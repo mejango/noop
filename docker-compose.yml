@@ -1,25 +1,14 @@
 services:
-  bot:
+  noop:
     build:
       context: .
-      dockerfile: Dockerfile.bot
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
     volumes:
       - noop-data:/data
     env_file:
       - .env
-    environment:
-      - DATA_DIR=/data
-      - NODE_ENV=production
-    restart: unless-stopped
-
-  dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile.dashboard
-    ports:
-      - "3000:3000"
-    volumes:
-      - noop-data:/data:ro
     environment:
       - DATA_DIR=/data
       - NODE_ENV=production

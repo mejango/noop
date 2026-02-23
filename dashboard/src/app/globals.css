@@ -3,16 +3,36 @@
 @tailwind utilities;
 
 :root {
-  --background: #09090b;
+  --background: #1a1a1a;
   --foreground: #fafafa;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-tap-highlight-color: transparent;
 }
 
 body {
   color: var(--foreground);
   background: var(--background);
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  overscroll-behavior: none;
 }
 
-/* Custom scrollbar for dark theme */
+/* Glass morphism utilities */
+@layer utilities {
+  .glass {
+    @apply bg-white/5 backdrop-blur-md border border-white/10;
+  }
+  .glass-hover {
+    @apply hover:bg-white/10 hover:border-white/20 transition-all duration-200;
+  }
+  .gradient-text {
+    @apply bg-gradient-to-r from-juice-orange to-juice-cyan bg-clip-text text-transparent;
+  }
+}
+
+/* Custom scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -21,9 +41,26 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: #2a2a2a;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
+  background: rgba(245, 166, 35, 0.5);
+}
+
+/* Hide scrollbar utility */
+.hide-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Glow effects */
+.glow-orange {
+  box-shadow: 0 0 20px rgba(245, 166, 35, 0.3);
+}
+.glow-cyan {
+  box-shadow: 0 0 20px rgba(92, 235, 223, 0.3);
 }

@@ -3,6 +3,7 @@
 import { useState, useMemo } from 'react';
 import { usePolling } from '@/lib/hooks';
 import { formatUSD, timeAgo, momentumColor, momentumBg } from '@/lib/format';
+import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import {
   ComposedChart, Line, Area, Scatter, XAxis, YAxis, Tooltip,
@@ -79,7 +80,7 @@ const StarDot = (props: any) => {
   const { cx, cy } = props;
   if (!cx || !cy) return null;
   return (
-    <svg x={cx - 8} y={cy - 8} width={16} height={16} viewBox="0 0 24 24" fill="#facc15" stroke="#a16207" strokeWidth={1}>
+    <svg x={cx - 8} y={cy - 8} width={16} height={16} viewBox="0 0 24 24" fill={chartColors.trade} stroke="#a16207" strokeWidth={1}>
       <polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26" />
     </svg>
   );
@@ -162,21 +163,21 @@ export default function OverviewPage() {
       {/* Price + Momentum + Range Header */}
       <div className="flex flex-wrap items-start gap-4">
         <Card className="flex-1 min-w-[200px]">
-          <div className="text-3xl font-bold tracking-tight">{formatUSD(stats.last_price)}</div>
-          <div className="text-xs text-zinc-500 mt-1">ETH spot {timeAgo(stats.last_price_time)}</div>
+          <div className="text-3xl font-bold tracking-tight text-juice-orange">{formatUSD(stats.last_price)}</div>
+          <div className="text-xs text-gray-500 mt-1">ETH spot {timeAgo(stats.last_price_time)}</div>
         </Card>
 
         <Card title="Momentum" className="flex-1 min-w-[200px]">
           <div className="flex gap-2 flex-wrap">
             <div className={`rounded px-3 py-1.5 ${momentumBg(stats.medium_momentum)}`}>
-              <div className="text-xs text-zinc-500">Medium</div>
+              <div className="text-xs text-gray-500">Medium</div>
               <div className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
                 {stats.medium_momentum || 'neutral'}
                 {stats.medium_derivative && <span className="text-xs ml-1 opacity-70">({stats.medium_derivative})</span>}
               </div>
             </div>
             <div className={`rounded px-3 py-1.5 ${momentumBg(stats.short_momentum)}`}>
-              <div className="text-xs text-zinc-500">Short</div>
+              <div className="text-xs text-gray-500">Short</div>
               <div className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
                 {stats.short_momentum || 'neutral'}
                 {stats.short_derivative && <span className="text-xs ml-1 opacity-70">({stats.short_derivative})</span>}
@@ -188,13 +189,13 @@ export default function OverviewPage() {
         <Card title="Price Range" className="flex-1 min-w-[200px]">
           <div className="grid grid-cols-2 gap-2 text-sm">
             <div>
-              <span className="text-zinc-500">3d H/L:</span>{' '}
-              <span className="text-green-400">{formatUSD(stats.three_day_high)}</span>{' / '}
+              <span className="text-gray-500">3d H/L:</span>{' '}
+              <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>{' / '}
               <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
             </div>
             <div>
-              <span className="text-zinc-500">7d H/L:</span>{' '}
-              <span className="text-green-400">{formatUSD(stats.seven_day_high)}</span>{' / '}
+              <span className="text-gray-500">7d H/L:</span>{' '}
+              <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>{' / '}
               <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
             </div>
           </div>
@@ -208,29 +209,31 @@ export default function OverviewPage() {
             <button
               key={r}
               onClick={() => setRange(r)}
-              className={`px-3 py-1 rounded text-sm transition-colors ${
-                range === r ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'
+              className={`px-3 py-1 rounded text-sm transition-all duration-200 ${
+                range === r
+                  ? 'bg-white/10 text-white border border-white/20'
+                  : 'text-gray-400 hover:bg-white/10 hover:text-white'
               }`}
             >
               {r}
             </button>
           ))}
         </div>
-        <div className="flex gap-3 text-xs text-zinc-500">
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-violet-400 inline-block" /> ETH</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-red-400 inline-block" /> Best PUT</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-emerald-400 inline-block" /> Best CALL</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-blue-400/50 inline-block" /> Liquidity</span>
-          <span className="flex items-center gap-1"><span className="text-yellow-400">&#9733;</span> Trade</span>
+        <div className="flex gap-3 text-xs text-gray-500">
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red }} /> PUT Value</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary }} /> CALL Value</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.blue, opacity: 0.5 }} /> Liquidity</span>
+          <span className="flex items-center gap-1"><span style={{ color: chartColors.trade }}>&#9733;</span> Trade</span>
         </div>
       </div>
 
       {/* Big Combined Chart */}
       <Card>
         {loading && merged.length === 0 ? (
-          <div className="h-[500px] flex items-center justify-center text-zinc-500">Loading...</div>
+          <div className="h-[500px] flex items-center justify-center text-gray-500">Loading...</div>
         ) : merged.length === 0 ? (
-          <div className="h-[500px] flex items-center justify-center text-zinc-500">No data yet — bot is collecting</div>
+          <div className="h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
           <ResponsiveContainer width="100%" height={500}>
             <ComposedChart data={merged} margin={{ top: 10, right: 60, left: 10, bottom: 0 }}>
@@ -244,16 +247,16 @@ export default function OverviewPage() {
                     ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                     : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
                 }}
-                stroke="#3f3f46"
-                tick={{ fill: '#71717a', fontSize: 11 }}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
               />
               {/* Left Y-axis: ETH price */}
               <YAxis
                 yAxisId="price"
                 domain={['auto', 'auto']}
                 tickFormatter={(v) => `$${v}`}
-                stroke="#3f3f46"
-                tick={{ fill: '#71717a', fontSize: 11 }}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
                 width={70}
               />
               {/* Right Y-axis: scores & liquidity */}
@@ -262,19 +265,19 @@ export default function OverviewPage() {
                 orientation="right"
                 domain={['auto', 'auto']}
                 tickFormatter={(v) => v.toFixed(3)}
-                stroke="#3f3f46"
-                tick={{ fill: '#52525b', fontSize: 10 }}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tickSecondary}
                 width={55}
               />
               <Tooltip
-                contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 12 }}
+                {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 formatter={(val: any, name: any) => {
                   if (name === 'price') return [formatUSD(Number(val)), 'ETH'];
-                  if (name === 'bestPut') return [Number(val).toFixed(4), 'Best PUT Score'];
-                  if (name === 'bestCall') return [Number(val).toFixed(4), 'Best CALL Score'];
+                  if (name === 'bestPut') return [Number(val).toFixed(4), 'PUT Value (ask delta)'];
+                  if (name === 'bestCall') return [Number(val).toFixed(4), 'CALL Value (bid delta)'];
                   if (name === 'liquidity') return [Number(val).toFixed(2), 'Liquidity Flow'];
                   return [val, name];
                 }}
@@ -286,7 +289,7 @@ export default function OverviewPage() {
                 <ReferenceLine
                   yAxisId="price"
                   y={stats.seven_day_high}
-                  stroke="#22c55e"
+                  stroke={chartColors.refHigh}
                   strokeDasharray="3 3"
                   strokeOpacity={0.4}
                 />
@@ -295,7 +298,7 @@ export default function OverviewPage() {
                 <ReferenceLine
                   yAxisId="price"
                   y={stats.seven_day_low}
-                  stroke="#ef4444"
+                  stroke={chartColors.refLow}
                   strokeDasharray="3 3"
                   strokeOpacity={0.4}
                 />
@@ -306,9 +309,9 @@ export default function OverviewPage() {
                 yAxisId="score"
                 type="monotone"
                 dataKey="liquidity"
-                fill="#3b82f6"
+                fill={chartColors.blue}
                 fillOpacity={0.1}
-                stroke="#3b82f6"
+                stroke={chartColors.blue}
                 strokeWidth={0}
                 connectNulls={false}
                 dot={false}
@@ -319,7 +322,7 @@ export default function OverviewPage() {
                 yAxisId="price"
                 type="monotone"
                 dataKey="price"
-                stroke="#a78bfa"
+                stroke={chartColors.primary}
                 dot={false}
                 strokeWidth={2}
                 connectNulls
@@ -330,7 +333,7 @@ export default function OverviewPage() {
                 yAxisId="score"
                 type="monotone"
                 dataKey="bestPut"
-                stroke="#f87171"
+                stroke={chartColors.red}
                 dot={false}
                 strokeWidth={1}
                 strokeOpacity={0.7}
@@ -342,7 +345,7 @@ export default function OverviewPage() {
                 yAxisId="score"
                 type="monotone"
                 dataKey="bestCall"
-                stroke="#34d399"
+                stroke={chartColors.secondary}
                 dot={false}
                 strokeWidth={1}
                 strokeOpacity={0.7}
@@ -372,19 +375,19 @@ export default function OverviewPage() {
                 <div
                   key={i}
                   className={`flex-1 rounded-sm ${
-                    d.momentum === 'upward' ? 'bg-green-800/50' :
-                    d.momentum === 'downward' ? 'bg-red-800/50' : 'bg-zinc-800/50'
+                    d.momentum === 'upward' ? 'bg-emerald-800/50' :
+                    d.momentum === 'downward' ? 'bg-red-800/50' : 'bg-white/5'
                   }`}
                   title={`${new Date(d.ts).toLocaleString()}: ${d.momentum || 'neutral'}`}
                 />
               ))}
             </div>
-            <div className="flex justify-between text-xs text-zinc-500 mt-1">
+            <div className="flex justify-between text-xs text-gray-500 mt-1">
               <span>{merged.length > 0 ? new Date(merged[0].ts).toLocaleString() : ''}</span>
               <div className="flex gap-3">
-                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-green-800/50 inline-block" /> upward</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-emerald-800/50 inline-block" /> upward</span>
                 <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-red-800/50 inline-block" /> downward</span>
-                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-zinc-800/50 inline-block" /> neutral</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-white/5 inline-block border border-white/10" /> neutral</span>
               </div>
               <span>{merged.length > 0 ? new Date(merged[merged.length - 1].ts).toLocaleString() : ''}</span>
             </div>

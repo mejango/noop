@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { usePolling } from '@/lib/hooks';
 import { formatNum } from '@/lib/format';
+import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import Badge from '@/components/Badge';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar } from 'recharts';
@@ -62,13 +63,17 @@ export default function OnchainPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">On-Chain Analysis</h1>
+        <h1 className="text-xl font-bold text-juice-orange">On-Chain Analysis</h1>
         <div className="flex gap-1">
           {ranges.map(r => (
             <button
               key={r}
               onClick={() => setRange(r)}
-              className={`px-3 py-1 rounded text-sm ${range === r ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}
+              className={`px-3 py-1 rounded text-sm transition-all duration-200 ${
+                range === r
+                  ? 'bg-white/10 text-white border border-white/20'
+                  : 'text-gray-400 hover:bg-white/10 hover:text-white'
+              }`}
             >
               {r}
             </button>
@@ -80,20 +85,20 @@ export default function OnchainPage() {
       {latest && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <Card>
-            <div className="text-lg font-bold capitalize">{latest.liquidity_flow_direction || '--'}</div>
-            <div className="text-xs text-zinc-500">Liquidity Flow</div>
+            <div className="text-lg font-bold capitalize text-juice-cyan">{latest.liquidity_flow_direction || '--'}</div>
+            <div className="text-xs text-gray-500">Liquidity Flow</div>
           </Card>
           <Card>
-            <div className="text-lg font-bold">{formatNum((latest.liquidity_flow_magnitude || 0) * 100, 1)}%</div>
-            <div className="text-xs text-zinc-500">Flow Magnitude</div>
+            <div className="text-lg font-bold text-juice-orange">{formatNum((latest.liquidity_flow_magnitude || 0) * 100, 1)}%</div>
+            <div className="text-xs text-gray-500">Flow Magnitude</div>
           </Card>
           <Card>
-            <div className="text-lg font-bold">{latest.whale_count || 0}</div>
-            <div className="text-xs text-zinc-500">Whale Wallets</div>
+            <div className="text-lg font-bold text-juice-cyan">{latest.whale_count || 0}</div>
+            <div className="text-xs text-gray-500">Whale Wallets</div>
           </Card>
           <Card>
             <Badge label={latest.exhaustion_alert_level || 'HEALTHY'} color={alertColors[latest.exhaustion_alert_level] || 'green'} />
-            <div className="text-xs text-zinc-500 mt-1">Alert Level</div>
+            <div className="text-xs text-gray-500 mt-1">Alert Level</div>
           </Card>
         </div>
       )}
@@ -101,18 +106,18 @@ export default function OnchainPage() {
       {/* Liquidity Flow */}
       <Card title="Liquidity Flow">
         {flowData.length === 0 ? (
-          <div className="h-[250px] flex items-center justify-center text-zinc-500">No data</div>
+          <div className="h-[250px] flex items-center justify-center text-gray-500">No data</div>
         ) : (
           <ResponsiveContainer width="100%" height={250}>
             <AreaChart data={flowData}>
               <XAxis dataKey="ts" type="number" domain={['dataMin', 'dataMax']}
                 tickFormatter={(ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                stroke="#52525b" tick={{ fill: '#71717a', fontSize: 11 }} />
-              <YAxis stroke="#52525b" tick={{ fill: '#71717a', fontSize: 11 }}
+                stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <YAxis stroke={chartAxis.stroke} tick={chartAxis.tick}
                 tickFormatter={(v) => `${(v * 100).toFixed(0)}%`} />
-              <Tooltip contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 12 }}
+              <Tooltip {...chartTooltip}
                 labelFormatter={(ts) => new Date(ts as number).toLocaleString()} />
-              <Area type="monotone" dataKey="magnitude" stroke="#a78bfa" fill="#a78bfa" fillOpacity={0.2} />
+              <Area type="monotone" dataKey="magnitude" stroke={chartColors.primary} fill={chartColors.primary} fillOpacity={0.15} />
             </AreaChart>
           </ResponsiveContainer>
         )}
@@ -121,17 +126,17 @@ export default function OnchainPage() {
       {/* Whale Activity */}
       <Card title="Whale Activity">
         {whaleData.length === 0 ? (
-          <div className="h-[200px] flex items-center justify-center text-zinc-500">No data</div>
+          <div className="h-[200px] flex items-center justify-center text-gray-500">No data</div>
         ) : (
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={whaleData}>
               <XAxis dataKey="ts" type="number" domain={['dataMin', 'dataMax']}
                 tickFormatter={(ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                stroke="#52525b" tick={{ fill: '#71717a', fontSize: 11 }} />
-              <YAxis stroke="#52525b" tick={{ fill: '#71717a', fontSize: 11 }} />
-              <Tooltip contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 12 }}
+                stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <YAxis stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <Tooltip {...chartTooltip}
                 labelFormatter={(ts) => new Date(ts as number).toLocaleString()} />
-              <Bar dataKey="wallets" fill="#facc15" name="Whale Wallets" />
+              <Bar dataKey="wallets" fill={chartColors.quaternary} name="Whale Wallets" />
             </BarChart>
           </ResponsiveContainer>
         )}
@@ -140,17 +145,17 @@ export default function OnchainPage() {
       {/* Exhaustion Score */}
       <Card title="Exhaustion Score">
         {exhaustionData.length === 0 ? (
-          <div className="h-[200px] flex items-center justify-center text-zinc-500">No data</div>
+          <div className="h-[200px] flex items-center justify-center text-gray-500">No data</div>
         ) : (
           <ResponsiveContainer width="100%" height={200}>
             <AreaChart data={exhaustionData}>
               <XAxis dataKey="ts" type="number" domain={['dataMin', 'dataMax']}
                 tickFormatter={(ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                stroke="#52525b" tick={{ fill: '#71717a', fontSize: 11 }} />
-              <YAxis stroke="#52525b" tick={{ fill: '#71717a', fontSize: 11 }} />
-              <Tooltip contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 12 }}
+                stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <YAxis stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <Tooltip {...chartTooltip}
                 labelFormatter={(ts) => new Date(ts as number).toLocaleString()} />
-              <Area type="monotone" dataKey="score" stroke="#f87171" fill="#f87171" fillOpacity={0.15} />
+              <Area type="monotone" dataKey="score" stroke={chartColors.red} fill={chartColors.red} fillOpacity={0.15} />
             </AreaChart>
           </ResponsiveContainer>
         )}

@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { usePolling } from '@/lib/hooks';
 import { formatUSD } from '@/lib/format';
+import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 
@@ -38,13 +39,17 @@ export default function PricesPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">Price & Momentum</h1>
+        <h1 className="text-xl font-bold text-juice-orange">Price & Momentum</h1>
         <div className="flex gap-1">
           {ranges.map(r => (
             <button
               key={r}
               onClick={() => setRange(r)}
-              className={`px-3 py-1 rounded text-sm ${range === r ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}
+              className={`px-3 py-1 rounded text-sm transition-all duration-200 ${
+                range === r
+                  ? 'bg-white/10 text-white border border-white/20'
+                  : 'text-gray-400 hover:bg-white/10 hover:text-white'
+              }`}
             >
               {r}
             </button>
@@ -54,9 +59,9 @@ export default function PricesPage() {
 
       <Card>
         {loading && prices.length === 0 ? (
-          <div className="h-[400px] flex items-center justify-center text-zinc-500">Loading...</div>
+          <div className="h-[400px] flex items-center justify-center text-gray-500">Loading...</div>
         ) : prices.length === 0 ? (
-          <div className="h-[400px] flex items-center justify-center text-zinc-500">No price data yet</div>
+          <div className="h-[400px] flex items-center justify-center text-gray-500">No price data yet</div>
         ) : (
           <ResponsiveContainer width="100%" height={400}>
             <LineChart data={chartData}>
@@ -70,28 +75,28 @@ export default function PricesPage() {
                     ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                     : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
                 }}
-                stroke="#52525b"
-                tick={{ fill: '#71717a', fontSize: 11 }}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
               />
               <YAxis
                 domain={['auto', 'auto']}
                 tickFormatter={(v) => `$${v}`}
-                stroke="#52525b"
-                tick={{ fill: '#71717a', fontSize: 11 }}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
                 width={70}
               />
               <Tooltip
-                contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 12 }}
+                {...chartTooltip}
                 labelFormatter={(ts) => new Date(ts as number).toLocaleString()}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 formatter={(val: any) => [formatUSD(Number(val) || 0), 'ETH']}
               />
-              <Line type="monotone" dataKey="price" stroke="#a78bfa" dot={false} strokeWidth={1.5} />
+              <Line type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={1.5} />
               {latestPrice?.seven_day_high && (
-                <ReferenceLine y={latestPrice.seven_day_high} stroke="#22c55e" strokeDasharray="3 3" label={{ value: `7d H: ${formatUSD(latestPrice.seven_day_high)}`, fill: '#22c55e', fontSize: 10, position: 'right' }} />
+                <ReferenceLine y={latestPrice.seven_day_high} stroke={chartColors.refHigh} strokeDasharray="3 3" label={{ value: `7d H: ${formatUSD(latestPrice.seven_day_high)}`, fill: chartColors.refHigh, fontSize: 10, position: 'right' }} />
               )}
               {latestPrice?.seven_day_low && (
-                <ReferenceLine y={latestPrice.seven_day_low} stroke="#ef4444" strokeDasharray="3 3" label={{ value: `7d L: ${formatUSD(latestPrice.seven_day_low)}`, fill: '#ef4444', fontSize: 10, position: 'right' }} />
+                <ReferenceLine y={latestPrice.seven_day_low} stroke={chartColors.refLow} strokeDasharray="3 3" label={{ value: `7d L: ${formatUSD(latestPrice.seven_day_low)}`, fill: chartColors.refLow, fontSize: 10, position: 'right' }} />
               )}
             </LineChart>
           </ResponsiveContainer>
@@ -107,14 +112,14 @@ export default function PricesPage() {
                 <div
                   key={i}
                   className={`flex-1 rounded-sm ${
-                    d.momentum === 'upward' ? 'bg-green-800/50' :
-                    d.momentum === 'downward' ? 'bg-red-800/50' : 'bg-zinc-800/50'
+                    d.momentum === 'upward' ? 'bg-emerald-800/50' :
+                    d.momentum === 'downward' ? 'bg-red-800/50' : 'bg-white/5'
                   }`}
                   title={`${d.time}: ${d.momentum || 'neutral'}`}
                 />
               ))}
             </div>
-            <div className="flex justify-between text-xs text-zinc-500 mt-1">
+            <div className="flex justify-between text-xs text-gray-500 mt-1">
               <span>{chartData[0]?.time}</span>
               <span>{chartData[chartData.length - 1]?.time}</span>
             </div>

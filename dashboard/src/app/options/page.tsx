@@ -3,6 +3,7 @@
 import { useState, useMemo } from 'react';
 import { usePolling } from '@/lib/hooks';
 import { formatUSD, formatNum } from '@/lib/format';
+import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import { ScatterChart, Scatter, XAxis, YAxis, Tooltip, ResponsiveContainer, ZAxis } from 'recharts';
 
@@ -53,14 +54,18 @@ export default function OptionsPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold">Options Surface</h1>
+        <h1 className="text-xl font-bold text-juice-orange">Options Surface</h1>
         <div className="flex gap-4">
           <div className="flex gap-1">
             {(['put', 'call'] as const).map(t => (
               <button
                 key={t}
                 onClick={() => setOptionType(t)}
-                className={`px-3 py-1 rounded text-sm capitalize ${optionType === t ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}
+                className={`px-3 py-1 rounded text-sm capitalize transition-all duration-200 ${
+                  optionType === t
+                    ? 'bg-white/10 text-white border border-white/20'
+                    : 'text-gray-400 hover:bg-white/10 hover:text-white'
+                }`}
               >
                 {t}s
               </button>
@@ -71,7 +76,11 @@ export default function OptionsPage() {
               <button
                 key={r}
                 onClick={() => setRange(r)}
-                className={`px-3 py-1 rounded text-sm ${range === r ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}
+                className={`px-3 py-1 rounded text-sm transition-all duration-200 ${
+                  range === r
+                    ? 'bg-white/10 text-white border border-white/20'
+                    : 'text-gray-400 hover:bg-white/10 hover:text-white'
+                }`}
               >
                 {r}
               </button>
@@ -82,9 +91,9 @@ export default function OptionsPage() {
 
       <Card title={`${optionType === 'put' ? 'Put' : 'Call'} Score by Strike (latest snapshot)`}>
         {loading && snapshots.length === 0 ? (
-          <div className="h-[400px] flex items-center justify-center text-zinc-500">Loading...</div>
+          <div className="h-[400px] flex items-center justify-center text-gray-500">Loading...</div>
         ) : scatterData.length === 0 ? (
-          <div className="h-[400px] flex items-center justify-center text-zinc-500">No options data</div>
+          <div className="h-[400px] flex items-center justify-center text-gray-500">No options data</div>
         ) : (
           <ResponsiveContainer width="100%" height={400}>
             <ScatterChart>
@@ -92,18 +101,18 @@ export default function OptionsPage() {
                 dataKey="strike"
                 name="Strike"
                 tickFormatter={(v) => `$${v}`}
-                stroke="#52525b"
-                tick={{ fill: '#71717a', fontSize: 11 }}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
               />
               <YAxis
                 dataKey="score"
                 name="Score"
-                stroke="#52525b"
-                tick={{ fill: '#71717a', fontSize: 11 }}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
               />
               <ZAxis dataKey="delta" range={[20, 200]} name="Delta" />
               <Tooltip
-                contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 12 }}
+                {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 formatter={(val: any, name: any) => {
                   const v = Number(val) || 0;
@@ -113,7 +122,7 @@ export default function OptionsPage() {
                 }}
                 labelFormatter={() => ''}
               />
-              <Scatter data={scatterData} fill={optionType === 'put' ? '#f87171' : '#4ade80'} />
+              <Scatter data={scatterData} fill={optionType === 'put' ? chartColors.red : chartColors.tertiary} />
             </ScatterChart>
           </ResponsiveContainer>
         )}
@@ -122,12 +131,12 @@ export default function OptionsPage() {
       {/* Table of latest options */}
       <Card title="Latest Options">
         {latestSnapshots.length === 0 ? (
-          <p className="text-zinc-500 text-sm">No data</p>
+          <p className="text-gray-500 text-sm">No data</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-zinc-500 text-xs border-b border-zinc-800">
+                <tr className="text-gray-500 text-xs border-b border-white/10">
                   <th className="text-left py-2 px-2">Instrument</th>
                   <th className="text-right px-2">Strike</th>
                   <th className="text-right px-2">Expiry</th>
@@ -139,14 +148,14 @@ export default function OptionsPage() {
               </thead>
               <tbody>
                 {latestSnapshots.slice(0, 30).map(s => (
-                  <tr key={s.id} className="border-b border-zinc-800/50 hover:bg-zinc-800/30">
-                    <td className="py-1.5 px-2 font-mono text-xs">{s.instrument_name}</td>
+                  <tr key={s.id} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                    <td className="py-1.5 px-2 text-xs">{s.instrument_name}</td>
                     <td className="text-right px-2">{formatUSD(s.strike)}</td>
                     <td className="text-right px-2 text-xs">{s.expiry ? new Date(s.expiry * 1000).toLocaleDateString() : '--'}</td>
                     <td className="text-right px-2">{formatNum(s.delta, 4)}</td>
                     <td className="text-right px-2">{formatUSD(s.ask_price)}</td>
                     <td className="text-right px-2">{formatUSD(s.bid_price)}</td>
-                    <td className="text-right px-2 font-mono">
+                    <td className="text-right px-2">
                       {formatNum(optionType === 'put' ? s.ask_delta_value : s.bid_delta_value, 6)}
                     </td>
                   </tr>

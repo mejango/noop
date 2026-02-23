@@ -28,15 +28,15 @@ export function dteDays(expiryUnix: number | null | undefined): number | null {
 }
 
 export function momentumColor(main: string | null | undefined): string {
-  if (!main) return 'text-zinc-400';
-  if (main === 'upward') return 'text-green-400';
+  if (!main) return 'text-gray-400';
+  if (main === 'upward') return 'text-emerald-400';
   if (main === 'downward') return 'text-red-400';
-  return 'text-zinc-400';
+  return 'text-gray-400';
 }
 
 export function momentumBg(main: string | null | undefined): string {
-  if (!main) return 'bg-zinc-800';
-  if (main === 'upward') return 'bg-green-900/30';
-  if (main === 'downward') return 'bg-red-900/30';
-  return 'bg-zinc-800';
+  if (!main) return 'bg-white/5';
+  if (main === 'upward') return 'bg-emerald-900/20';
+  if (main === 'downward') return 'bg-red-900/20';
+  return 'bg-white/5';
 }

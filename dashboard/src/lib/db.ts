@@ -109,7 +109,7 @@ export function getBestOptionsOverTime(since: string) {
   return d.prepare(`
     SELECT timestamp,
       MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
-      MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN ask_delta_value END) as best_call_score
+      MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_score
     FROM options_snapshots
     WHERE timestamp > ?
     GROUP BY timestamp
@@ -134,7 +134,7 @@ export function getTradeMarkers(since: string) {
   const d = getDb();
   return d.prepare(`
     SELECT t.timestamp, t.direction, t.amount, t.price, t.total_value, t.order_type,
-      p.instrument_name, p.strike, p.option_type
+      p.instrument_name, p.strike
     FROM trades t
     LEFT JOIN positions p ON t.position_id = p.id
     WHERE t.timestamp > ?
