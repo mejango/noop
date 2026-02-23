@@ -1,0 +1,41 @@
+FROM node:20-alpine AS builder
+
+# Install build tools for native modules (better-sqlite3)
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /app
+
+# Copy dashboard package files and install
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm ci
+
+# Copy dashboard source
+COPY dashboard/ ./
+
+# Build Next.js
+ENV DATA_DIR=/data
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+# Production image
+FROM node:20-alpine
+
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /app
+
+COPY --from=builder /app/package.json /app/package-lock.json ./
+RUN npm ci --production
+
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/src ./src
+
+ENV DATA_DIR=/data
+ENV NODE_ENV=production
+ENV PORT=3000
+ENV NEXT_TELEMETRY_DISABLED=1
+
+EXPOSE 3000
+
+CMD ["npm", "start"]

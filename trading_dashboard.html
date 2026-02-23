@@ -1,0 +1,1300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ETH Options Trading Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh; 
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        
+        .header p {
+            margin: 10px 0 0 0;
+            opacity: 0.8;
+            font-size: 1.1em;
+        }
+        
+        .controls {
+            padding: 20px 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e9ecef;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        .control-group label {
+            font-weight: 600;
+            color: #495057;
+            font-size: 0.9em;
+        }
+        
+        .control-group input, .control-group select {
+            padding: 8px 12px;
+            border: 2px solid #e9ecef;
+            border-radius: 6px;
+            font-size: 0.9em;
+            transition: border-color 0.3s;
+        }
+        
+        .control-group input:focus, .control-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        .btn:active {
+            transform: translateY(0);
+        }
+        
+        .chart-container {
+            padding: 30px;
+            position: relative;
+        }
+        
+        .chart-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        .chart-section h3 {
+            margin: 0 0 15px 0;
+            color: #2c3e50;
+            font-size: 18px;
+            font-weight: 600;
+        }
+        
+        .chart-section canvas {
+            width: 100% !important;
+            height: 300px !important;
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            padding: 20px 30px;
+            background: #f8f9fa;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 5px;
+        }
+        
+        .stat-label {
+            color: #6c757d;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 50px;
+            color: #6c757d;
+        }
+        
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            margin: 20px 30px;
+            border-radius: 6px;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .file-input {
+            display: none;
+        }
+        
+        .file-label {
+            background: #28a745;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: inline-block;
+            transition: background-color 0.3s;
+        }
+        
+        .file-label:hover {
+            background: #218838;
+        }
+        
+        .legend {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .legend-color {
+            width: 20px;
+            height: 3px;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📈 ETH Options Trading Dashboard</h1>
+            <p>Real-time visualization of spot price, option prices, liquidity, and trading activity</p>
+            <p style="font-size: 0.9em; opacity: 0.7;">🔄 Automatically reads from ./archive/ directory • Data starts from Oct 8, 2025</p>
+        </div>
+        
+        <div class="controls">
+            <div class="control-group">
+                <label for="dataFile">Load Archive Data</label>
+                <input type="file" id="dataFile" class="file-input" accept=".json,.txt" multiple>
+                <label for="dataFile" class="file-label">📁 Select Files</label>
+            </div>
+            
+            <div class="control-group">
+                <label for="timeRange">Time Range</label>
+                <select id="timeRange">
+                    <option value="1">Last Hour</option>
+                    <option value="6">Last 6 Hours</option>
+                    <option value="24">Last 24 Hours</option>
+                    <option value="168">Last Week</option>
+                    <option value="240" selected>Last 10 Days</option>
+                    <option value="720">Last Month</option>
+                    <option value="all">All Data</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label for="updateInterval">Auto Refresh (seconds)</label>
+                <select id="updateInterval">
+                    <option value="0">Manual Only</option>
+                    <option value="30">30 seconds</option>
+                    <option value="60" selected>1 minute</option>
+                    <option value="300">5 minutes</option>
+                </select>
+            </div>
+            
+            <button class="btn" onclick="loadData()">🔄 Refresh Data</button>
+            <button class="btn" onclick="loadExtendedData()" id="loadExtendedBtn">📈 Load Extended History</button>
+            <button class="btn" onclick="exportData()">💾 Export Chart</button>
+        </div>
+        
+        <div id="errorContainer"></div>
+        
+        <div id="loadingProgress" style="display: none; padding: 10px 30px; background: #e3f2fd; border-bottom: 1px solid #bbdefb;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <div style="flex: 1; background: #f5f5f5; border-radius: 10px; height: 20px; overflow: hidden;">
+                    <div id="progressBar" style="background: linear-gradient(90deg, #4caf50, #8bc34a); height: 100%; width: 0%; transition: width 0.3s ease;"></div>
+                </div>
+                <span id="progressText" style="font-size: 0.9em; color: #1976d2; font-weight: 600;">Loading files...</span>
+            </div>
+        </div>
+        
+        <div class="stats-grid" id="statsGrid">
+            <div class="stat-card">
+                <div class="stat-value" id="currentPrice">$0.00</div>
+                <div class="stat-label">Current ETH Price</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="bestPutValue">0.000000</div>
+                <div class="stat-label">Best Put Value</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="liquidityDelta">0%</div>
+                <div class="stat-label">Liquidity Delta</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalPutTrades">0</div>
+                <div class="stat-label">Put Trades</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="liquidityHealth">0%</div>
+                <div class="stat-label">Liquidity Health</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="whaleActivity">0</div>
+                <div class="stat-label">Whale Transactions</div>
+            </div>
+        </div>
+        
+        <div class="chart-container">
+            <div class="chart-section">
+                <h3>ETH Spot Price</h3>
+                <canvas id="priceChart" width="800" height="200"></canvas>
+            </div>
+            <div class="chart-section">
+                <h3>Best Put Value</h3>
+                <canvas id="putValueChart" width="800" height="200"></canvas>
+            </div>
+            <div class="chart-section">
+                <h3>Liquidity Delta</h3>
+                <canvas id="liquidityChart" width="800" height="200"></canvas>
+            </div>
+            <div class="chart-section">
+                <h3>Put Trades</h3>
+                <canvas id="tradesChart" width="800" height="200"></canvas>
+            </div>
+        </div>
+        
+        <div class="legend">
+            <div class="legend-item">
+                <div class="legend-color" style="background: #e74c3c;"></div>
+                <span>ETH Spot Price</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #3498db;"></div>
+                <span>Best Put Value</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #e74c3c;"></div>
+                <span>Hourly Flow</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #3498db;"></div>
+                <span>Daily Flow</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #27ae60;"></div>
+                <span>Weekly Flow</span>
+            </div>
+            <div class="legend-item">
+                <div class="legend-color" style="background: #9b59b6;"></div>
+                <span>Put Trades</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let charts = {
+            price: null,
+            putValue: null,
+            liquidity: null,
+            trades: null
+        };
+        let allData = [];
+        let updateInterval = null;
+        let isLoadingHistorical = false;
+        let historicalOffset = 0;
+        let isProgressiveLoading = false;
+        let currentFileIndex = 0;
+        
+        // Common chart options
+        const commonOptions = {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+                intersect: false,
+                mode: 'index'
+            },
+            plugins: {
+                legend: {
+                    display: false
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(0,0,0,0.9)',
+                    titleColor: '#fff',
+                    bodyColor: '#fff',
+                    borderColor: '#ddd',
+                    borderWidth: 1,
+                    cornerRadius: 8,
+                    displayColors: false,
+                    callbacks: {
+                        title: function(context) {
+                            return new Date(context[0].label).toLocaleString();
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    type: 'time',
+                    time: {
+                        displayFormats: {
+                            hour: 'MMM dd HH:mm',
+                            day: 'MMM dd'
+                        }
+                    },
+                    grid: {
+                        color: 'rgba(0,0,0,0.1)',
+                        drawBorder: false
+                    },
+                    ticks: {
+                        color: '#666',
+                        font: {
+                            size: 12
+                        }
+                    }
+                },
+                y: {
+                    type: 'linear',
+                    display: true,
+                    position: 'left',
+                    grid: {
+                        color: 'rgba(0,0,0,0.1)',
+                        drawBorder: false
+                    },
+                    ticks: {
+                        color: '#666',
+                        font: {
+                            size: 12
+                        }
+                    },
+                    beginAtZero: false
+                }
+            },
+            elements: {
+                line: {
+                    borderJoinStyle: 'round',
+                    borderCapStyle: 'round'
+                }
+            }
+        };
+        
+        // Initialize all charts
+        function initCharts() {
+            // ETH Spot Price Chart
+            const priceCtx = document.getElementById('priceChart').getContext('2d');
+            charts.price = new Chart(priceCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'ETH Spot Price',
+                        data: [],
+                        borderColor: '#e74c3c',
+                        backgroundColor: 'rgba(231, 76, 60, 0.1)',
+                        borderWidth: 3,
+                        fill: false,
+                        tension: 0.2,
+                        pointRadius: 0,
+                        pointHoverRadius: 8,
+                        pointBackgroundColor: '#e74c3c',
+                        pointBorderColor: '#e74c3c',
+                        pointBorderWidth: 2,
+                        spanGaps: true
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: {
+                                display: true,
+                                text: 'ETH Price ($)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        ...commonOptions.plugins,
+                        tooltip: {
+                            ...commonOptions.plugins.tooltip,
+                            callbacks: {
+                                ...commonOptions.plugins.tooltip.callbacks,
+                                label: function(context) {
+                                    return `ETH Spot Price: $${context.parsed.y.toFixed(2)}`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            
+            // Best Put Value Chart
+            const putValueCtx = document.getElementById('putValueChart').getContext('2d');
+            charts.putValue = new Chart(putValueCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Best Put Value',
+                        data: [],
+                        borderColor: '#3498db',
+                        backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                        borderWidth: 3,
+                        fill: false,
+                        tension: 0.2,
+                        pointRadius: 0,
+                        pointHoverRadius: 8,
+                        pointBackgroundColor: '#3498db',
+                        pointBorderColor: '#3498db',
+                        pointBorderWidth: 2,
+                        spanGaps: true
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: {
+                                display: true,
+                                text: 'Put Value'
+                            }
+                        }
+                    },
+                    plugins: {
+                        ...commonOptions.plugins,
+                        tooltip: {
+                            ...commonOptions.plugins.tooltip,
+                            callbacks: {
+                                ...commonOptions.plugins.tooltip.callbacks,
+                                label: function(context) {
+                                    return `Best Put Value: ${context.parsed.y.toFixed(6)}`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            
+            // Liquidity Delta Chart
+            const liquidityCtx = document.getElementById('liquidityChart').getContext('2d');
+            charts.liquidity = new Chart(liquidityCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: 'Hourly Flow',
+                            data: [],
+                            borderColor: '#e74c3c',
+                            backgroundColor: 'rgba(231, 76, 60, 0.05)',
+                            borderWidth: 2.5,
+                            fill: false,
+                            tension: 0.3,
+                            pointRadius: 0,
+                            pointHoverRadius: 8,
+                            pointBackgroundColor: '#e74c3c',
+                            pointBorderColor: '#e74c3c',
+                            pointBorderWidth: 2,
+                            spanGaps: true
+                        },
+                        {
+                            label: 'Daily Flow',
+                            data: [],
+                            borderColor: '#3498db',
+                            backgroundColor: 'rgba(52, 152, 219, 0.05)',
+                            borderWidth: 2.5,
+                            fill: false,
+                            tension: 0.3,
+                            pointRadius: 0,
+                            pointHoverRadius: 8,
+                            pointBackgroundColor: '#3498db',
+                            pointBorderColor: '#3498db',
+                            pointBorderWidth: 2,
+                            spanGaps: true
+                        },
+                        {
+                            label: 'Weekly Flow',
+                            data: [],
+                            borderColor: '#27ae60',
+                            backgroundColor: 'rgba(39, 174, 96, 0.05)',
+                            borderWidth: 2.5,
+                            fill: false,
+                            tension: 0.3,
+                            pointRadius: 0,
+                            pointHoverRadius: 8,
+                            pointBackgroundColor: '#27ae60',
+                            pointBorderColor: '#27ae60',
+                            pointBorderWidth: 2,
+                            spanGaps: true
+                        }
+                    ]
+                },
+                options: {
+                    ...commonOptions,
+                    plugins: {
+                        ...commonOptions.plugins,
+                        legend: {
+                            display: true,
+                            position: 'top',
+                            labels: {
+                                usePointStyle: true,
+                                padding: 20,
+                                font: {
+                                    size: 12
+                                }
+                            }
+                        },
+                        tooltip: {
+                            ...commonOptions.plugins.tooltip,
+                            callbacks: {
+                                ...commonOptions.plugins.tooltip.callbacks,
+                                label: function(context) {
+                                    const value = context.parsed.y;
+                                    const flowType = value >= 0 ? 'Inflow' : 'Outflow';
+                                    return `${context.dataset.label}: ${Math.abs(value).toFixed(2)}% ${flowType}`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: {
+                                display: true,
+                                text: 'Liquidity Flow (%)',
+                                font: {
+                                    size: 14,
+                                    weight: 'bold'
+                                }
+                            },
+                            min: -50,
+                            max: 50,
+                            grid: {
+                                ...commonOptions.scales.y.grid,
+                                color: function(context) {
+                                    if (context.tick.value === 0) {
+                                        return 'rgba(0,0,0,0.4)'; // Darker line at zero
+                                    }
+                                    return 'rgba(0,0,0,0.1)';
+                                }
+                            },
+                            ticks: {
+                                ...commonOptions.scales.y.ticks,
+                                stepSize: 10,
+                                callback: function(value) {
+                                    if (value === 0) return '0%';
+                                    return value >= 0 ? `+${value}%` : `${value}%`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            
+            // Put Trades Chart
+            const tradesCtx = document.getElementById('tradesChart').getContext('2d');
+            charts.trades = new Chart(tradesCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Put Trades',
+                        data: [],
+                        borderColor: '#9b59b6',
+                        backgroundColor: 'rgba(155, 89, 182, 0.8)',
+                        borderWidth: 0,
+                        fill: false,
+                        tension: 0,
+                        pointRadius: 8,
+                        pointHoverRadius: 12,
+                        pointStyle: 'triangle',
+                        pointBackgroundColor: '#9b59b6',
+                        pointBorderColor: '#9b59b6',
+                        pointBorderWidth: 2,
+                        showLine: false
+                    }]
+                },
+                options: {
+                    ...commonOptions,
+                    scales: {
+                        ...commonOptions.scales,
+                        y: {
+                            ...commonOptions.scales.y,
+                            title: {
+                                display: true,
+                                text: 'Trade Price ($)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        ...commonOptions.plugins,
+                        tooltip: {
+                            ...commonOptions.plugins.tooltip,
+                            callbacks: {
+                                ...commonOptions.plugins.tooltip.callbacks,
+                                label: function(context) {
+                                    return `Put Trade: $${context.parsed.y.toFixed(2)}`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Parse different data formats
+        function parseDataFile(fileContent, fileName) {
+            const data = [];
+            
+            try {
+                if (fileName.includes('spot_momentum')) {
+                    // Parse spot momentum text file
+                    const lines = fileContent.split('\n').filter(line => line.trim());
+                    lines.forEach(line => {
+                        const parts = line.split('::');
+                        if (parts.length >= 4) {
+                            const pricePart = parts[0];
+                            const timestamp = parts[3];
+                            const price = parseFloat(pricePart.split(' ')[0]);
+                            
+                            if (!isNaN(price) && timestamp) {
+                                data.push({
+                                    timestamp: new Date(timestamp),
+                                    spotPrice: price,
+                                    shortMomentum: parts[1],
+                                    mediumMomentum: parts[2]
+                                });
+                            }
+                        }
+                    });
+                } else if (fileName.includes('trading_decisions')) {
+                    // Parse trading decisions JSON
+                    const jsonData = JSON.parse(fileContent);
+                    if (jsonData.decisions) {
+                        jsonData.decisions.forEach(decision => {
+                            if (decision.timestamp) {
+                                data.push({
+                                    timestamp: new Date(decision.timestamp),
+                                    action: decision.action,
+                                    success: decision.success,
+                                    spotPrice: decision.spotPrice,
+                                    optionPrice: decision.option?.askPrice || decision.option?.bidPrice,
+                                    reason: decision.reason
+                                });
+                            }
+                        });
+                    }
+                } else if (fileName.includes('options_data')) {
+                    // Parse options data JSON
+                    const jsonData = JSON.parse(fileContent);
+                    if (jsonData.options) {
+                        jsonData.options.forEach(option => {
+                            if (option.timestamp) {
+                                const tickData = {
+                                    timestamp: new Date(option.timestamp),
+                                    spotPrice: option.spotPrice,
+                                    bestPutValue: option.bestPutScore,
+                                    bestCallValue: option.bestCallScore,
+                                    mediumTermMomentum: option.mediumTermMomentum,
+                                    shortTermMomentum: option.shortTermMomentum
+                                };
+                                
+                                data.push(tickData);
+                            }
+                        });
+                    }
+                } else if (fileName.includes('onchain_analysis')) {
+                    // Parse onchain analysis JSON
+                    const jsonData = JSON.parse(fileContent);
+                    if (jsonData.ticks) {
+                        jsonData.ticks.forEach(tick => {
+                            if (tick.timestamp) {
+                                const tickData = {
+                                    timestamp: new Date(tick.timestamp)
+                                };
+                                
+                                // Extract liquidity delta from onchain analysis
+                                if (tick.onchainAnalysis && tick.onchainAnalysis.dexLiquidity && tick.onchainAnalysis.dexLiquidity.flowAnalysis) {
+                                    const flow = tick.onchainAnalysis.dexLiquidity.flowAnalysis;
+                                    if (flow.weightedChange !== undefined) {
+                                        tickData.liquidityDelta = flow.weightedChange * 100; // Convert to percentage
+                                    }
+                                }
+                                
+                                data.push(tickData);
+                            }
+                        });
+                    }
+                } else if (fileName.includes('.json') && !fileName.includes('whale_') && !fileName.includes('performance_')) {
+                    // Parse general JSON data (main data files)
+                    const jsonData = JSON.parse(fileContent);
+                    if (jsonData.ticks) {
+                        jsonData.ticks.forEach(tick => {
+                            if (tick.timestamp) {
+                                const tickData = {
+                                    timestamp: new Date(tick.timestamp)
+                                };
+                                
+                                // Extract spot price from instruments
+                                if (tick.instruments && tick.instruments.length > 0) {
+                                    const spotInstrument = tick.instruments.find(inst => 
+                                        inst.instrument_name === 'ETH-USD' || 
+                                        inst.instrument_name.includes('ETH')
+                                    );
+                                    if (spotInstrument && spotInstrument.last_price) {
+                                        tickData.spotPrice = parseFloat(spotInstrument.last_price);
+                                    }
+                                }
+                                
+                                data.push(tickData);
+                            }
+                        });
+                    }
+                }
+            } catch (error) {
+                console.error('Error parsing file:', fileName, error);
+            }
+            
+            return data;
+        }
+        
+        
+        // Load historical data progressively
+        async function loadHistoricalData() {
+            if (isLoadingHistorical) return;
+            
+            isLoadingHistorical = true;
+            const btn = document.getElementById('loadHistoricalBtn');
+            const originalText = btn.textContent;
+            btn.textContent = '⏳ Loading...';
+            btn.disabled = true;
+            
+            historicalOffset += 10; // Load next 10 days
+            
+            try {
+                const response = await fetch(`/api/historical-data?days=10&offset=${historicalOffset}`);
+                if (response.ok) {
+                    const historicalData = await response.json();
+                    
+                    if (historicalData.length > 0) {
+                        // Merge with existing data
+                        allData = [...historicalData, ...allData];
+                        allData.sort((a, b) => a.timestamp - b.timestamp);
+                        
+                        // Update chart with new data
+                        updateChart();
+                        updateStats();
+                        
+                        console.log(`Loaded ${historicalData.length} historical data points (offset: ${historicalOffset} days)`);
+                        
+                        // Continue loading more data automatically
+                        setTimeout(() => {
+                            loadHistoricalData();
+                        }, 1000);
+                    } else {
+                        console.log('No more historical data available');
+                        btn.textContent = '✅ All Data Loaded';
+                        btn.disabled = true;
+                        isLoadingHistorical = false;
+                        return;
+                    }
+                }
+            } catch (error) {
+                console.error('Error loading historical data:', error);
+                btn.textContent = '❌ Error';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.disabled = false;
+                }, 2000);
+            }
+            
+            if (isLoadingHistorical) {
+                btn.textContent = originalText;
+                btn.disabled = false;
+            }
+            isLoadingHistorical = false;
+        }
+        
+        // Load and process data
+        async function loadData() {
+            try {
+                // First, load the most recent file for fast initial display
+                const response = await fetch('/api/recent-data');
+                if (response.ok) {
+                    allData = await response.json();
+                    console.log(`Loaded ${allData.length} data points from most recent file`);
+                    
+                    // Log data summary
+                    if (allData.length > 0) {
+                        console.log(`Loaded ${allData.length} data points from server`);
+                    }
+                    
+                    // Update chart immediately with recent data
+                    updateChart();
+                    updateStats();
+                    
+                    // Start progressive loading of more files based on time range
+                    const timeRange = document.getElementById('timeRange').value;
+                    const daysBack = timeRange === 'all' ? 30 : Math.min(parseInt(timeRange) / 24, 10); // Default to 10 days max
+                    
+                    setTimeout(() => {
+                        loadFilesProgressively(daysBack);
+                    }, 1000);
+                } else {
+                    throw new Error('Server not available');
+                }
+            } catch (error) {
+                console.log('Server not available, trying file upload...');
+                
+                const fileInput = document.getElementById('dataFile');
+                const files = fileInput.files;
+                
+                if (files.length === 0) {
+                    console.log('No files selected, no data to display');
+                    allData = [];
+                    updateChart();
+                    updateStats();
+                } else {
+                    allData = [];
+                    
+                    for (let file of files) {
+                        try {
+                            const content = await file.text();
+                            const parsedData = parseDataFile(content, file.name);
+                            allData = allData.concat(parsedData);
+                        } catch (error) {
+                            showError(`Error reading file ${file.name}: ${error.message}`);
+                        }
+                    }
+                    
+                    if (allData.length === 0) {
+                        showError('No valid data found in the selected files.');
+                        return;
+                    }
+                    
+                    console.log(`Loaded ${allData.length} data points from files`);
+                    
+                    // Update chart with file data
+                    updateChart();
+                    updateStats();
+                }
+            }
+        }
+        
+        // Load files progressively one by one
+        async function loadFilesProgressively(daysBack = 10) {
+            if (isProgressiveLoading) {
+                console.log('Progressive loading already in progress');
+                return;
+            }
+            
+            isProgressiveLoading = true;
+            currentFileIndex = 1; // Start from second file (first already loaded)
+            
+            // Show progress indicator
+            const progressContainer = document.getElementById('loadingProgress');
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            progressContainer.style.display = 'block';
+            
+            const loadNextFile = async () => {
+                try {
+                    const response = await fetch(`/api/load-file?index=${currentFileIndex}&days=${daysBack}`);
+                    if (response.ok) {
+                        const result = await response.json();
+                        
+                        if (result.done) {
+                            console.log(`All files from last ${daysBack} days loaded`);
+                            isProgressiveLoading = false;
+                            progressContainer.style.display = 'none';
+                            return;
+                        }
+                        
+                        // Only update if we have new data
+                        if (result.data.length > 0) {
+                            // Merge new data with existing data
+                            allData = [...allData, ...result.data];
+                            allData.sort((a, b) => a.timestamp - b.timestamp);
+                            allData = mergeDataPoints(allData);
+                            
+                            // Update chart with new data immediately
+                            updateChart();
+                            updateStats();
+                        }
+                        
+                        // Update progress indicator
+                        const progress = ((currentFileIndex + 1) / result.totalFiles) * 100;
+                        progressBar.style.width = `${progress}%`;
+                        progressText.textContent = `Loading file ${currentFileIndex + 1}/${result.totalFiles}: ${result.fileName}`;
+                        
+                        console.log(`Loaded file ${currentFileIndex + 1}/${result.totalFiles}: ${result.fileName} (${result.data.length} points)`);
+                        
+                        currentFileIndex++;
+                        
+                        // Continue loading next file after a short delay
+                        setTimeout(loadNextFile, 300);
+                    } else {
+                        console.error('Failed to load file:', response.status);
+                        isProgressiveLoading = false;
+                        progressContainer.style.display = 'none';
+                    }
+                } catch (error) {
+                    console.error('Error loading file:', error);
+                    isProgressiveLoading = false;
+                    progressContainer.style.display = 'none';
+                }
+            };
+            
+            loadNextFile();
+        }
+        
+        // Load extended historical data (for when user wants more than 10 days)
+        async function loadExtendedData() {
+            const btn = document.getElementById('loadExtendedBtn');
+            const originalText = btn.textContent;
+            btn.textContent = '⏳ Loading Extended Data...';
+            btn.disabled = true;
+            
+            try {
+                // Load 30 days of data
+                const response = await fetch('/api/latest-data');
+                if (response.ok) {
+                    const extendedData = await response.json();
+                    
+                    // Merge with existing data
+                    allData = [...allData, ...extendedData];
+                    allData.sort((a, b) => a.timestamp - b.timestamp);
+                    allData = mergeDataPoints(allData);
+                    
+                    // Update chart
+                    updateChart();
+                    updateStats();
+                    
+                    console.log(`Loaded extended data: ${extendedData.length} additional points`);
+                    btn.textContent = '✅ Extended Data Loaded';
+                }
+            } catch (error) {
+                console.error('Error loading extended data:', error);
+                btn.textContent = '❌ Error';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.disabled = false;
+                }, 2000);
+            }
+        }
+        
+        // Merge data points with same timestamp
+        function mergeDataPoints(data) {
+            const merged = new Map();
+            
+            data.forEach(point => {
+                // Ensure timestamp is a Date object
+                const timestamp = point.timestamp instanceof Date ? point.timestamp : new Date(point.timestamp);
+                const key = timestamp.getTime();
+                
+                if (merged.has(key)) {
+                    const existing = merged.get(key);
+                    // Merge properties, preferring non-null values
+                    Object.keys(point).forEach(key => {
+                        if (point[key] !== null && point[key] !== undefined) {
+                            existing[key] = point[key];
+                        }
+                    });
+                } else {
+                    merged.set(key, { ...point, timestamp: timestamp });
+                }
+            });
+            
+            return Array.from(merged.values()).sort((a, b) => a.timestamp - b.timestamp);
+        }
+        
+        // Filter data by selected time range
+        function filterDataByTimeRange() {
+            const timeRange = document.getElementById('timeRange').value;
+            
+            // Always start from October 8, 2025
+            const startDate = new Date('2025-10-08T00:00:00Z');
+            
+            if (timeRange === 'all') {
+                // Filter to only show data from Oct 8, 2025 onwards
+                allData = allData.filter(point => point.timestamp >= startDate);
+                return;
+            }
+            
+            const hours = parseInt(timeRange);
+            const cutoffTime = new Date(Date.now() - (hours * 60 * 60 * 1000));
+            
+            // Use the later of: Oct 8, 2025 or the time range cutoff
+            const effectiveStartTime = new Date(Math.max(startDate.getTime(), cutoffTime.getTime()));
+            
+            allData = allData.filter(point => point.timestamp >= effectiveStartTime);
+        }
+        
+        // Update all charts with current data
+        function updateChart() {
+            if (!charts.price || !charts.putValue || !charts.liquidity || !charts.trades) return;
+            
+            const labels = allData.map(point => point.timestamp);
+            const spotPrices = allData.map(point => point.spotPrice || null);
+            const putValues = allData.map(point => point.bestPutValue || null);
+            const liquidityDeltas = allData.map(point => point.liquidityDelta || null);
+            
+            // Debug logging
+            console.log(`Updating charts with ${allData.length} data points`);
+            console.log(`Spot prices: ${spotPrices.filter(p => p !== null).length} valid values`);
+            console.log(`Put values: ${putValues.filter(p => p !== null).length} valid values`);
+            console.log(`Sample spot price: ${spotPrices.find(p => p !== null)}`);
+            console.log(`Sample put value: ${putValues.find(p => p !== null)}`);
+            
+            // Count put trades only - mark when puts were bought
+            const putTrades = allData.map(point => {
+                if (point.action === 'buy_put') {
+                    return point.spotPrice || 0; // Use spot price as the value to show on chart
+                }
+                return null;
+            });
+            
+            // Update ETH Spot Price Chart
+            charts.price.data.labels = labels;
+            charts.price.data.datasets[0].data = spotPrices;
+            charts.price.update('active');
+            
+            // Update Best Put Value Chart
+            charts.putValue.data.labels = labels;
+            charts.putValue.data.datasets[0].data = putValues;
+            charts.putValue.update('active');
+            
+            // Update Liquidity Delta Chart with multiple timeframes
+            charts.liquidity.data.labels = labels;
+            
+            // Calculate hourly, daily, and weekly flows
+            const hourlyFlows = calculateLiquidityFlows(allData, 1); // 1 hour
+            const dailyFlows = calculateLiquidityFlows(allData, 24); // 24 hours
+            const weeklyFlows = calculateLiquidityFlows(allData, 168); // 168 hours (7 days)
+            
+            charts.liquidity.data.datasets[0].data = hourlyFlows;
+            charts.liquidity.data.datasets[1].data = dailyFlows;
+            charts.liquidity.data.datasets[2].data = weeklyFlows;
+            charts.liquidity.update('active');
+            
+            // Update Put Trades Chart
+            charts.trades.data.labels = labels;
+            charts.trades.data.datasets[0].data = putTrades;
+            charts.trades.update('active');
+        }
+        
+        // Calculate liquidity flows for different timeframes
+        function calculateLiquidityFlows(data, hoursBack) {
+            const flows = [];
+            const msPerHour = 60 * 60 * 1000;
+            const windowMs = hoursBack * msPerHour;
+            const maxFlow = 50; // Exclude values > ±50%
+            
+            for (let i = 0; i < data.length; i++) {
+                const currentTime = new Date(data[i].timestamp);
+                const windowStart = new Date(currentTime.getTime() - windowMs);
+                
+                // Find data points within the time window
+                const windowData = data.filter(point => {
+                    const pointTime = new Date(point.timestamp);
+                    const liquidityDelta = point.liquidityDelta;
+                    return pointTime >= windowStart && 
+                           pointTime <= currentTime && 
+                           liquidityDelta !== null && 
+                           Math.abs(liquidityDelta) <= maxFlow;
+                });
+                
+                if (windowData.length > 0) {
+                    // Calculate average flow in the window, excluding extreme values
+                    const validFlows = windowData.map(point => point.liquidityDelta).filter(flow => Math.abs(flow) <= maxFlow);
+                    const avgFlow = validFlows.reduce((sum, flow) => sum + flow, 0) / validFlows.length;
+                    flows.push(avgFlow);
+                } else {
+                    flows.push(null);
+                }
+            }
+            
+            return flows;
+        }
+        
+        // Detect liquidity spikes (significant changes in liquidity delta)
+        function detectLiquiditySpikes(liquidityDeltas) {
+            const spikes = [];
+            const threshold = 5; // 5% change threshold for spike detection
+            
+            for (let i = 1; i < liquidityDeltas.length; i++) {
+                const current = liquidityDeltas[i];
+                const previous = liquidityDeltas[i - 1];
+                
+                if (current !== null && previous !== null) {
+                    const change = Math.abs(current - previous);
+                    if (change > threshold) {
+                        spikes.push({
+                            index: i,
+                            value: current,
+                            change: current - previous,
+                            timestamp: allData[i].timestamp
+                        });
+                    }
+                }
+            }
+            
+            return spikes;
+        }
+        
+        // Update statistics
+        function updateStats() {
+            if (allData.length === 0) return;
+            
+            // Find the latest values from all data points
+            const latestSpotPrice = allData
+                .filter(point => point.spotPrice !== null && point.spotPrice !== undefined)
+                .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0]?.spotPrice;
+            
+            const latestPutValue = allData
+                .filter(point => point.bestPutValue !== null && point.bestPutValue !== undefined)
+                .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0]?.bestPutValue;
+            
+            const latestLiquidityDelta = allData
+                .filter(point => point.liquidityDelta !== null && point.liquidityDelta !== undefined)
+                .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[0]?.liquidityDelta;
+            
+            const putTrades = allData.filter(point => point.action === 'buy_put').length;
+            
+            document.getElementById('currentPrice').textContent = 
+                latestSpotPrice ? `$${latestSpotPrice.toFixed(2)}` : '$0.00';
+            document.getElementById('bestPutValue').textContent = 
+                latestPutValue ? latestPutValue.toFixed(6) : '0.000000';
+            document.getElementById('liquidityDelta').textContent = 
+                latestLiquidityDelta ? `${latestLiquidityDelta.toFixed(2)}%` : '0%';
+            document.getElementById('totalPutTrades').textContent = putTrades;
+            
+            // Calculate average liquidity health (simplified)
+            const liquidityDeltas = allData
+                .map(point => point.liquidityDelta)
+                .filter(delta => delta !== null && delta !== undefined);
+            
+            const avgLiquidityDelta = liquidityDeltas.length > 0 
+                ? liquidityDeltas.reduce((sum, delta) => sum + delta, 0) / liquidityDeltas.length 
+                : 0;
+            
+            // Convert to health percentage (positive = good, negative = concerning)
+            const liquidityHealth = Math.max(0, Math.min(100, 50 + avgLiquidityDelta * 10));
+            
+            document.getElementById('liquidityHealth').textContent = `${liquidityHealth.toFixed(1)}%`;
+            document.getElementById('whaleActivity').textContent = 
+                allData.filter(point => point.whaleCount).reduce((sum, point) => sum + (point.whaleCount || 0), 0);
+        }
+        
+        // Show error message
+        function showError(message) {
+            const errorContainer = document.getElementById('errorContainer');
+            errorContainer.innerHTML = `<div class="error">❌ ${message}</div>`;
+            setTimeout(() => {
+                errorContainer.innerHTML = '';
+            }, 5000);
+        }
+        
+        // Export charts as images
+        function exportData() {
+            if (!charts.price) return;
+            
+            // Export each chart individually
+            const chartsToExport = [
+                { chart: charts.price, name: 'eth-spot-price' },
+                { chart: charts.putValue, name: 'best-put-value' },
+                { chart: charts.liquidity, name: 'liquidity-delta' },
+                { chart: charts.trades, name: 'put-trades' }
+            ];
+            
+            chartsToExport.forEach(({ chart, name }) => {
+                if (chart) {
+                    const link = document.createElement('a');
+                    link.download = `trading-dashboard-${name}-${new Date().toISOString().split('T')[0]}.png`;
+                    link.href = chart.toBase64Image();
+                    link.click();
+                }
+            });
+        }
+        
+        // Setup auto-refresh
+        function setupAutoRefresh() {
+            const interval = document.getElementById('updateInterval').value;
+            
+            if (updateInterval) {
+                clearInterval(updateInterval);
+                updateInterval = null;
+            }
+            
+            if (interval > 0) {
+                updateInterval = setInterval(() => {
+                    loadData();
+                }, interval * 1000);
+            }
+        }
+        
+        // Event listeners
+        document.getElementById('timeRange').addEventListener('change', () => {
+            filterDataByTimeRange();
+            updateChart();
+            updateStats();
+        });
+        
+        document.getElementById('updateInterval').addEventListener('change', setupAutoRefresh);
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            initCharts();
+            // Auto-load data on page load
+            setTimeout(loadData, 1000);
+        });
+    </script>
+</body>
+</html>

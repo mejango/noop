@@ -1,0 +1,17 @@
+# Railway configuration
+# Deploy two services from the same repo, sharing a persistent volume at /data
+
+# Service 1: Bot (worker, no HTTP)
+# Dockerfile: Dockerfile.bot
+# Volume: /data
+
+# Service 2: Dashboard (web, port 3000)
+# Dockerfile: Dockerfile.dashboard
+# Volume: /data (read-only)
+
+# Environment variables (set in Railway dashboard, never committed):
+# PRIVATE_KEY - wallet key
+# ETHERSCAN_API_KEY
+# THEGRAPH_API_KEY
+# DATA_DIR=/data
+# NODE_ENV=production

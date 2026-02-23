@@ -1,0 +1,15 @@
+node_modules/
+.next/
+data/
+archive/
+backups/
+.env
+.env.local
+.private_key.txt
+public_key.pem
+*.db
+*.db-wal
+*.db-shm
+price_history.json
+bot_data.json
+.DS_Store
