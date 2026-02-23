@@ -177,6 +177,7 @@ const DYNAMIC_INTERVALS = {
 
 // Configuration
 const ARCHIVE_DIR = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'archive') : './archive';
+const BOT_DATA_PATH = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'bot_data.json') : './bot_data.json';
 
 const PERIOD = 10 * 1000 * 60 * 60 * 24;
 
@@ -189,7 +190,7 @@ const CALL_EXPIRATION_RANGE = [7, 14];
 const CALL_DELTA_RANGE = [0.06, 0.2]; // Positive delta for calls
 
 // Price history management functions
-const PRICE_HISTORY_FILE = 'price_history.json';
+const PRICE_HISTORY_FILE = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'price_history.json') : './price_history.json';
 
 // Call buyback thresholds
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Minimum profit percentage for automatic call buyback
@@ -256,34 +257,34 @@ const quantizeDown = (x, step) => {
 
 // Ensure backup directory exists
 const ensureBackupDir = () => {
-  const backupDir = 'backups';
+  const backupDir = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'backups') : './backups';
   if (!fs.existsSync(backupDir)) {
-    fs.mkdirSync(backupDir);
+    fs.mkdirSync(backupDir, { recursive: true });
   }
   return backupDir;
 };
 
 // Create or overwrite single backup file
 const createBackup = () => {
-  if (fs.existsSync('bot_data.json')) {
+  if (fs.existsSync(BOT_DATA_PATH)) {
     const backupDir = ensureBackupDir();
     const backupFile = path.join(backupDir, 'bot_data_backup.json');
-    fs.copyFileSync('bot_data.json', backupFile);
+    fs.copyFileSync(BOT_DATA_PATH, backupFile);
   }
 };
 
 // Load existing data
 const loadData = () => {
   try {
-    if (fs.existsSync('bot_data.json')) {
+    if (fs.existsSync(BOT_DATA_PATH)) {
       // Create backup before loading
       createBackup();
-      
-      const data = fs.readFileSync('bot_data.json', 'utf-8');
+
+      const data = fs.readFileSync(BOT_DATA_PATH, 'utf-8');
       botData = { ...botData, ...JSON.parse(data) };
-      console.log('✅ Loaded existing bot data');
+      console.log(`✅ Loaded existing bot data from ${BOT_DATA_PATH}`);
     } else {
-      console.log('⚠️ No existing bot_data.json found - starting with default data');
+      console.log(`⚠️ No existing bot_data.json found at ${BOT_DATA_PATH} - starting with default data`);
     }
   } catch (error) {
     console.error('❌ Error loading bot data:', error);
@@ -302,7 +303,7 @@ const saveData = () => {
     // Create backup before saving
     createBackup();
     
-    fs.writeFileSync('bot_data.json', JSON.stringify(botData, null, 2));
+    fs.writeFileSync(BOT_DATA_PATH, JSON.stringify(botData, null, 2));
     console.log('💾 Bot data saved successfully');
   } catch (error) {
     console.error('❌ Error saving bot data:', error);
