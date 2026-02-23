@@ -18,20 +18,15 @@ WORKDIR /app
 
 # Install bot dependencies
 COPY package.json package-lock.json ./
-RUN npm ci --production
-
-# Install dashboard production dependencies
-COPY dashboard/package.json dashboard/package-lock.json ./dashboard/
-RUN cd dashboard && npm ci --production
+RUN npm ci --omit=dev
 
 # Copy bot
 COPY bot/ ./bot/
 COPY script.js ./
 
-# Copy dashboard build
-COPY --from=dashboard-builder /dashboard/.next ./dashboard/.next
-COPY --from=dashboard-builder /dashboard/src ./dashboard/src
-COPY --from=dashboard-builder /dashboard/next.config.mjs ./dashboard/
+# Copy dashboard standalone build
+COPY --from=dashboard-builder /dashboard/.next/standalone ./dashboard/
+COPY --from=dashboard-builder /dashboard/.next/static ./dashboard/.next/static
 
 # Start script runs both
 COPY start.sh ./
@@ -40,6 +35,7 @@ RUN chmod +x start.sh
 ENV DATA_DIR=/data
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 ENV NEXT_TELEMETRY_DISABLED=1
 
 EXPOSE 3000

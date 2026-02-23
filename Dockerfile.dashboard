@@ -20,22 +20,17 @@ RUN npm run build
 # Production image
 FROM node:20-alpine
 
-RUN apk add --no-cache python3 make g++
-
 WORKDIR /app
 
-COPY --from=builder /app/package.json /app/package-lock.json ./
-RUN npm ci --production
-
-COPY --from=builder /app/.next ./.next
-COPY --from=builder /app/next.config.mjs ./
-COPY --from=builder /app/src ./src
+COPY --from=builder /app/.next/standalone ./
+COPY --from=builder /app/.next/static ./.next/static
 
 ENV DATA_DIR=/data
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 ENV NEXT_TELEMETRY_DISABLED=1
 
 EXPOSE 3000
 
-CMD ["npm", "start"]
+CMD ["node", "server.js"]
