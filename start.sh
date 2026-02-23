@@ -13,4 +13,4 @@ node bot/index.js &
 BOT_PID=$!
 
 echo "Starting dashboard on port ${PORT:-3000}..."
-cd dashboard && node server.js
+cd dashboard && HOSTNAME=0.0.0.0 node server.js
