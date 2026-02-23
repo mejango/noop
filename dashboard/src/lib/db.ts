@@ -103,3 +103,41 @@ export function getSignals(since: string, limit = 100) {
     LIMIT ?
   `).all(since, limit);
 }
+
+export function getBestOptionsOverTime(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT timestamp,
+      MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
+      MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN ask_delta_value END) as best_call_score
+    FROM options_snapshots
+    WHERE timestamp > ?
+    GROUP BY timestamp
+    ORDER BY timestamp ASC
+  `).all(since);
+}
+
+export function getLiquidityOverTime(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT timestamp, liquidity_flow_magnitude,
+      CASE WHEN liquidity_flow_direction = 'inflow' THEN liquidity_flow_magnitude
+           WHEN liquidity_flow_direction = 'outflow' THEN -liquidity_flow_magnitude
+           ELSE 0 END as signed_liquidity
+    FROM onchain_data
+    WHERE timestamp > ?
+    ORDER BY timestamp ASC
+  `).all(since);
+}
+
+export function getTradeMarkers(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT t.timestamp, t.direction, t.amount, t.price, t.total_value, t.order_type,
+      p.instrument_name, p.strike, p.option_type
+    FROM trades t
+    LEFT JOIN positions p ON t.position_id = p.id
+    WHERE t.timestamp > ?
+    ORDER BY t.timestamp ASC
+  `).all(since);
+}

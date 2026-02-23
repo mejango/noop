@@ -1,9 +1,13 @@
 'use client';
 
+import { useState, useMemo } from 'react';
 import { usePolling } from '@/lib/hooks';
-import { formatUSD, formatNum, timeAgo, dteDays, momentumColor, momentumBg } from '@/lib/format';
+import { formatUSD, timeAgo, momentumColor, momentumBg } from '@/lib/format';
 import Card from '@/components/Card';
-import Badge from '@/components/Badge';
+import {
+  ComposedChart, Line, Area, Scatter, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, Legend, ReferenceLine,
+} from 'recharts';
 
 interface Stats {
   open_puts: number;
@@ -24,28 +28,39 @@ interface Stats {
   open_call_revenue: number;
 }
 
-interface Position {
-  id: number;
-  instrument_name: string;
-  direction: string;
-  strike: number;
-  expiry: number;
-  amount: number;
-  avg_price: number;
-  total_cost: number;
-  status: string;
-  pnl: number | null;
-  opened_at: string;
-  closed_at: string | null;
-  close_reason: string | null;
+interface SpotPrice {
+  timestamp: string;
+  price: number;
+  short_momentum: string;
+  medium_momentum: string;
 }
 
-interface Signal {
-  id: number;
+interface OptionsPoint {
   timestamp: string;
-  signal_type: string;
-  details: string;
-  acted_on: number;
+  best_put_score: number | null;
+  best_call_score: number | null;
+}
+
+interface LiquidityPoint {
+  timestamp: string;
+  signed_liquidity: number;
+}
+
+interface TradeMarker {
+  timestamp: string;
+  direction: string;
+  amount: number;
+  price: number;
+  total_value: number;
+  instrument_name: string;
+  strike: number;
+}
+
+interface ChartData {
+  prices: SpotPrice[];
+  options: OptionsPoint[];
+  liquidity: LiquidityPoint[];
+  trades: TradeMarker[];
 }
 
 const emptyStats: Stats = {
@@ -55,14 +70,96 @@ const emptyStats: Stats = {
   seven_day_high: 0, seven_day_low: 0, open_put_cost: 0, open_call_revenue: 0,
 };
 
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [] };
+const ranges = ['1h', '6h', '24h', '3d', '7d', '30d'] as const;
+
+// Custom star shape for trade markers
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const StarDot = (props: any) => {
+  const { cx, cy } = props;
+  if (!cx || !cy) return null;
+  return (
+    <svg x={cx - 8} y={cy - 8} width={16} height={16} viewBox="0 0 24 24" fill="#facc15" stroke="#a16207" strokeWidth={1}>
+      <polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26" />
+    </svg>
+  );
+};
+
 export default function OverviewPage() {
+  const [range, setRange] = useState<string>('7d');
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats);
-  const { data: positions } = usePolling<Position[]>('/api/positions?status=open', []);
-  const { data: signals } = usePolling<Signal[]>('/api/signals?range=7d&limit=20', []);
+  const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart);
+
+  // Merge all data series by timestamp into a single array for the chart
+  const merged = useMemo(() => {
+    const map = new Map<number, {
+      ts: number;
+      price?: number;
+      momentum?: string;
+      bestPut?: number;
+      bestCall?: number;
+      liquidity?: number;
+      trade?: number;
+      tradeInfo?: string;
+    }>();
+
+    // Add prices
+    for (const p of chart.prices) {
+      const ts = new Date(p.timestamp).getTime();
+      map.set(ts, {
+        ts,
+        price: p.price,
+        momentum: p.medium_momentum,
+      });
+    }
+
+    // Merge best option scores
+    for (const o of chart.options) {
+      const ts = new Date(o.timestamp).getTime();
+      const existing = map.get(ts) || { ts };
+      if (o.best_put_score != null) existing.bestPut = o.best_put_score;
+      if (o.best_call_score != null) existing.bestCall = o.best_call_score;
+      map.set(ts, existing);
+    }
+
+    // Merge liquidity
+    for (const l of chart.liquidity) {
+      const ts = new Date(l.timestamp).getTime();
+      const existing = map.get(ts) || { ts };
+      existing.liquidity = l.signed_liquidity;
+      map.set(ts, existing);
+    }
+
+    // Sort by timestamp
+    const sorted = Array.from(map.values()).sort((a, b) => a.ts - b.ts);
+
+    // Mark trades on nearest price point
+    for (const t of chart.trades) {
+      const tTs = new Date(t.timestamp).getTime();
+      let closest = sorted[0];
+      let minDiff = Infinity;
+      for (const s of sorted) {
+        const diff = Math.abs(s.ts - tTs);
+        if (diff < minDiff) { minDiff = diff; closest = s; }
+      }
+      if (closest) {
+        closest.trade = closest.price;
+        closest.tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${t.price.toFixed(2)}`;
+      }
+    }
+
+    return sorted;
+  }, [chart]);
+
+  // Separate trade points for the scatter
+  const tradePoints = useMemo(() =>
+    merged.filter(d => d.trade != null).map(d => ({ ts: d.ts, trade: d.trade })),
+    [merged]
+  );
 
   return (
     <div className="space-y-6">
-      {/* Price + Momentum Header */}
+      {/* Price + Momentum + Range Header */}
       <div className="flex flex-wrap items-start gap-4">
         <Card className="flex-1 min-w-[200px]">
           <div className="text-3xl font-bold tracking-tight">{formatUSD(stats.last_price)}</div>
@@ -104,74 +201,196 @@ export default function OverviewPage() {
         </Card>
       </div>
 
-      {/* Strategy Stats */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <Card>
-          <div className="text-2xl font-bold">{stats.open_puts}</div>
-          <div className="text-xs text-zinc-500">Open Puts</div>
-        </Card>
-        <Card>
-          <div className="text-2xl font-bold">{stats.open_calls}</div>
-          <div className="text-xs text-zinc-500">Open Calls</div>
-        </Card>
-        <Card>
-          <div className="text-2xl font-bold">{formatUSD(stats.open_put_cost)}</div>
-          <div className="text-xs text-zinc-500">Put Cost Basis</div>
-        </Card>
-        <Card>
-          <div className="text-2xl font-bold">{stats.total_trades}</div>
-          <div className="text-xs text-zinc-500">Total Trades</div>
-        </Card>
+      {/* Time Range Selector */}
+      <div className="flex items-center justify-between">
+        <div className="flex gap-1">
+          {ranges.map(r => (
+            <button
+              key={r}
+              onClick={() => setRange(r)}
+              className={`px-3 py-1 rounded text-sm transition-colors ${
+                range === r ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'
+              }`}
+            >
+              {r}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-3 text-xs text-zinc-500">
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-violet-400 inline-block" /> ETH</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-red-400 inline-block" /> Best PUT</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-emerald-400 inline-block" /> Best CALL</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 bg-blue-400/50 inline-block" /> Liquidity</span>
+          <span className="flex items-center gap-1"><span className="text-yellow-400">&#9733;</span> Trade</span>
+        </div>
       </div>
 
-      {/* Open Positions */}
-      <Card title="Open Positions">
-        {positions.length === 0 ? (
-          <p className="text-zinc-500 text-sm">No open positions</p>
+      {/* Big Combined Chart */}
+      <Card>
+        {loading && merged.length === 0 ? (
+          <div className="h-[500px] flex items-center justify-center text-zinc-500">Loading...</div>
+        ) : merged.length === 0 ? (
+          <div className="h-[500px] flex items-center justify-center text-zinc-500">No data yet — bot is collecting</div>
         ) : (
-          <div className="space-y-2">
-            {positions.map((pos) => {
-              const dte = dteDays(pos.expiry);
-              const dteColor = dte !== null && dte <= 7 ? 'red' : dte !== null && dte <= 30 ? 'yellow' : 'blue';
-              return (
-                <div key={pos.id} className="flex items-center justify-between px-3 py-2 rounded bg-zinc-800/50 border border-zinc-800">
-                  <div className="flex items-center gap-3">
-                    <Badge label={pos.direction === 'buy' ? 'PUT' : 'CALL'} color={pos.direction === 'buy' ? 'red' : 'green'} />
-                    <span className="text-sm font-mono">{pos.instrument_name}</span>
-                  </div>
-                  <div className="flex items-center gap-4 text-sm">
-                    <span className="text-zinc-400">Qty: {formatNum(pos.amount)}</span>
-                    <span className="text-zinc-400">Avg: {formatUSD(pos.avg_price)}</span>
-                    <span className="text-zinc-400">Cost: {formatUSD(pos.total_cost)}</span>
-                    {dte !== null && <Badge label={`${dte}d DTE`} color={dteColor} />}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <ResponsiveContainer width="100%" height={500}>
+            <ComposedChart data={merged} margin={{ top: 10, right: 60, left: 10, bottom: 0 }}>
+              <XAxis
+                dataKey="ts"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                tickFormatter={(ts) => {
+                  const d = new Date(ts);
+                  return range === '1h' || range === '6h'
+                    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                    : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+                }}
+                stroke="#3f3f46"
+                tick={{ fill: '#71717a', fontSize: 11 }}
+              />
+              {/* Left Y-axis: ETH price */}
+              <YAxis
+                yAxisId="price"
+                domain={['auto', 'auto']}
+                tickFormatter={(v) => `$${v}`}
+                stroke="#3f3f46"
+                tick={{ fill: '#71717a', fontSize: 11 }}
+                width={70}
+              />
+              {/* Right Y-axis: scores & liquidity */}
+              <YAxis
+                yAxisId="score"
+                orientation="right"
+                domain={['auto', 'auto']}
+                tickFormatter={(v) => v.toFixed(3)}
+                stroke="#3f3f46"
+                tick={{ fill: '#52525b', fontSize: 10 }}
+                width={55}
+              />
+              <Tooltip
+                contentStyle={{ backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: 8, fontSize: 12 }}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                formatter={(val: any, name: any) => {
+                  if (name === 'price') return [formatUSD(Number(val)), 'ETH'];
+                  if (name === 'bestPut') return [Number(val).toFixed(4), 'Best PUT Score'];
+                  if (name === 'bestCall') return [Number(val).toFixed(4), 'Best CALL Score'];
+                  if (name === 'liquidity') return [Number(val).toFixed(2), 'Liquidity Flow'];
+                  return [val, name];
+                }}
+              />
+              <Legend content={() => null} />
+
+              {/* 7d high/low reference lines */}
+              {stats.seven_day_high > 0 && (
+                <ReferenceLine
+                  yAxisId="price"
+                  y={stats.seven_day_high}
+                  stroke="#22c55e"
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.4}
+                />
+              )}
+              {stats.seven_day_low > 0 && stats.seven_day_low < Infinity && (
+                <ReferenceLine
+                  yAxisId="price"
+                  y={stats.seven_day_low}
+                  stroke="#ef4444"
+                  strokeDasharray="3 3"
+                  strokeOpacity={0.4}
+                />
+              )}
+
+              {/* Liquidity flow area */}
+              <Area
+                yAxisId="score"
+                type="monotone"
+                dataKey="liquidity"
+                fill="#3b82f6"
+                fillOpacity={0.1}
+                stroke="#3b82f6"
+                strokeWidth={0}
+                connectNulls={false}
+                dot={false}
+              />
+
+              {/* ETH price line */}
+              <Line
+                yAxisId="price"
+                type="monotone"
+                dataKey="price"
+                stroke="#a78bfa"
+                dot={false}
+                strokeWidth={2}
+                connectNulls
+              />
+
+              {/* Best PUT score */}
+              <Line
+                yAxisId="score"
+                type="monotone"
+                dataKey="bestPut"
+                stroke="#f87171"
+                dot={false}
+                strokeWidth={1}
+                strokeOpacity={0.7}
+                connectNulls
+              />
+
+              {/* Best CALL score */}
+              <Line
+                yAxisId="score"
+                type="monotone"
+                dataKey="bestCall"
+                stroke="#34d399"
+                dot={false}
+                strokeWidth={1}
+                strokeOpacity={0.7}
+                connectNulls
+              />
+
+              {/* Trade markers (stars) */}
+              {tradePoints.length > 0 && (
+                <Scatter
+                  yAxisId="price"
+                  data={tradePoints}
+                  dataKey="trade"
+                  shape={<StarDot />}
+                />
+              )}
+            </ComposedChart>
+          </ResponsiveContainer>
         )}
       </Card>
 
-      {/* Recent Signals */}
-      <Card title="Recent Signals">
-        {signals.length === 0 ? (
-          <p className="text-zinc-500 text-sm">No signals yet</p>
-        ) : (
-          <div className="space-y-1">
-            {signals.map((sig) => (
-              <div key={sig.id} className="flex items-center gap-3 text-sm py-1">
-                <span className="text-zinc-500 text-xs">{timeAgo(sig.timestamp)}</span>
-                <Badge
-                  label={sig.signal_type}
-                  color={sig.signal_type.includes('crash') ? 'red' : sig.signal_type.includes('roll') ? 'yellow' : 'blue'}
+      {/* Momentum Timeline */}
+      {merged.length > 0 && (
+        <Card title="Momentum Timeline">
+          <div className="overflow-x-auto">
+            <div className="flex gap-0.5 min-w-[600px]" style={{ height: 32 }}>
+              {merged.filter(d => d.momentum !== undefined).map((d, i) => (
+                <div
+                  key={i}
+                  className={`flex-1 rounded-sm ${
+                    d.momentum === 'upward' ? 'bg-green-800/50' :
+                    d.momentum === 'downward' ? 'bg-red-800/50' : 'bg-zinc-800/50'
+                  }`}
+                  title={`${new Date(d.ts).toLocaleString()}: ${d.momentum || 'neutral'}`}
                 />
-                <span className="text-zinc-300 truncate">{sig.details}</span>
-                {sig.acted_on ? <Badge label="acted" color="green" /> : null}
+              ))}
+            </div>
+            <div className="flex justify-between text-xs text-zinc-500 mt-1">
+              <span>{merged.length > 0 ? new Date(merged[0].ts).toLocaleString() : ''}</span>
+              <div className="flex gap-3">
+                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-green-800/50 inline-block" /> upward</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-red-800/50 inline-block" /> downward</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-zinc-800/50 inline-block" /> neutral</span>
               </div>
-            ))}
+              <span>{merged.length > 0 ? new Date(merged[merged.length - 1].ts).toLocaleString() : ''}</span>
+            </div>
           </div>
-        )}
-      </Card>
+        </Card>
+      )}
     </div>
   );
 }
