@@ -143,7 +143,7 @@ const StarDot = (props: any) => {
 
 // Momentum color helper for bar cells
 const momentumBarColor = (m: string | undefined | null) =>
-  m === 'upward' ? '#065f46' : m === 'downward' ? '#7f1d1d' : 'rgba(255,255,255,0.20)';
+  m === 'upward' ? '#10b981' : m === 'downward' ? '#ef4444' : 'rgba(255,255,255,0.25)';
 
 // Color interpolation for heatmap intensity (0=dim, 1=bright)
 const lerpColor = (a: [number, number, number], b: [number, number, number], t: number): string => {
@@ -631,8 +631,8 @@ export default function OverviewPage() {
           <div className="flex items-center justify-between mb-1">
             <span className="text-xs font-medium text-gray-400">Momentum</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#065f46' }} /> upward</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#7f1d1d' }} /> downward</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#10b981' }} /> upward</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#ef4444' }} /> downward</span>
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: 'rgba(255,255,255,0.05)' }} /> neutral</span>
             </div>
           </div>
