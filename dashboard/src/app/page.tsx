@@ -386,6 +386,12 @@ export default function OverviewPage() {
     return { callHeatmap: calls, putHeatmap: puts };
   }, [chart.optionsHeatmap, merged]);
 
+  // Data for options value sub-chart (only points with options data)
+  const optionsData = useMemo(() =>
+    merged.filter(d => (d.bestPut != null && d.bestPut > 0) || (d.bestCall != null && d.bestCall > 0)),
+    [merged]
+  );
+
   // Table data: latest first, only rows with a price
   const tableData = useMemo(() =>
     [...merged].reverse().filter(d => d.price != null),
@@ -486,9 +492,6 @@ export default function OverviewPage() {
         </div>
         <div className="flex gap-3 text-xs text-gray-500">
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red }} /> PUT Value</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary }} /> CALL Value</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.blue, opacity: 0.5 }} /> Liquidity</span>
           <span className="flex items-center gap-1"><span style={{ color: chartColors.trade }}>&#9733;</span> Trade</span>
         </div>
       </div>
@@ -519,55 +522,14 @@ export default function OverviewPage() {
                 tick={chartAxis.tick}
                 width={70}
               />
-              {/* Right Y-axis: PUT value (delta/price) */}
-              <YAxis
-                yAxisId="putValue"
-                orientation="right"
-                domain={['auto', 'auto']}
-                tickFormatter={(v) => Number(v).toFixed(3)}
-                stroke="transparent"
-                tick={{ fill: chartColors.red, fontSize: 10 }}
-                width={55}
-              />
-              {/* Right Y-axis: CALL value (price/delta) */}
-              <YAxis
-                yAxisId="callValue"
-                orientation="right"
-                domain={['auto', 'auto']}
-                tickFormatter={(v) => Number(v).toFixed(1)}
-                stroke="transparent"
-                tick={{ fill: chartColors.secondary, fontSize: 10 }}
-                width={55}
-              />
-              {/* Hidden axis for liquidity */}
-              <YAxis yAxisId="liq" orientation="right" hide domain={['auto', 'auto']} />
               <Tooltip
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                content={({ active, payload, label }: any) => {
-                  if (!active || !payload?.length) return null;
-                  const row = payload[0]?.payload;
-                  if (!row) return null;
-                  const price = row.price;
-                  const bestPut = row.bestPut;
-                  const bestCall = row.bestCall;
-                  const fmtPut = bestPut != null && bestPut > 0 ? bestPut.toFixed(4) : 'N/A';
-                  const fmtCall = bestCall != null && bestCall > 0 ? bestCall.toFixed(1) : 'N/A';
-                  const fmtPutPeak = putPeak > 0 ? putPeak.toFixed(4) : 'N/A';
-                  const fmtCallPeak = callPeak > 0 ? callPeak.toFixed(1) : 'N/A';
-                  return (
-                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
-                      <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
-                      <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {price != null ? formatUSD(price) : 'N/A'}</div>
-                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}</div>
-                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}</div>
-                      <div className="text-xs text-gray-500 mt-1 border-t border-white/10 pt-1">
-                        <span style={{ color: chartColors.red }}>Best PUT ({chart.bestScores.windowDays}d): {fmtPutPeak}</span>
-                        {' / '}
-                        <span style={{ color: chartColors.secondary }}>Best CALL: {fmtCallPeak}</span>
-                      </div>
-                    </div>
-                  );
+                labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                formatter={(val: any, name: any) => {
+                  if (name === 'price') return [formatUSD(Number(val)), 'ETH'];
+                  return [val, name];
                 }}
               />
               <Legend content={() => null} />
@@ -580,28 +542,8 @@ export default function OverviewPage() {
                 <ReferenceLine yAxisId="price" y={stats.seven_day_low} stroke={chartColors.refLow} strokeDasharray="3 3" strokeOpacity={0.4} />
               )}
 
-              {/* Best value threshold lines */}
-              {putPeak > 0 && (
-                <ReferenceLine
-                  yAxisId="putValue" y={putPeak} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.5}
-                  label={{ value: `PUT threshold (${chart.bestScores.windowDays}d): ${putPeak.toFixed(4)}`, fill: chartColors.red, fontSize: 9, position: 'insideTopLeft' }}
-                />
-              )}
-              {callPeak > 0 && (
-                <ReferenceLine
-                  yAxisId="callValue" y={callPeak} stroke={chartColors.secondary} strokeDasharray="4 4" strokeOpacity={0.5}
-                  label={{ value: `CALL threshold (${chart.bestScores.windowDays}d): ${callPeak.toFixed(1)}`, fill: chartColors.secondary, fontSize: 9, position: 'insideTopRight' }}
-                />
-              )}
-
-              {/* Liquidity flow area */}
-              <Area yAxisId="liq" type="monotone" dataKey="liquidity" fill={chartColors.blue} fillOpacity={0.1} stroke={chartColors.blue} strokeWidth={0} connectNulls={false} dot={false} />
               {/* ETH price line */}
               <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls />
-              {/* Best PUT score */}
-              <Area yAxisId="putValue" type="monotone" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1.5} strokeOpacity={0.8} fill={chartColors.red} fillOpacity={0.08} connectNulls dot={{ r: 2, fill: chartColors.red, strokeWidth: 0 }} />
-              {/* Best CALL score */}
-              <Area yAxisId="callValue" type="monotone" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1.5} strokeOpacity={0.8} fill={chartColors.secondary} fillOpacity={0.08} connectNulls dot={{ r: 2, fill: chartColors.secondary, strokeWidth: 0 }} />
               {/* Trade markers (stars) */}
               {tradePoints.length > 0 && (
                 <Scatter yAxisId="price" data={tradePoints} dataKey="trade" shape={<StarDot />} />
@@ -610,6 +552,78 @@ export default function OverviewPage() {
           </ResponsiveContainer>
         )}
       </Card>
+
+      {/* Options Value Sub-Chart */}
+      {optionsData.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-400">Options Value</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red }} /> PUT (delta/ask)</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary }} /> CALL (bid/delta)</span>
+              {putPeak > 0 && <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block border-dashed border-t" style={{ borderColor: chartColors.red }} /> threshold {putPeak.toFixed(4)}</span>}
+              {callPeak > 0 && <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block border-dashed border-t" style={{ borderColor: chartColors.secondary }} /> threshold {callPeak.toFixed(1)}</span>}
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={160}>
+            <ComposedChart data={optionsData} margin={CHART_MARGINS} syncId="main">
+              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <YAxis
+                yAxisId="putVal"
+                domain={['auto', 'auto']}
+                tickFormatter={(v) => Number(v).toFixed(4)}
+                stroke={chartAxis.stroke}
+                tick={{ fill: chartColors.red, fontSize: 10 }}
+                width={60}
+              />
+              <YAxis
+                yAxisId="callVal"
+                orientation="right"
+                domain={['auto', 'auto']}
+                tickFormatter={(v) => Number(v).toFixed(0)}
+                stroke={chartAxis.stroke}
+                tick={{ fill: chartColors.secondary, fontSize: 10 }}
+                width={50}
+              />
+              <Tooltip
+                {...chartTooltip}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                content={({ active, payload }: any) => {
+                  if (!active || !payload?.length) return null;
+                  const row = payload[0]?.payload;
+                  if (!row) return null;
+                  const bestPut = row.bestPut;
+                  const bestCall = row.bestCall;
+                  const fmtPut = bestPut != null && bestPut > 0 ? bestPut.toFixed(4) : 'N/A';
+                  const fmtCall = bestCall != null && bestCall > 0 ? bestCall.toFixed(1) : 'N/A';
+                  const fmtPutPeak = putPeak > 0 ? putPeak.toFixed(4) : 'N/A';
+                  const fmtCallPeak = callPeak > 0 ? callPeak.toFixed(1) : 'N/A';
+                  return (
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400 mb-1">{new Date(row.ts).toLocaleString()}</div>
+                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}</div>
+                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}</div>
+                      <div className="text-xs text-gray-500 mt-1 border-t border-white/10 pt-1">
+                        <span style={{ color: chartColors.red }}>Best PUT ({chart.bestScores.windowDays}d): {fmtPutPeak}</span>
+                        {' / '}
+                        <span style={{ color: chartColors.secondary }}>Best CALL: {fmtCallPeak}</span>
+                      </div>
+                    </div>
+                  );
+                }}
+              />
+              {putPeak > 0 && (
+                <ReferenceLine yAxisId="putVal" y={putPeak} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.4} />
+              )}
+              {callPeak > 0 && (
+                <ReferenceLine yAxisId="callVal" y={callPeak} stroke={chartColors.secondary} strokeDasharray="4 4" strokeOpacity={0.4} />
+              )}
+              <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1.5} dot={{ r: 2, fill: chartColors.red, strokeWidth: 0 }} connectNulls={false} isAnimationActive={false} />
+              <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1.5} dot={{ r: 2, fill: chartColors.secondary, strokeWidth: 0 }} connectNulls={false} isAnimationActive={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
 
       {/* Momentum Bar */}
       {momentumData.length > 0 && (
