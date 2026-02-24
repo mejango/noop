@@ -571,10 +571,10 @@ export default function OverviewPage() {
               <YAxis
                 yAxisId="putVal"
                 domain={['auto', 'auto']}
-                tickFormatter={(v) => Number(v).toFixed(4)}
+                tickFormatter={(v) => Number(v).toFixed(6)}
                 stroke={chartAxis.stroke}
                 tick={{ fill: chartColors.red, fontSize: 10 }}
-                width={60}
+                width={70}
               />
               <YAxis
                 yAxisId="callVal"
@@ -594,8 +594,8 @@ export default function OverviewPage() {
                   if (!row) return null;
                   const bestPut = row.bestPut;
                   const bestCall = row.bestCall;
-                  const fmtPut = bestPut != null && bestPut > 0 ? bestPut.toFixed(4) : 'N/A';
-                  const fmtCall = bestCall != null && bestCall > 0 ? bestCall.toFixed(1) : 'N/A';
+                  const fmtPut = bestPut != null && bestPut > 0 ? bestPut.toFixed(6) : 'N/A';
+                  const fmtCall = bestCall != null && bestCall > 0 ? bestCall.toFixed(2) : 'N/A';
                   const fmtPutPeak = putPeak > 0 ? putPeak.toFixed(4) : 'N/A';
                   const fmtCallPeak = callPeak > 0 ? callPeak.toFixed(1) : 'N/A';
                   return (
@@ -855,14 +855,14 @@ export default function OverviewPage() {
                         style={{ color: d.bestPut && d.bestPut > 0 ? chartColors.red : '#444' }}
                         title={putTitle}
                       >
-                        {d.bestPut === undefined ? '--' : d.bestPut && d.bestPut > 0 ? d.bestPut.toFixed(4) : 'N/A'}
+                        {d.bestPut === undefined ? '--' : d.bestPut && d.bestPut > 0 ? d.bestPut.toFixed(6) : 'N/A'}
                       </td>
                       <td
                         className="py-1.5 px-3 text-right tabular-nums cursor-help"
                         style={{ color: d.bestCall && d.bestCall > 0 ? chartColors.secondary : '#444' }}
                         title={callTitle}
                       >
-                        {d.bestCall === undefined ? '--' : d.bestCall && d.bestCall > 0 ? d.bestCall.toFixed(1) : 'N/A'}
+                        {d.bestCall === undefined ? '--' : d.bestCall && d.bestCall > 0 ? d.bestCall.toFixed(2) : 'N/A'}
                       </td>
                     </tr>
                   );
