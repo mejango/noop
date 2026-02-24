@@ -186,8 +186,8 @@ const PUT_EXPIRATION_RANGE = [50, 90];
 const PUT_DELTA_RANGE = [-0.12, -0.02]; // Negative delta for puts
 
 // Trading parameters - CALLS  
-const CALL_EXPIRATION_RANGE = [7, 14];
-const CALL_DELTA_RANGE = [0.06, 0.2]; // Positive delta for calls
+const CALL_EXPIRATION_RANGE = [5, 9];
+const CALL_DELTA_RANGE = [0.04, 0.12]; // Positive delta for calls
 
 // Call buyback thresholds
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Minimum profit percentage for automatic call buyback
@@ -2147,7 +2147,7 @@ const fetchAndFilterInstruments = async (spotPrice) => {
              (!spotPrice || strikePrice < 0.8 * spotPrice);
     });
 
-    // Filter for call candidates (positive delta, shorter expiration, strike > 1.2 * spot)
+    // Filter for call candidates (positive delta, shorter expiration, strike > 1.10 * spot)
     const callCandidates = instruments.filter(instrument => {
       const expiration = new Date(instrument.option_details.expiry * 1000);
       const now = new Date();
@@ -2158,7 +2158,7 @@ const fetchAndFilterInstruments = async (spotPrice) => {
              daysToExpiry <= CALL_EXPIRATION_RANGE[1] &&
              instrument.instrument_type === 'option' &&
              instrument.option_details.option_type === 'C' &&
-             (!spotPrice || strikePrice > 1.14 * spotPrice);
+             (!spotPrice || strikePrice > 1.10 * spotPrice);
     });
 
     console.log(`📈 Put candidates: ${putCandidates.length} | Call candidates: ${callCandidates.length}`);

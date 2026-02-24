@@ -1,6 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
-const { DB_PATH, DATA_DIR } = require('./config');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+const DB_PATH = path.join(DATA_DIR, 'noop.db');
 const fs = require('fs');
 
 // Ensure data directory exists

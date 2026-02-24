@@ -1,14 +1,17 @@
 /**
  * Bot Entry Point
- * Initializes the database, loads config, and starts the trading bot.
+ * Initializes the database and starts the trading bot.
  */
-const config = require('./config');
 const db = require('./db');
 const fs = require('fs');
 const path = require('path');
 
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
+const ARCHIVE_DIR = path.join(DATA_DIR, 'archive');
+const DB_PATH = path.join(DATA_DIR, 'noop.db');
+
 // Ensure data directories exist
-[config.DATA_DIR, config.ARCHIVE_DIR].forEach(dir => {
+[DATA_DIR, ARCHIVE_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -16,14 +19,13 @@ const path = require('path');
 
 console.log('='.repeat(70));
 console.log('NOOP-C Bot Starting');
-console.log(`Data dir: ${config.DATA_DIR}`);
-console.log(`DB path: ${config.DB_PATH}`);
-console.log(`Archive: ${config.ARCHIVE_DIR}`);
+console.log(`Data dir: ${DATA_DIR}`);
+console.log(`DB path: ${DB_PATH}`);
+console.log(`Archive: ${ARCHIVE_DIR}`);
 console.log('='.repeat(70));
 
 // Export db for script.js to use
 global.__noopDb = db;
-global.__noopConfig = config;
 
 // Load and run the main bot script
 require('../script.js');

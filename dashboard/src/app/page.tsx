@@ -117,7 +117,7 @@ const StarDot = (props: any) => {
 
 // Momentum color helper for bar cells
 const momentumBarColor = (m: string | undefined) =>
-  m === 'upward' ? '#065f46' : m === 'downward' ? '#7f1d1d' : 'rgba(255,255,255,0.05)';
+  m === 'upward' ? '#065f46' : m === 'downward' ? '#7f1d1d' : 'rgba(255,255,255,0.08)';
 
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('7d');
@@ -138,7 +138,7 @@ export default function OverviewPage() {
       : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }, [range]);
 
-  // Merge all data series by timestamp (bot uses shared tick timestamp for spot + options)
+  // Merge all data series by snapping to nearest price point via binary search
   const merged = useMemo(() => {
     type Row = {
       ts: number;
@@ -152,54 +152,51 @@ export default function OverviewPage() {
       tradeInfo?: string;
     };
 
-    // Build map keyed by timestamp string for exact matching
-    const byTs = new Map<string, Row>();
-
-    for (const p of chart.prices) {
+    // Build rows from price data (primary time axis)
+    const rows: Row[] = chart.prices.map(p => {
       const m = p.medium_momentum_main;
-      byTs.set(p.timestamp, {
+      return {
         ts: new Date(p.timestamp).getTime(),
         price: p.price,
         momentum: m,
-        momentumVal: m === 'upward' ? 1 : m === 'downward' ? -1 : 0,
-      });
-    }
+        momentumVal: 1, // all bars same height, color shows direction
+      };
+    });
+    rows.sort((a, b) => a.ts - b.ts);
+    if (rows.length === 0) return rows;
 
-    // Merge options by exact timestamp (shared tick timestamp from bot)
+    // Binary search: find index of nearest row by timestamp
+    const snapToNearest = (targetTs: number): number => {
+      let lo = 0, hi = rows.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (rows[mid].ts < targetTs) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo > 0 && Math.abs(rows[lo - 1].ts - targetTs) < Math.abs(rows[lo].ts - targetTs))
+        return lo - 1;
+      return lo;
+    };
+
+    // Snap options data to nearest price point
     for (const o of chart.options) {
-      const row = byTs.get(o.timestamp);
-      if (row) {
-        // null means no options in delta range at this tick → shows as 0 in chart, N/A in table
-        row.bestPut = o.best_put_value;
-        row.bestCall = o.best_call_value;
-      }
+      const idx = snapToNearest(new Date(o.timestamp).getTime());
+      // null means no options in delta range → shows as 0 in chart, N/A in table
+      rows[idx].bestPut = o.best_put_value;
+      rows[idx].bestCall = o.best_call_value;
     }
 
-    // Merge liquidity by exact timestamp
+    // Snap liquidity data to nearest price point
     for (const l of chart.liquidity) {
-      const row = byTs.get(l.timestamp);
-      if (row) {
-        row.liquidity = l.signed_liquidity;
-      }
+      const idx = snapToNearest(new Date(l.timestamp).getTime());
+      rows[idx].liquidity = l.signed_liquidity;
     }
 
-    const rows = Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
-
-    // Snap trade markers to nearest price point (trades have their own timestamps)
-    if (rows.length > 0) {
-      for (const t of chart.trades) {
-        const tTs = new Date(t.timestamp).getTime();
-        let lo = 0, hi = rows.length - 1;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if (rows[mid].ts < tTs) lo = mid + 1;
-          else hi = mid;
-        }
-        const nearest = (lo > 0 && Math.abs(rows[lo - 1].ts - tTs) < Math.abs(rows[lo].ts - tTs))
-          ? rows[lo - 1] : rows[lo];
-        nearest.trade = nearest.price;
-        nearest.tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${t.price.toFixed(2)}`;
-      }
+    // Snap trade markers to nearest price point
+    for (const t of chart.trades) {
+      const idx = snapToNearest(new Date(t.timestamp).getTime());
+      rows[idx].trade = rows[idx].price;
+      rows[idx].tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${t.price.toFixed(2)}`;
     }
 
     return rows;
@@ -419,9 +416,9 @@ export default function OverviewPage() {
               {/* ETH price line */}
               <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls />
               {/* Best PUT score */}
-              <Line yAxisId="putValue" type="monotone" dataKey="bestPut" stroke={chartColors.red} dot={false} strokeWidth={1} strokeOpacity={0.7} connectNulls />
+              <Line yAxisId="putValue" type="monotone" dataKey="bestPut" stroke={chartColors.red} dot={false} strokeWidth={1} strokeOpacity={0.7} connectNulls={false} />
               {/* Best CALL score */}
-              <Line yAxisId="callValue" type="monotone" dataKey="bestCall" stroke={chartColors.secondary} dot={false} strokeWidth={1} strokeOpacity={0.7} connectNulls />
+              <Line yAxisId="callValue" type="monotone" dataKey="bestCall" stroke={chartColors.secondary} dot={false} strokeWidth={1} strokeOpacity={0.7} connectNulls={false} />
               {/* Trade markers (stars) */}
               {tradePoints.length > 0 && (
                 <Scatter yAxisId="price" data={tradePoints} dataKey="trade" shape={<StarDot />} />
@@ -445,7 +442,7 @@ export default function OverviewPage() {
           <ResponsiveContainer width="100%" height={48}>
             <BarChart data={momentumData} margin={CHART_MARGINS} syncId="main">
               <XAxis dataKey="ts" type="number" domain={xDomain} hide />
-              <YAxis domain={[-1, 1]} hide />
+              <YAxis domain={[0, 1]} hide />
               <Tooltip
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
