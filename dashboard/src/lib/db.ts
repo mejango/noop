@@ -1,8 +1,16 @@
 import Database from 'better-sqlite3';
 import path from 'path';
+import fs from 'fs';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
+const BOT_DATA_PATH = path.join(DATA_DIR, 'bot_data.json');
+
+// Bot constants (must match script.js)
+const PUT_BUYING_BASE_FUNDING_LIMIT = 0;
+const CALL_SELLING_BASE_FUNDING_LIMIT = 0;
+const PERIOD_MS = 10 * 1000 * 60 * 60 * 24; // 10 days
+const MEASUREMENT_WINDOW_DAYS = 6.2;
 
 let db: Database.Database | null = null;
 
@@ -140,4 +148,61 @@ export function getTradeMarkers(since: string) {
     WHERE t.timestamp > ?
     ORDER BY t.timestamp ASC
   `).all(since);
+}
+
+export function getBestScores() {
+  const d = getDb();
+  const since = new Date(Date.now() - MEASUREMENT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  const row = d.prepare(`
+    SELECT
+      MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
+      MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_score
+    FROM options_snapshots
+    WHERE timestamp > ?
+  `).get(since) as { best_put_score: number | null; best_call_score: number | null } | undefined;
+  return {
+    bestPutScore: row?.best_put_score ?? 0,
+    bestCallScore: row?.best_call_score ?? 0,
+    windowDays: MEASUREMENT_WINDOW_DAYS,
+  };
+}
+
+export function getBotBudget() {
+  try {
+    const raw = fs.readFileSync(BOT_DATA_PATH, 'utf-8');
+    const data = JSON.parse(raw);
+    const now = Date.now();
+
+    const putTotalBudget = PUT_BUYING_BASE_FUNDING_LIMIT + (data.putUnspentBuyLimit || 0);
+    const putSpent = data.putNetBought || 0;
+    const putRemaining = Math.max(0, putTotalBudget - putSpent);
+    const putCycleStart = data.putCycleStart || now;
+    const putCycleElapsed = now - putCycleStart;
+    const putDaysLeft = Math.max(0, (PERIOD_MS - putCycleElapsed) / (1000 * 60 * 60 * 24));
+
+    const callTotalBudget = CALL_SELLING_BASE_FUNDING_LIMIT + (data.callUnspentSellLimit || 0);
+    const callSpent = data.callNetSold || 0;
+    const callRemaining = Math.max(0, callTotalBudget - callSpent);
+    const callCycleStart = data.callCycleStart || now;
+    const callCycleElapsed = now - callCycleStart;
+    const callDaysLeft = Math.max(0, (PERIOD_MS - callCycleElapsed) / (1000 * 60 * 60 * 24));
+
+    return {
+      putTotalBudget,
+      putSpent,
+      putRemaining,
+      putDaysLeft: +putDaysLeft.toFixed(1),
+      callTotalBudget,
+      callSpent,
+      callRemaining,
+      callDaysLeft: +callDaysLeft.toFixed(1),
+      cycleDays: PERIOD_MS / (1000 * 60 * 60 * 24),
+    };
+  } catch {
+    return {
+      putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0,
+      callTotalBudget: 0, callSpent: 0, callRemaining: 0, callDaysLeft: 0,
+      cycleDays: PERIOD_MS / (1000 * 60 * 60 * 24),
+    };
+  }
 }

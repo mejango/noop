@@ -10,6 +10,18 @@ import {
   ResponsiveContainer, Legend, ReferenceLine,
 } from 'recharts';
 
+interface Budget {
+  putTotalBudget: number;
+  putSpent: number;
+  putRemaining: number;
+  putDaysLeft: number;
+  callTotalBudget: number;
+  callSpent: number;
+  callRemaining: number;
+  callDaysLeft: number;
+  cycleDays: number;
+}
+
 interface Stats {
   open_puts: number;
   open_calls: number;
@@ -27,6 +39,7 @@ interface Stats {
   seven_day_low: number;
   open_put_cost: number;
   open_call_revenue: number;
+  budget: Budget;
 }
 
 interface SpotPrice {
@@ -57,21 +70,34 @@ interface TradeMarker {
   strike: number;
 }
 
+interface BestScores {
+  bestPutScore: number;
+  bestCallScore: number;
+  windowDays: number;
+}
+
 interface ChartData {
   prices: SpotPrice[];
   options: OptionsPoint[];
   liquidity: LiquidityPoint[];
   trades: TradeMarker[];
+  bestScores: BestScores;
 }
+
+const emptyBudget: Budget = {
+  putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0,
+  callTotalBudget: 0, callSpent: 0, callRemaining: 0, callDaysLeft: 0, cycleDays: 10,
+};
 
 const emptyStats: Stats = {
   open_puts: 0, open_calls: 0, total_positions: 0, total_trades: 0,
   last_price: 0, last_price_time: '', short_momentum: '', short_derivative: '',
   medium_momentum: '', medium_derivative: '', three_day_high: 0, three_day_low: 0,
   seven_day_high: 0, seven_day_low: 0, open_put_cost: 0, open_call_revenue: 0,
+  budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [] };
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2 } };
 const ranges = ['1h', '6h', '24h', '3d', '7d', '30d'] as const;
 
 // Custom star shape for trade markers
@@ -92,7 +118,11 @@ export default function OverviewPage() {
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart);
 
   // Merge all data series by timestamp into a single array for the chart
-  const { merged, putPeak, callPeak } = useMemo(() => {
+  // Best scores from the bot's 6.2-day measurement window (always fixed, independent of chart range)
+  const putPeak = chart.bestScores.bestPutScore;
+  const callPeak = chart.bestScores.bestCallScore;
+
+  const merged = useMemo(() => {
     const map = new Map<number, {
       ts: number;
       price?: number;
@@ -109,12 +139,6 @@ export default function OverviewPage() {
       const ts = new Date(p.timestamp).getTime();
       map.set(ts, { ts, price: p.price, momentum: p.medium_momentum });
     }
-
-    // Track peak values for threshold reference lines
-    const putVals = chart.options.map(o => o.best_put_value).filter((v): v is number => v != null && v > 0);
-    const callVals = chart.options.map(o => o.best_call_value).filter((v): v is number => v != null && v > 0);
-    const putPeak = putVals.length > 0 ? Math.max(...putVals) : 0;
-    const callPeak = callVals.length > 0 ? Math.max(...callVals) : 0;
 
     for (const o of chart.options) {
       const ts = new Date(o.timestamp).getTime();
@@ -154,7 +178,7 @@ export default function OverviewPage() {
       }
     }
 
-    return { merged: sorted, putPeak, callPeak };
+    return sorted;
   }, [chart]);
 
   // Separate trade points for the scatter
@@ -202,6 +226,24 @@ export default function OverviewPage() {
               <span className="text-gray-500">7d H/L:</span>{' '}
               <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>{' / '}
               <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="Budget" className="flex-1 min-w-[200px]">
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <div>
+              <span className="text-gray-500">PUT:</span>{' '}
+              <span className="text-white">{formatUSD(stats.budget.putRemaining)}</span>
+              <span className="text-gray-500 text-xs ml-1">/ {formatUSD(stats.budget.putTotalBudget)}</span>
+            </div>
+            <div>
+              <span className="text-gray-500">CALL:</span>{' '}
+              <span className="text-white">{formatUSD(stats.budget.callRemaining)}</span>
+              <span className="text-gray-500 text-xs ml-1">/ {formatUSD(stats.budget.callTotalBudget)}</span>
+            </div>
+            <div className="col-span-2 text-xs text-gray-500">
+              {stats.budget.putDaysLeft > 0 ? `${stats.budget.putDaysLeft}d left` : 'cycle ended'} in {stats.budget.cycleDays}d cycle
             </div>
           </div>
         </Card>
@@ -329,7 +371,7 @@ export default function OverviewPage() {
                   stroke={chartColors.red}
                   strokeDasharray="4 4"
                   strokeOpacity={0.5}
-                  label={{ value: `PUT best: ${putPeak.toFixed(4)}`, fill: chartColors.red, fontSize: 9, position: 'insideTopLeft' }}
+                  label={{ value: `PUT threshold (${chart.bestScores.windowDays}d): ${putPeak.toFixed(4)}`, fill: chartColors.red, fontSize: 9, position: 'insideTopLeft' }}
                 />
               )}
               {callPeak > 0 && (
@@ -339,7 +381,7 @@ export default function OverviewPage() {
                   stroke={chartColors.secondary}
                   strokeDasharray="4 4"
                   strokeOpacity={0.5}
-                  label={{ value: `CALL best: ${callPeak.toFixed(1)}`, fill: chartColors.secondary, fontSize: 9, position: 'insideTopRight' }}
+                  label={{ value: `CALL threshold (${chart.bestScores.windowDays}d): ${callPeak.toFixed(1)}`, fill: chartColors.secondary, fontSize: 9, position: 'insideTopRight' }}
                 />
               )}
 
