@@ -199,6 +199,14 @@ export default function OverviewPage() {
       nearest.tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${t.price.toFixed(2)}`;
     }
 
+    // Forward-fill sparse options/liquidity values so the table matches the chart lines
+    let lastPut: number | undefined;
+    let lastCall: number | undefined;
+    for (const row of rows) {
+      if (row.bestPut != null) lastPut = row.bestPut; else if (lastPut != null) row.bestPut = lastPut;
+      if (row.bestCall != null) lastCall = row.bestCall; else if (lastCall != null) row.bestCall = lastCall;
+    }
+
     return rows;
   }, [chart]);
 
