@@ -113,7 +113,8 @@ export function getSignals(since: string, limit = 100) {
 export function getOptionsHeatmap(since: string) {
   const d = getDb();
   return d.prepare(`
-    SELECT timestamp, option_type, instrument_name, strike, delta, ask_price, bid_price, index_price
+    SELECT timestamp, option_type, instrument_name, strike, delta, ask_price, bid_price,
+      index_price, expiry, ask_delta_value, bid_delta_value
     FROM options_snapshots
     WHERE timestamp > ?
     ORDER BY timestamp ASC

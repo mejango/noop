@@ -85,6 +85,9 @@ interface HeatmapSnapshot {
   ask_price: number | null;
   bid_price: number | null;
   index_price: number | null;
+  expiry: number | null;
+  ask_delta_value: number | null;
+  bid_delta_value: number | null;
 }
 
 interface HeatmapDot {
@@ -185,6 +188,13 @@ export default function OverviewPage() {
 
   // Merge all data series by snapping to nearest price point via binary search
   const merged = useMemo(() => {
+    type OptionDetail = {
+      delta: number | null;
+      price: number | null;
+      strike: number;
+      expiry: number | null;
+      dte: number | null;
+    };
     type Row = {
       ts: number;
       price?: number;
@@ -192,6 +202,8 @@ export default function OverviewPage() {
       momentumVal?: number;
       bestPut?: number | null;
       bestCall?: number | null;
+      bestPutDetail?: OptionDetail;
+      bestCallDetail?: OptionDetail;
       liquidity?: number;
       trade?: number;
       tradeInfo?: string;
@@ -223,12 +235,48 @@ export default function OverviewPage() {
       return lo;
     };
 
+    // Build best option details per timestamp from heatmap data
+    const bestPutByTs = new Map<string, HeatmapSnapshot>();
+    const bestCallByTs = new Map<string, HeatmapSnapshot>();
+    for (const snap of chart.optionsHeatmap) {
+      const isPut = snap.option_type === 'P' || snap.option_type === 'put' || snap.instrument_name?.includes('-P');
+      const isCall = snap.option_type === 'C' || snap.option_type === 'call' || snap.instrument_name?.includes('-C');
+      if (isPut && (snap.ask_delta_value ?? 0) > 0) {
+        const prev = bestPutByTs.get(snap.timestamp);
+        if (!prev || (snap.ask_delta_value ?? 0) > (prev.ask_delta_value ?? 0)) {
+          bestPutByTs.set(snap.timestamp, snap);
+        }
+      }
+      if (isCall && (snap.bid_delta_value ?? 0) > 0) {
+        const prev = bestCallByTs.get(snap.timestamp);
+        if (!prev || (snap.bid_delta_value ?? 0) > (prev.bid_delta_value ?? 0)) {
+          bestCallByTs.set(snap.timestamp, snap);
+        }
+      }
+    }
+
+    const makeDetail = (snap: HeatmapSnapshot, isPut: boolean): OptionDetail => {
+      const now = Date.now();
+      const dte = snap.expiry ? Math.max(0, Math.ceil((snap.expiry * 1000 - now) / (1000 * 60 * 60 * 24))) : null;
+      return {
+        delta: snap.delta,
+        price: isPut ? snap.ask_price : snap.bid_price,
+        strike: snap.strike,
+        expiry: snap.expiry,
+        dte,
+      };
+    };
+
     // Snap options data to nearest price point
     for (const o of chart.options) {
       const idx = snapToNearest(new Date(o.timestamp).getTime());
-      // null means no options in delta range → shows as 0 in chart, N/A in table
       rows[idx].bestPut = o.best_put_value;
       rows[idx].bestCall = o.best_call_value;
+      // Attach option details from heatmap data
+      const putSnap = bestPutByTs.get(o.timestamp);
+      if (putSnap) rows[idx].bestPutDetail = makeDetail(putSnap, true);
+      const callSnap = bestCallByTs.get(o.timestamp);
+      if (callSnap) rows[idx].bestCallDetail = makeDetail(callSnap, false);
     }
 
     // Snap liquidity data to nearest price point
@@ -771,22 +819,40 @@ export default function OverviewPage() {
                 </tr>
               </thead>
               <tbody>
-                {tableData.slice(0, visibleCount).map((d, i) => (
-                  <tr key={i} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                    <td className="py-1.5 px-3 text-gray-400 text-xs whitespace-nowrap">
-                      {new Date(d.ts).toLocaleString()}
-                    </td>
-                    <td className="py-1.5 px-3 text-right text-juice-orange tabular-nums">
-                      {formatUSD(d.price!)}
-                    </td>
-                    <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: d.bestPut && d.bestPut > 0 ? chartColors.red : '#444' }}>
-                      {d.bestPut === undefined ? '--' : d.bestPut && d.bestPut > 0 ? d.bestPut.toFixed(4) : 'N/A'}
-                    </td>
-                    <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: d.bestCall && d.bestCall > 0 ? chartColors.secondary : '#444' }}>
-                      {d.bestCall === undefined ? '--' : d.bestCall && d.bestCall > 0 ? d.bestCall.toFixed(1) : 'N/A'}
-                    </td>
-                  </tr>
-                ))}
+                {tableData.slice(0, visibleCount).map((d, i) => {
+                  const putDetail = d.bestPutDetail;
+                  const callDetail = d.bestCallDetail;
+                  const putTitle = putDetail
+                    ? `Delta: ${putDetail.delta?.toFixed(4) ?? 'N/A'}\nPrice: ${putDetail.price?.toFixed(6) ?? 'N/A'}\nStrike: $${putDetail.strike.toFixed(0)}\nDTE: ${putDetail.dte ?? 'N/A'}`
+                    : '';
+                  const callTitle = callDetail
+                    ? `Delta: ${callDetail.delta?.toFixed(4) ?? 'N/A'}\nPrice: ${callDetail.price?.toFixed(6) ?? 'N/A'}\nStrike: $${callDetail.strike.toFixed(0)}\nDTE: ${callDetail.dte ?? 'N/A'}`
+                    : '';
+                  return (
+                    <tr key={i} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                      <td className="py-1.5 px-3 text-gray-400 text-xs whitespace-nowrap">
+                        {new Date(d.ts).toLocaleString()}
+                      </td>
+                      <td className="py-1.5 px-3 text-right text-juice-orange tabular-nums">
+                        {formatUSD(d.price!)}
+                      </td>
+                      <td
+                        className="py-1.5 px-3 text-right tabular-nums cursor-help"
+                        style={{ color: d.bestPut && d.bestPut > 0 ? chartColors.red : '#444' }}
+                        title={putTitle}
+                      >
+                        {d.bestPut === undefined ? '--' : d.bestPut && d.bestPut > 0 ? d.bestPut.toFixed(4) : 'N/A'}
+                      </td>
+                      <td
+                        className="py-1.5 px-3 text-right tabular-nums cursor-help"
+                        style={{ color: d.bestCall && d.bestCall > 0 ? chartColors.secondary : '#444' }}
+                        title={callTitle}
+                      >
+                        {d.bestCall === undefined ? '--' : d.bestCall && d.bestCall > 0 ? d.bestCall.toFixed(1) : 'N/A'}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             {visibleCount < tableData.length && (
