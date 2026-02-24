@@ -38,8 +38,8 @@ interface SpotPrice {
 
 interface OptionsPoint {
   timestamp: string;
-  best_put_score: number | null;
-  best_call_score: number | null;
+  best_put_price: number | null;
+  best_call_price: number | null;
 }
 
 interface LiquidityPoint {
@@ -98,9 +98,7 @@ export default function OverviewPage() {
       price?: number;
       momentum?: string;
       bestPut?: number;
-      bestPutRaw?: number;
       bestCall?: number;
-      bestCallRaw?: number;
       liquidity?: number;
       trade?: number;
       tradeInfo?: string;
@@ -116,26 +114,12 @@ export default function OverviewPage() {
       });
     }
 
-    // Collect raw PUT and CALL scores to find min/max for normalization
-    const putScores = chart.options.map(o => o.best_put_score).filter((v): v is number => v != null && v > 0);
-    const callScores = chart.options.map(o => o.best_call_score).filter((v): v is number => v != null && v > 0);
-    const putMin = Math.min(...putScores, 0);
-    const putMax = Math.max(...putScores, 1);
-    const callMin = Math.min(...callScores, 0);
-    const callMax = Math.max(...callScores, 1);
-
-    // Merge best option scores (normalized to 0-1 range, raw values kept for tooltip)
+    // Merge best option premiums (actual dollar prices)
     for (const o of chart.options) {
       const ts = new Date(o.timestamp).getTime();
       const existing = map.get(ts) || { ts };
-      if (o.best_put_score != null) {
-        existing.bestPutRaw = o.best_put_score;
-        existing.bestPut = putMax > putMin ? (o.best_put_score - putMin) / (putMax - putMin) : 0;
-      }
-      if (o.best_call_score != null) {
-        existing.bestCallRaw = o.best_call_score;
-        existing.bestCall = callMax > callMin ? (o.best_call_score - callMin) / (callMax - callMin) : 0;
-      }
+      if (o.best_put_price != null) existing.bestPut = o.best_put_price;
+      if (o.best_call_price != null) existing.bestCall = o.best_call_price;
       map.set(ts, existing);
     }
 
@@ -237,8 +221,8 @@ export default function OverviewPage() {
         </div>
         <div className="flex gap-3 text-xs text-gray-500">
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red }} /> PUT Value</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary }} /> CALL Value</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red }} /> PUT Premium</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary }} /> CALL Premium</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.blue, opacity: 0.5 }} /> Liquidity</span>
           <span className="flex items-center gap-1"><span style={{ color: chartColors.trade }}>&#9733;</span> Trade</span>
         </div>
@@ -275,15 +259,15 @@ export default function OverviewPage() {
                 tick={chartAxis.tick}
                 width={70}
               />
-              {/* Right Y-axis: normalized scores (0-1) */}
+              {/* Right Y-axis: option premiums in $ */}
               <YAxis
-                yAxisId="score"
+                yAxisId="premium"
                 orientation="right"
-                domain={[0, 1]}
-                tickFormatter={(v) => `${(v * 100).toFixed(0)}%`}
+                domain={['auto', 'auto']}
+                tickFormatter={(v) => `$${v}`}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tickSecondary}
-                width={45}
+                width={55}
               />
               <Tooltip
                 {...chartTooltip}
@@ -292,10 +276,8 @@ export default function OverviewPage() {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 formatter={(val: any, name: any) => {
                   if (name === 'price') return [formatUSD(Number(val)), 'ETH'];
-                  if (name === 'bestPut') return null;
-                  if (name === 'bestPutRaw') return [Number(val).toFixed(4), 'PUT Value (|δ|/ask)'];
-                  if (name === 'bestCall') return null;
-                  if (name === 'bestCallRaw') return [Number(val).toFixed(2), 'CALL Value (bid/|δ|)'];
+                  if (name === 'bestPut') return [formatUSD(Number(val)), 'Best PUT Premium'];
+                  if (name === 'bestCall') return [formatUSD(Number(val)), 'Best CALL Premium'];
                   if (name === 'liquidity') return [Number(val).toFixed(2), 'Liquidity Flow'];
                   return [val, name];
                 }}
@@ -324,7 +306,7 @@ export default function OverviewPage() {
 
               {/* Liquidity flow area */}
               <Area
-                yAxisId="score"
+                yAxisId="premium"
                 type="monotone"
                 dataKey="liquidity"
                 fill={chartColors.blue}
@@ -348,7 +330,7 @@ export default function OverviewPage() {
 
               {/* Best PUT score */}
               <Line
-                yAxisId="score"
+                yAxisId="premium"
                 type="monotone"
                 dataKey="bestPut"
                 stroke={chartColors.red}
@@ -360,7 +342,7 @@ export default function OverviewPage() {
 
               {/* Best CALL score */}
               <Line
-                yAxisId="score"
+                yAxisId="premium"
                 type="monotone"
                 dataKey="bestCall"
                 stroke={chartColors.secondary}
@@ -369,10 +351,6 @@ export default function OverviewPage() {
                 strokeOpacity={0.7}
                 connectNulls
               />
-
-              {/* Hidden lines for raw tooltip values */}
-              <Line yAxisId="score" dataKey="bestPutRaw" stroke="none" dot={false} connectNulls legendType="none" />
-              <Line yAxisId="score" dataKey="bestCallRaw" stroke="none" dot={false} connectNulls legendType="none" />
 
               {/* Trade markers (stars) */}
               {tradePoints.length > 0 && (
