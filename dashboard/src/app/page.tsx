@@ -38,8 +38,8 @@ interface SpotPrice {
 
 interface OptionsPoint {
   timestamp: string;
-  best_put_price: number | null;
-  best_call_price: number | null;
+  best_put_value: number | null;
+  best_call_value: number | null;
 }
 
 interface LiquidityPoint {
@@ -92,7 +92,7 @@ export default function OverviewPage() {
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart);
 
   // Merge all data series by timestamp into a single array for the chart
-  const merged = useMemo(() => {
+  const { merged, putPeak, callPeak } = useMemo(() => {
     const map = new Map<number, {
       ts: number;
       price?: number;
@@ -107,19 +107,24 @@ export default function OverviewPage() {
     // Add prices
     for (const p of chart.prices) {
       const ts = new Date(p.timestamp).getTime();
-      map.set(ts, {
-        ts,
-        price: p.price,
-        momentum: p.medium_momentum,
-      });
+      map.set(ts, { ts, price: p.price, momentum: p.medium_momentum });
     }
 
-    // Merge best option premiums (actual dollar prices)
+    // Track peak values for threshold reference lines
+    const putVals = chart.options.map(o => o.best_put_value).filter((v): v is number => v != null && v > 0);
+    const callVals = chart.options.map(o => o.best_call_value).filter((v): v is number => v != null && v > 0);
+    const putPeak = putVals.length > 0 ? Math.max(...putVals) : 0;
+    const callPeak = callVals.length > 0 ? Math.max(...callVals) : 0;
+
     for (const o of chart.options) {
       const ts = new Date(o.timestamp).getTime();
       const existing = map.get(ts) || { ts };
-      if (o.best_put_price != null) existing.bestPut = o.best_put_price;
-      if (o.best_call_price != null) existing.bestCall = o.best_call_price;
+      if (o.best_put_value != null && o.best_put_value > 0) {
+        existing.bestPut = o.best_put_value;
+      }
+      if (o.best_call_value != null && o.best_call_value > 0) {
+        existing.bestCall = o.best_call_value;
+      }
       map.set(ts, existing);
     }
 
@@ -149,7 +154,7 @@ export default function OverviewPage() {
       }
     }
 
-    return sorted;
+    return { merged: sorted, putPeak, callPeak };
   }, [chart]);
 
   // Separate trade points for the scatter
@@ -221,8 +226,8 @@ export default function OverviewPage() {
         </div>
         <div className="flex gap-3 text-xs text-gray-500">
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red }} /> PUT Premium</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary }} /> CALL Premium</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red }} /> PUT Value</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary }} /> CALL Value</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.blue, opacity: 0.5 }} /> Liquidity</span>
           <span className="flex items-center gap-1"><span style={{ color: chartColors.trade }}>&#9733;</span> Trade</span>
         </div>
@@ -236,7 +241,7 @@ export default function OverviewPage() {
           <div className="h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
           <ResponsiveContainer width="100%" height={500}>
-            <ComposedChart data={merged} margin={{ top: 10, right: 60, left: 10, bottom: 0 }}>
+            <ComposedChart data={merged} margin={{ top: 10, right: 120, left: 10, bottom: 0 }}>
               <XAxis
                 dataKey="ts"
                 type="number"
@@ -259,16 +264,28 @@ export default function OverviewPage() {
                 tick={chartAxis.tick}
                 width={70}
               />
-              {/* Right Y-axis: option premiums in $ */}
+              {/* Right Y-axis: PUT value (delta/price) */}
               <YAxis
-                yAxisId="premium"
+                yAxisId="putValue"
                 orientation="right"
                 domain={['auto', 'auto']}
-                tickFormatter={(v) => `$${v}`}
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tickSecondary}
+                tickFormatter={(v) => Number(v).toFixed(3)}
+                stroke={chartColors.red}
+                tick={{ fill: chartColors.red, fontSize: 10 }}
                 width={55}
               />
+              {/* Right Y-axis: CALL value (price/delta) */}
+              <YAxis
+                yAxisId="callValue"
+                orientation="right"
+                domain={['auto', 'auto']}
+                tickFormatter={(v) => Number(v).toFixed(1)}
+                stroke={chartColors.secondary}
+                tick={{ fill: chartColors.secondary, fontSize: 10 }}
+                width={55}
+              />
+              {/* Hidden axis for liquidity */}
+              <YAxis yAxisId="liq" orientation="right" hide domain={['auto', 'auto']} />
               <Tooltip
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -276,8 +293,8 @@ export default function OverviewPage() {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 formatter={(val: any, name: any) => {
                   if (name === 'price') return [formatUSD(Number(val)), 'ETH'];
-                  if (name === 'bestPut') return [formatUSD(Number(val)), 'Best PUT Premium'];
-                  if (name === 'bestCall') return [formatUSD(Number(val)), 'Best CALL Premium'];
+                  if (name === 'bestPut') return [Number(val).toFixed(4), 'PUT Value (δ/price)'];
+                  if (name === 'bestCall') return [Number(val).toFixed(2), 'CALL Value (price/δ)'];
                   if (name === 'liquidity') return [Number(val).toFixed(2), 'Liquidity Flow'];
                   return [val, name];
                 }}
@@ -304,9 +321,31 @@ export default function OverviewPage() {
                 />
               )}
 
+              {/* Best value threshold lines */}
+              {putPeak > 0 && (
+                <ReferenceLine
+                  yAxisId="putValue"
+                  y={putPeak}
+                  stroke={chartColors.red}
+                  strokeDasharray="4 4"
+                  strokeOpacity={0.5}
+                  label={{ value: `PUT best: ${putPeak.toFixed(4)}`, fill: chartColors.red, fontSize: 9, position: 'insideTopLeft' }}
+                />
+              )}
+              {callPeak > 0 && (
+                <ReferenceLine
+                  yAxisId="callValue"
+                  y={callPeak}
+                  stroke={chartColors.secondary}
+                  strokeDasharray="4 4"
+                  strokeOpacity={0.5}
+                  label={{ value: `CALL best: ${callPeak.toFixed(1)}`, fill: chartColors.secondary, fontSize: 9, position: 'insideTopRight' }}
+                />
+              )}
+
               {/* Liquidity flow area */}
               <Area
-                yAxisId="premium"
+                yAxisId="liq"
                 type="monotone"
                 dataKey="liquidity"
                 fill={chartColors.blue}
@@ -330,7 +369,7 @@ export default function OverviewPage() {
 
               {/* Best PUT score */}
               <Line
-                yAxisId="premium"
+                yAxisId="putValue"
                 type="monotone"
                 dataKey="bestPut"
                 stroke={chartColors.red}
@@ -342,7 +381,7 @@ export default function OverviewPage() {
 
               {/* Best CALL score */}
               <Line
-                yAxisId="premium"
+                yAxisId="callValue"
                 type="monotone"
                 dataKey="bestCall"
                 stroke={chartColors.secondary}

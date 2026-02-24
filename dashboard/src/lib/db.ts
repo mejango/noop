@@ -107,19 +107,13 @@ export function getSignals(since: string, limit = 100) {
 export function getBestOptionsOverTime(since: string) {
   const d = getDb();
   return d.prepare(`
-    SELECT o1.timestamp,
-      (SELECT o2.ask_price FROM options_snapshots o2
-        WHERE o2.timestamp = o1.timestamp
-        AND (o2.option_type = 'P' OR o2.instrument_name LIKE '%-P')
-        AND o2.ask_delta_value IS NOT NULL AND o2.ask_delta_value > 0
-        ORDER BY o2.ask_delta_value DESC LIMIT 1) as best_put_price,
-      (SELECT o2.bid_price FROM options_snapshots o2
-        WHERE o2.timestamp = o1.timestamp
-        AND (o2.option_type = 'C' OR o2.instrument_name LIKE '%-C')
-        AND o2.bid_delta_value IS NOT NULL AND o2.bid_delta_value > 0
-        ORDER BY o2.bid_delta_value DESC LIMIT 1) as best_call_price
-    FROM (SELECT DISTINCT timestamp FROM options_snapshots WHERE timestamp > ?) o1
-    ORDER BY o1.timestamp ASC
+    SELECT timestamp,
+      MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_value,
+      MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_value
+    FROM options_snapshots
+    WHERE timestamp > ?
+    GROUP BY timestamp
+    ORDER BY timestamp ASC
   `).all(since);
 }
 
