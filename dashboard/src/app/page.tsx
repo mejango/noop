@@ -836,12 +836,6 @@ export default function OverviewPage() {
                 {tableData.slice(0, visibleCount).map((d, i) => {
                   const putDetail = d.bestPutDetail;
                   const callDetail = d.bestCallDetail;
-                  const putTitle = putDetail
-                    ? `Delta: ${putDetail.delta?.toFixed(4) ?? 'N/A'}\nPrice: ${putDetail.price?.toFixed(6) ?? 'N/A'}\nStrike: $${putDetail.strike.toFixed(0)}\nDTE: ${putDetail.dte ?? 'N/A'}`
-                    : '';
-                  const callTitle = callDetail
-                    ? `Delta: ${callDetail.delta?.toFixed(4) ?? 'N/A'}\nPrice: ${callDetail.price?.toFixed(6) ?? 'N/A'}\nStrike: $${callDetail.strike.toFixed(0)}\nDTE: ${callDetail.dte ?? 'N/A'}`
-                    : '';
                   return (
                     <tr key={i} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
                       <td className="py-1.5 px-3 text-gray-400 text-xs whitespace-nowrap">
@@ -851,18 +845,38 @@ export default function OverviewPage() {
                         {formatUSD(d.price!)}
                       </td>
                       <td
-                        className="py-1.5 px-3 text-right tabular-nums cursor-help"
+                        className="py-1.5 px-3 text-right tabular-nums relative group"
                         style={{ color: d.bestPut && d.bestPut > 0 ? chartColors.red : '#444' }}
-                        title={putTitle}
                       >
-                        {d.bestPut === undefined ? '--' : d.bestPut && d.bestPut > 0 ? d.bestPut.toFixed(6) : 'N/A'}
+                        <span className="cursor-help">{d.bestPut === undefined ? '--' : d.bestPut && d.bestPut > 0 ? d.bestPut.toFixed(6) : 'N/A'}</span>
+                        {putDetail && (
+                          <div className="absolute right-0 bottom-full mb-1 hidden group-hover:block z-20 pointer-events-none">
+                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                              <div className="text-gray-400 mb-1">Best PUT option</div>
+                              <div>Delta: <span className="text-white">{putDetail.delta?.toFixed(4) ?? 'N/A'}</span></div>
+                              <div>Price: <span className="text-white">{putDetail.price?.toFixed(6) ?? 'N/A'}</span></div>
+                              <div>Strike: <span className="text-white">${putDetail.strike.toFixed(0)}</span></div>
+                              <div>DTE: <span className="text-white">{putDetail.dte ?? 'N/A'}</span></div>
+                            </div>
+                          </div>
+                        )}
                       </td>
                       <td
-                        className="py-1.5 px-3 text-right tabular-nums cursor-help"
+                        className="py-1.5 px-3 text-right tabular-nums relative group"
                         style={{ color: d.bestCall && d.bestCall > 0 ? chartColors.secondary : '#444' }}
-                        title={callTitle}
                       >
-                        {d.bestCall === undefined ? '--' : d.bestCall && d.bestCall > 0 ? d.bestCall.toFixed(2) : 'N/A'}
+                        <span className="cursor-help">{d.bestCall === undefined ? '--' : d.bestCall && d.bestCall > 0 ? d.bestCall.toFixed(2) : 'N/A'}</span>
+                        {callDetail && (
+                          <div className="absolute right-0 bottom-full mb-1 hidden group-hover:block z-20 pointer-events-none">
+                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                              <div className="text-gray-400 mb-1">Best CALL option</div>
+                              <div>Delta: <span className="text-white">{callDetail.delta?.toFixed(4) ?? 'N/A'}</span></div>
+                              <div>Price: <span className="text-white">{callDetail.price?.toFixed(6) ?? 'N/A'}</span></div>
+                              <div>Strike: <span className="text-white">${callDetail.strike.toFixed(0)}</span></div>
+                              <div>DTE: <span className="text-white">{callDetail.dte ?? 'N/A'}</span></div>
+                            </div>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
