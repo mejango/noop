@@ -45,8 +45,8 @@ interface Stats {
 interface SpotPrice {
   timestamp: string;
   price: number;
-  short_momentum: string;
-  medium_momentum: string;
+  short_momentum_main: string;
+  medium_momentum_main: string;
 }
 
 interface OptionsPoint {
@@ -137,7 +137,7 @@ export default function OverviewPage() {
     // Add prices
     for (const p of chart.prices) {
       const ts = new Date(p.timestamp).getTime();
-      map.set(ts, { ts, price: p.price, momentum: p.medium_momentum });
+      map.set(ts, { ts, price: p.price, momentum: p.medium_momentum_main });
     }
 
     for (const o of chart.options) {
