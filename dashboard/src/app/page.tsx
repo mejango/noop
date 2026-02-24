@@ -138,9 +138,9 @@ export default function OverviewPage() {
       : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }, [range]);
 
-  // Merge all data series by timestamp
+  // Merge all data series by snapping to nearest price timestamp
   const merged = useMemo(() => {
-    const map = new Map<number, {
+    type Row = {
       ts: number;
       price?: number;
       momentum?: string;
@@ -150,51 +150,56 @@ export default function OverviewPage() {
       liquidity?: number;
       trade?: number;
       tradeInfo?: string;
-    }>();
+    };
 
-    for (const p of chart.prices) {
-      const ts = new Date(p.timestamp).getTime();
+    // Build sorted price backbone first
+    const rows: Row[] = chart.prices.map(p => {
       const m = p.medium_momentum_main;
-      map.set(ts, {
-        ts,
+      return {
+        ts: new Date(p.timestamp).getTime(),
         price: p.price,
         momentum: m,
         momentumVal: m === 'upward' ? 1 : m === 'downward' ? -1 : 0,
-      });
-    }
+      };
+    }).sort((a, b) => a.ts - b.ts);
 
+    if (rows.length === 0) return rows;
+
+    // Binary search to find nearest price row
+    const findNearest = (targetTs: number): Row => {
+      let lo = 0, hi = rows.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (rows[mid].ts < targetTs) lo = mid + 1;
+        else hi = mid;
+      }
+      if (lo > 0 && Math.abs(rows[lo - 1].ts - targetTs) < Math.abs(rows[lo].ts - targetTs)) {
+        return rows[lo - 1];
+      }
+      return rows[lo];
+    };
+
+    // Snap options data to nearest price point
     for (const o of chart.options) {
-      const ts = new Date(o.timestamp).getTime();
-      const existing = map.get(ts) || { ts };
-      if (o.best_put_value != null && o.best_put_value > 0) existing.bestPut = o.best_put_value;
-      if (o.best_call_value != null && o.best_call_value > 0) existing.bestCall = o.best_call_value;
-      map.set(ts, existing);
+      const nearest = findNearest(new Date(o.timestamp).getTime());
+      if (o.best_put_value != null && o.best_put_value > 0) nearest.bestPut = o.best_put_value;
+      if (o.best_call_value != null && o.best_call_value > 0) nearest.bestCall = o.best_call_value;
     }
 
+    // Snap liquidity data to nearest price point
     for (const l of chart.liquidity) {
-      const ts = new Date(l.timestamp).getTime();
-      const existing = map.get(ts) || { ts };
-      existing.liquidity = l.signed_liquidity;
-      map.set(ts, existing);
+      const nearest = findNearest(new Date(l.timestamp).getTime());
+      nearest.liquidity = l.signed_liquidity;
     }
 
-    const sorted = Array.from(map.values()).sort((a, b) => a.ts - b.ts);
-
+    // Snap trade markers to nearest price point
     for (const t of chart.trades) {
-      const tTs = new Date(t.timestamp).getTime();
-      let closest = sorted[0];
-      let minDiff = Infinity;
-      for (const s of sorted) {
-        const diff = Math.abs(s.ts - tTs);
-        if (diff < minDiff) { minDiff = diff; closest = s; }
-      }
-      if (closest) {
-        closest.trade = closest.price;
-        closest.tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${t.price.toFixed(2)}`;
-      }
+      const nearest = findNearest(new Date(t.timestamp).getTime());
+      nearest.trade = nearest.price;
+      nearest.tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${t.price.toFixed(2)}`;
     }
 
-    return sorted;
+    return rows;
   }, [chart]);
 
   const tradePoints = useMemo(() =>
