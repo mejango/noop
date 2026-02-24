@@ -117,6 +117,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_onchain_data_timestamp ON onchain_data(timestamp);
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_type ON strategy_signals(signal_type);
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_timestamp ON strategy_signals(timestamp);
+
+  CREATE TABLE IF NOT EXISTS bot_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    put_cycle_start INTEGER,
+    put_net_bought REAL NOT NULL DEFAULT 0,
+    put_unspent_buy_limit REAL NOT NULL DEFAULT 0,
+    call_cycle_start INTEGER,
+    call_net_sold REAL NOT NULL DEFAULT 0,
+    call_unspent_sell_limit REAL NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
 `);
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
@@ -246,6 +257,37 @@ const stmts = {
       (SELECT COUNT(*) FROM trades) as total_trades,
       (SELECT price FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as last_price,
       (SELECT timestamp FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as last_price_time
+  `),
+
+  // Bot state persistence
+  upsertBotState: db.prepare(`
+    INSERT INTO bot_state (id, put_cycle_start, put_net_bought, put_unspent_buy_limit,
+      call_cycle_start, call_net_sold, call_unspent_sell_limit, updated_at)
+    VALUES (1, @put_cycle_start, @put_net_bought, @put_unspent_buy_limit,
+      @call_cycle_start, @call_net_sold, @call_unspent_sell_limit, datetime('now'))
+    ON CONFLICT(id) DO UPDATE SET
+      put_cycle_start = @put_cycle_start,
+      put_net_bought = @put_net_bought,
+      put_unspent_buy_limit = @put_unspent_buy_limit,
+      call_cycle_start = @call_cycle_start,
+      call_net_sold = @call_net_sold,
+      call_unspent_sell_limit = @call_unspent_sell_limit,
+      updated_at = datetime('now')
+  `),
+
+  getBotState: db.prepare(`
+    SELECT * FROM bot_state WHERE id = 1
+  `),
+
+  getSpotPriceHistory7d: db.prepare(`
+    SELECT price, timestamp FROM spot_prices
+    WHERE timestamp > @since
+    ORDER BY timestamp ASC
+  `),
+
+  getOpenPositionsByDirection: db.prepare(`
+    SELECT * FROM positions WHERE status = 'open' AND direction = @direction
+    ORDER BY opened_at DESC
   `),
 
   // 7-day average premium for call selling elevation check
@@ -403,6 +445,106 @@ const getAvgCallPremium7d = () => {
   return stmts.getAvgCallPremium7d.get({ since });
 };
 
+// ─── Bot State Helpers ────────────────────────────────────────────────────────
+
+const saveBotState = (botData) => {
+  stmts.upsertBotState.run({
+    put_cycle_start: botData.putCycleStart || null,
+    put_net_bought: botData.putNetBought || 0,
+    put_unspent_buy_limit: botData.putUnspentBuyLimit || 0,
+    call_cycle_start: botData.callCycleStart || null,
+    call_net_sold: botData.callNetSold || 0,
+    call_unspent_sell_limit: botData.callUnspentSellLimit || 0,
+  });
+};
+
+const loadBotState = () => {
+  return stmts.getBotState.get() || null;
+};
+
+const loadPriceHistoryFromDb = () => {
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const rows = stmts.getSpotPriceHistory7d.all({ since });
+  // Normalize timestamps to Unix ms for compatibility with momentum functions
+  return rows.map(r => ({
+    price: r.price,
+    timestamp: new Date(r.timestamp).getTime(),
+  }));
+};
+
+const loadOpenPositionsAsArrays = () => {
+  const buyPositions = stmts.getOpenPositionsByDirection.all({ direction: 'buy' });
+  const sellPositions = stmts.getOpenPositionsByDirection.all({ direction: 'sell' });
+
+  const boughtPuts = buyPositions.map(pos => {
+    const trades = stmts.getTradesForPosition.all({ position_id: pos.id });
+    return {
+      instrument_name: pos.instrument_name,
+      base_asset_address: pos.base_asset_address,
+      base_asset_sub_id: pos.base_asset_sub_id,
+      strike: pos.strike,
+      expiration: pos.expiry,
+      totalAmount: pos.amount,
+      orders: trades.map(t => ({
+        amount: t.amount,
+        buyPrice: t.price,
+        buyTimestamp: t.timestamp,
+        delta: null,
+        totalCost: t.total_value,
+      })),
+    };
+  });
+
+  const soldCalls = sellPositions.map(pos => {
+    const trades = stmts.getTradesForPosition.all({ position_id: pos.id });
+    return {
+      instrument_name: pos.instrument_name,
+      base_asset_address: pos.base_asset_address,
+      base_asset_sub_id: pos.base_asset_sub_id,
+      strike: pos.strike,
+      expiration: pos.expiry,
+      totalAmount: pos.amount,
+      orders: trades.map(t => ({
+        amount: t.amount,
+        sellPrice: t.price,
+        sellTimestamp: t.timestamp,
+        delta: null,
+        totalRevenue: t.total_value,
+      })),
+    };
+  });
+
+  return { boughtPuts, soldCalls };
+};
+
+const migrateFromJson = (jsonPath) => {
+  try {
+    const existing = stmts.getBotState.get();
+    if (existing) return; // already migrated
+
+    if (!fs.existsSync(jsonPath)) return; // no JSON to migrate
+
+    const raw = fs.readFileSync(jsonPath, 'utf-8');
+    const data = JSON.parse(raw);
+
+    stmts.upsertBotState.run({
+      put_cycle_start: data.putCycleStart || null,
+      put_net_bought: data.putNetBought || 0,
+      put_unspent_buy_limit: data.putUnspentBuyLimit || 0,
+      call_cycle_start: data.callCycleStart || null,
+      call_net_sold: data.callNetSold || 0,
+      call_unspent_sell_limit: data.callUnspentSellLimit || 0,
+    });
+
+    // Rename JSON to .migrated
+    const migratedPath = jsonPath + '.migrated';
+    fs.renameSync(jsonPath, migratedPath);
+    console.log(`Migrated bot_data.json cycle state to SQLite (renamed to ${migratedPath})`);
+  } catch (e) {
+    console.error('migrateFromJson failed (will fall back to JSON):', e.message);
+  }
+};
+
 // Graceful close
 const close = () => db.close();
 
@@ -430,5 +572,10 @@ module.exports = {
   getRecentOptionsSnapshots,
   getStats,
   getAvgCallPremium7d,
+  saveBotState,
+  loadBotState,
+  loadPriceHistoryFromDb,
+  loadOpenPositionsAsArrays,
+  migrateFromJson,
   close,
 };

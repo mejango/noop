@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef, useCallback } from 'react';
 import { usePolling } from '@/lib/hooks';
 import { formatUSD, timeAgo, momentumColor, momentumBg } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import {
-  ComposedChart, Line, Area, Scatter, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, Legend, ReferenceLine,
+  ComposedChart, Line, Area, Scatter, Bar, Cell, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, Legend, ReferenceLine, BarChart,
 } from 'recharts';
 
 interface Budget {
@@ -100,6 +100,9 @@ const emptyStats: Stats = {
 const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2 } };
 const ranges = ['1h', '6h', '24h', '3d', '7d', '30d'] as const;
 
+const CHART_MARGINS = { top: 10, right: 120, left: 10, bottom: 0 };
+const PAGE_SIZE = 100;
+
 // Custom star shape for trade markers
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const StarDot = (props: any) => {
@@ -112,21 +115,36 @@ const StarDot = (props: any) => {
   );
 };
 
+// Momentum color helper for bar cells
+const momentumBarColor = (m: string | undefined) =>
+  m === 'upward' ? '#065f46' : m === 'downward' ? '#7f1d1d' : 'rgba(255,255,255,0.05)';
+
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('7d');
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const tableRef = useRef<HTMLDivElement>(null);
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart);
 
-  // Merge all data series by timestamp into a single array for the chart
   // Best scores from the bot's 6.2-day measurement window (always fixed, independent of chart range)
   const putPeak = chart.bestScores.bestPutScore;
   const callPeak = chart.bestScores.bestCallScore;
 
+  // Shared X-axis tick formatter
+  const xTickFormatter = useCallback((ts: number) => {
+    const d = new Date(ts);
+    return range === '1h' || range === '6h'
+      ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }, [range]);
+
+  // Merge all data series by timestamp
   const merged = useMemo(() => {
     const map = new Map<number, {
       ts: number;
       price?: number;
       momentum?: string;
+      momentumVal?: number;
       bestPut?: number;
       bestCall?: number;
       liquidity?: number;
@@ -134,25 +152,25 @@ export default function OverviewPage() {
       tradeInfo?: string;
     }>();
 
-    // Add prices
     for (const p of chart.prices) {
       const ts = new Date(p.timestamp).getTime();
-      map.set(ts, { ts, price: p.price, momentum: p.medium_momentum_main });
+      const m = p.medium_momentum_main;
+      map.set(ts, {
+        ts,
+        price: p.price,
+        momentum: m,
+        momentumVal: m === 'upward' ? 1 : m === 'downward' ? -1 : 0,
+      });
     }
 
     for (const o of chart.options) {
       const ts = new Date(o.timestamp).getTime();
       const existing = map.get(ts) || { ts };
-      if (o.best_put_value != null && o.best_put_value > 0) {
-        existing.bestPut = o.best_put_value;
-      }
-      if (o.best_call_value != null && o.best_call_value > 0) {
-        existing.bestCall = o.best_call_value;
-      }
+      if (o.best_put_value != null && o.best_put_value > 0) existing.bestPut = o.best_put_value;
+      if (o.best_call_value != null && o.best_call_value > 0) existing.bestCall = o.best_call_value;
       map.set(ts, existing);
     }
 
-    // Merge liquidity
     for (const l of chart.liquidity) {
       const ts = new Date(l.timestamp).getTime();
       const existing = map.get(ts) || { ts };
@@ -160,10 +178,8 @@ export default function OverviewPage() {
       map.set(ts, existing);
     }
 
-    // Sort by timestamp
     const sorted = Array.from(map.values()).sort((a, b) => a.ts - b.ts);
 
-    // Mark trades on nearest price point
     for (const t of chart.trades) {
       const tTs = new Date(t.timestamp).getTime();
       let closest = sorted[0];
@@ -181,11 +197,41 @@ export default function OverviewPage() {
     return sorted;
   }, [chart]);
 
-  // Separate trade points for the scatter
   const tradePoints = useMemo(() =>
     merged.filter(d => d.trade != null).map(d => ({ ts: d.ts, trade: d.trade })),
     [merged]
   );
+
+  // Data for momentum bar (only points with momentum data)
+  const momentumData = useMemo(() =>
+    merged.filter(d => d.momentum !== undefined),
+    [merged]
+  );
+
+  // Data for liquidity bar (only points with liquidity data)
+  const liquidityData = useMemo(() =>
+    merged.filter(d => d.liquidity != null),
+    [merged]
+  );
+
+  // Table data: latest first, only rows with a price
+  const tableData = useMemo(() =>
+    [...merged].reverse().filter(d => d.price != null),
+    [merged]
+  );
+
+  const handleTableScroll = useCallback(() => {
+    const el = tableRef.current;
+    if (!el) return;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 50) {
+      setVisibleCount(prev => Math.min(prev + PAGE_SIZE, tableData.length));
+    }
+  }, [tableData.length]);
+
+  // Shared X-axis props for sub-charts (synced with main chart)
+  const xDomain = merged.length > 0
+    ? [merged[0].ts, merged[merged.length - 1].ts]
+    : [0, 1];
 
   return (
     <div className="space-y-6">
@@ -255,7 +301,7 @@ export default function OverviewPage() {
           {ranges.map(r => (
             <button
               key={r}
-              onClick={() => setRange(r)}
+              onClick={() => { setRange(r); setVisibleCount(PAGE_SIZE); }}
               className={`px-3 py-1 rounded text-sm transition-all duration-200 ${
                 range === r
                   ? 'bg-white/10 text-white border border-white/20'
@@ -283,17 +329,12 @@ export default function OverviewPage() {
           <div className="h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
           <ResponsiveContainer width="100%" height={500}>
-            <ComposedChart data={merged} margin={{ top: 10, right: 120, left: 10, bottom: 0 }}>
+            <ComposedChart data={merged} margin={CHART_MARGINS} syncId="main">
               <XAxis
                 dataKey="ts"
                 type="number"
                 domain={['dataMin', 'dataMax']}
-                tickFormatter={(ts) => {
-                  const d = new Date(ts);
-                  return range === '1h' || range === '6h'
-                    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                    : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-                }}
+                tickFormatter={xTickFormatter}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
               />
@@ -335,8 +376,8 @@ export default function OverviewPage() {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 formatter={(val: any, name: any) => {
                   if (name === 'price') return [formatUSD(Number(val)), 'ETH'];
-                  if (name === 'bestPut') return [Number(val).toFixed(4), 'PUT Value (δ/price)'];
-                  if (name === 'bestCall') return [Number(val).toFixed(2), 'CALL Value (price/δ)'];
+                  if (name === 'bestPut') return [Number(val).toFixed(4), 'PUT Value'];
+                  if (name === 'bestCall') return [Number(val).toFixed(2), 'CALL Value'];
                   if (name === 'liquidity') return [Number(val).toFixed(2), 'Liquidity Flow'];
                   return [val, name];
                 }}
@@ -345,133 +386,155 @@ export default function OverviewPage() {
 
               {/* 7d high/low reference lines */}
               {stats.seven_day_high > 0 && (
-                <ReferenceLine
-                  yAxisId="price"
-                  y={stats.seven_day_high}
-                  stroke={chartColors.refHigh}
-                  strokeDasharray="3 3"
-                  strokeOpacity={0.4}
-                />
+                <ReferenceLine yAxisId="price" y={stats.seven_day_high} stroke={chartColors.refHigh} strokeDasharray="3 3" strokeOpacity={0.4} />
               )}
               {stats.seven_day_low > 0 && stats.seven_day_low < Infinity && (
-                <ReferenceLine
-                  yAxisId="price"
-                  y={stats.seven_day_low}
-                  stroke={chartColors.refLow}
-                  strokeDasharray="3 3"
-                  strokeOpacity={0.4}
-                />
+                <ReferenceLine yAxisId="price" y={stats.seven_day_low} stroke={chartColors.refLow} strokeDasharray="3 3" strokeOpacity={0.4} />
               )}
 
               {/* Best value threshold lines */}
               {putPeak > 0 && (
                 <ReferenceLine
-                  yAxisId="putValue"
-                  y={putPeak}
-                  stroke={chartColors.red}
-                  strokeDasharray="4 4"
-                  strokeOpacity={0.5}
+                  yAxisId="putValue" y={putPeak} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.5}
                   label={{ value: `PUT threshold (${chart.bestScores.windowDays}d): ${putPeak.toFixed(4)}`, fill: chartColors.red, fontSize: 9, position: 'insideTopLeft' }}
                 />
               )}
               {callPeak > 0 && (
                 <ReferenceLine
-                  yAxisId="callValue"
-                  y={callPeak}
-                  stroke={chartColors.secondary}
-                  strokeDasharray="4 4"
-                  strokeOpacity={0.5}
+                  yAxisId="callValue" y={callPeak} stroke={chartColors.secondary} strokeDasharray="4 4" strokeOpacity={0.5}
                   label={{ value: `CALL threshold (${chart.bestScores.windowDays}d): ${callPeak.toFixed(1)}`, fill: chartColors.secondary, fontSize: 9, position: 'insideTopRight' }}
                 />
               )}
 
               {/* Liquidity flow area */}
-              <Area
-                yAxisId="liq"
-                type="monotone"
-                dataKey="liquidity"
-                fill={chartColors.blue}
-                fillOpacity={0.1}
-                stroke={chartColors.blue}
-                strokeWidth={0}
-                connectNulls={false}
-                dot={false}
-              />
-
+              <Area yAxisId="liq" type="monotone" dataKey="liquidity" fill={chartColors.blue} fillOpacity={0.1} stroke={chartColors.blue} strokeWidth={0} connectNulls={false} dot={false} />
               {/* ETH price line */}
-              <Line
-                yAxisId="price"
-                type="monotone"
-                dataKey="price"
-                stroke={chartColors.primary}
-                dot={false}
-                strokeWidth={2}
-                connectNulls
-              />
-
+              <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls />
               {/* Best PUT score */}
-              <Line
-                yAxisId="putValue"
-                type="monotone"
-                dataKey="bestPut"
-                stroke={chartColors.red}
-                dot={false}
-                strokeWidth={1}
-                strokeOpacity={0.7}
-                connectNulls
-              />
-
+              <Line yAxisId="putValue" type="monotone" dataKey="bestPut" stroke={chartColors.red} dot={false} strokeWidth={1} strokeOpacity={0.7} connectNulls />
               {/* Best CALL score */}
-              <Line
-                yAxisId="callValue"
-                type="monotone"
-                dataKey="bestCall"
-                stroke={chartColors.secondary}
-                dot={false}
-                strokeWidth={1}
-                strokeOpacity={0.7}
-                connectNulls
-              />
-
+              <Line yAxisId="callValue" type="monotone" dataKey="bestCall" stroke={chartColors.secondary} dot={false} strokeWidth={1} strokeOpacity={0.7} connectNulls />
               {/* Trade markers (stars) */}
               {tradePoints.length > 0 && (
-                <Scatter
-                  yAxisId="price"
-                  data={tradePoints}
-                  dataKey="trade"
-                  shape={<StarDot />}
-                />
+                <Scatter yAxisId="price" data={tradePoints} dataKey="trade" shape={<StarDot />} />
               )}
             </ComposedChart>
           </ResponsiveContainer>
         )}
       </Card>
 
-      {/* Momentum Timeline */}
-      {merged.length > 0 && (
-        <Card title="Momentum Timeline">
-          <div className="overflow-x-auto">
-            <div className="flex gap-0.5 min-w-[600px]" style={{ height: 32 }}>
-              {merged.filter(d => d.momentum !== undefined).map((d, i) => (
-                <div
-                  key={i}
-                  className={`flex-1 rounded-sm ${
-                    d.momentum === 'upward' ? 'bg-emerald-800/50' :
-                    d.momentum === 'downward' ? 'bg-red-800/50' : 'bg-white/5'
-                  }`}
-                  title={`${new Date(d.ts).toLocaleString()}: ${d.momentum || 'neutral'}`}
-                />
-              ))}
+      {/* Momentum Bar */}
+      {momentumData.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-400">Momentum</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#065f46' }} /> upward</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#7f1d1d' }} /> downward</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: 'rgba(255,255,255,0.05)' }} /> neutral</span>
             </div>
-            <div className="flex justify-between text-xs text-gray-500 mt-1">
-              <span>{merged.length > 0 ? new Date(merged[0].ts).toLocaleString() : ''}</span>
-              <div className="flex gap-3">
-                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-emerald-800/50 inline-block" /> upward</span>
-                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-red-800/50 inline-block" /> downward</span>
-                <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm bg-white/5 inline-block border border-white/10" /> neutral</span>
+          </div>
+          <ResponsiveContainer width="100%" height={48}>
+            <BarChart data={momentumData} margin={CHART_MARGINS} syncId="main">
+              <XAxis dataKey="ts" type="number" domain={xDomain} hide />
+              <YAxis domain={[-1, 1]} hide />
+              <Tooltip
+                {...chartTooltip}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                formatter={(_v: any, _n: any, props: any) => {
+                  const m = props.payload?.momentum || 'neutral';
+                  return [m, 'Momentum'];
+                }}
+              />
+              <Bar dataKey="momentumVal" isAnimationActive={false} maxBarSize={4}>
+                {momentumData.map((d, i) => (
+                  <Cell key={i} fill={momentumBarColor(d.momentum)} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
+      {/* Liquidity Bar */}
+      {liquidityData.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-400">Liquidity Flow</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: chartColors.blue }} /> inflow</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#ef4444' }} /> outflow</span>
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={64}>
+            <BarChart data={liquidityData} margin={CHART_MARGINS} syncId="main">
+              <XAxis dataKey="ts" type="number" domain={xDomain} hide />
+              <YAxis hide />
+              <Tooltip
+                {...chartTooltip}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                formatter={(val: any) => [Number(val).toFixed(2), 'Liquidity']}
+              />
+              <Bar dataKey="liquidity" isAnimationActive={false} maxBarSize={4}>
+                {liquidityData.map((d, i) => (
+                  <Cell key={i} fill={(d.liquidity ?? 0) >= 0 ? chartColors.blue : '#ef4444'} fillOpacity={0.7} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
+      {/* Data Table: spot price, best put, best call */}
+      {tableData.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-medium text-gray-400">Price & Options History</span>
+            <span className="text-xs text-gray-600">{tableData.length} entries</span>
+          </div>
+          <div
+            ref={tableRef}
+            onScroll={handleTableScroll}
+            className="overflow-auto"
+            style={{ maxHeight: 400 }}
+          >
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-[#111] z-10">
+                <tr className="text-xs text-gray-500 border-b border-white/5">
+                  <th className="text-left py-2 px-3 font-medium">Time</th>
+                  <th className="text-right py-2 px-3 font-medium">Spot Price</th>
+                  <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.red }}>Best PUT Value</th>
+                  <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.secondary }}>Best CALL Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tableData.slice(0, visibleCount).map((d, i) => (
+                  <tr key={i} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                    <td className="py-1.5 px-3 text-gray-400 text-xs whitespace-nowrap">
+                      {new Date(d.ts).toLocaleString()}
+                    </td>
+                    <td className="py-1.5 px-3 text-right text-juice-orange tabular-nums">
+                      {formatUSD(d.price!)}
+                    </td>
+                    <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: d.bestPut ? chartColors.red : '#444' }}>
+                      {d.bestPut != null ? d.bestPut.toFixed(4) : '--'}
+                    </td>
+                    <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: d.bestCall ? chartColors.secondary : '#444' }}>
+                      {d.bestCall != null ? d.bestCall.toFixed(1) : '--'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {visibleCount < tableData.length && (
+              <div className="text-center py-3 text-xs text-gray-600">
+                Showing {visibleCount} of {tableData.length} — scroll for more
               </div>
-              <span>{merged.length > 0 ? new Date(merged[merged.length - 1].ts).toLocaleString() : ''}</span>
-            </div>
+            )}
           </div>
         </Card>
       )}

@@ -1,10 +1,8 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import fs from 'fs';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
-const BOT_DATA_PATH = path.join(DATA_DIR, 'bot_data.json');
 
 // Bot constants (must match script.js)
 const PUT_BUYING_BASE_FUNDING_LIMIT = 0;
@@ -168,22 +166,38 @@ export function getBestScores() {
 }
 
 export function getBotBudget() {
+  const empty = {
+    putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0,
+    callTotalBudget: 0, callSpent: 0, callRemaining: 0, callDaysLeft: 0,
+    cycleDays: PERIOD_MS / (1000 * 60 * 60 * 24),
+  };
+
   try {
-    const raw = fs.readFileSync(BOT_DATA_PATH, 'utf-8');
-    const data = JSON.parse(raw);
+    const d = getDb();
+    const row = d.prepare('SELECT * FROM bot_state WHERE id = 1').get() as {
+      put_cycle_start: number | null;
+      put_net_bought: number;
+      put_unspent_buy_limit: number;
+      call_cycle_start: number | null;
+      call_net_sold: number;
+      call_unspent_sell_limit: number;
+    } | undefined;
+
+    if (!row) return empty;
+
     const now = Date.now();
 
-    const putTotalBudget = PUT_BUYING_BASE_FUNDING_LIMIT + (data.putUnspentBuyLimit || 0);
-    const putSpent = data.putNetBought || 0;
+    const putTotalBudget = PUT_BUYING_BASE_FUNDING_LIMIT + (row.put_unspent_buy_limit || 0);
+    const putSpent = row.put_net_bought || 0;
     const putRemaining = Math.max(0, putTotalBudget - putSpent);
-    const putCycleStart = data.putCycleStart || now;
+    const putCycleStart = row.put_cycle_start || now;
     const putCycleElapsed = now - putCycleStart;
     const putDaysLeft = Math.max(0, (PERIOD_MS - putCycleElapsed) / (1000 * 60 * 60 * 24));
 
-    const callTotalBudget = CALL_SELLING_BASE_FUNDING_LIMIT + (data.callUnspentSellLimit || 0);
-    const callSpent = data.callNetSold || 0;
+    const callTotalBudget = CALL_SELLING_BASE_FUNDING_LIMIT + (row.call_unspent_sell_limit || 0);
+    const callSpent = row.call_net_sold || 0;
     const callRemaining = Math.max(0, callTotalBudget - callSpent);
-    const callCycleStart = data.callCycleStart || now;
+    const callCycleStart = row.call_cycle_start || now;
     const callCycleElapsed = now - callCycleStart;
     const callDaysLeft = Math.max(0, (PERIOD_MS - callCycleElapsed) / (1000 * 60 * 60 * 24));
 
@@ -199,10 +213,6 @@ export function getBotBudget() {
       cycleDays: PERIOD_MS / (1000 * 60 * 60 * 24),
     };
   } catch {
-    return {
-      putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0,
-      callTotalBudget: 0, callSpent: 0, callRemaining: 0, callDaysLeft: 0,
-      cycleDays: PERIOD_MS / (1000 * 60 * 60 * 24),
-    };
+    return empty;
   }
 }

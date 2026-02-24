@@ -189,33 +189,8 @@ const PUT_DELTA_RANGE = [-0.12, -0.02]; // Negative delta for puts
 const CALL_EXPIRATION_RANGE = [7, 14];
 const CALL_DELTA_RANGE = [0.06, 0.2]; // Positive delta for calls
 
-// Price history management functions
-const PRICE_HISTORY_FILE = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'price_history.json') : './price_history.json';
-
 // Call buyback thresholds
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Minimum profit percentage for automatic call buyback
-
-const loadPriceHistory = () => {
-  try {
-    if (fs.existsSync(PRICE_HISTORY_FILE)) {
-      const data = fs.readFileSync(PRICE_HISTORY_FILE, 'utf-8');
-      const priceHistory = JSON.parse(data);
-      console.log(`Loaded ${priceHistory.length} price history entries`);
-      return priceHistory;
-    }
-  } catch (error) {
-    console.error('Error loading price history:', error);
-  }
-  return [];
-};
-
-const savePriceHistory = (priceHistory) => {
-  try {
-    fs.writeFileSync(PRICE_HISTORY_FILE, JSON.stringify(priceHistory, null, 2));
-  } catch (error) {
-    console.error('Error saving price history:', error);
-  }
-};
 
 // Common bot state structure
 const createBotData = () => {
@@ -245,7 +220,12 @@ let botData = {
 const DEFAULT_AMOUNT_STEP = 0.01;
 
 let botData = createBotData();
-let priceHistory = loadPriceHistory();
+
+const persistCycleState = () => {
+  if (!db) return;
+  try { db.saveBotState(botData); }
+  catch (e) { console.error('Failed to persist cycle state:', e.message); }
+};
 
 const getAmountStep = (opt) =>
   Number(opt?.options?.amount_step) || Number(opt?.amount_step) || DEFAULT_AMOUNT_STEP;
@@ -255,58 +235,36 @@ const quantizeDown = (x, step) => {
   return Math.max(0, Math.floor(x / step) * step);
 };  
 
-// Ensure backup directory exists
-const ensureBackupDir = () => {
-  const backupDir = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'backups') : './backups';
-  if (!fs.existsSync(backupDir)) {
-    fs.mkdirSync(backupDir, { recursive: true });
-  }
-  return backupDir;
-};
-
-// Create or overwrite single backup file
-const createBackup = () => {
-  if (fs.existsSync(BOT_DATA_PATH)) {
-    const backupDir = ensureBackupDir();
-    const backupFile = path.join(backupDir, 'bot_data_backup.json');
-    fs.copyFileSync(BOT_DATA_PATH, backupFile);
-  }
-};
-
-// Load existing data
+// Load existing data from SQLite
 const loadData = () => {
-  try {
-    if (fs.existsSync(BOT_DATA_PATH)) {
-      // Create backup before loading
-      createBackup();
-
-      const data = fs.readFileSync(BOT_DATA_PATH, 'utf-8');
-      botData = { ...botData, ...JSON.parse(data) };
-      console.log(`✅ Loaded existing bot data from ${BOT_DATA_PATH}`);
-    } else {
-      console.log(`⚠️ No existing bot_data.json found at ${BOT_DATA_PATH} - starting with default data`);
-    }
-  } catch (error) {
-    console.error('❌ Error loading bot data:', error);
-    console.log('⚠️ Starting with default data due to load error');
+  if (!db) {
+    console.log('⚠️ No SQLite connection - starting with default data');
+    return;
   }
-};
 
-const saveData = () => {
+  // One-time migration from JSON → SQLite
+  try { db.migrateFromJson(BOT_DATA_PATH); } catch (_e) { /* logged inside */ }
+
   try {
-    // Safety check: don't save if botData is empty or corrupted
-    if (!botData || Object.keys(botData).length === 0) {
-      console.log('⚠️ Skipping save - botData is empty or corrupted');
-      return;
+    const state = db.loadBotState();
+    if (state) {
+      botData.putCycleStart = state.put_cycle_start;
+      botData.putNetBought = state.put_net_bought;
+      botData.putUnspentBuyLimit = state.put_unspent_buy_limit;
+      botData.callCycleStart = state.call_cycle_start;
+      botData.callNetSold = state.call_net_sold;
+      botData.callUnspentSellLimit = state.call_unspent_sell_limit;
+      console.log(`✅ Loaded cycle state from SQLite`);
     }
-    
-    // Create backup before saving
-    createBackup();
-    
-    fs.writeFileSync(BOT_DATA_PATH, JSON.stringify(botData, null, 2));
-    console.log('💾 Bot data saved successfully');
-  } catch (error) {
-    console.error('❌ Error saving bot data:', error);
+
+    // Rebuild position arrays from SQLite
+    const positions = db.loadOpenPositionsAsArrays();
+    botData.boughtPuts = positions.boughtPuts;
+    botData.soldCalls = positions.soldCalls;
+    console.log(`✅ Loaded ${positions.boughtPuts.length} open puts and ${positions.soldCalls.length} open calls from SQLite`);
+  } catch (e) {
+    console.error('❌ Error loading from SQLite:', e.message);
+    console.log('⚠️ Starting with default data due to load error');
   }
 };
 
@@ -2220,7 +2178,10 @@ const handleBuyingPuts = async (putOptionsWithDetails, historicalData, spotPrice
   const now = Date.now();
 
   // once at startup
-  if (!botData.putCycleStart) botData.putCycleStart = now;
+  if (!botData.putCycleStart) {
+    botData.putCycleStart = now;
+    persistCycleState();
+  }
 
   const timeSinceCycleStart = now - botData.putCycleStart;
   const isCommitPhaseOver = timeSinceCycleStart >= PERIOD;
@@ -2367,6 +2328,7 @@ const handleBuyingPuts = async (putOptionsWithDetails, historicalData, spotPrice
     
     botData.putNetBought = 0;
     botData.putCycleStart = now;
+    persistCycleState();
   }
 
   return validPutOptions;
@@ -2436,7 +2398,8 @@ const executeCallSellOrder = async (option, reason, spotPrice) => {
     }
   
     botData.callNetSold += gross; // can go negative later from buybacks (earned capacity)
-  
+    persistCycleState();
+
     // Check if this instrument already exists in soldCalls
     const existingCallIndex = botData.soldCalls.findIndex(call => call.instrument_name === option.instrument_name);
     
@@ -2523,12 +2486,15 @@ const handleSellingCalls = async (callOptionsWithDetails, historicalData, spotPr
   const now = Date.now();
 
   // once at startup
-  if (!botData.callCycleStart) botData.callCycleStart = now;
+  if (!botData.callCycleStart) {
+    botData.callCycleStart = now;
+    persistCycleState();
+  }
 
   const timeSinceCycleStart = now - botData.callCycleStart;
   const isCommitPhaseOver = timeSinceCycleStart >= PERIOD;
 
- 
+
   console.log(' ');
   console.log('📞 CALL STRATEGY');
   const callTotalBudget = CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit;
@@ -2666,6 +2632,7 @@ const handleSellingCalls = async (callOptionsWithDetails, historicalData, spotPr
     
     botData.callNetSold = 0;
     botData.callCycleStart = now;
+    persistCycleState();
   }
 
   return validCallOptions;
@@ -2734,7 +2701,8 @@ const executePutBuyOrder = async (option, reason, spotPrice) => {
     }
   
     botData.putNetBought += cost; // stays signed (sellbacks can drive it negative = earned capacity)
-  
+    persistCycleState();
+
     // Check if this instrument already exists in boughtPuts
     const existingPutIndex = botData.boughtPuts.findIndex(put => put.instrument_name === option.instrument_name);
     
@@ -2833,24 +2801,8 @@ const cleanupExpiredOptions = () => {
     
     if (expiredCalls > 0) {
       console.log(`🧹 Cleaning up ${expiredCalls} expired sold calls`);
-      
-      // Move expired calls to boughtbackCalls
-      if (!botData.boughtbackCalls) botData.boughtbackCalls = [];
-      expiredCallsList.forEach(call => {
-        botData.boughtbackCalls.push({
-          ...call,
-          totalBuybackAmount: Number(call.totalAmount),
-          buybackOrders: [{
-            instrument_name: call.instrument_name,
-            buybackAmount: Number(call.totalAmount),
-            buybackPrice: 0,
-            buybackTimestamp: new Date().toISOString(),
-            reason: 'expired'
-          }]
-        });
-      });
-      
-      // Remove from soldCalls
+
+      // Remove from soldCalls (SQLite closePosition handles the persistent record)
       botData.soldCalls = botData.soldCalls.filter(call => {
         const expirationTime = new Date(call.expiration).getTime();
         return currentTime < expirationTime;
@@ -2871,24 +2823,8 @@ const cleanupExpiredOptions = () => {
     
     if (expiredPuts > 0) {
       console.log(`🧹 Cleaning up ${expiredPuts} expired bought puts`);
-      
-      // Move expired puts to soldbackPuts
-      if (!botData.soldbackPuts) botData.soldbackPuts = [];
-      expiredPutsList.forEach(put => {
-        botData.soldbackPuts.push({
-          ...put,
-          totalSellbackAmount: Number(put.totalAmount),
-          sellbackOrders: [{
-            instrument_name: put.instrument_name,
-            sellbackAmount: Number(put.totalAmount),
-            sellbackPrice: 0,
-            sellbackTimestamp: new Date().toISOString(),
-            reason: 'expired'
-          }]
-        });
-      });
-      
-      // Remove from boughtPuts
+
+      // Remove from boughtPuts (SQLite closePosition handles the persistent record)
       botData.boughtPuts = botData.boughtPuts.filter(put => {
         const expirationTime = new Date(put.expiration).getTime();
         return currentTime < expirationTime;
@@ -2937,22 +2873,18 @@ const runBot = async () => {
   // Get spot price and update momentum
   const spotPrice = await getSpotPrice();
 
-  if (spotPrice) {      
-      // Update price history
-      priceHistory.push({
-        price: spotPrice,
-        timestamp: now
-      });
-      
-
+  if (spotPrice) {
     // Display run header
     console.log(`ETH: $${spotPrice?.toFixed(2) || 'N/A'} | ${new Date().toLocaleString()}`);
-    
 
-    // Keep only last 7 days of data
-    const weekAgo = now - TIME_CONSTANTS.WEEK;
-    priceHistory = priceHistory.filter(p => p.timestamp > weekAgo);
-      
+    // Load 7-day price history from SQLite, append current tick (not yet inserted)
+    let priceHistory = [];
+    if (db) {
+      try { priceHistory = db.loadPriceHistoryFromDb(); }
+      catch (e) { console.log('DB: price history read failed:', e.message); }
+    }
+    priceHistory.push({ price: spotPrice, timestamp: now });
+
     // Analyze momentum early to display in header
     const momentumResult = analyzeMomentum(priceHistory);
     botData.mediumTermMomentum = momentumResult.mediumTermMomentum;
@@ -3359,21 +3291,7 @@ const runBot = async () => {
     console.log(`⏰ Next bot check in ${checkInterval / (1000 * 60)} minutes`);
 
   botData.lastCheck = now;
-  
-  try {
-    saveData();
-  } catch (error) {
-    console.error('❌ Error saving bot data:', error.message);
-    console.log('⚠️ Continuing execution despite data save failure');
-  }
-  
-  try {
-    savePriceHistory(priceHistory);
-  } catch (error) {
-    console.error('❌ Error saving price history:', error.message);
-    console.log('⚠️ Continuing execution despite price history save failure');
-  }
-  
+
   // Schedule next run
   setTimeout(runBotWithWatchdog, checkInterval);
   
@@ -3418,8 +3336,6 @@ process.on('SIGINT', () => {
   console.log(' ');
   console.log('🛑 Shutting down bot gracefully...');
   allowExit = true;
-  saveData();
-  savePriceHistory(priceHistory);
   process.exit(0);
 });
 
@@ -3427,8 +3343,6 @@ process.on('SIGTERM', () => {
   console.log(' ');
   console.log('🛑 Shutting down bot gracefully...');
   allowExit = true;
-  saveData();
-  savePriceHistory(priceHistory);
   process.exit(0);
 });
 
@@ -3437,8 +3351,6 @@ process.on('SIGUSR1', () => {
   console.log(' ');
   console.log('🔄 Update signal received - shutting down gracefully...');
   allowExit = true;
-  saveData();
-  savePriceHistory(priceHistory);
   process.exit(0);
 });
 
