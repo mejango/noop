@@ -2873,6 +2873,9 @@ const runBot = async () => {
   // Get spot price and update momentum
   const spotPrice = await getSpotPrice();
 
+  // Shared timestamp for all DB writes this tick
+  const tickTimestamp = new Date().toISOString();
+
   if (spotPrice) {
     // Display run header
     console.log(`ETH: $${spotPrice?.toFixed(2) || 'N/A'} | ${new Date().toLocaleString()}`);
@@ -2889,13 +2892,13 @@ const runBot = async () => {
     const momentumResult = analyzeMomentum(priceHistory);
     botData.mediumTermMomentum = momentumResult.mediumTermMomentum;
     botData.shortTermMomentum = momentumResult.shortTermMomentum;
-      
+
     // Save spot price momentum data
     saveSpotPriceMomentum(spotPrice, momentumResult, botData, ARCHIVE_DIR);
 
     // SQLite: persist spot price
     if (db) {
-      try { db.insertSpotPrice(spotPrice, momentumResult, botData); }
+      try { db.insertSpotPrice(spotPrice, momentumResult, botData, tickTimestamp); }
       catch (e) { console.log('DB: spot price write failed:', e.message); }
     }
 
@@ -3220,7 +3223,7 @@ const runBot = async () => {
       try {
         const allOptions = [...(putOptionsWithDetails || []), ...(callOptionsWithDetails || [])];
         if (allOptions.length > 0) {
-          db.insertOptionsSnapshotBatch(allOptions, new Date().toISOString());
+          db.insertOptionsSnapshotBatch(allOptions, tickTimestamp);
         }
       } catch (e) { console.log('DB: options snapshot write failed:', e.message); }
     }

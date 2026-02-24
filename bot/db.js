@@ -302,14 +302,14 @@ const stmts = {
 
 // ─── Helper Functions ─────────────────────────────────────────────────────────
 
-const insertSpotPrice = (spotPrice, momentumResult, botData) => {
+const insertSpotPrice = (spotPrice, momentumResult, botData, timestamp) => {
   const shortMomentum = typeof momentumResult.shortTermMomentum === 'object'
     ? momentumResult.shortTermMomentum : { main: momentumResult.shortTermMomentum };
   const medMomentum = typeof momentumResult.mediumTermMomentum === 'object'
     ? momentumResult.mediumTermMomentum : { main: momentumResult.mediumTermMomentum };
 
   return stmts.insertSpotPrice.run({
-    timestamp: new Date().toISOString(),
+    timestamp: timestamp || new Date().toISOString(),
     price: spotPrice,
     short_momentum_main: shortMomentum.main || null,
     short_momentum_derivative: shortMomentum.derivative || null,

@@ -138,73 +138,68 @@ export default function OverviewPage() {
       : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }, [range]);
 
-  // Merge all data series by snapping to nearest price timestamp
+  // Merge all data series by timestamp (bot uses shared tick timestamp for spot + options)
   const merged = useMemo(() => {
     type Row = {
       ts: number;
       price?: number;
       momentum?: string;
       momentumVal?: number;
-      bestPut?: number;
-      bestCall?: number;
+      bestPut?: number | null;
+      bestCall?: number | null;
       liquidity?: number;
       trade?: number;
       tradeInfo?: string;
     };
 
-    // Build sorted price backbone first
-    const rows: Row[] = chart.prices.map(p => {
+    // Build map keyed by timestamp string for exact matching
+    const byTs = new Map<string, Row>();
+
+    for (const p of chart.prices) {
       const m = p.medium_momentum_main;
-      return {
+      byTs.set(p.timestamp, {
         ts: new Date(p.timestamp).getTime(),
         price: p.price,
         momentum: m,
         momentumVal: m === 'upward' ? 1 : m === 'downward' ? -1 : 0,
-      };
-    }).sort((a, b) => a.ts - b.ts);
+      });
+    }
 
-    if (rows.length === 0) return rows;
-
-    // Binary search to find nearest price row
-    const findNearest = (targetTs: number): Row => {
-      let lo = 0, hi = rows.length - 1;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (rows[mid].ts < targetTs) lo = mid + 1;
-        else hi = mid;
-      }
-      if (lo > 0 && Math.abs(rows[lo - 1].ts - targetTs) < Math.abs(rows[lo].ts - targetTs)) {
-        return rows[lo - 1];
-      }
-      return rows[lo];
-    };
-
-    // Snap options data to nearest price point
+    // Merge options by exact timestamp (shared tick timestamp from bot)
     for (const o of chart.options) {
-      const nearest = findNearest(new Date(o.timestamp).getTime());
-      if (o.best_put_value != null && o.best_put_value > 0) nearest.bestPut = o.best_put_value;
-      if (o.best_call_value != null && o.best_call_value > 0) nearest.bestCall = o.best_call_value;
+      const row = byTs.get(o.timestamp);
+      if (row) {
+        // null means no options in delta range at this tick → shows as 0 in chart, N/A in table
+        row.bestPut = o.best_put_value;
+        row.bestCall = o.best_call_value;
+      }
     }
 
-    // Snap liquidity data to nearest price point
+    // Merge liquidity by exact timestamp
     for (const l of chart.liquidity) {
-      const nearest = findNearest(new Date(l.timestamp).getTime());
-      nearest.liquidity = l.signed_liquidity;
+      const row = byTs.get(l.timestamp);
+      if (row) {
+        row.liquidity = l.signed_liquidity;
+      }
     }
 
-    // Snap trade markers to nearest price point
-    for (const t of chart.trades) {
-      const nearest = findNearest(new Date(t.timestamp).getTime());
-      nearest.trade = nearest.price;
-      nearest.tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${t.price.toFixed(2)}`;
-    }
+    const rows = Array.from(byTs.values()).sort((a, b) => a.ts - b.ts);
 
-    // Forward-fill sparse options/liquidity values so the table matches the chart lines
-    let lastPut: number | undefined;
-    let lastCall: number | undefined;
-    for (const row of rows) {
-      if (row.bestPut != null) lastPut = row.bestPut; else if (lastPut != null) row.bestPut = lastPut;
-      if (row.bestCall != null) lastCall = row.bestCall; else if (lastCall != null) row.bestCall = lastCall;
+    // Snap trade markers to nearest price point (trades have their own timestamps)
+    if (rows.length > 0) {
+      for (const t of chart.trades) {
+        const tTs = new Date(t.timestamp).getTime();
+        let lo = 0, hi = rows.length - 1;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (rows[mid].ts < tTs) lo = mid + 1;
+          else hi = mid;
+        }
+        const nearest = (lo > 0 && Math.abs(rows[lo - 1].ts - tTs) < Math.abs(rows[lo].ts - tTs))
+          ? rows[lo - 1] : rows[lo];
+        nearest.trade = nearest.price;
+        nearest.tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${t.price.toFixed(2)}`;
+      }
     }
 
     return rows;
@@ -533,11 +528,11 @@ export default function OverviewPage() {
                     <td className="py-1.5 px-3 text-right text-juice-orange tabular-nums">
                       {formatUSD(d.price!)}
                     </td>
-                    <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: d.bestPut ? chartColors.red : '#444' }}>
-                      {d.bestPut != null ? d.bestPut.toFixed(4) : '--'}
+                    <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: d.bestPut && d.bestPut > 0 ? chartColors.red : '#444' }}>
+                      {d.bestPut === undefined ? '--' : d.bestPut && d.bestPut > 0 ? d.bestPut.toFixed(4) : 'N/A'}
                     </td>
-                    <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: d.bestCall ? chartColors.secondary : '#444' }}>
-                      {d.bestCall != null ? d.bestCall.toFixed(1) : '--'}
+                    <td className="py-1.5 px-3 text-right tabular-nums" style={{ color: d.bestCall && d.bestCall > 0 ? chartColors.secondary : '#444' }}>
+                      {d.bestCall === undefined ? '--' : d.bestCall && d.bestCall > 0 ? d.bestCall.toFixed(1) : 'N/A'}
                     </td>
                   </tr>
                 ))}
