@@ -110,6 +110,16 @@ export function getSignals(since: string, limit = 100) {
   `).all(since, limit);
 }
 
+export function getOptionsHeatmap(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT timestamp, option_type, instrument_name, strike, delta, ask_price, bid_price, index_price
+    FROM options_snapshots
+    WHERE timestamp > ?
+    ORDER BY timestamp ASC
+  `).all(since);
+}
+
 export function getBestOptionsOverTime(since: string) {
   const d = getDb();
   return d.prepare(`

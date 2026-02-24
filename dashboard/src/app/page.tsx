@@ -7,7 +7,7 @@ import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import {
   ComposedChart, Line, Area, Scatter, Bar, Cell, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, Legend, ReferenceLine, BarChart,
+  ResponsiveContainer, Legend, ReferenceLine, BarChart, ScatterChart, ReferenceArea,
 } from 'recharts';
 
 interface Budget {
@@ -76,12 +76,35 @@ interface BestScores {
   windowDays: number;
 }
 
+interface HeatmapSnapshot {
+  timestamp: string;
+  option_type: string;
+  instrument_name: string;
+  strike: number;
+  delta: number | null;
+  ask_price: number | null;
+  bid_price: number | null;
+  index_price: number | null;
+}
+
+interface HeatmapDot {
+  ts: number;
+  pctOtm: number;
+  premium: number;
+  strike: number;
+  delta: number | null;
+  bid: number | null;
+  ask: number | null;
+  intensity: number; // 0-1 normalized
+}
+
 interface ChartData {
   prices: SpotPrice[];
   options: OptionsPoint[];
   liquidity: LiquidityPoint[];
   trades: TradeMarker[];
   bestScores: BestScores;
+  optionsHeatmap: HeatmapSnapshot[];
 }
 
 const emptyBudget: Budget = {
@@ -97,7 +120,7 @@ const emptyStats: Stats = {
   budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2 } };
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2 }, optionsHeatmap: [] };
 const ranges = ['1h', '6h', '24h', '3d', '7d', '30d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 120, left: 10, bottom: 0 };
@@ -116,8 +139,30 @@ const StarDot = (props: any) => {
 };
 
 // Momentum color helper for bar cells
-const momentumBarColor = (m: string | undefined) =>
-  m === 'upward' ? '#065f46' : m === 'downward' ? '#7f1d1d' : 'rgba(255,255,255,0.08)';
+const momentumBarColor = (m: string | undefined | null) =>
+  m === 'upward' ? '#065f46' : m === 'downward' ? '#7f1d1d' : 'rgba(255,255,255,0.20)';
+
+// Color interpolation for heatmap intensity (0=dim, 1=bright)
+const lerpColor = (a: [number, number, number], b: [number, number, number], t: number): string => {
+  const r = Math.round(a[0] + (b[0] - a[0]) * t);
+  const g = Math.round(a[1] + (b[1] - a[1]) * t);
+  const bl = Math.round(a[2] + (b[2] - a[2]) * t);
+  return `rgb(${r},${g},${bl})`;
+};
+const callColorDim: [number, number, number] = [20, 40, 80];   // dark blue
+const callColorBright: [number, number, number] = [92, 235, 223]; // juice-cyan
+const putColorDim: [number, number, number] = [80, 20, 20];    // dark red
+const putColorBright: [number, number, number] = [248, 113, 113]; // red-400
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
+  if (!cx || !cy || !payload) return null;
+  const t = payload.intensity ?? 0;
+  const fill = type === 'call'
+    ? lerpColor(callColorDim, callColorBright, t)
+    : lerpColor(putColorDim, putColorBright, t);
+  return <circle cx={cx} cy={cy} r={3} fill={fill} fillOpacity={0.6 + t * 0.4} />;
+};
 
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('7d');
@@ -154,7 +199,7 @@ export default function OverviewPage() {
 
     // Build rows from price data (primary time axis)
     const rows: Row[] = chart.prices.map(p => {
-      const m = p.medium_momentum_main;
+      const m = p.medium_momentum_main || 'neutral';
       return {
         ts: new Date(p.timestamp).getTime(),
         price: p.price,
@@ -218,6 +263,80 @@ export default function OverviewPage() {
     merged.filter(d => d.liquidity != null),
     [merged]
   );
+
+  // Heatmap data: split by option type, calculate % OTM and normalize premium
+  const { callHeatmap, putHeatmap } = useMemo(() => {
+    const calls: HeatmapDot[] = [];
+    const puts: HeatmapDot[] = [];
+
+    // Build a quick spot-price lookup from merged data
+    const spotByTs = new Map<number, number>();
+    for (const r of merged) {
+      if (r.price) spotByTs.set(r.ts, r.price);
+    }
+    // Find nearest spot price for a given timestamp
+    const findSpot = (ts: number, indexPrice: number | null): number | null => {
+      if (indexPrice && indexPrice > 0) return indexPrice;
+      const exact = spotByTs.get(ts);
+      if (exact) return exact;
+      // Snap to nearest merged row
+      let bestDist = Infinity, bestPrice: number | null = null;
+      spotByTs.forEach((v, k) => {
+        const d = Math.abs(k - ts);
+        if (d < bestDist) { bestDist = d; bestPrice = v; }
+      });
+      return bestPrice;
+    };
+
+    for (const snap of chart.optionsHeatmap) {
+      const ts = new Date(snap.timestamp).getTime();
+      const spot = findSpot(ts, snap.index_price);
+      if (!spot || !snap.strike) continue;
+
+      const isCall = snap.option_type === 'C' || snap.option_type === 'call' || snap.instrument_name?.includes('-C');
+      const isPut = snap.option_type === 'P' || snap.option_type === 'put' || snap.instrument_name?.includes('-P');
+      if (!isCall && !isPut) continue;
+
+      const pctOtm = isCall
+        ? (snap.strike - spot) / spot * 100
+        : (spot - snap.strike) / spot * 100;
+      if (pctOtm < 0) continue; // skip ITM
+
+      // Premium: for calls use bid_price (what we'd sell at), for puts use ask_price (what we'd buy at)
+      const premium = isCall ? (snap.bid_price ?? 0) : (snap.ask_price ?? 0);
+      if (premium <= 0) continue;
+
+      const dot: HeatmapDot = {
+        ts,
+        pctOtm: +pctOtm.toFixed(2),
+        premium,
+        strike: snap.strike,
+        delta: snap.delta,
+        bid: snap.bid_price,
+        ask: snap.ask_price,
+        intensity: 0, // normalized below
+      };
+
+      if (isCall) calls.push(dot);
+      else puts.push(dot);
+    }
+
+    // Normalize intensity within each set
+    const normalize = (dots: HeatmapDot[]) => {
+      if (dots.length === 0) return;
+      const premiums = dots.map(d => d.premium);
+      const min = Math.min(...premiums);
+      const max = Math.max(...premiums);
+      const range = max - min || 1;
+      for (const d of dots) {
+        d.intensity = (d.premium - min) / range;
+      }
+    };
+    normalize(calls);
+    normalize(puts);
+
+    return { callHeatmap: calls, putHeatmap: puts };
+  }, [chart.optionsHeatmap, merged]);
 
   // Table data: latest first, only rows with a price
   const tableData = useMemo(() =>
@@ -358,7 +477,7 @@ export default function OverviewPage() {
                 orientation="right"
                 domain={['auto', 'auto']}
                 tickFormatter={(v) => Number(v).toFixed(3)}
-                stroke={chartColors.red}
+                stroke="transparent"
                 tick={{ fill: chartColors.red, fontSize: 10 }}
                 width={55}
               />
@@ -368,7 +487,7 @@ export default function OverviewPage() {
                 orientation="right"
                 domain={['auto', 'auto']}
                 tickFormatter={(v) => Number(v).toFixed(1)}
-                stroke={chartColors.secondary}
+                stroke="transparent"
                 tick={{ fill: chartColors.secondary, fontSize: 10 }}
                 width={55}
               />
@@ -377,14 +496,30 @@ export default function OverviewPage() {
               <Tooltip
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                formatter={(val: any, name: any) => {
-                  if (name === 'price') return [formatUSD(Number(val)), 'ETH'];
-                  if (name === 'bestPut') return [Number(val).toFixed(4), 'PUT Value'];
-                  if (name === 'bestCall') return [Number(val).toFixed(2), 'CALL Value'];
-                  if (name === 'liquidity') return [Number(val).toFixed(2), 'Liquidity Flow'];
-                  return [val, name];
+                content={({ active, payload, label }: any) => {
+                  if (!active || !payload?.length) return null;
+                  const row = payload[0]?.payload;
+                  if (!row) return null;
+                  const price = row.price;
+                  const bestPut = row.bestPut;
+                  const bestCall = row.bestCall;
+                  const fmtPut = bestPut != null && bestPut > 0 ? bestPut.toFixed(4) : 'N/A';
+                  const fmtCall = bestCall != null && bestCall > 0 ? bestCall.toFixed(1) : 'N/A';
+                  const fmtPutPeak = putPeak > 0 ? putPeak.toFixed(4) : 'N/A';
+                  const fmtCallPeak = callPeak > 0 ? callPeak.toFixed(1) : 'N/A';
+                  return (
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
+                      <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {price != null ? formatUSD(price) : 'N/A'}</div>
+                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}</div>
+                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}</div>
+                      <div className="text-xs text-gray-500 mt-1 border-t border-white/10 pt-1">
+                        <span style={{ color: chartColors.red }}>Best PUT ({chart.bestScores.windowDays}d): {fmtPutPeak}</span>
+                        {' / '}
+                        <span style={{ color: chartColors.secondary }}>Best CALL: {fmtCallPeak}</span>
+                      </div>
+                    </div>
+                  );
                 }}
               />
               <Legend content={() => null} />
@@ -416,9 +551,9 @@ export default function OverviewPage() {
               {/* ETH price line */}
               <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls />
               {/* Best PUT score */}
-              <Line yAxisId="putValue" type="monotone" dataKey="bestPut" stroke={chartColors.red} dot={false} strokeWidth={1} strokeOpacity={0.7} connectNulls={false} />
+              <Area yAxisId="putValue" type="monotone" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1.5} strokeOpacity={0.8} fill={chartColors.red} fillOpacity={0.08} connectNulls dot={{ r: 2, fill: chartColors.red, strokeWidth: 0 }} />
               {/* Best CALL score */}
-              <Line yAxisId="callValue" type="monotone" dataKey="bestCall" stroke={chartColors.secondary} dot={false} strokeWidth={1} strokeOpacity={0.7} connectNulls={false} />
+              <Area yAxisId="callValue" type="monotone" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1.5} strokeOpacity={0.8} fill={chartColors.secondary} fillOpacity={0.08} connectNulls dot={{ r: 2, fill: chartColors.secondary, strokeWidth: 0 }} />
               {/* Trade markers (stars) */}
               {tradePoints.length > 0 && (
                 <Scatter yAxisId="price" data={tradePoints} dataKey="trade" shape={<StarDot />} />
@@ -463,7 +598,7 @@ export default function OverviewPage() {
         </Card>
       )}
 
-      {/* Liquidity Bar */}
+      {/* Liquidity Flow */}
       {liquidityData.length > 0 && (
         <Card>
           <div className="flex items-center justify-between mb-1">
@@ -474,9 +609,10 @@ export default function OverviewPage() {
             </div>
           </div>
           <ResponsiveContainer width="100%" height={64}>
-            <BarChart data={liquidityData} margin={CHART_MARGINS} syncId="main">
+            <ComposedChart data={liquidityData} margin={CHART_MARGINS} syncId="main">
               <XAxis dataKey="ts" type="number" domain={xDomain} hide />
               <YAxis hide />
+              <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
               <Tooltip
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -484,12 +620,130 @@ export default function OverviewPage() {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 formatter={(val: any) => [Number(val).toFixed(2), 'Liquidity']}
               />
-              <Bar dataKey="liquidity" isAnimationActive={false} maxBarSize={4}>
-                {liquidityData.map((d, i) => (
-                  <Cell key={i} fill={(d.liquidity ?? 0) >= 0 ? chartColors.blue : '#ef4444'} fillOpacity={0.7} />
-                ))}
-              </Bar>
-            </BarChart>
+              <Area type="stepAfter" dataKey="liquidity" stroke={chartColors.blue} strokeWidth={1} fill={chartColors.blue} fillOpacity={0.15} connectNulls dot={{ r: 2, strokeWidth: 0, fill: chartColors.blue }} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
+      {/* Call Market Heatmap */}
+      {callHeatmap.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-400">Call Market</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> cheap</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> rich</span>
+              <span className="text-gray-600">bid premium</span>
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={200}>
+            <ScatterChart margin={CHART_MARGINS} syncId="main">
+              <XAxis
+                dataKey="ts"
+                type="number"
+                domain={xDomain}
+                tickFormatter={xTickFormatter}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+              />
+              <YAxis
+                dataKey="pctOtm"
+                name="% OTM"
+                domain={[0, 'auto']}
+                tickFormatter={(v) => `${v}%`}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={55}
+              />
+              <Tooltip
+                {...chartTooltip}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                content={({ active, payload }: any) => {
+                  if (!active || !payload?.[0]?.payload) return null;
+                  const d = payload[0].payload as HeatmapDot;
+                  return (
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
+                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
+                      <div className="text-sm">% OTM: <span className="text-cyan-300">{d.pctOtm.toFixed(1)}%</span></div>
+                      {d.delta != null && <div className="text-sm">Delta: <span className="text-gray-300">{d.delta.toFixed(3)}</span></div>}
+                      <div className="text-sm">Bid: <span className="text-cyan-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span className="text-gray-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
+                    </div>
+                  );
+                }}
+              />
+              {/* Faint band showing bot's active delta trading range (~2-12% OTM as rough equivalent) */}
+              <ReferenceArea y1={2} y2={12} fill="#5CEBDF" fillOpacity={0.04} />
+              <Scatter
+                data={callHeatmap}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                shape={(props: any) => <HeatmapDotShape {...props} type="call" />}
+                isAnimationActive={false}
+              />
+            </ScatterChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
+      {/* Put Market Heatmap */}
+      {putHeatmap.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-400">Put Market</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> cheap</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.8) }} /> rich</span>
+              <span className="text-gray-600">ask premium</span>
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={200}>
+            <ScatterChart margin={CHART_MARGINS} syncId="main">
+              <XAxis
+                dataKey="ts"
+                type="number"
+                domain={xDomain}
+                tickFormatter={xTickFormatter}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+              />
+              <YAxis
+                dataKey="pctOtm"
+                name="% OTM"
+                domain={[0, 'auto']}
+                tickFormatter={(v) => `${v}%`}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={55}
+              />
+              <Tooltip
+                {...chartTooltip}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                content={({ active, payload }: any) => {
+                  if (!active || !payload?.[0]?.payload) return null;
+                  const d = payload[0].payload as HeatmapDot;
+                  return (
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
+                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
+                      <div className="text-sm">% OTM: <span className="text-red-300">{d.pctOtm.toFixed(1)}%</span></div>
+                      {d.delta != null && <div className="text-sm">Delta: <span className="text-gray-300">{d.delta.toFixed(3)}</span></div>}
+                      <div className="text-sm">Bid: <span className="text-gray-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span className="text-red-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
+                    </div>
+                  );
+                }}
+              />
+              {/* Faint band showing bot's active delta trading range (~2-12% OTM as rough equivalent) */}
+              <ReferenceArea y1={2} y2={12} fill="#f87171" fillOpacity={0.04} />
+              <Scatter
+                data={putHeatmap}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                shape={(props: any) => <HeatmapDotShape {...props} type="put" />}
+                isAnimationActive={false}
+              />
+            </ScatterChart>
           </ResponsiveContainer>
         </Card>
       )}

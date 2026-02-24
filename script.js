@@ -1911,7 +1911,7 @@ const getSpotPrice = async () => {
 };
 
 // Fetch option details
-const fetchOptionDetails = async (instrument) => {
+const fetchOptionDetails = async (instrument, spotPrice) => {
   try {
     const response = await axios.post(API_URL.GET_TICKER, {
       instrument_name: instrument.instrument_name,
@@ -1943,8 +1943,9 @@ const fetchOptionDetails = async (instrument) => {
         askPrice: bestAskPrice,
         askAmount: bestAskAmount,
         bidPrice: bestBidPrice,
-        bidAmount: bestBidAmount
-
+        bidAmount: bestBidAmount,
+        markPrice: response.data.result.mark_price || null,
+        indexPrice: response.data.result.index_price || spotPrice || null,
       }
     };
     
@@ -2144,7 +2145,7 @@ const fetchAndFilterInstruments = async (spotPrice) => {
              daysToExpiry <= PUT_EXPIRATION_RANGE[1] &&
              instrument.instrument_type === 'option' &&
              instrument.option_details.option_type === 'P' &&
-             (!spotPrice || strikePrice < 0.8 * spotPrice);
+             (!spotPrice || (strikePrice < spotPrice && strikePrice > 0.60 * spotPrice));
     });
 
     // Filter for call candidates (positive delta, shorter expiration, strike > 1.10 * spot)
@@ -2158,7 +2159,7 @@ const fetchAndFilterInstruments = async (spotPrice) => {
              daysToExpiry <= CALL_EXPIRATION_RANGE[1] &&
              instrument.instrument_type === 'option' &&
              instrument.option_details.option_type === 'C' &&
-             (!spotPrice || strikePrice > 1.10 * spotPrice);
+             (!spotPrice || strikePrice > spotPrice);
     });
 
     console.log(`📈 Put candidates: ${putCandidates.length} | Call candidates: ${callCandidates.length}`);
@@ -3145,7 +3146,7 @@ const runBot = async () => {
     // Add error handling to individual promises
     const allOptionsPromises = allCandidates.map(async (instrument, index) => {
       try {
-        const result = await fetchOptionDetails(instrument);
+        const result = await fetchOptionDetails(instrument, spotPrice);
         return { success: true, data: result, index };
       } catch (error) {
         console.log(`⚠️ Failed to fetch details for ${instrument.instrument_name}: ${error.message}`);
