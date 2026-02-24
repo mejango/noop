@@ -136,15 +136,28 @@ export function getBestOptionsOverTime(since: string) {
 
 export function getLiquidityOverTime(since: string) {
   const d = getDb();
-  return d.prepare(`
-    SELECT timestamp, liquidity_flow_magnitude,
-      CASE WHEN liquidity_flow_direction = 'inflow' THEN liquidity_flow_magnitude
-           WHEN liquidity_flow_direction = 'outflow' THEN -liquidity_flow_magnitude
-           ELSE 0 END as signed_liquidity
+  const rows = d.prepare(`
+    SELECT timestamp, raw_data
     FROM onchain_data
     WHERE timestamp > ?
     ORDER BY timestamp ASC
-  `).all(since);
+  `).all(since) as { timestamp: string; raw_data: string }[];
+
+  return rows.map(row => {
+    let totalTvl = 0;
+    try {
+      const data = JSON.parse(row.raw_data);
+      const dexes = data?.dexLiquidity?.dexes;
+      if (dexes) {
+        for (const dex of Object.values(dexes) as { totalLiquidity?: number; error?: string }[]) {
+          if (!dex.error && dex.totalLiquidity && !isNaN(dex.totalLiquidity)) {
+            totalTvl += dex.totalLiquidity;
+          }
+        }
+      }
+    } catch { /* skip malformed rows */ }
+    return { timestamp: row.timestamp, tvl: totalTvl };
+  }).filter(r => r.tvl > 0);
 }
 
 export function getTradeMarkers(since: string) {

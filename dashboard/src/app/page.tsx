@@ -57,7 +57,7 @@ interface OptionsPoint {
 
 interface LiquidityPoint {
   timestamp: string;
-  signed_liquidity: number;
+  tvl: number;
 }
 
 interface TradeMarker {
@@ -152,9 +152,9 @@ const lerpColor = (a: [number, number, number], b: [number, number, number], t: 
   const bl = Math.round(a[2] + (b[2] - a[2]) * t);
   return `rgb(${r},${g},${bl})`;
 };
-const callColorDim: [number, number, number] = [20, 40, 80];   // dark blue
+const callColorDim: [number, number, number] = [60, 130, 160];   // muted cyan
 const callColorBright: [number, number, number] = [92, 235, 223]; // juice-cyan
-const putColorDim: [number, number, number] = [80, 20, 20];    // dark red
+const putColorDim: [number, number, number] = [160, 80, 80];    // muted red
 const putColorBright: [number, number, number] = [248, 113, 113]; // red-400
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -164,7 +164,7 @@ const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
   const fill = type === 'call'
     ? lerpColor(callColorDim, callColorBright, t)
     : lerpColor(putColorDim, putColorBright, t);
-  return <circle cx={cx} cy={cy} r={3} fill={fill} fillOpacity={0.6 + t * 0.4} />;
+  return <circle cx={cx} cy={cy} r={3.5} fill={fill} fillOpacity={0.75 + t * 0.25} />;
 };
 
 export default function OverviewPage() {
@@ -282,7 +282,7 @@ export default function OverviewPage() {
     // Snap liquidity data to nearest price point
     for (const l of chart.liquidity) {
       const idx = snapToNearest(new Date(l.timestamp).getTime());
-      rows[idx].liquidity = l.signed_liquidity;
+      rows[idx].liquidity = l.tvl;
     }
 
     // Snap trade markers to nearest price point
@@ -492,6 +492,8 @@ export default function OverviewPage() {
         </div>
         <div className="flex gap-3 text-xs text-gray-500">
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
           <span className="flex items-center gap-1"><span style={{ color: chartColors.trade }}>&#9733;</span> Trade</span>
         </div>
       </div>
@@ -522,14 +524,28 @@ export default function OverviewPage() {
                 tick={chartAxis.tick}
                 width={70}
               />
+              {/* Hidden axes for PUT/CALL overlay */}
+              <YAxis yAxisId="putVal" orientation="right" hide domain={['auto', 'auto']} />
+              <YAxis yAxisId="callVal" orientation="right" hide domain={['auto', 'auto']} />
               <Tooltip
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                formatter={(val: any, name: any) => {
-                  if (name === 'price') return [formatUSD(Number(val)), 'ETH'];
-                  return [val, name];
+                content={({ active, payload, label }: any) => {
+                  if (!active || !payload?.length) return null;
+                  const row = payload[0]?.payload;
+                  if (!row) return null;
+                  const bestPut = row.bestPut;
+                  const bestCall = row.bestCall;
+                  const fmtPut = bestPut != null && bestPut > 0 ? bestPut.toFixed(6) : 'N/A';
+                  const fmtCall = bestCall != null && bestCall > 0 ? bestCall.toFixed(2) : 'N/A';
+                  return (
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
+                      <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
+                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}</div>
+                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}</div>
+                    </div>
+                  );
                 }}
               />
               <Legend content={() => null} />
@@ -544,6 +560,9 @@ export default function OverviewPage() {
 
               {/* ETH price line */}
               <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls />
+              {/* PUT/CALL value overlays */}
+              <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
+              <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               {/* Trade markers (stars) */}
               {tradePoints.length > 0 && (
                 <Scatter yAxisId="price" data={tradePoints} dataKey="trade" shape={<StarDot />} />
@@ -660,29 +679,32 @@ export default function OverviewPage() {
         </Card>
       )}
 
-      {/* Liquidity Flow */}
+      {/* DEX Liquidity (TVL) */}
       {liquidityData.length > 0 && (
         <Card>
           <div className="flex items-center justify-between mb-1">
-            <span className="text-xs font-medium text-gray-400">Liquidity Flow</span>
+            <span className="text-xs font-medium text-gray-400">DEX Liquidity (TVL)</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: chartColors.blue }} /> inflow</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#ef4444' }} /> outflow</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.blue }} /> Total Value Locked</span>
             </div>
           </div>
-          <ResponsiveContainer width="100%" height={64}>
+          <ResponsiveContainer width="100%" height={80}>
             <ComposedChart data={liquidityData} margin={CHART_MARGINS} syncId="main">
-              <XAxis dataKey="ts" type="number" domain={xDomain} hide />
-              <YAxis hide />
-              <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
+              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <YAxis
+                tickFormatter={(v) => `$${(v / 1e6).toFixed(0)}M`}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={55}
+              />
               <Tooltip
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                formatter={(val: any) => [Number(val).toFixed(2), 'Liquidity']}
+                formatter={(val: any) => [`$${Number(val).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, 'TVL']}
               />
-              <Area type="stepAfter" dataKey="liquidity" stroke={chartColors.blue} strokeWidth={1} fill={chartColors.blue} fillOpacity={0.15} connectNulls dot={{ r: 2, strokeWidth: 0, fill: chartColors.blue }} />
+              <Area type="stepAfter" dataKey="liquidity" stroke={chartColors.blue} strokeWidth={1.5} fill={chartColors.blue} fillOpacity={0.1} connectNulls dot={{ r: 2.5, strokeWidth: 0, fill: chartColors.blue }} />
             </ComposedChart>
           </ResponsiveContainer>
         </Card>
