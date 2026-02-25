@@ -31,3 +31,18 @@ export function usePolling<T>(url: string, initialData: T): { data: T; loading: 
 
   return { data, loading, error, refetch: fetchData };
 }
+
+/** Returns true when viewport is narrower than the given breakpoint (default 768px). */
+export function useIsMobile(breakpoint = 768): boolean {
+  const [isMobile, setIsMobile] = useState(false);
+
+  useEffect(() => {
+    const mql = window.matchMedia(`(max-width: ${breakpoint - 1}px)`);
+    setIsMobile(mql.matches);
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, [breakpoint]);
+
+  return isMobile;
+}

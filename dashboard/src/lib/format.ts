@@ -3,10 +3,6 @@ export function formatUSD(n: number | null | undefined): string {
   return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-export function formatNum(n: number | null | undefined, decimals = 2): string {
-  if (n == null || isNaN(n)) return '--';
-  return n.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
-}
 
 export function timeAgo(ts: string | null | undefined): string {
   if (!ts) return '--';
@@ -32,11 +28,4 @@ export function momentumColor(main: string | null | undefined): string {
   if (main === 'upward') return 'text-emerald-400';
   if (main === 'downward') return 'text-red-400';
   return 'text-gray-400';
-}
-
-export function momentumBg(main: string | null | undefined): string {
-  if (!main) return 'bg-white/5';
-  if (main === 'upward') return 'bg-emerald-900/20';
-  if (main === 'downward') return 'bg-red-900/20';
-  return 'bg-white/5';
 }

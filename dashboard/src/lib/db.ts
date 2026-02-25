@@ -47,37 +47,6 @@ export function getSpotPrices(since: string, limit = 2000) {
   `).all(since, limit);
 }
 
-export function getOptionsSnapshots(since: string, limit = 500) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT * FROM options_snapshots
-    WHERE timestamp > ?
-    ORDER BY timestamp DESC
-    LIMIT ?
-  `).all(since, limit);
-}
-
-export function getOnchainData(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT id, timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
-      liquidity_flow_confidence, whale_count, whale_total_txns, exhaustion_score,
-      exhaustion_alert_level
-    FROM onchain_data
-    WHERE timestamp > ?
-    ORDER BY timestamp DESC
-  `).all(since);
-}
-
-export function getSignals(since: string, limit = 100) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT * FROM strategy_signals
-    WHERE timestamp > ?
-    ORDER BY timestamp DESC
-    LIMIT ?
-  `).all(since, limit);
-}
 
 export function getOptionsHeatmap(since: string) {
   const d = getDb();
