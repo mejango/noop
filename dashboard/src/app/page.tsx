@@ -143,7 +143,7 @@ const StarDot = (props: any) => {
 
 // Momentum color helper for bar cells
 const momentumBarColor = (m: string | undefined | null) =>
-  m === 'upward' ? '#10b981' : m === 'downward' ? '#ef4444' : 'rgba(255,255,255,0.25)';
+  m === 'upward' ? '#4ade80' : m === 'downward' ? '#f87171' : 'rgba(255,255,255,0.4)';
 
 // Color interpolation for heatmap intensity (0=dim, 1=bright)
 const lerpColor = (a: [number, number, number], b: [number, number, number], t: number): string => {
@@ -416,25 +416,6 @@ export default function OverviewPage() {
           </div>
         </Card>
 
-        <Card title="Momentum" className="flex flex-col">
-          <div className="flex-1 flex flex-col justify-center gap-2">
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 w-12">Medium</span>
-              <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
-                {stats.medium_momentum || 'neutral'}
-              </span>
-              {stats.medium_derivative && <span className="text-xs text-gray-500">({stats.medium_derivative})</span>}
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 w-12">Short</span>
-              <span className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
-                {stats.short_momentum || 'neutral'}
-              </span>
-              {stats.short_derivative && <span className="text-xs text-gray-500">({stats.short_derivative})</span>}
-            </div>
-          </div>
-        </Card>
-
         <Card title="Price Range" className="flex flex-col">
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
             <div className="flex items-center gap-3">
@@ -448,6 +429,25 @@ export default function OverviewPage() {
               <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
               <span className="text-gray-600">/</span>
               <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="Momentum" className="flex flex-col overflow-hidden">
+          <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-xs text-gray-500 w-12 shrink-0">Medium</span>
+              <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
+                {stats.medium_momentum || 'neutral'}
+              </span>
+              {stats.medium_derivative && <span className="text-xs text-gray-500 truncate">({stats.medium_derivative})</span>}
+            </div>
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-xs text-gray-500 w-12 shrink-0">Short</span>
+              <span className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
+                {stats.short_momentum || 'neutral'}
+              </span>
+              {stats.short_derivative && <span className="text-xs text-gray-500 truncate">({stats.short_derivative})</span>}
             </div>
           </div>
         </Card>
@@ -578,13 +578,13 @@ export default function OverviewPage() {
           <div className="flex items-center justify-between mb-1">
             <span className="text-xs font-medium text-gray-400">Momentum</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#10b981' }} /> upward</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#ef4444' }} /> downward</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: 'rgba(255,255,255,0.05)' }} /> neutral</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#4ade80' }} /> upward</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#f87171' }} /> downward</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: 'rgba(255,255,255,0.4)' }} /> neutral</span>
             </div>
           </div>
-          <ResponsiveContainer width="100%" height={48}>
-            <BarChart data={momentumData} margin={CHART_MARGINS} syncId="main">
+          <ResponsiveContainer width="100%" height={32}>
+            <BarChart data={momentumData} margin={CHART_MARGINS} barCategoryGap={0} barGap={0} syncId="main">
               <XAxis dataKey="ts" type="number" domain={xDomain} hide />
               <YAxis domain={[0, 1]} hide />
               <Tooltip
@@ -597,7 +597,7 @@ export default function OverviewPage() {
                   return [m, 'Momentum'];
                 }}
               />
-              <Bar dataKey="momentumVal" isAnimationActive={false} maxBarSize={4}>
+              <Bar dataKey="momentumVal" isAnimationActive={false}>
                 {momentumData.map((d, i) => (
                   <Cell key={i} fill={momentumBarColor(d.momentum)} />
                 ))}
