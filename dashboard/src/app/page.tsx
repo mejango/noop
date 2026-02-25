@@ -880,8 +880,8 @@ export default function OverviewPage() {
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Put Market</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> lower value</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.8) }} /> higher value</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.8) }} /> better buy</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> worse buy</span>
             </div>
           </div>
           <ResponsiveContainer width="100%" height={360}>
@@ -942,8 +942,8 @@ export default function OverviewPage() {
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Call Market</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> lower value</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> higher value</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> better sell</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> worse sell</span>
             </div>
           </div>
           <ResponsiveContainer width="100%" height={360}>
