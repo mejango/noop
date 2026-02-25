@@ -74,7 +74,7 @@
  * Execution:
  * ----------
  *   • Instruments prefetched from /public/get_instruments
- *   • Enriched with greeks & order book from /public/get_ticker
+ *   • Enriched with greeks & AMM prices from /public/get_tickers
  *   • Orders submitted via /private/order as LIMIT takers:
  *     – Buys at best ask
  *     – Sells at best bid
@@ -120,7 +120,7 @@ if (db) {
 
 // Lyra API endpoints
 const API_URL = {
-  GET_TICKER: 'https://api.lyra.finance/public/get_ticker',
+  GET_TICKERS: 'https://api.lyra.finance/public/get_tickers',
   GET_INSTRUMENTS: 'https://api.lyra.finance/public/get_instruments',
   PLACE_ORDER: 'https://api.lyra.finance/private/order',
 }
@@ -205,13 +205,11 @@ let botData = {
     putCycleStart: null,
     putNetBought: 0,
     putUnspentBuyLimit: 0,
-    boughtPuts: [],
-    
+
     // Call strategy data
     callCycleStart: null,
     callNetSold: 0,
     callUnspentSellLimit: 0,
-    soldCalls: [],
   };
 
   return botData;
@@ -256,12 +254,6 @@ const loadData = () => {
       botData.callUnspentSellLimit = state.call_unspent_sell_limit;
       console.log(`✅ Loaded cycle state from SQLite`);
     }
-
-    // Rebuild position arrays from SQLite
-    const positions = db.loadOpenPositionsAsArrays();
-    botData.boughtPuts = positions.boughtPuts;
-    botData.soldCalls = positions.soldCalls;
-    console.log(`✅ Loaded ${positions.boughtPuts.length} open puts and ${positions.soldCalls.length} open calls from SQLite`);
   } catch (e) {
     console.error('❌ Error loading from SQLite:', e.message);
     console.log('⚠️ Starting with default data due to load error');
@@ -1911,49 +1903,54 @@ const getSpotPrice = async () => {
 };
 
 // Fetch option details
-const fetchOptionDetails = async (instrument, spotPrice) => {
+// Fetch all tickers for a given expiry date (batch call — returns AMM prices)
+const fetchTickersByExpiry = async (expiryDate) => {
   try {
-    const response = await axios.post(API_URL.GET_TICKER, {
-      instrument_name: instrument.instrument_name,
+    const response = await axios.post(API_URL.GET_TICKERS, {
+      instrument_type: 'option',
+      currency: 'ETH',
+      expiry_date: expiryDate,
     });
-    if (!response.data.result) {
-      console.error(`No result found for instrument: ${instrument.instrument_name}`);
-      if (response.data.error) {
-        console.error(`Error:`, response.data.error);
-        return null;
-      }
+    if (!response.data.result?.tickers) {
+      console.error(`No tickers found for expiry ${expiryDate}`);
+      return {};
     }
-    
-    const delta = response.data.result.option_pricing?.delta;
-    const bestAskPrice = response.data.result.best_ask_price;
-    const bestAskAmount = response.data.result.best_ask_amount;
-    const bestBidPrice = response.data.result.best_bid_price;
-    const bestBidAmount = response.data.result.best_bid_amount;
-    
-    const askDeltaValue = bestAskPrice == 0 ? 0 : Math.abs(delta) / bestAskPrice;
-    const bidDeltaValue = bestBidPrice == 0 ? 0 : bestBidPrice / Math.abs(delta);
-
-    // Merge the instrument data with the ticker data
-    const result = {
-      ...instrument,
-      details: {
-        delta: delta,
-        askDeltaValue: askDeltaValue,
-        bidDeltaValue: bidDeltaValue,
-        askPrice: bestAskPrice,
-        askAmount: bestAskAmount,
-        bidPrice: bestBidPrice,
-        bidAmount: bestBidAmount,
-        markPrice: response.data.result.mark_price || null,
-        indexPrice: response.data.result.index_price || spotPrice || null,
-      }
-    };
-    
-    return result;
+    return response.data.result.tickers;
   } catch (error) {
-    console.error(`Error fetching details for ${instrument.instrument_name}:`, error.message);
-    return null;
+    console.error(`Error fetching tickers for expiry ${expiryDate}:`, error.message);
+    return {};
   }
+};
+
+// Enrich a candidate instrument using pre-fetched ticker data
+const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
+  if (!ticker) return null;
+
+  const delta = Number(ticker.option_pricing?.d);
+  const askPrice = Number(ticker.a);
+  const askAmount = Number(ticker.A);
+  const bidPrice = Number(ticker.b);
+  const bidAmount = Number(ticker.B);
+  const markPrice = Number(ticker.M) || null;
+  const indexPrice = Number(ticker.I) || spotPrice || null;
+
+  const askDeltaValue = askPrice == 0 ? 0 : Math.abs(delta) / askPrice;
+  const bidDeltaValue = bidPrice == 0 ? 0 : bidPrice / Math.abs(delta);
+
+  return {
+    ...instrument,
+    details: {
+      delta,
+      askDeltaValue,
+      bidDeltaValue,
+      askPrice,
+      askAmount,
+      bidPrice,
+      bidAmount,
+      markPrice,
+      indexPrice,
+    }
+  };
 };
 
 // Load private key (prefer env var, fallback to file)
@@ -2401,36 +2398,6 @@ const executeCallSellOrder = async (option, reason, spotPrice) => {
     botData.callNetSold += gross; // can go negative later from buybacks (earned capacity)
     persistCycleState();
 
-    // Check if this instrument already exists in soldCalls
-    const existingCallIndex = botData.soldCalls.findIndex(call => call.instrument_name === option.instrument_name);
-    
-    const orderData = {
-      amount: filledAmt,
-      sellPrice: avgPx,
-      sellTimestamp: new Date().toISOString(),
-      delta: option.details.delta,
-      totalRevenue: gross
-    };
-    
-    if (existingCallIndex >= 0) {
-      // Add to existing position
-      botData.soldCalls[existingCallIndex].orders.push(orderData);
-      botData.soldCalls[existingCallIndex].totalAmount += filledAmt;
-      console.log(`📈 Added to existing CALL: ${filledAmt} @ $${avgPx} | Total: ${botData.soldCalls[existingCallIndex].totalAmount.toFixed(2)}`);
-    } else {
-      // Create new position
-      botData.soldCalls.push({
-        instrument_name: option.instrument_name,
-        base_asset_address: option.base_asset_address,
-        base_asset_sub_id: option.base_asset_sub_id,
-        strike: option.option_details.strike,
-        expiration: option.option_details.expiry,
-        totalAmount: filledAmt,
-        orders: [orderData]
-      });
-      console.log(`🆕 New CALL position created: ${filledAmt} @ $${avgPx}`);
-    }
-  
     logTradingDecision({
       action: 'sell_call', success: true,
       option: { instrument_name: option.instrument_name, strike: option.option_details.strike, expiration: option.option_details.expiry, delta: option.details.delta, bidPrice: bidPx },
@@ -2439,42 +2406,6 @@ const executeCallSellOrder = async (option, reason, spotPrice) => {
     }, ARCHIVE_DIR);
   
     console.log(`✅ SOLD ${filledAmt} @ $${avgPx} | callNetSold now $${botData.callNetSold.toFixed(4)}`);
-
-    // SQLite: persist position and trade
-    if (db) {
-      try {
-        let existingPos = db.getOpenPositionByInstrument(option.instrument_name);
-        let posId;
-        if (existingPos) {
-          db.addToPosition(existingPos.id, filledAmt, gross);
-          posId = existingPos.id;
-        } else {
-          posId = db.createPosition({
-            instrument_name: option.instrument_name,
-            base_asset_address: option.base_asset_address,
-            base_asset_sub_id: option.base_asset_sub_id,
-            direction: 'sell',
-            strike: option.option_details.strike,
-            expiry: option.option_details.expiry,
-            amount: filledAmt,
-            avg_price: avgPx,
-            total_cost: gross,
-          });
-        }
-        db.insertTrade({
-          position_id: posId,
-          instrument_name: option.instrument_name,
-          direction: 'sell',
-          amount: filledAmt,
-          price: avgPx,
-          total_value: gross,
-          fee: order.result?.trades?.[0]?.trade_fee || null,
-          order_type: 'entry',
-          reason,
-          order_response: order,
-        });
-      } catch (e) { console.log('DB: call sell trade write failed:', e.message); }
-    }
 
     return true;
   };
@@ -2704,36 +2635,6 @@ const executePutBuyOrder = async (option, reason, spotPrice) => {
     botData.putNetBought += cost; // stays signed (sellbacks can drive it negative = earned capacity)
     persistCycleState();
 
-    // Check if this instrument already exists in boughtPuts
-    const existingPutIndex = botData.boughtPuts.findIndex(put => put.instrument_name === option.instrument_name);
-    
-    const orderData = {
-      amount: filledAmt,
-      buyPrice: avgPx,
-      buyTimestamp: new Date().toISOString(),
-      delta: option.details.delta,
-      totalCost: cost
-    };
-    
-    if (existingPutIndex >= 0) {
-      // Add to existing position
-      botData.boughtPuts[existingPutIndex].orders.push(orderData);
-      botData.boughtPuts[existingPutIndex].totalAmount += filledAmt;
-      console.log(`📈 Added to existing PUT: ${filledAmt} @ $${avgPx} | Total: ${botData.boughtPuts[existingPutIndex].totalAmount.toFixed(2)}`);
-    } else {
-      // Create new position
-      botData.boughtPuts.push({
-        instrument_name: option.instrument_name,
-        base_asset_address: option.base_asset_address,
-        base_asset_sub_id: option.base_asset_sub_id,
-        strike: option.option_details.strike,
-        expiration: option.option_details.expiry,
-        totalAmount: filledAmt,
-        orders: [orderData]
-      });
-      console.log(`🆕 New PUT position created: ${filledAmt} @ $${avgPx}`);
-    }
-  
     logTradingDecision({
       action: 'buy_put', success: true,
       option: { instrument_name: option.instrument_name, strike: option.option_details.strike, expiration: option.option_details.expiry, delta: option.details.delta, askPrice: askPx },
@@ -2743,121 +2644,7 @@ const executePutBuyOrder = async (option, reason, spotPrice) => {
   
     console.log(`✅ BOUGHT ${filledAmt} @ $${avgPx} | putNetBought now $${botData.putNetBought.toFixed(4)}`);
 
-    // SQLite: persist position and trade
-    if (db) {
-      try {
-        let existingPos = db.getOpenPositionByInstrument(option.instrument_name);
-        let posId;
-        if (existingPos) {
-          db.addToPosition(existingPos.id, filledAmt, cost);
-          posId = existingPos.id;
-        } else {
-          posId = db.createPosition({
-            instrument_name: option.instrument_name,
-            base_asset_address: option.base_asset_address,
-            base_asset_sub_id: option.base_asset_sub_id,
-            direction: 'buy',
-            strike: option.option_details.strike,
-            expiry: option.option_details.expiry,
-            amount: filledAmt,
-            avg_price: avgPx,
-            total_cost: cost,
-          });
-        }
-        db.insertTrade({
-          position_id: posId,
-          instrument_name: option.instrument_name,
-          direction: 'buy',
-          amount: filledAmt,
-          price: avgPx,
-          total_value: cost,
-          fee: order.result?.trades?.[0]?.trade_fee || null,
-          order_type: 'entry',
-          reason,
-          order_response: order,
-        });
-      } catch (e) { console.log('DB: put buy trade write failed:', e.message); }
-    }
-
     return true;
-};
-
-// Main bot function
-// Clean up expired options
-const cleanupExpiredOptions = () => {
-  const currentTime = Date.now();
-  let expiredCalls = 0;
-  let expiredPuts = 0;
-  
-  // Clean up expired sold calls
-  if (botData.soldCalls) {
-    const expiredCallsList = botData.soldCalls.filter(call => {
-      // Use normalized expiration field (Unix timestamp in seconds)
-      const expirationTime = call.expiration * 1000;
-      
-      return currentTime >= expirationTime;
-    });
-    
-    expiredCalls = expiredCallsList.length;
-    
-    if (expiredCalls > 0) {
-      console.log(`🧹 Cleaning up ${expiredCalls} expired sold calls`);
-
-      // Remove from soldCalls (SQLite closePosition handles the persistent record)
-      botData.soldCalls = botData.soldCalls.filter(call => {
-        const expirationTime = new Date(call.expiration).getTime();
-        return currentTime < expirationTime;
-      });
-    }
-  }
-  
-  // Clean up expired bought puts
-  if (botData.boughtPuts) {
-    const expiredPutsList = botData.boughtPuts.filter(put => {
-      // Use normalized expiration field (Unix timestamp in seconds)
-      const expirationTime = put.expiration * 1000;
-      
-      return currentTime >= expirationTime;
-    });
-    
-    expiredPuts = expiredPutsList.length;
-    
-    if (expiredPuts > 0) {
-      console.log(`🧹 Cleaning up ${expiredPuts} expired bought puts`);
-
-      // Remove from boughtPuts (SQLite closePosition handles the persistent record)
-      botData.boughtPuts = botData.boughtPuts.filter(put => {
-        const expirationTime = new Date(put.expiration).getTime();
-        return currentTime < expirationTime;
-      });
-    }
-  }
-  
-  if (expiredCalls > 0 || expiredPuts > 0) {
-    console.log(`✅ Cleanup complete: ${expiredCalls} calls, ${expiredPuts} puts moved to closed positions`);
-
-    // SQLite: mark expired positions as closed
-    if (db) {
-      try {
-        const openPositions = db.getOpenPositions();
-        for (const pos of openPositions) {
-          if (pos.expiry && (pos.expiry * 1000) <= currentTime) {
-            db.closePosition(pos.id, 'expired', 0, 'expired');
-            db.insertTrade({
-              position_id: pos.id,
-              instrument_name: pos.instrument_name,
-              direction: pos.direction === 'buy' ? 'sell' : 'buy',
-              amount: pos.amount,
-              price: 0,
-              total_value: 0,
-              order_type: 'expired',
-              reason: 'expired',
-            });
-          }
-        }
-      } catch (e) { console.log('DB: cleanup write failed:', e.message); }
-    }
-  }
 };
 
 const runBot = async () => {
@@ -2867,10 +2654,7 @@ const runBot = async () => {
   console.log(' ');
   console.log('─'.repeat(60));
   console.log(`🥱 NO OPERATION RUN`);
-  
-  // Clean up any expired options first
-  cleanupExpiredOptions();
-  
+
   // Get spot price and update momentum
   const spotPrice = await getSpotPrice();
 
@@ -3139,52 +2923,57 @@ const runBot = async () => {
   console.log(`   7-day high: $${botData.shortTermMomentum?.sevenDayHigh?.toFixed(2) || 'N/A'}`);
   console.log(`   7-day low: $${botData.shortTermMomentum?.sevenDayLow?.toFixed(2) || 'N/A'}`);
     
-    // Fetch all option details together for both strategies
+    // Batch-fetch AMM tickers per unique expiry (get_tickers returns AMM prices)
     const allCandidates = [...putCandidates, ...callCandidates];
-    console.log(`🔍 Fetching details for ${allCandidates.length} total candidates (${putCandidates.length} PUT + ${callCandidates.length} CALL)...`);
-    
-    // Add error handling to individual promises
-    const allOptionsPromises = allCandidates.map(async (instrument, index) => {
-      try {
-        const result = await fetchOptionDetails(instrument, spotPrice);
-        return { success: true, data: result, index };
-      } catch (error) {
-        console.log(`⚠️ Failed to fetch details for ${instrument.instrument_name}: ${error.message}`);
-        return { success: false, data: null, index };
+    console.log(`🔍 Fetching AMM tickers for ${allCandidates.length} total candidates (${putCandidates.length} PUT + ${callCandidates.length} CALL)...`);
+
+    // Extract unique expiry dates from instrument names (e.g. "ETH-20260424-1400-P" → "20260424")
+    const expiryDates = [...new Set(allCandidates.map(i => i.instrument_name.split('-')[1]))];
+    console.log(`📅 Unique expiry dates: ${expiryDates.join(', ')} (${expiryDates.length} batch calls)`);
+
+    // Fetch tickers for all expiries in parallel
+    const tickerResults = await Promise.all(
+      expiryDates.map(expiry => fetchTickersByExpiry(expiry))
+    );
+
+    // Merge all ticker maps into one keyed by instrument_name
+    const tickerMap = {};
+    for (const tickers of tickerResults) {
+      for (const [name, data] of Object.entries(tickers)) {
+        tickerMap[name] = data;
       }
-    });
-    
-    const allOptionsResults = await Promise.all(allOptionsPromises);
-    
-    // Filter out failed fetches and separate by index
+    }
+    console.log(`📊 Ticker map contains ${Object.keys(tickerMap).length} instruments`);
+
+    // Enrich candidates from the ticker map
     const putOptionsWithDetails = [];
     const callOptionsWithDetails = [];
     let successfulFetches = 0;
     let failedFetches = 0;
-    
-    // First putCandidates.length results are PUT options
-    for (let i = 0; i < putCandidates.length; i++) {
-      const result = allOptionsResults[i];
-      if (result.success && result.data !== null && result.data !== undefined) {
-        putOptionsWithDetails.push(result.data);
+
+    for (const instrument of putCandidates) {
+      const ticker = tickerMap[instrument.instrument_name];
+      const enriched = enrichCandidateFromTicker(instrument, ticker, spotPrice);
+      if (enriched) {
+        putOptionsWithDetails.push(enriched);
         successfulFetches++;
       } else {
         failedFetches++;
       }
     }
-    
-    // Remaining results are CALL options
-    for (let i = putCandidates.length; i < allOptionsResults.length; i++) {
-      const result = allOptionsResults[i];
-      if (result.success && result.data !== null && result.data !== undefined) {
-        callOptionsWithDetails.push(result.data);
+
+    for (const instrument of callCandidates) {
+      const ticker = tickerMap[instrument.instrument_name];
+      const enriched = enrichCandidateFromTicker(instrument, ticker, spotPrice);
+      if (enriched) {
+        callOptionsWithDetails.push(enriched);
         successfulFetches++;
       } else {
         failedFetches++;
       }
     }
-    
-    console.log(`✅ Successfully fetched ${successfulFetches} option details (${failedFetches} failed)`);
+
+    console.log(`✅ Successfully enriched ${successfulFetches} options from AMM tickers (${failedFetches} missing)`);
 
     // Run both strategies with pre-fetched option details
     let processedPutOptions = [];
@@ -3236,24 +3025,6 @@ const runBot = async () => {
     const checkInterval = determineCheckInterval(botData.mediumTermMomentum, botData.shortTermMomentum, botData);
 
     // Log performance metrics
-    const totalSoldValue = botData.soldCalls.reduce((sum, call) => sum + call.totalRevenue, 0);
-    const averageSoldPrice = botData.soldCalls.length > 0 ? totalSoldValue / botData.soldCalls.length : 0;
-    const soldCallsDetails = botData.soldCalls.map(call => ({
-      instrument_name: call.instrument_name,
-      amount: call.amount,
-      sellPrice: call.sellPrice,
-      totalRevenue: call.totalRevenue
-    }));
-    
-    const totalBoughtValue = botData.boughtPuts.reduce((sum, put) => sum + put.totalCost, 0);
-    const averageBoughtPrice = botData.boughtPuts.length > 0 ? totalBoughtValue / botData.boughtPuts.length : 0;
-    const boughtPutsDetails = botData.boughtPuts.map(put => ({
-      instrument_name: put.instrument_name,
-      amount: put.amount,
-      buyPrice: put.buyPrice,
-      totalCost: put.totalCost
-    }));
-
     try {
       logPerformanceMetrics({
         timestamp: new Date().toISOString(),
@@ -3264,14 +3035,6 @@ const runBot = async () => {
         putUnspentBuyLimit: botData.putUnspentBuyLimit,
         callNetSold: botData.callNetSold,
         callUnspentSellLimit: botData.callUnspentSellLimit,
-        soldCallsCount: botData.soldCalls.length,
-        totalSoldValue: totalSoldValue,
-        averageSoldPrice: averageSoldPrice,
-        soldCallsDetails: soldCallsDetails,
-        boughtPutsCount: botData.boughtPuts.length,
-        totalBoughtValue: totalBoughtValue,
-        averageBoughtPrice: averageBoughtPrice,
-        boughtPutsDetails: boughtPutsDetails
       }, ARCHIVE_DIR);
     } catch (error) {
       console.error('❌ Error logging performance metrics:', error.message);

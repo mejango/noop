@@ -152,37 +152,6 @@ const stmts = {
       @ask_delta_value, @bid_delta_value)
   `),
 
-  insertPosition: db.prepare(`
-    INSERT INTO positions (instrument_name, base_asset_address, base_asset_sub_id, direction,
-      strike, expiry, amount, avg_price, total_cost, status, opened_at, rolled_from_id)
-    VALUES (@instrument_name, @base_asset_address, @base_asset_sub_id, @direction,
-      @strike, @expiry, @amount, @avg_price, @total_cost, 'open', @opened_at, @rolled_from_id)
-  `),
-
-  updatePositionAmount: db.prepare(`
-    UPDATE positions SET amount = amount + @additional_amount,
-      total_cost = total_cost + @additional_cost,
-      avg_price = (total_cost + @additional_cost) / (amount + @additional_amount)
-    WHERE id = @id
-  `),
-
-  closePosition: db.prepare(`
-    UPDATE positions SET status = @status, pnl = @pnl, closed_at = @closed_at,
-      close_reason = @close_reason
-    WHERE id = @id
-  `),
-
-  setRolledTo: db.prepare(`
-    UPDATE positions SET rolled_to_id = @rolled_to_id WHERE id = @id
-  `),
-
-  insertTrade: db.prepare(`
-    INSERT INTO trades (position_id, instrument_name, direction, amount, price, total_value,
-      fee, order_type, reason, timestamp, order_response)
-    VALUES (@position_id, @instrument_name, @direction, @amount, @price, @total_value,
-      @fee, @order_type, @reason, @timestamp, @order_response)
-  `),
-
   insertOnchainData: db.prepare(`
     INSERT INTO onchain_data (timestamp, spot_price, liquidity_flow_direction,
       liquidity_flow_magnitude, liquidity_flow_confidence, whale_count, whale_total_txns,
@@ -206,34 +175,12 @@ const stmts = {
     SELECT * FROM positions WHERE status = 'open' ORDER BY opened_at DESC
   `),
 
-  getOpenPositionByInstrument: db.prepare(`
-    SELECT * FROM positions WHERE instrument_name = @instrument_name AND status = 'open' LIMIT 1
-  `),
-
   getRecentSpotPrices: db.prepare(`
     SELECT * FROM spot_prices WHERE timestamp > @since ORDER BY timestamp DESC
   `),
 
   getRecentSignals: db.prepare(`
     SELECT * FROM strategy_signals WHERE timestamp > @since ORDER BY timestamp DESC LIMIT @limit
-  `),
-
-  getPositionsByStatus: db.prepare(`
-    SELECT * FROM positions WHERE status = @status ORDER BY opened_at DESC
-  `),
-
-  getAllPositions: db.prepare(`
-    SELECT * FROM positions ORDER BY opened_at DESC
-  `),
-
-  getTradesForPosition: db.prepare(`
-    SELECT * FROM trades WHERE position_id = @position_id ORDER BY timestamp ASC
-  `),
-
-  getRecentTrades: db.prepare(`
-    SELECT t.*, p.strike, p.expiry, p.direction as position_direction
-    FROM trades t LEFT JOIN positions p ON t.position_id = p.id
-    WHERE t.timestamp > @since ORDER BY t.timestamp DESC LIMIT @limit
   `),
 
   getRecentOnchain: db.prepare(`
@@ -252,10 +199,6 @@ const stmts = {
 
   getStats: db.prepare(`
     SELECT
-      (SELECT COUNT(*) FROM positions WHERE status = 'open' AND direction = 'buy') as open_puts,
-      (SELECT COUNT(*) FROM positions WHERE status = 'open' AND direction = 'sell') as open_calls,
-      (SELECT COUNT(*) FROM positions) as total_positions,
-      (SELECT COUNT(*) FROM trades) as total_trades,
       (SELECT price FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as last_price,
       (SELECT timestamp FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as last_price_time
   `),
@@ -284,11 +227,6 @@ const stmts = {
     SELECT price, timestamp FROM spot_prices
     WHERE timestamp > @since
     ORDER BY timestamp ASC
-  `),
-
-  getOpenPositionsByDirection: db.prepare(`
-    SELECT * FROM positions WHERE status = 'open' AND direction = @direction
-    ORDER BY opened_at DESC
   `),
 
   // 7-day average premium for call selling elevation check
@@ -323,80 +261,30 @@ const insertSpotPrice = (spotPrice, momentumResult, botData, timestamp) => {
   });
 };
 
+const toNum = (v) => v != null && v !== '' ? Number(v) : null;
+
 const insertOptionsSnapshotBatch = (options, timestamp) => {
   const insert = db.transaction((opts) => {
     for (const opt of opts) {
       stmts.insertOptionsSnapshot.run({
         timestamp,
         instrument_name: opt.instrument_name || '',
-        strike: opt.option_details?.strike ? Number(opt.option_details.strike) : null,
+        strike: toNum(opt.option_details?.strike),
         expiry: opt.option_details?.expiry || null,
-        option_type: opt.option_details?.type || (opt.instrument_name?.includes('-P') ? 'put' : 'call'),
-        delta: opt.details?.delta ? Number(opt.details.delta) : null,
-        ask_price: opt.details?.askPrice ? Number(opt.details.askPrice) : null,
-        bid_price: opt.details?.bidPrice ? Number(opt.details.bidPrice) : null,
-        ask_amount: opt.details?.askAmount ? Number(opt.details.askAmount) : null,
-        bid_amount: opt.details?.bidAmount ? Number(opt.details.bidAmount) : null,
-        mark_price: opt.details?.markPrice ? Number(opt.details.markPrice) : null,
-        index_price: opt.details?.indexPrice ? Number(opt.details.indexPrice) : null,
-        ask_delta_value: opt.details?.askDeltaValue ? Number(opt.details.askDeltaValue) : null,
-        bid_delta_value: opt.details?.bidDeltaValue ? Number(opt.details.bidDeltaValue) : null,
+        option_type: opt.option_details?.option_type || (opt.instrument_name?.includes('-P') ? 'P' : 'C'),
+        delta: toNum(opt.details?.delta),
+        ask_price: toNum(opt.details?.askPrice),
+        bid_price: toNum(opt.details?.bidPrice),
+        ask_amount: toNum(opt.details?.askAmount),
+        bid_amount: toNum(opt.details?.bidAmount),
+        mark_price: toNum(opt.details?.markPrice),
+        index_price: toNum(opt.details?.indexPrice),
+        ask_delta_value: toNum(opt.details?.askDeltaValue),
+        bid_delta_value: toNum(opt.details?.bidDeltaValue),
       });
     }
   });
   insert(options);
-};
-
-const createPosition = (data) => {
-  const result = stmts.insertPosition.run({
-    instrument_name: data.instrument_name,
-    base_asset_address: data.base_asset_address || null,
-    base_asset_sub_id: data.base_asset_sub_id || null,
-    direction: data.direction,
-    strike: data.strike ? Number(data.strike) : null,
-    expiry: data.expiry || null,
-    amount: data.amount,
-    avg_price: data.avg_price,
-    total_cost: data.total_cost,
-    opened_at: data.opened_at || new Date().toISOString(),
-    rolled_from_id: data.rolled_from_id || null,
-  });
-  return result.lastInsertRowid;
-};
-
-const addToPosition = (positionId, additionalAmount, additionalCost) => {
-  stmts.updatePositionAmount.run({
-    id: positionId,
-    additional_amount: additionalAmount,
-    additional_cost: additionalCost,
-  });
-};
-
-const closePosition = (positionId, status, pnl, reason) => {
-  stmts.closePosition.run({
-    id: positionId,
-    status,
-    pnl: pnl || null,
-    closed_at: new Date().toISOString(),
-    close_reason: reason || null,
-  });
-};
-
-const insertTrade = (data) => {
-  const result = stmts.insertTrade.run({
-    position_id: data.position_id || null,
-    instrument_name: data.instrument_name,
-    direction: data.direction,
-    amount: data.amount,
-    price: data.price,
-    total_value: data.total_value,
-    fee: data.fee || null,
-    order_type: data.order_type,
-    reason: data.reason || null,
-    timestamp: data.timestamp || new Date().toISOString(),
-    order_response: data.order_response ? JSON.stringify(data.order_response) : null,
-  });
-  return result.lastInsertRowid;
 };
 
 const insertOnchainData = (analysis) => {
@@ -430,14 +318,8 @@ const insertSignal = (signalType, details, actedOn = false) => {
 
 // Read helpers
 const getOpenPositions = () => stmts.getOpenPositions.all();
-const getOpenPositionByInstrument = (instrumentName) =>
-  stmts.getOpenPositionByInstrument.get({ instrument_name: instrumentName });
 const getRecentSpotPrices = (since) => stmts.getRecentSpotPrices.all({ since });
 const getRecentSignals = (since, limit = 50) => stmts.getRecentSignals.all({ since, limit });
-const getPositionsByStatus = (status) => stmts.getPositionsByStatus.all({ status });
-const getAllPositions = () => stmts.getAllPositions.all();
-const getTradesForPosition = (positionId) => stmts.getTradesForPosition.all({ position_id: positionId });
-const getRecentTrades = (since, limit = 100) => stmts.getRecentTrades.all({ since, limit });
 const getRecentOnchain = (since) => stmts.getRecentOnchain.all({ since });
 const getRecentOptionsSnapshots = (since) => stmts.getRecentOptionsSnapshots.all({ since });
 const getStats = () => stmts.getStats.get();
@@ -471,51 +353,6 @@ const loadPriceHistoryFromDb = () => {
     price: r.price,
     timestamp: new Date(r.timestamp).getTime(),
   }));
-};
-
-const loadOpenPositionsAsArrays = () => {
-  const buyPositions = stmts.getOpenPositionsByDirection.all({ direction: 'buy' });
-  const sellPositions = stmts.getOpenPositionsByDirection.all({ direction: 'sell' });
-
-  const boughtPuts = buyPositions.map(pos => {
-    const trades = stmts.getTradesForPosition.all({ position_id: pos.id });
-    return {
-      instrument_name: pos.instrument_name,
-      base_asset_address: pos.base_asset_address,
-      base_asset_sub_id: pos.base_asset_sub_id,
-      strike: pos.strike,
-      expiration: pos.expiry,
-      totalAmount: pos.amount,
-      orders: trades.map(t => ({
-        amount: t.amount,
-        buyPrice: t.price,
-        buyTimestamp: t.timestamp,
-        delta: null,
-        totalCost: t.total_value,
-      })),
-    };
-  });
-
-  const soldCalls = sellPositions.map(pos => {
-    const trades = stmts.getTradesForPosition.all({ position_id: pos.id });
-    return {
-      instrument_name: pos.instrument_name,
-      base_asset_address: pos.base_asset_address,
-      base_asset_sub_id: pos.base_asset_sub_id,
-      strike: pos.strike,
-      expiration: pos.expiry,
-      totalAmount: pos.amount,
-      orders: trades.map(t => ({
-        amount: t.amount,
-        sellPrice: t.price,
-        sellTimestamp: t.timestamp,
-        delta: null,
-        totalRevenue: t.total_value,
-      })),
-    };
-  });
-
-  return { boughtPuts, soldCalls };
 };
 
 const migrateFromJson = (jsonPath) => {
@@ -553,22 +390,12 @@ module.exports = {
   db,
   insertSpotPrice,
   insertOptionsSnapshotBatch,
-  createPosition,
-  addToPosition,
-  closePosition,
-  setRolledTo: (positionId, rolledToId) => stmts.setRolledTo.run({ id: positionId, rolled_to_id: rolledToId }),
-  insertTrade,
   insertOnchainData,
   insertSignal,
   markSignalActed: (id) => stmts.markSignalActed.run({ id }),
   getOpenPositions,
-  getOpenPositionByInstrument,
   getRecentSpotPrices,
   getRecentSignals,
-  getPositionsByStatus,
-  getAllPositions,
-  getTradesForPosition,
-  getRecentTrades,
   getRecentOnchain,
   getRecentOptionsSnapshots,
   getStats,
@@ -576,7 +403,6 @@ module.exports = {
   saveBotState,
   loadBotState,
   loadPriceHistoryFromDb,
-  loadOpenPositionsAsArrays,
   migrateFromJson,
   close,
 };

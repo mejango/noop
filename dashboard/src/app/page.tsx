@@ -23,10 +23,6 @@ interface Budget {
 }
 
 interface Stats {
-  open_puts: number;
-  open_calls: number;
-  total_positions: number;
-  total_trades: number;
   last_price: number;
   last_price_time: string;
   short_momentum: string;
@@ -37,8 +33,6 @@ interface Stats {
   three_day_low: number;
   seven_day_high: number;
   seven_day_low: number;
-  open_put_cost: number;
-  open_call_revenue: number;
   budget: Budget;
 }
 
@@ -117,10 +111,9 @@ const emptyBudget: Budget = {
 };
 
 const emptyStats: Stats = {
-  open_puts: 0, open_calls: 0, total_positions: 0, total_trades: 0,
   last_price: 0, last_price_time: '', short_momentum: '', short_derivative: '',
   medium_momentum: '', medium_derivative: '', three_day_high: 0, three_day_low: 0,
-  seven_day_high: 0, seven_day_low: 0, open_put_cost: 0, open_call_revenue: 0,
+  seven_day_high: 0, seven_day_low: 0,
   budget: emptyBudget,
 };
 
