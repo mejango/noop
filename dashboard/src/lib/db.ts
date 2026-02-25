@@ -171,6 +171,50 @@ export function getRecentTicks(limit = 50) {
   `).all(limit);
 }
 
+export function getOpenPositions() {
+  const d = getDb();
+  return d.prepare(`
+    SELECT id, instrument_name, direction, strike, expiry, amount, avg_price, total_cost, opened_at
+    FROM positions
+    WHERE status = 'open'
+    ORDER BY opened_at DESC
+  `).all();
+}
+
+export function getRecentTrades(limit = 20) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT t.id, t.timestamp, t.direction, t.amount, t.price, t.total_value, t.fee, t.order_type, t.reason,
+      p.instrument_name, p.strike, p.expiry
+    FROM trades t
+    LEFT JOIN positions p ON t.position_id = p.id
+    ORDER BY t.timestamp DESC
+    LIMIT ?
+  `).all(limit);
+}
+
+export function getOnchainData(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
+      liquidity_flow_confidence, whale_count, whale_total_txns, exhaustion_score, exhaustion_alert_level
+    FROM onchain_data
+    WHERE timestamp > ?
+    ORDER BY timestamp DESC
+  `).all(since);
+}
+
+export function getSignals(since: string, limit = 50) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT id, timestamp, signal_type, details, acted_on
+    FROM strategy_signals
+    WHERE timestamp > ?
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(since, limit);
+}
+
 export function getBotBudget() {
   const empty = {
     putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0,

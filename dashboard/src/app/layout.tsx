@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import Nav from "@/components/Nav";
+import AdvisorDrawer from "@/components/AdvisorDrawer";
 
 const jetbrainsMono = JetBrains_Mono({
   subsets: ["latin"],
@@ -28,6 +29,7 @@ export default function RootLayout({
         <main className="max-w-7xl mx-auto px-3 py-4 md:px-6 md:py-6">
           {children}
         </main>
+        <AdvisorDrawer />
       </body>
     </html>
   );
