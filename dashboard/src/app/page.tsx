@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useMemo, useCallback } from 'react';
-import { usePolling } from '@/lib/hooks';
+import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, momentumColor, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
@@ -158,6 +158,7 @@ const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: 
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 120, left: 10, bottom: 0 };
+const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 0 };
 
 // Custom star shape for trade markers
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -199,6 +200,8 @@ const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
 
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('6.2d');
+  const mobile = useIsMobile();
+  const margins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
@@ -453,7 +456,7 @@ export default function OverviewPage() {
   return (
     <div className="space-y-6">
       {/* Left: Range + Best Options | Right: Momentum */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <Card title="Price Range" subtitle="High / Low" className="flex flex-col">
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
             <div className="flex items-center gap-3">
@@ -544,7 +547,7 @@ export default function OverviewPage() {
           </div>
         </Card>
 
-        <Card title="Momentum" className="col-span-2 flex flex-col overflow-hidden">
+        <Card title="Momentum" className="sm:col-span-2 flex flex-col overflow-hidden">
           <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
             <div className="flex items-center gap-3 min-w-0">
               <span className="text-xs text-gray-500 w-12 shrink-0">Medium</span>
@@ -565,13 +568,13 @@ export default function OverviewPage() {
       </div>
 
       {/* Time Range Selector */}
-      <div className="flex items-center justify-between">
-        <div className="flex gap-1">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex gap-1 overflow-x-auto hide-scrollbar">
           {ranges.map(r => (
             <button
               key={r}
               onClick={() => setRange(r)}
-              className={`px-3 py-1 rounded text-sm ${
+              className={`px-2 md:px-3 py-1 rounded text-xs md:text-sm shrink-0 ${
                 range === r
                   ? 'bg-white/10 text-white border border-white/20'
                   : 'text-gray-400 hover:bg-white/10 hover:text-white'
@@ -592,12 +595,12 @@ export default function OverviewPage() {
       {/* Big Combined Chart */}
       <Card>
         {loading && merged.length === 0 ? (
-          <div className="h-[500px] flex items-center justify-center text-gray-500">Loading...</div>
+          <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">Loading...</div>
         ) : merged.length === 0 ? (
-          <div className="h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
+          <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
-          <ResponsiveContainer width="100%" height={500}>
-            <ComposedChart data={merged} margin={CHART_MARGINS} syncId="main">
+          <ResponsiveContainer width="100%" height={mobile ? 300 : 500}>
+            <ComposedChart data={merged} margin={margins} syncId="main">
               <XAxis
                 dataKey="ts"
                 type="number"
@@ -613,7 +616,7 @@ export default function OverviewPage() {
                 tickFormatter={(v) => `$${v}`}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={70}
+                width={mobile ? 45 : 70}
               />
               {/* Hidden axes for PUT/CALL overlay */}
               <YAxis yAxisId="putVal" orientation="right" hide domain={['auto', 'auto']} />
@@ -681,7 +684,7 @@ export default function OverviewPage() {
       {/* Momentum Bar — two rows: medium (top) + short (bottom) */}
       {momentumData.length > 0 && (
         <Card>
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Momentum</span>
             <div className="flex gap-3 text-xs text-gray-500">
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#4ade80' }} /> upward</span>
@@ -689,7 +692,7 @@ export default function OverviewPage() {
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: '#555' }} /> neutral</span>
             </div>
           </div>
-          <div style={{ marginLeft: CHART_MARGINS.left, marginRight: CHART_MARGINS.right }}>
+          <div style={{ marginLeft: margins.left, marginRight: margins.right }}>
             <div className="flex items-center gap-1">
               <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">medium</span>
               <div className="flex rounded-t overflow-hidden flex-1" style={{ height: 10 }}>
@@ -731,7 +734,7 @@ export default function OverviewPage() {
         const formatDexName = (name: string) => name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         return (
           <Card>
-            <div className="flex items-center justify-between mb-1">
+            <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
               <span className="text-xs font-medium text-gray-400">DEX Liquidity (TVL)</span>
               <div className="flex gap-3 text-xs text-gray-500">
                 {dexNames.map((name, i) => (
@@ -742,13 +745,13 @@ export default function OverviewPage() {
               </div>
             </div>
             <ResponsiveContainer width="100%" height={100}>
-              <ComposedChart data={filteredLiquidity} margin={CHART_MARGINS} syncId="main">
+              <ComposedChart data={filteredLiquidity} margin={margins} syncId="main">
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 <YAxis
                   tickFormatter={(v) => `$${(v / 1e6).toFixed(0)}M`}
                   stroke={chartAxis.stroke}
                   tick={chartAxis.tick}
-                  width={55}
+                  width={mobile ? 35 : 55}
                 />
                 <Tooltip
                   {...chartTooltip}
@@ -769,7 +772,7 @@ export default function OverviewPage() {
       {/* Put Market Heatmap */}
       {filteredPutHeatmap.length > 0 && (
         <Card>
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Put Market</span>
             <div className="flex gap-3 text-xs text-gray-500">
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> cheap</span>
@@ -778,7 +781,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <ResponsiveContainer width="100%" height={200}>
-            <ScatterChart margin={CHART_MARGINS} syncId="main">
+            <ScatterChart margin={margins} syncId="main">
               <XAxis
                 dataKey="ts"
                 type="number"
@@ -794,7 +797,7 @@ export default function OverviewPage() {
                 tickFormatter={(v) => v.toFixed(2)}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={55}
+                width={mobile ? 35 : 55}
               />
               <Tooltip
                 {...chartTooltip}
@@ -831,7 +834,7 @@ export default function OverviewPage() {
       {/* Call Market Heatmap */}
       {filteredCallHeatmap.length > 0 && (
         <Card>
-          <div className="flex items-center justify-between mb-1">
+          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Call Market</span>
             <div className="flex gap-3 text-xs text-gray-500">
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> cheap</span>
@@ -840,7 +843,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <ResponsiveContainer width="100%" height={200}>
-            <ScatterChart margin={CHART_MARGINS} syncId="main">
+            <ScatterChart margin={margins} syncId="main">
               <XAxis
                 dataKey="ts"
                 type="number"
@@ -856,7 +859,7 @@ export default function OverviewPage() {
                 tickFormatter={(v) => v.toFixed(2)}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={55}
+                width={mobile ? 35 : 55}
               />
               <Tooltip
                 {...chartTooltip}
@@ -897,8 +900,8 @@ export default function OverviewPage() {
           <span className="text-xs font-medium text-gray-400">Tick Log</span>
           <span className="text-xs text-gray-600">{ticks.length} ticks</span>
         </div>
-        <div className="overflow-auto" style={{ maxHeight: 400 }}>
-          <table className="w-full text-sm">
+        <div className="overflow-auto max-h-[300px] md:max-h-[400px]">
+          <table className="w-full text-xs md:text-sm">
             <thead className="sticky top-0 bg-[#111] z-10">
               <tr className="text-xs text-gray-500 border-b border-white/5">
                 <th className="text-left py-2 px-3 font-medium">Time</th>
@@ -945,7 +948,21 @@ export default function OverviewPage() {
                         )}
                       </span>
                       <span className="text-gray-600"> / </span>
-                      <span className="text-gray-500">{Number(d.historical?.best_put_score) > 0 ? Number(d.historical.best_put_score).toFixed(6) : '--'}</span>
+                      <span className="relative inline-block group/pb">
+                        <span className="text-gray-500 cursor-help">{Number(d.historical?.best_put_score) > 0 ? Number(d.historical.best_put_score).toFixed(6) : '--'}</span>
+                        {chart.bestScores.bestPutDetail && (
+                          <div className="absolute right-0 top-full mt-1 hidden group-hover/pb:block z-20 pointer-events-none">
+                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                              <div className="text-gray-400 mb-1">Best PUT ({chart.bestScores.windowDays}d)</div>
+                              <div>Delta: <span className="text-white">{Number(chart.bestScores.bestPutDetail.delta).toFixed(4)}</span></div>
+                              <div>Price: <span className="text-white">{Number(chart.bestScores.bestPutDetail.price).toFixed(6)}</span></div>
+                              <div>Strike: <span className="text-white">${Number(chart.bestScores.bestPutDetail.strike).toFixed(0)}</span></div>
+                              <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestPutDetail.expiry) ?? 'N/A'}</span></div>
+                              {chart.bestScores.bestPutDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestPutDetail.instrument}</div>}
+                            </div>
+                          </div>
+                        )}
+                      </span>
                     </td>
                     <td className="py-1.5 px-3 text-right tabular-nums text-xs">
                       <span className="relative inline-block group/cn">
@@ -964,7 +981,21 @@ export default function OverviewPage() {
                         )}
                       </span>
                       <span className="text-gray-600"> / </span>
-                      <span className="text-gray-500">{Number(d.historical?.best_call_score) > 0 ? Number(d.historical.best_call_score).toFixed(2) : '--'}</span>
+                      <span className="relative inline-block group/cb">
+                        <span className="text-gray-500 cursor-help">{Number(d.historical?.best_call_score) > 0 ? Number(d.historical.best_call_score).toFixed(2) : '--'}</span>
+                        {chart.bestScores.bestCallDetail && (
+                          <div className="absolute right-0 top-full mt-1 hidden group-hover/cb:block z-20 pointer-events-none">
+                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                              <div className="text-gray-400 mb-1">Best CALL ({chart.bestScores.windowDays}d)</div>
+                              <div>Delta: <span className="text-white">{Number(chart.bestScores.bestCallDetail.delta).toFixed(4)}</span></div>
+                              <div>Price: <span className="text-white">{Number(chart.bestScores.bestCallDetail.price).toFixed(6)}</span></div>
+                              <div>Strike: <span className="text-white">${Number(chart.bestScores.bestCallDetail.strike).toFixed(0)}</span></div>
+                              <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestCallDetail.expiry) ?? 'N/A'}</span></div>
+                              {chart.bestScores.bestCallDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestCallDetail.instrument}</div>}
+                            </div>
+                          </div>
+                        )}
+                      </span>
                     </td>
                     <td className="py-1.5 px-3 text-right text-xs text-gray-400">
                       {d.instruments.total} <span className="text-gray-600">({d.instruments.put_candidates}P/{d.instruments.call_candidates}C)</span>
