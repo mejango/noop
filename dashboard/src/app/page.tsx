@@ -308,7 +308,7 @@ export default function OverviewPage() {
     for (const t of chart.trades) {
       const idx = snapToNearest(new Date(t.timestamp).getTime());
       rows[idx].trade = rows[idx].price;
-      rows[idx].tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${t.price.toFixed(2)}`;
+      rows[idx].tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${Number(t.price).toFixed(2)}`;
     }
 
     return rows;
@@ -465,15 +465,15 @@ export default function OverviewPage() {
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">PUT</span>
-              <span className="text-red-400 font-medium">{chart.bestScores.bestPutScore > 0 ? chart.bestScores.bestPutScore.toFixed(6) : '--'}</span>
+              <span className="text-red-400 font-medium">{Number(chart.bestScores.bestPutScore) > 0 ? Number(chart.bestScores.bestPutScore).toFixed(6) : '--'}</span>
               <span className="text-gray-600">/</span>
-              <span className="text-red-400">{(latestTick?.current_best_put ?? 0) > 0 ? latestTick!.current_best_put.toFixed(6) : '--'}</span>
+              <span className="text-red-400">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : '--'}</span>
             </div>
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
-              <span className="text-cyan-400 font-medium">{chart.bestScores.bestCallScore > 0 ? chart.bestScores.bestCallScore.toFixed(2) : '--'}</span>
+              <span className="text-cyan-400 font-medium">{Number(chart.bestScores.bestCallScore) > 0 ? Number(chart.bestScores.bestCallScore).toFixed(2) : '--'}</span>
               <span className="text-gray-600">/</span>
-              <span className="text-cyan-400">{(latestTick?.current_best_call ?? 0) > 0 ? latestTick!.current_best_call.toFixed(2) : '--'}</span>
+              <span className="text-cyan-400">{Number(latestTick?.current_best_call ?? 0) > 0 ? Number(latestTick!.current_best_call).toFixed(2) : '--'}</span>
             </div>
           </div>
         </Card>
@@ -561,8 +561,8 @@ export default function OverviewPage() {
                   if (!row) return null;
                   const bestPut = row.bestPut;
                   const bestCall = row.bestCall;
-                  const fmtPut = bestPut != null && bestPut > 0 ? bestPut.toFixed(6) : 'N/A';
-                  const fmtCall = bestCall != null && bestCall > 0 ? bestCall.toFixed(2) : 'N/A';
+                  const fmtPut = bestPut != null && Number(bestPut) > 0 ? Number(bestPut).toFixed(6) : 'N/A';
+                  const fmtCall = bestCall != null && Number(bestCall) > 0 ? Number(bestCall).toFixed(2) : 'N/A';
                   const { bestPutScore, bestCallScore, windowDays } = chart.bestScores;
                   return (
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
@@ -572,9 +572,9 @@ export default function OverviewPage() {
                       <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}</div>
                       <div className="border-t border-white/10 mt-1.5 pt-1.5 text-xs text-gray-500">
                         Best scores ({windowDays}d window):
-                        <span style={{ color: chartColors.red }}> P {bestPutScore.toFixed(6)}</span>
+                        <span style={{ color: chartColors.red }}> P {Number(bestPutScore).toFixed(6)}</span>
                         {' / '}
-                        <span style={{ color: chartColors.secondary }}>C {bestCallScore.toFixed(2)}</span>
+                        <span style={{ color: chartColors.secondary }}>C {Number(bestCallScore).toFixed(2)}</span>
                       </div>
                     </div>
                   );
@@ -700,68 +700,6 @@ export default function OverviewPage() {
         );
       })()}
 
-      {/* Call Market Heatmap */}
-      {filteredCallHeatmap.length > 0 && (
-        <Card>
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs font-medium text-gray-400">Call Market</span>
-            <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> cheap</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> rich</span>
-              <span className="text-gray-600">bid premium</span>
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height={200}>
-            <ScatterChart margin={CHART_MARGINS} syncId="main">
-              <XAxis
-                dataKey="ts"
-                type="number"
-                domain={xDomain}
-                tickFormatter={xTickFormatter}
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tick}
-              />
-              <YAxis
-                dataKey="absDelta"
-                name="Delta"
-                domain={[0, 'auto']}
-                tickFormatter={(v) => v.toFixed(2)}
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tick}
-                width={55}
-              />
-              <Tooltip
-                {...chartTooltip}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                content={({ active, payload }: any) => {
-                  if (!active || !payload?.[0]?.payload) return null;
-                  const d = payload[0].payload as HeatmapDot;
-                  return (
-                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
-                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
-                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
-                      <div className="text-sm">Delta: <span className="text-cyan-300">{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
-                      <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
-                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
-                      <div className="text-sm">Bid: <span className="text-cyan-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
-                      <div className="text-sm">Ask: <span className="text-gray-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
-                    </div>
-                  );
-                }}
-              />
-              {/* Band showing bot's active call delta range: 0.04–0.12 */}
-              <ReferenceArea y1={0.04} y2={0.12} fill="#5CEBDF" fillOpacity={0.12} stroke="#5CEBDF" strokeOpacity={0.15} />
-              <Scatter
-                data={filteredCallHeatmap}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                shape={(props: any) => <HeatmapDotShape {...props} type="call" />}
-                isAnimationActive={false}
-              />
-            </ScatterChart>
-          </ResponsiveContainer>
-        </Card>
-      )}
-
       {/* Put Market Heatmap */}
       {filteredPutHeatmap.length > 0 && (
         <Card>
@@ -824,6 +762,68 @@ export default function OverviewPage() {
         </Card>
       )}
 
+      {/* Call Market Heatmap */}
+      {filteredCallHeatmap.length > 0 && (
+        <Card>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-xs font-medium text-gray-400">Call Market</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> cheap</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> rich</span>
+              <span className="text-gray-600">bid premium</span>
+            </div>
+          </div>
+          <ResponsiveContainer width="100%" height={200}>
+            <ScatterChart margin={CHART_MARGINS} syncId="main">
+              <XAxis
+                dataKey="ts"
+                type="number"
+                domain={xDomain}
+                tickFormatter={xTickFormatter}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+              />
+              <YAxis
+                dataKey="absDelta"
+                name="Delta"
+                domain={[0, 'auto']}
+                tickFormatter={(v) => v.toFixed(2)}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={55}
+              />
+              <Tooltip
+                {...chartTooltip}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                content={({ active, payload }: any) => {
+                  if (!active || !payload?.[0]?.payload) return null;
+                  const d = payload[0].payload as HeatmapDot;
+                  return (
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
+                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
+                      <div className="text-sm">Delta: <span className="text-cyan-300">{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
+                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
+                      <div className="text-sm">Bid: <span className="text-cyan-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span className="text-gray-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
+                    </div>
+                  );
+                }}
+              />
+              {/* Band showing bot's active call delta range: 0.04–0.12 */}
+              <ReferenceArea y1={0.04} y2={0.12} fill="#5CEBDF" fillOpacity={0.12} stroke="#5CEBDF" strokeOpacity={0.15} />
+              <Scatter
+                data={filteredCallHeatmap}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                shape={(props: any) => <HeatmapDotShape {...props} type="call" />}
+                isAnimationActive={false}
+              />
+            </ScatterChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
       {/* Data Table: spot price, best put, best call */}
       {/* Tick Log Table */}
       <Card>
@@ -864,17 +864,17 @@ export default function OverviewPage() {
                     </td>
                     <td className="py-1.5 px-3 text-right tabular-nums text-xs relative group">
                       <span className="cursor-help">
-                        <span style={{ color: chartColors.red }}>{(d.current_best_put ?? 0) > 0 ? d.current_best_put.toFixed(6) : '--'}</span>
+                        <span style={{ color: chartColors.red }}>{Number(d.current_best_put ?? 0) > 0 ? Number(d.current_best_put).toFixed(6) : '--'}</span>
                         <span className="text-gray-600"> / </span>
-                        <span className="text-gray-500">{d.historical.best_put_score > 0 ? d.historical.best_put_score.toFixed(6) : '--'}</span>
+                        <span className="text-gray-500">{Number(d.historical?.best_put_score) > 0 ? Number(d.historical.best_put_score).toFixed(6) : '--'}</span>
                       </span>
                       {d.best_put_detail && (
                         <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
                           <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                             <div className="text-gray-400 mb-1">Best PUT option</div>
-                            <div>Delta: <span className="text-white">{d.best_put_detail.delta?.toFixed(4) ?? 'N/A'}</span></div>
-                            <div>Price: <span className="text-white">{d.best_put_detail.price?.toFixed(6) ?? 'N/A'}</span></div>
-                            <div>Strike: <span className="text-white">${d.best_put_detail.strike?.toFixed(0) ?? 'N/A'}</span></div>
+                            <div>Delta: <span className="text-white">{d.best_put_detail.delta != null ? Number(d.best_put_detail.delta).toFixed(4) : 'N/A'}</span></div>
+                            <div>Price: <span className="text-white">{d.best_put_detail.price != null ? Number(d.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
+                            <div>Strike: <span className="text-white">{d.best_put_detail.strike != null ? `$${Number(d.best_put_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
                             <div>DTE: <span className="text-white">{dteDays(d.best_put_detail.expiry) ?? 'N/A'}</span></div>
                           </div>
                         </div>
@@ -882,17 +882,17 @@ export default function OverviewPage() {
                     </td>
                     <td className="py-1.5 px-3 text-right tabular-nums text-xs relative group">
                       <span className="cursor-help">
-                        <span style={{ color: chartColors.secondary }}>{(d.current_best_call ?? 0) > 0 ? d.current_best_call.toFixed(2) : '--'}</span>
+                        <span style={{ color: chartColors.secondary }}>{Number(d.current_best_call ?? 0) > 0 ? Number(d.current_best_call).toFixed(2) : '--'}</span>
                         <span className="text-gray-600"> / </span>
-                        <span className="text-gray-500">{d.historical.best_call_score > 0 ? d.historical.best_call_score.toFixed(2) : '--'}</span>
+                        <span className="text-gray-500">{Number(d.historical?.best_call_score) > 0 ? Number(d.historical.best_call_score).toFixed(2) : '--'}</span>
                       </span>
                       {d.best_call_detail && (
                         <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
                           <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                             <div className="text-gray-400 mb-1">Best CALL option</div>
-                            <div>Delta: <span className="text-white">{d.best_call_detail.delta?.toFixed(4) ?? 'N/A'}</span></div>
-                            <div>Price: <span className="text-white">{d.best_call_detail.price?.toFixed(6) ?? 'N/A'}</span></div>
-                            <div>Strike: <span className="text-white">${d.best_call_detail.strike?.toFixed(0) ?? 'N/A'}</span></div>
+                            <div>Delta: <span className="text-white">{d.best_call_detail.delta != null ? Number(d.best_call_detail.delta).toFixed(4) : 'N/A'}</span></div>
+                            <div>Price: <span className="text-white">{d.best_call_detail.price != null ? Number(d.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
+                            <div>Strike: <span className="text-white">{d.best_call_detail.strike != null ? `$${Number(d.best_call_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
                             <div>DTE: <span className="text-white">{dteDays(d.best_call_detail.expiry) ?? 'N/A'}</span></div>
                           </div>
                         </div>
@@ -913,7 +913,7 @@ export default function OverviewPage() {
                       </span>
                     </td>
                     <td className="py-1.5 px-3 text-right text-xs text-gray-500">
-                      {d.next_check_minutes.toFixed(0)}m
+                      {Number(d.next_check_minutes ?? 0).toFixed(0)}m
                     </td>
                   </tr>
                 );
