@@ -141,7 +141,7 @@ const emptyStats: Stats = {
 };
 
 const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2 }, optionsHeatmap: [] };
-const ranges = ['1h', '6h', '24h', '3d', '7d', '30d'] as const;
+const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 120, left: 10, bottom: 0 };
 const PAGE_SIZE = 100;
@@ -185,7 +185,7 @@ const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
 };
 
 export default function OverviewPage() {
-  const [range, setRange] = useState<string>('7d');
+  const [range, setRange] = useState<string>('6.2d');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const tableRef = useRef<HTMLDivElement>(null);
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats);
@@ -606,12 +606,19 @@ export default function OverviewPage() {
                   const bestCall = row.bestCall;
                   const fmtPut = bestPut != null && bestPut > 0 ? bestPut.toFixed(6) : 'N/A';
                   const fmtCall = bestCall != null && bestCall > 0 ? bestCall.toFixed(2) : 'N/A';
+                  const { bestPutScore, bestCallScore, windowDays } = chart.bestScores;
                   return (
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
                       <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
                       <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}</div>
                       <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}</div>
+                      <div className="border-t border-white/10 mt-1.5 pt-1.5 text-xs text-gray-500">
+                        Best scores ({windowDays}d window):
+                        <span style={{ color: chartColors.red }}> P {bestPutScore.toFixed(6)}</span>
+                        {' / '}
+                        <span style={{ color: chartColors.secondary }}>C {bestCallScore.toFixed(2)}</span>
+                      </div>
                     </div>
                   );
                 }}
@@ -624,6 +631,14 @@ export default function OverviewPage() {
               )}
               {stats.seven_day_low > 0 && stats.seven_day_low < Infinity && (
                 <ReferenceLine yAxisId="price" y={stats.seven_day_low} stroke={chartColors.refLow} strokeDasharray="3 3" strokeOpacity={0.4} />
+              )}
+
+              {/* Best score reference lines (dotted) */}
+              {chart.bestScores.bestPutScore > 0 && (
+                <ReferenceLine yAxisId="putVal" y={chart.bestScores.bestPutScore} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.5} />
+              )}
+              {chart.bestScores.bestCallScore > 0 && (
+                <ReferenceLine yAxisId="callVal" y={chart.bestScores.bestCallScore} stroke={chartColors.secondary} strokeDasharray="4 4" strokeOpacity={0.5} />
               )}
 
               {/* ETH price line */}
