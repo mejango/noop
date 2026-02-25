@@ -548,14 +548,14 @@ export default function OverviewPage() {
         <Card title="Momentum" className="sm:col-span-2 flex flex-col overflow-hidden">
           <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
             <div className="flex items-center gap-3 min-w-0">
-              <span className="text-xs text-gray-500 w-12 shrink-0">Medium</span>
+              <span className="text-xs text-gray-500 w-20 shrink-0">Medium term</span>
               <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
                 {stats.medium_momentum || 'neutral'}
               </span>
               {stats.medium_derivative && <span className="text-xs text-gray-500 truncate">({stats.medium_derivative})</span>}
             </div>
             <div className="flex items-center gap-3 min-w-0">
-              <span className="text-xs text-gray-500 w-12 shrink-0">Short</span>
+              <span className="text-xs text-gray-500 w-20 shrink-0">Short term</span>
               <span className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
                 {stats.short_momentum || 'neutral'}
               </span>
