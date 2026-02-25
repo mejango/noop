@@ -40,7 +40,9 @@ interface SpotPrice {
   timestamp: string;
   price: number;
   short_momentum_main: string;
+  short_momentum_derivative: string;
   medium_momentum_main: string;
+  medium_momentum_derivative: string;
 }
 
 interface OptionsPoint {
@@ -170,9 +172,28 @@ const StarDot = (props: any) => {
   );
 };
 
-// Momentum color helper for bar cells
-const momentumBarColor = (m: string | undefined | null) =>
-  m === 'upward' ? '#4ade80' : m === 'downward' ? '#f87171' : '#555';
+// Momentum color helpers for bar cells (derivative-aware shading)
+const momentumBarColorMedium = (m: string | undefined | null, derivative: string | undefined | null) => {
+  if (m === 'upward') return derivative === 'accelerating' ? '#4ade80' : '#166534';
+  if (m === 'downward') return derivative === 'accelerating' ? '#f87171' : '#7f1d1d';
+  return '#555';
+};
+const momentumBarColorShort = (m: string | undefined | null, derivative: string | undefined | null) => {
+  const base = derivative?.replace(/_with_spikes\(.*\)$/, '') ?? '';
+  if (m === 'upward') {
+    if (base === 'steep') return '#4ade80';
+    if (base === 'slanted') return '#22c55e';
+    if (base === 'moving') return '#16a34a';
+    return '#166534'; // flat or unknown
+  }
+  if (m === 'downward') {
+    if (base === 'steep') return '#f87171';
+    if (base === 'slanted') return '#ef4444';
+    if (base === 'moving') return '#dc2626';
+    return '#991b1b'; // flat or unknown
+  }
+  return '#555';
+};
 
 // Color interpolation for heatmap intensity (0=dim, 1=bright)
 const lerpColor = (a: [number, number, number], b: [number, number, number], t: number): string => {
@@ -232,6 +253,8 @@ export default function OverviewPage() {
       price?: number;
       momentum?: string;
       shortMomentum?: string;
+      mediumDerivative?: string;
+      shortDerivative?: string;
       momentumVal?: number;
       bestPut?: number | null;
       bestCall?: number | null;
@@ -249,6 +272,8 @@ export default function OverviewPage() {
         price: p.price,
         momentum: m,
         shortMomentum: p.short_momentum_main || 'neutral',
+        mediumDerivative: p.medium_momentum_derivative || undefined,
+        shortDerivative: p.short_momentum_derivative || undefined,
         momentumVal: 1, // all bars same height, color shows direction
       };
     });
@@ -696,12 +721,12 @@ export default function OverviewPage() {
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Momentum</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#4ade80' }} /> upward</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#f87171' }} /> downward</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#4ade80' }} /> bright = accelerating</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#166534' }} /> dim = decelerating</span>
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: '#555' }} /> neutral</span>
             </div>
           </div>
-          <div style={{ marginLeft: margins.left, marginRight: margins.right }}>
+          <div style={{ marginLeft: margins.left + (mobile ? 45 : 70), marginRight: margins.right }}>
             <div className="flex items-center gap-1">
               <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">medium</span>
               <div className="flex rounded-t overflow-hidden flex-1" style={{ height: 10 }}>
@@ -709,8 +734,8 @@ export default function OverviewPage() {
                   <div
                     key={i}
                     className="flex-1"
-                    style={{ background: momentumBarColor(d.momentum) }}
-                    title={`${new Date(d.ts).toLocaleString()}\nMedium: ${d.momentum}\nShort: ${d.shortMomentum}`}
+                    style={{ background: momentumBarColorMedium(d.momentum, d.mediumDerivative) }}
+                    title={`${new Date(d.ts).toLocaleString()}\nMedium: ${d.momentum} (${d.mediumDerivative ?? 'n/a'})\nShort: ${d.shortMomentum} (${d.shortDerivative ?? 'n/a'})`}
                   />
                 ))}
               </div>
@@ -722,8 +747,8 @@ export default function OverviewPage() {
                   <div
                     key={i}
                     className="flex-1"
-                    style={{ background: momentumBarColor(d.shortMomentum) }}
-                    title={`${new Date(d.ts).toLocaleString()}\nMedium: ${d.momentum}\nShort: ${d.shortMomentum}`}
+                    style={{ background: momentumBarColorShort(d.shortMomentum, d.shortDerivative) }}
+                    title={`${new Date(d.ts).toLocaleString()}\nMedium: ${d.momentum} (${d.mediumDerivative ?? 'n/a'})\nShort: ${d.shortMomentum} (${d.shortDerivative ?? 'n/a'})`}
                   />
                 ))}
               </div>
