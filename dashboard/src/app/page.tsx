@@ -6,7 +6,7 @@ import { formatUSD, timeAgo, momentumColor } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import {
-  ComposedChart, Line, Area, Scatter, XAxis, YAxis, Tooltip,
+  ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
 } from 'recharts';
 
@@ -196,7 +196,7 @@ export default function OverviewPage() {
       bestCall?: number | null;
       bestPutDetail?: OptionDetail;
       bestCallDetail?: OptionDetail;
-      liquidity?: number;
+      liquidity?: Record<string, number>;
       trade?: number;
       tradeInfo?: string;
     };
@@ -277,8 +277,16 @@ export default function OverviewPage() {
 
     // Snap liquidity data to nearest price point
     for (const l of chart.liquidity) {
-      const idx = snapToNearest(new Date(l.timestamp).getTime());
-      rows[idx].liquidity = l.tvl;
+      const idx = snapToNearest(new Date(l.timestamp as string).getTime());
+      const dexValues: Record<string, number> = {};
+      for (const [key, val] of Object.entries(l)) {
+        if (key !== 'timestamp' && typeof val === 'number') {
+          dexValues[key] = val;
+        }
+      }
+      if (Object.keys(dexValues).length > 0) {
+        rows[idx].liquidity = dexValues;
+      }
     }
 
     // Snap trade markers to nearest price point
@@ -302,11 +310,21 @@ export default function OverviewPage() {
     [merged]
   );
 
-  // Data for liquidity bar (only points with liquidity data)
-  const liquidityData = useMemo(() =>
-    merged.filter(d => d.liquidity != null),
-    [merged]
-  );
+  // Data for liquidity chart: flatten per-dex values into top-level keys
+  const { liquidityData, dexNames } = useMemo(() => {
+    const nameSet = new Set<string>();
+    const data = merged
+      .filter(d => d.liquidity != null)
+      .map(d => {
+        const flat: Record<string, number> = { ts: d.ts };
+        for (const [name, val] of Object.entries(d.liquidity!)) {
+          flat[name] = val;
+          nameSet.add(name);
+        }
+        return flat;
+      });
+    return { liquidityData: data, dexNames: Array.from(nameSet).sort() };
+  }, [merged]);
 
   // Heatmap data: split by option type, calculate % OTM and normalize premium
   const { callHeatmap, putHeatmap } = useMemo(() => {
@@ -618,35 +636,50 @@ export default function OverviewPage() {
       )}
 
       {/* DEX Liquidity (TVL) */}
-      {liquidityData.length > 0 && (
-        <Card>
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs font-medium text-gray-400">DEX Liquidity (TVL)</span>
-            <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.blue }} /> Total Value Locked</span>
+      {liquidityData.length > 0 && (() => {
+        const dexColors: Record<string, string> = {
+          uniswap_v3: '#ff007a', // Uniswap pink
+          uniswap_v4: '#fc72ff', // Uniswap V4 purple-pink
+        };
+        const fallbackColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
+        const getColor = (name: string, i: number) => dexColors[name] || fallbackColors[i % fallbackColors.length];
+        const formatDexName = (name: string) => name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        return (
+          <Card>
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-medium text-gray-400">DEX Liquidity (TVL)</span>
+              <div className="flex gap-3 text-xs text-gray-500">
+                {dexNames.map((name, i) => (
+                  <span key={name} className="flex items-center gap-1">
+                    <span className="w-3 h-0.5 inline-block" style={{ background: getColor(name, i) }} /> {formatDexName(name)}
+                  </span>
+                ))}
+              </div>
             </div>
-          </div>
-          <ResponsiveContainer width="100%" height={80}>
-            <ComposedChart data={liquidityData} margin={CHART_MARGINS} syncId="main">
-              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
-              <YAxis
-                tickFormatter={(v) => `$${(v / 1e6).toFixed(0)}M`}
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tick}
-                width={55}
-              />
-              <Tooltip
-                {...chartTooltip}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                formatter={(val: any) => [`$${Number(val).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, 'TVL']}
-              />
-              <Area type="stepAfter" dataKey="liquidity" stroke={chartColors.blue} strokeWidth={1.5} fill={chartColors.blue} fillOpacity={0.1} connectNulls dot={{ r: 2.5, strokeWidth: 0, fill: chartColors.blue }} isAnimationActive={false} />
-            </ComposedChart>
-          </ResponsiveContainer>
-        </Card>
-      )}
+            <ResponsiveContainer width="100%" height={100}>
+              <ComposedChart data={liquidityData} margin={CHART_MARGINS} syncId="main">
+                <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+                <YAxis
+                  tickFormatter={(v) => `$${(v / 1e6).toFixed(0)}M`}
+                  stroke={chartAxis.stroke}
+                  tick={chartAxis.tick}
+                  width={55}
+                />
+                <Tooltip
+                  {...chartTooltip}
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  formatter={(val: any, name: any) => [`$${Number(val).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, formatDexName(name as string)]}
+                />
+                {dexNames.map((name, i) => (
+                  <Line key={name} type="stepAfter" dataKey={name} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
+                ))}
+              </ComposedChart>
+            </ResponsiveContainer>
+          </Card>
+        );
+      })()}
 
       {/* Call Market Heatmap */}
       {callHeatmap.length > 0 && (

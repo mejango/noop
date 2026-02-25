@@ -119,20 +119,20 @@ export function getLiquidityOverTime(since: string) {
   `).all(since) as { timestamp: string; raw_data: string }[];
 
   return rows.map(row => {
-    let totalTvl = 0;
+    const entry: Record<string, number | string> = { timestamp: row.timestamp };
     try {
       const data = JSON.parse(row.raw_data);
       const dexes = data?.dexLiquidity?.dexes;
       if (dexes) {
-        for (const dex of Object.values(dexes) as { totalLiquidity?: number; error?: string }[]) {
+        for (const [name, dex] of Object.entries(dexes) as [string, { totalLiquidity?: number; error?: string }][]) {
           if (!dex.error && dex.totalLiquidity && !isNaN(dex.totalLiquidity)) {
-            totalTvl += dex.totalLiquidity;
+            entry[name] = dex.totalLiquidity;
           }
         }
       }
     } catch { /* skip malformed rows */ }
-    return { timestamp: row.timestamp, tvl: totalTvl };
-  }).filter(r => r.tvl > 0);
+    return entry;
+  }).filter(r => Object.keys(r).length > 1); // must have at least one dex value
 }
 
 export function getTradeMarkers(since: string) {
@@ -162,6 +162,14 @@ export function getBestScores() {
     bestCallScore: row?.best_call_score ?? 0,
     windowDays: MEASUREMENT_WINDOW_DAYS,
   };
+}
+
+export function getRecentTicks(limit = 50) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT id, timestamp, summary FROM bot_ticks
+    ORDER BY timestamp DESC LIMIT ?
+  `).all(limit);
 }
 
 export function getBotBudget() {
