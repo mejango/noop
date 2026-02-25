@@ -189,6 +189,10 @@ const CALL_DELTA_RANGE = [0.04, 0.12]; // Positive delta for calls
 // Call buyback thresholds
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Minimum profit percentage for automatic call buyback
 
+// Journal auto-generation
+const JOURNAL_INTERVAL_MS = 24 * 60 * 60 * 1000; // Once per day
+let lastJournalGeneration = 0;
+
 // Common bot state structure
 const createBotData = () => {
 let botData = {
@@ -2333,6 +2337,114 @@ const executePutBuyOrder = async (option, reason, spotPrice) => {
     return true;
 };
 
+// ─── Auto Journal Generation ─────────────────────────────────────────────────
+
+const generateJournalEntries = async (tickSummary, botData) => {
+  try {
+    // Gather snapshot data
+    const stats = db.getStats();
+    const recentTicks = db.getRecentTicks(300);
+    const since24h = new Date(Date.now() - TIME_CONSTANTS.DAY).toISOString();
+    const since7d = new Date(Date.now() - TIME_CONSTANTS.WEEK).toISOString();
+    const recentOnchain = db.getRecentOnchain(since24h);
+    const recentPrices = db.getRecentSpotPrices(since7d);
+    const previousJournal = db.getRecentJournalEntries(20);
+
+    // Sample arrays to keep prompt compact (~4K tokens of data)
+    const sample = (arr, target) => {
+      if (!arr || arr.length <= target) return arr || [];
+      const step = Math.ceil(arr.length / target);
+      return arr.filter((_, i) => i % step === 0);
+    };
+
+    const sampledTicks = sample(recentTicks, 24);
+    const sampledPrices = sample(recentPrices, 48);
+    const sampledOnchain = sample(recentOnchain, 24);
+
+    // Build snapshot
+    const snapshot = {
+      current_tick: tickSummary,
+      stats,
+      recent_ticks_24h: sampledTicks.map(t => {
+        try { return { timestamp: t.timestamp, ...JSON.parse(t.summary) }; } catch { return t; }
+      }),
+      onchain_24h: sampledOnchain,
+      prices_7d: sampledPrices.map(p => ({
+        timestamp: p.timestamp,
+        price: p.spot_price,
+        medium_momentum: p.medium_momentum ? JSON.parse(p.medium_momentum) : null,
+        short_momentum: p.short_momentum ? JSON.parse(p.short_momentum) : null,
+      })),
+      budget: {
+        putNetBought: botData.putNetBought,
+        putUnspentBuyLimit: botData.putUnspentBuyLimit,
+        callNetSold: botData.callNetSold,
+        callUnspentSellLimit: botData.callUnspentSellLimit,
+      },
+      previous_journal: previousJournal,
+    };
+
+    const systemPrompt = `You are the Spitznagel Bot — a tail-risk hedging advisor operating on ETH options with Universa-style principles. You maintain an analytical journal tracking market observations, hypotheses, and regime assessments.
+
+Analyze the provided daily snapshot across three time scales:
+
+**Short-term (hours):** Price action, short momentum shifts, spike events, intraday patterns.
+**Medium-term (days):** Trend direction changes, momentum regime shifts, onchain flow patterns, protection cost trends.
+**Long-term (week+):** Structural patterns, correlation shifts, regime transitions, compounding geometry.
+
+Review your previous journal entries. Confirm patterns that held, revise those that didn't, and contradict past assessments when data warrants it.
+
+Output 2-5 journal entries using these tags:
+<journal type="observation">Factual patterns identified in the data</journal>
+<journal type="hypothesis">Testable predictions grounded in data</journal>
+<journal type="regime_note">Market state assessments and regime classifications</journal>
+
+Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (exhaustion signals, flow reversals), and portfolio geometry (spot-options relationship).`;
+
+    const userMessage = `Here is today's daily snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nAnalyze across short, medium, and long time scales. Review previous journal entries and build on, revise, or contradict them as warranted.`;
+
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      timeout: 60000,
+    });
+
+    const text = response.data?.content?.[0]?.text || '';
+
+    // Extract journal entries (same pattern as chat route)
+    const regex = /<journal\s+type="(observation|hypothesis|regime_note)">([\s\S]*?)<\/journal>/g;
+    const seriesNames = ['spot_return', 'liquidity_flow', 'exhaustion_score', 'best_put_dv', 'best_call_dv'];
+    let match;
+    let count = 0;
+
+    while ((match = regex.exec(text)) !== null) {
+      const entryType = match[1];
+      const content = match[2].trim();
+      if (content) {
+        const referenced = seriesNames.filter(s =>
+          content.toLowerCase().includes(s.replace(/_/g, ' ')) || content.includes(s)
+        );
+        db.insertJournalEntry(entryType, content, referenced.length > 0 ? referenced : null);
+        count++;
+      }
+    }
+
+    console.log(`📓 Journal: generated ${count} entries`);
+  } catch (e) {
+    console.log('📓 Journal generation failed:', e.message);
+  }
+};
+
+// ─── Bot Loop ────────────────────────────────────────────────────────────────
+
 const runBot = async () => {
   try {
   const now = Date.now();
@@ -2774,6 +2886,14 @@ const runBot = async () => {
         db.insertTick(tickTimestamp, JSON.stringify(tickSummary));
       } catch (e) {
         console.log('DB: tick write failed:', e.message);
+      }
+
+      // Auto-generate journal entries once per day
+      if (Date.now() - lastJournalGeneration >= JOURNAL_INTERVAL_MS && process.env.ANTHROPIC_API_KEY) {
+        lastJournalGeneration = Date.now();
+        generateJournalEntries(tickSummary, botData).catch(e => {
+          console.log('📓 Journal generation failed:', e.message);
+        });
       }
     }
 
