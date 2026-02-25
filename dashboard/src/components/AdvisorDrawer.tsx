@@ -31,10 +31,6 @@ export default function AdvisorDrawer() {
   }, []);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, scrollToBottom]);
-
-  useEffect(() => {
     if (open && inputRef.current) {
       inputRef.current.focus();
     }
@@ -51,6 +47,9 @@ export default function AdvisorDrawer() {
 
     // Add empty assistant message to stream into
     setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+
+    // Scroll to show the user's message, then let them read at their own pace
+    setTimeout(scrollToBottom, 50);
 
     try {
       const res = await fetch('/api/ai/chat', {
@@ -105,7 +104,7 @@ export default function AdvisorDrawer() {
     } finally {
       setStreaming(false);
     }
-  }, [messages, streaming]);
+  }, [messages, streaming, scrollToBottom]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
