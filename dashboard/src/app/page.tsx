@@ -199,7 +199,7 @@ const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
 };
 
 export default function OverviewPage() {
-  const [range, setRange] = useState<string>('6.2d');
+  const [range, setRange] = useState<string>('6h');
   const mobile = useIsMobile();
   const margins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats);
