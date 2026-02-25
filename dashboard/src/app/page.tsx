@@ -726,7 +726,7 @@ export default function OverviewPage() {
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: '#555' }} /> neutral</span>
             </div>
           </div>
-          <div style={{ marginLeft: margins.left + (mobile ? 45 : 70), marginRight: margins.right }}>
+          <div style={{ marginLeft: margins.left + (mobile ? 45 : 70) - 44, marginRight: margins.right }}>
             <div className="flex items-center gap-1">
               <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">medium</span>
               <div className="flex rounded-t overflow-hidden flex-1" style={{ height: 10 }}>
@@ -778,7 +778,7 @@ export default function OverviewPage() {
                 ))}
               </div>
             </div>
-            <ResponsiveContainer width="100%" height={100}>
+            <ResponsiveContainer width="100%" height={200}>
               <ComposedChart data={filteredLiquidity} margin={margins} syncId="main">
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 {dexNames.map((name, i) => (
