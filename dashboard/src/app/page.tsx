@@ -2,7 +2,7 @@
 
 import { useState, useMemo, useRef, useCallback } from 'react';
 import { usePolling } from '@/lib/hooks';
-import { formatUSD, timeAgo, momentumColor, momentumBg } from '@/lib/format';
+import { formatUSD, timeAgo, momentumColor } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import {
@@ -236,18 +236,21 @@ export default function OverviewPage() {
     };
 
     // Build best option details per timestamp from heatmap data
+    // Only consider options within the bot's trading delta range
+    // PUTs: delta between -0.12 and -0.02, CALLs: delta between 0.04 and 0.12
     const bestPutByTs = new Map<string, HeatmapSnapshot>();
     const bestCallByTs = new Map<string, HeatmapSnapshot>();
     for (const snap of chart.optionsHeatmap) {
       const isPut = snap.option_type === 'P' || snap.option_type === 'put' || snap.instrument_name?.includes('-P');
       const isCall = snap.option_type === 'C' || snap.option_type === 'call' || snap.instrument_name?.includes('-C');
-      if (isPut && (snap.ask_delta_value ?? 0) > 0) {
+      const d = snap.delta ?? 0;
+      if (isPut && d <= -0.02 && d >= -0.12 && (snap.ask_delta_value ?? 0) > 0) {
         const prev = bestPutByTs.get(snap.timestamp);
         if (!prev || (snap.ask_delta_value ?? 0) > (prev.ask_delta_value ?? 0)) {
           bestPutByTs.set(snap.timestamp, snap);
         }
       }
-      if (isCall && (snap.bid_delta_value ?? 0) > 0) {
+      if (isCall && d >= 0.04 && d <= 0.12 && (snap.bid_delta_value ?? 0) > 0) {
         const prev = bestCallByTs.get(snap.timestamp);
         if (!prev || (snap.bid_delta_value ?? 0) > (prev.bid_delta_value ?? 0)) {
           bestCallByTs.set(snap.timestamp, snap);
@@ -414,59 +417,65 @@ export default function OverviewPage() {
   return (
     <div className="space-y-6">
       {/* Price + Momentum + Range Header */}
-      <div className="flex flex-wrap items-start gap-4">
-        <Card className="flex-1 min-w-[200px]">
-          <div className="text-3xl font-bold tracking-tight text-juice-orange">{formatUSD(stats.last_price)}</div>
-          <div className="text-xs text-gray-500 mt-1">ETH spot {timeAgo(stats.last_price_time)}</div>
+      <div className="grid grid-cols-4 gap-4">
+        <Card title="ETH Spot" className="flex flex-col">
+          <div className="flex-1 flex flex-col justify-center">
+            <div className="text-3xl font-bold tracking-tight text-juice-orange">{formatUSD(stats.last_price)}</div>
+            <div className="text-xs text-gray-500 mt-1">{timeAgo(stats.last_price_time)}</div>
+          </div>
         </Card>
 
-        <Card title="Momentum" className="flex-1 min-w-[200px]">
-          <div className="flex gap-2 flex-wrap">
-            <div className={`rounded px-3 py-1.5 ${momentumBg(stats.medium_momentum)}`}>
-              <div className="text-xs text-gray-500">Medium</div>
-              <div className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
+        <Card title="Momentum" className="flex flex-col">
+          <div className="flex-1 flex flex-col justify-center gap-2">
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 w-12">Medium</span>
+              <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
                 {stats.medium_momentum || 'neutral'}
-                {stats.medium_derivative && <span className="text-xs ml-1 opacity-70">({stats.medium_derivative})</span>}
-              </div>
+              </span>
+              {stats.medium_derivative && <span className="text-xs text-gray-500">({stats.medium_derivative})</span>}
             </div>
-            <div className={`rounded px-3 py-1.5 ${momentumBg(stats.short_momentum)}`}>
-              <div className="text-xs text-gray-500">Short</div>
-              <div className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 w-12">Short</span>
+              <span className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
                 {stats.short_momentum || 'neutral'}
-                {stats.short_derivative && <span className="text-xs ml-1 opacity-70">({stats.short_derivative})</span>}
-              </div>
+              </span>
+              {stats.short_derivative && <span className="text-xs text-gray-500">({stats.short_derivative})</span>}
             </div>
           </div>
         </Card>
 
-        <Card title="Price Range" className="flex-1 min-w-[200px]">
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div>
-              <span className="text-gray-500">3d H/L:</span>{' '}
-              <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>{' / '}
+        <Card title="Price Range" className="flex flex-col">
+          <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 w-10">3d H/L</span>
+              <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>
+              <span className="text-gray-600">/</span>
               <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
             </div>
-            <div>
-              <span className="text-gray-500">7d H/L:</span>{' '}
-              <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>{' / '}
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 w-10">7d H/L</span>
+              <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
+              <span className="text-gray-600">/</span>
               <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
             </div>
           </div>
         </Card>
 
-        <Card title="Budget" className="flex-1 min-w-[200px]">
-          <div className="grid grid-cols-2 gap-2 text-sm">
-            <div>
-              <span className="text-gray-500">PUT:</span>{' '}
+        <Card title="Budget" className="flex flex-col">
+          <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 w-10">PUT</span>
               <span className="text-white">{formatUSD(stats.budget.putRemaining)}</span>
-              <span className="text-gray-500 text-xs ml-1">/ {formatUSD(stats.budget.putTotalBudget)}</span>
+              <span className="text-gray-600">/</span>
+              <span className="text-gray-500 text-xs">{formatUSD(stats.budget.putTotalBudget)}</span>
             </div>
-            <div>
-              <span className="text-gray-500">CALL:</span>{' '}
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 w-10">CALL</span>
               <span className="text-white">{formatUSD(stats.budget.callRemaining)}</span>
-              <span className="text-gray-500 text-xs ml-1">/ {formatUSD(stats.budget.callTotalBudget)}</span>
+              <span className="text-gray-600">/</span>
+              <span className="text-gray-500 text-xs">{formatUSD(stats.budget.callTotalBudget)}</span>
             </div>
-            <div className="col-span-2 text-xs text-gray-500">
+            <div className="text-xs text-gray-500">
               {stats.budget.putDaysLeft > 0 ? `${stats.budget.putDaysLeft}d left` : 'cycle ended'} in {stats.budget.cycleDays}d cycle
             </div>
           </div>

@@ -123,10 +123,16 @@ export function getOptionsHeatmap(since: string) {
 
 export function getBestOptionsOverTime(since: string) {
   const d = getDb();
+  // Only consider options within the bot's trading delta range
+  // PUTs: delta between -0.12 and -0.02, CALLs: delta between 0.04 and 0.12
   return d.prepare(`
     SELECT timestamp,
-      MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_value,
-      MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_value
+      MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
+        AND delta <= -0.02 AND delta >= -0.12
+        THEN ask_delta_value END) as best_put_value,
+      MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
+        AND delta >= 0.04 AND delta <= 0.12
+        THEN bid_delta_value END) as best_call_value
     FROM options_snapshots
     WHERE timestamp > ?
     GROUP BY timestamp
