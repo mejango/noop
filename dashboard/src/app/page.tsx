@@ -101,6 +101,7 @@ interface HeatmapDot {
   pctOtm: number;
   absDelta: number;
   premium: number;
+  value: number | null;
   strike: number;
   delta: number | null;
   bid: number | null;
@@ -423,11 +424,14 @@ export default function OverviewPage() {
 
       if (snap.delta == null) continue; // need delta for Y-axis
 
+      const value = isCall ? (snap.bid_delta_value ?? null) : (snap.ask_delta_value ?? null);
+
       const dot: HeatmapDot = {
         ts,
         pctOtm: +pctOtm.toFixed(2),
         absDelta: +Math.abs(snap.delta).toFixed(4),
         premium,
+        value,
         strike: snap.strike,
         delta: snap.delta,
         bid: snap.bid_price,
@@ -451,14 +455,14 @@ export default function OverviewPage() {
         if (!bands.has(band)) bands.set(band, []);
         bands.get(band)!.push(d);
       }
-      // Normalize intensity within each band
+      // Normalize intensity by value within each band
       for (const group of Array.from(bands.values())) {
-        const premiums = group.map(d => d.premium);
-        const min = Math.min(...premiums);
-        const max = Math.max(...premiums);
+        const values = group.map(d => d.value ?? 0);
+        const min = Math.min(...values);
+        const max = Math.max(...values);
         const range = max - min || 1;
         for (const d of group) {
-          d.intensity = (d.premium - min) / range;
+          d.intensity = ((d.value ?? 0) - min) / range;
         }
       }
     };
@@ -833,9 +837,8 @@ export default function OverviewPage() {
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Put Market</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> cheaper</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.8) }} /> pricier</span>
-              <span className="text-gray-600">ask premium</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> lower value</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.8) }} /> higher value</span>
             </div>
           </div>
           <ResponsiveContainer width="100%" height={360}>
@@ -868,6 +871,7 @@ export default function OverviewPage() {
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
                       <div className="text-sm">Delta: <span style={{ color: 'rgb(255,160,50)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Value: <span style={{ color: 'rgb(255,160,50)' }}>{d.value != null ? d.value.toFixed(6) : 'N/A'}</span></div>
                       <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
                       {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
                       <div className="text-sm">Bid: <span className="text-gray-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
@@ -895,9 +899,8 @@ export default function OverviewPage() {
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Call Market</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> cheaper</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> pricier</span>
-              <span className="text-gray-600">bid premium</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> lower value</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> higher value</span>
             </div>
           </div>
           <ResponsiveContainer width="100%" height={360}>
@@ -930,6 +933,7 @@ export default function OverviewPage() {
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
                       <div className="text-sm">Delta: <span style={{ color: 'rgb(100,160,255)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Value: <span style={{ color: 'rgb(100,160,255)' }}>{d.value != null ? d.value.toFixed(2) : 'N/A'}</span></div>
                       <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
                       {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
                       <div className="text-sm">Bid: <span style={{ color: 'rgb(100,160,255)' }}>{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
