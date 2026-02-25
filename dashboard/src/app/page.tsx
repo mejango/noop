@@ -734,8 +734,8 @@ export default function OverviewPage() {
               </div>
             </div>
             <ResponsiveContainer width="100%" height={100}>
-              <ComposedChart data={liquidityData} margin={CHART_MARGINS} syncId="main">
-                <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <ComposedChart data={liquidityData} margin={CHART_MARGINS}>
+                <XAxis dataKey="ts" type="number" domain={['dataMin', 'dataMax']} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 <YAxis
                   tickFormatter={(v) => `$${(v / 1e6).toFixed(0)}M`}
                   stroke={chartAxis.stroke}
