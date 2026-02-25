@@ -418,12 +418,23 @@ export default function OverviewPage() {
     // Normalize intensity within each set
     const normalize = (dots: HeatmapDot[]) => {
       if (dots.length === 0) return;
-      const premiums = dots.map(d => d.premium);
-      const min = Math.min(...premiums);
-      const max = Math.max(...premiums);
-      const range = max - min || 1;
+      // Group by delta band (0.02-wide buckets)
+      const bandSize = 0.02;
+      const bands = new Map<number, HeatmapDot[]>();
       for (const d of dots) {
-        d.intensity = (d.premium - min) / range;
+        const band = Math.floor(d.absDelta / bandSize) * bandSize;
+        if (!bands.has(band)) bands.set(band, []);
+        bands.get(band)!.push(d);
+      }
+      // Normalize intensity within each band
+      for (const group of Array.from(bands.values())) {
+        const premiums = group.map(d => d.premium);
+        const min = Math.min(...premiums);
+        const max = Math.max(...premiums);
+        const range = max - min || 1;
+        for (const d of group) {
+          d.intensity = (d.premium - min) / range;
+        }
       }
     };
     normalize(calls);
