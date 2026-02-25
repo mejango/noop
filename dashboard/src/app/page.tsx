@@ -6,8 +6,8 @@ import { formatUSD, timeAgo, momentumColor } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import {
-  ComposedChart, Line, Area, Scatter, Bar, Cell, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, Legend, ReferenceLine, BarChart, ScatterChart, ReferenceArea,
+  ComposedChart, Line, Area, Scatter, XAxis, YAxis, Tooltip,
+  ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
 } from 'recharts';
 
 interface Budget {
@@ -98,6 +98,7 @@ interface HeatmapDot {
   delta: number | null;
   bid: number | null;
   ask: number | null;
+  dte: number | null;
   intensity: number; // 0-1 normalized
 }
 
@@ -143,7 +144,7 @@ const StarDot = (props: any) => {
 
 // Momentum color helper for bar cells
 const momentumBarColor = (m: string | undefined | null) =>
-  m === 'upward' ? '#4ade80' : m === 'downward' ? '#f87171' : 'rgba(255,255,255,0.4)';
+  m === 'upward' ? '#4ade80' : m === 'downward' ? '#f87171' : '#555';
 
 // Color interpolation for heatmap intensity (0=dim, 1=bright)
 const lerpColor = (a: [number, number, number], b: [number, number, number], t: number): string => {
@@ -353,6 +354,8 @@ export default function OverviewPage() {
       const premium = isCall ? (snap.bid_price ?? 0) : (snap.ask_price ?? 0);
       if (premium <= 0) continue;
 
+      const dte = snap.expiry ? Math.max(0, Math.ceil((snap.expiry * 1000 - ts) / (1000 * 60 * 60 * 24))) : null;
+
       const dot: HeatmapDot = {
         ts,
         pctOtm: +pctOtm.toFixed(2),
@@ -361,6 +364,7 @@ export default function OverviewPage() {
         delta: snap.delta,
         bid: snap.bid_price,
         ask: snap.ask_price,
+        dte,
         intensity: 0, // normalized below
       };
 
@@ -580,30 +584,19 @@ export default function OverviewPage() {
             <div className="flex gap-3 text-xs text-gray-500">
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#4ade80' }} /> upward</span>
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#f87171' }} /> downward</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: 'rgba(255,255,255,0.4)' }} /> neutral</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: '#555' }} /> neutral</span>
             </div>
           </div>
-          <ResponsiveContainer width="100%" height={32}>
-            <BarChart data={momentumData} margin={CHART_MARGINS} barCategoryGap={0} barGap={0} syncId="main">
-              <XAxis dataKey="ts" type="number" domain={xDomain} hide />
-              <YAxis domain={[0, 1]} hide />
-              <Tooltip
-                {...chartTooltip}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                formatter={(_v: any, _n: any, props: any) => {
-                  const m = props.payload?.momentum || 'neutral';
-                  return [m, 'Momentum'];
-                }}
+          <div className="flex rounded overflow-hidden" style={{ height: 20, marginLeft: CHART_MARGINS.left, marginRight: CHART_MARGINS.right }}>
+            {momentumData.map((d, i) => (
+              <div
+                key={i}
+                className="flex-1"
+                style={{ background: momentumBarColor(d.momentum) }}
+                title={`${new Date(d.ts).toLocaleString()}\nMomentum: ${d.momentum}`}
               />
-              <Bar dataKey="momentumVal" isAnimationActive={false}>
-                {momentumData.map((d, i) => (
-                  <Cell key={i} fill={momentumBarColor(d.momentum)} />
-                ))}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+            ))}
+          </div>
         </Card>
       )}
 
@@ -679,6 +672,7 @@ export default function OverviewPage() {
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
                       <div className="text-sm">% OTM: <span className="text-cyan-300">{d.pctOtm.toFixed(1)}%</span></div>
+                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
                       {d.delta != null && <div className="text-sm">Delta: <span className="text-gray-300">{d.delta.toFixed(3)}</span></div>}
                       <div className="text-sm">Bid: <span className="text-cyan-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
                       <div className="text-sm">Ask: <span className="text-gray-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
@@ -740,6 +734,7 @@ export default function OverviewPage() {
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
                       <div className="text-sm">% OTM: <span className="text-red-300">{d.pctOtm.toFixed(1)}%</span></div>
+                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
                       {d.delta != null && <div className="text-sm">Delta: <span className="text-gray-300">{d.delta.toFixed(3)}</span></div>}
                       <div className="text-sm">Bid: <span className="text-gray-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
                       <div className="text-sm">Ask: <span className="text-red-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
