@@ -2349,6 +2349,13 @@ const generateJournalEntries = async (tickSummary, botData) => {
     const recentOnchain = db.getRecentOnchain(since24h);
     const recentPrices = db.getRecentSpotPrices(since7d);
     const previousJournal = db.getRecentJournalEntries(20);
+    const recentSignals = db.getRecentSignals(since7d, 20);
+    const optionsDistribution = db.getOptionsDistribution(since24h);
+    const avgCallPremium = db.getAvgCallPremium7d();
+
+    const { buildCorrelationAnalysis } = require('./bot/correlation');
+    let correlations = null;
+    try { correlations = buildCorrelationAnalysis(db); } catch { /* graceful fallback */ }
 
     // Sample arrays to keep prompt compact (~4K tokens of data)
     const sample = (arr, target) => {
@@ -2371,9 +2378,9 @@ const generateJournalEntries = async (tickSummary, botData) => {
       onchain_24h: sampledOnchain,
       prices_7d: sampledPrices.map(p => ({
         timestamp: p.timestamp,
-        price: p.spot_price,
-        medium_momentum: p.medium_momentum ? JSON.parse(p.medium_momentum) : null,
-        short_momentum: p.short_momentum ? JSON.parse(p.short_momentum) : null,
+        price: p.price,
+        medium_momentum: p.medium_momentum_main || null,
+        short_momentum: p.short_momentum_main || null,
       })),
       budget: {
         putNetBought: botData.putNetBought,
@@ -2382,6 +2389,34 @@ const generateJournalEntries = async (tickSummary, botData) => {
         callUnspentSellLimit: botData.callUnspentSellLimit,
       },
       previous_journal: previousJournal,
+      signals_7d: recentSignals.map(s => ({
+        timestamp: s.timestamp,
+        type: s.signal_type,
+        acted_on: s.acted_on,
+        details: s.details,
+      })),
+      options_market: {
+        distribution: optionsDistribution,
+        avg_call_premium_7d: avgCallPremium?.avg_premium ?? null,
+      },
+      pool_breakdown: (() => {
+        try {
+          if (!recentOnchain.length || !recentOnchain[0].raw_data) return null;
+          const raw = JSON.parse(recentOnchain[0].raw_data);
+          const dexes = raw?.dexLiquidity?.dexes;
+          if (!dexes) return null;
+          return Object.entries(dexes).map(([name, dex]) => ({
+            dex: name,
+            total_liquidity: dex.totalLiquidity ?? null,
+            pool_count: dex.pools?.length ?? null,
+            top_pool: dex.pools?.[0] ? {
+              pair: dex.pools[0].pair || dex.pools[0].name || null,
+              liquidity: dex.pools[0].liquidity ?? dex.pools[0].totalLiquidity ?? null,
+            } : null,
+          }));
+        } catch { return null; }
+      })(),
+      cross_correlations: correlations,
     };
 
     const systemPrompt = `You are the Spitznagel Bot — a tail-risk hedging advisor operating on ETH options with Universa-style principles. You maintain an analytical journal tracking market observations, hypotheses, and regime assessments.

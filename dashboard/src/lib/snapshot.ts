@@ -3,11 +3,12 @@ import {
   getBotBudget,
   getBestScores,
   getRecentTicks,
-  getOpenPositions,
-  getRecentTrades,
   getOnchainData,
   getSignals,
   getJournalEntries,
+  getOptionsDistribution,
+  getAvgCallPremium7d,
+  getOnchainWithRawData,
 } from './db';
 import { buildCorrelationAnalysis } from './correlation';
 
@@ -20,8 +21,6 @@ export function buildMarketSnapshot() {
   const stats = (getStats() as Record<string, unknown>) || {};
   const budget = getBotBudget();
   const bestScores = getBestScores();
-  const openPositions = getOpenPositions() as Record<string, unknown>[];
-  const recentTrades = getRecentTrades(20) as Record<string, unknown>[];
   const onchain = getOnchainData(since24h) as Record<string, unknown>[];
   const signals = getSignals(since7d, 30) as Record<string, unknown>[];
 
@@ -85,31 +84,47 @@ export function buildMarketSnapshot() {
     },
 
     options_market: {
-      _description: 'Best options scores over the measurement window. Higher delta-value = better risk/reward. bestPutDetail/bestCallDetail show the specific contract that achieved the best score. delta is Black-Scholes delta, price is in ETH, strike in USD, expiry is Unix timestamp.',
+      _description: 'Best options scores over the measurement window. Higher delta-value = better risk/reward. distribution shows put/call aggregate stats from last 24h. avg_call_premium_7d is rolling 7d average call bid price.',
       best_put_score: bestScores.bestPutScore,
       best_call_score: bestScores.bestCallScore,
       window_days: bestScores.windowDays,
       best_put_detail: bestScores.bestPutDetail,
       best_call_detail: bestScores.bestCallDetail,
-    },
-
-    open_positions: {
-      _description: 'Currently open option positions. direction is "buy" or "sell". strike in USD, expiry is Unix timestamp, amount is contract size, avg_price is per-contract in ETH.',
-      count: openPositions.length,
-      positions: openPositions,
-    },
-
-    recent_trades: {
-      _description: 'Last 20 trades. direction is "buy" or "sell". price is per-contract in ETH, total_value is trade notional, fee in ETH.',
-      count: recentTrades.length,
-      trades: recentTrades,
+      distribution: (() => {
+        try { return getOptionsDistribution(since24h); } catch { return []; }
+      })(),
+      avg_call_premium_7d: (() => {
+        try {
+          const rows = getAvgCallPremium7d();
+          return rows.length > 0 ? rows[0].avg_premium : null;
+        } catch { return null; }
+      })(),
     },
 
     onchain_metrics: {
-      _description: 'On-chain data from last 24h. liquidity_flow_direction is "inflow"|"outflow"|"neutral", magnitude 0-1, confidence 0-1. exhaustion_score 0-1 (1=fully exhausted). exhaustion_alert_level is "low"|"medium"|"high".',
+      _description: 'On-chain data from last 24h. liquidity_flow_direction is "inflow"|"outflow"|"neutral", magnitude 0-1, confidence 0-1. exhaustion_score 0-1 (1=fully exhausted). exhaustion_alert_level is "low"|"medium"|"high". pool_breakdown shows per-DEX liquidity from latest raw_data.',
       data_points: onchain.length,
       latest: onchain.length > 0 ? onchain[0] : null,
       history: onchain,
+      pool_breakdown: (() => {
+        try {
+          const rows = getOnchainWithRawData(since24h, 1);
+          if (!rows.length || !rows[0].raw_data) return null;
+          const raw = JSON.parse(rows[0].raw_data);
+          const dexes = raw?.dexLiquidity?.dexes;
+          if (!dexes) return null;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          return Object.entries(dexes).map(([name, dex]: [string, any]) => ({
+            dex: name,
+            total_liquidity: dex.totalLiquidity ?? null,
+            pool_count: dex.pools?.length ?? null,
+            top_pool: dex.pools?.[0] ? {
+              pair: dex.pools[0].pair || dex.pools[0].name || null,
+              liquidity: dex.pools[0].liquidity ?? dex.pools[0].totalLiquidity ?? null,
+            } : null,
+          }));
+        } catch { return null; }
+      })(),
     },
 
     strategy_signals: {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getTradeMarkers, getBestScores, getOptionsHeatmap } from '@/lib/db';
+import { getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,11 +22,10 @@ export function GET(request: NextRequest) {
     const prices = getSpotPrices(since, 5000);
     const options = getBestOptionsOverTime(since);
     const liquidity = getLiquidityOverTime(since);
-    const trades = getTradeMarkers(since);
     const bestScores = getBestScores();
     const optionsHeatmap = getOptionsHeatmap(since);
 
-    return NextResponse.json({ prices, options, liquidity, trades, bestScores, optionsHeatmap });
+    return NextResponse.json({ prices, options, liquidity, bestScores, optionsHeatmap });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });

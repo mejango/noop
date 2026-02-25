@@ -104,18 +104,6 @@ export function getLiquidityOverTime(since: string) {
   }).filter(r => Object.keys(r).length > 1); // must have at least one dex value
 }
 
-export function getTradeMarkers(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT t.timestamp, t.direction, t.amount, t.price, t.total_value, t.order_type,
-      p.instrument_name, p.strike
-    FROM trades t
-    LEFT JOIN positions p ON t.position_id = p.id
-    WHERE t.timestamp > ?
-    ORDER BY t.timestamp ASC
-  `).all(since);
-}
-
 export function getBestScores() {
   const d = getDb();
   const since = new Date(Date.now() - MEASUREMENT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
@@ -171,28 +159,6 @@ export function getRecentTicks(limit = 50) {
   `).all(limit);
 }
 
-export function getOpenPositions() {
-  const d = getDb();
-  return d.prepare(`
-    SELECT id, instrument_name, direction, strike, expiry, amount, avg_price, total_cost, opened_at
-    FROM positions
-    WHERE status = 'open'
-    ORDER BY opened_at DESC
-  `).all();
-}
-
-export function getRecentTrades(limit = 20) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT t.id, t.timestamp, t.direction, t.amount, t.price, t.total_value, t.fee, t.order_type, t.reason,
-      p.instrument_name, p.strike, p.expiry
-    FROM trades t
-    LEFT JOIN positions p ON t.position_id = p.id
-    ORDER BY t.timestamp DESC
-    LIMIT ?
-  `).all(limit);
-}
-
 export function getOnchainData(since: string) {
   const d = getDb();
   return d.prepare(`
@@ -213,6 +179,41 @@ export function getSignals(since: string, limit = 50) {
     ORDER BY timestamp DESC
     LIMIT ?
   `).all(since, limit);
+}
+
+export function getOptionsDistribution(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT option_type, COUNT(*) as count,
+      AVG(delta) as avg_delta, MIN(delta) as min_delta, MAX(delta) as max_delta,
+      AVG(ask_price) as avg_ask, AVG(bid_price) as avg_bid,
+      AVG(ask_price - bid_price) as avg_spread, AVG(mark_price) as avg_mark,
+      MIN(strike) as min_strike, MAX(strike) as max_strike,
+      AVG(ask_delta_value) as avg_ask_dv, AVG(bid_delta_value) as avg_bid_dv
+    FROM options_snapshots WHERE timestamp > ? GROUP BY option_type
+  `).all(since);
+}
+
+export function getAvgCallPremium7d() {
+  const d = getDb();
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  return d.prepare(`
+    SELECT AVG(bid_price) as avg_premium
+    FROM options_snapshots
+    WHERE option_type = 'call' AND timestamp > ? AND bid_price > 0
+  `).all(since) as { avg_premium: number | null }[];
+}
+
+export function getOnchainWithRawData(since: string, limit = 5) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
+      liquidity_flow_confidence, exhaustion_score, exhaustion_alert_level, raw_data
+    FROM onchain_data
+    WHERE timestamp > ?
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(since, limit) as { timestamp: string; raw_data: string; [key: string]: unknown }[];
 }
 
 // ─── AI Journal ─────────────────────────────────────────────────────────────

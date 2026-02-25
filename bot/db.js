@@ -50,41 +50,6 @@ db.exec(`
     bid_delta_value REAL
   );
 
-  CREATE TABLE IF NOT EXISTS positions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    instrument_name TEXT NOT NULL,
-    base_asset_address TEXT,
-    base_asset_sub_id TEXT,
-    direction TEXT NOT NULL,
-    strike REAL,
-    expiry INTEGER,
-    amount REAL NOT NULL DEFAULT 0,
-    avg_price REAL,
-    total_cost REAL NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'open',
-    pnl REAL,
-    rolled_to_id INTEGER REFERENCES positions(id),
-    rolled_from_id INTEGER REFERENCES positions(id),
-    opened_at TEXT NOT NULL,
-    closed_at TEXT,
-    close_reason TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    position_id INTEGER REFERENCES positions(id),
-    instrument_name TEXT NOT NULL,
-    direction TEXT NOT NULL,
-    amount REAL NOT NULL,
-    price REAL NOT NULL,
-    total_value REAL NOT NULL,
-    fee REAL,
-    order_type TEXT NOT NULL,
-    reason TEXT,
-    timestamp TEXT NOT NULL,
-    order_response TEXT
-  );
-
   CREATE TABLE IF NOT EXISTS onchain_data (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -109,10 +74,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_spot_prices_timestamp ON spot_prices(timestamp);
   CREATE INDEX IF NOT EXISTS idx_options_snapshots_timestamp ON options_snapshots(timestamp);
   CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument ON options_snapshots(instrument_name);
-  CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
-  CREATE INDEX IF NOT EXISTS idx_positions_instrument ON positions(instrument_name);
-  CREATE INDEX IF NOT EXISTS idx_trades_position ON trades(position_id);
-  CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
   CREATE INDEX IF NOT EXISTS idx_onchain_data_timestamp ON onchain_data(timestamp);
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_type ON strategy_signals(signal_type);
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_timestamp ON strategy_signals(timestamp);
@@ -186,10 +147,6 @@ const stmts = {
   `),
 
   // Read queries
-  getOpenPositions: db.prepare(`
-    SELECT * FROM positions WHERE status = 'open' ORDER BY opened_at DESC
-  `),
-
   getRecentSpotPrices: db.prepare(`
     SELECT * FROM spot_prices WHERE timestamp > @since ORDER BY timestamp DESC
   `),
@@ -215,7 +172,15 @@ const stmts = {
   getStats: db.prepare(`
     SELECT
       (SELECT price FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as last_price,
-      (SELECT timestamp FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as last_price_time
+      (SELECT timestamp FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as last_price_time,
+      (SELECT short_momentum_main FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as short_momentum,
+      (SELECT short_momentum_derivative FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as short_derivative,
+      (SELECT medium_momentum_main FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as medium_momentum,
+      (SELECT medium_momentum_derivative FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as medium_derivative,
+      (SELECT three_day_high FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as three_day_high,
+      (SELECT three_day_low FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as three_day_low,
+      (SELECT seven_day_high FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as seven_day_high,
+      (SELECT seven_day_low FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as seven_day_low
   `),
 
   // Bot state persistence
@@ -263,6 +228,53 @@ const stmts = {
     FROM ai_journal
     ORDER BY timestamp DESC
     LIMIT @limit
+  `),
+
+  getOptionsDistribution: db.prepare(`
+    SELECT option_type, COUNT(*) as count,
+      AVG(delta) as avg_delta, MIN(delta) as min_delta, MAX(delta) as max_delta,
+      AVG(ask_price) as avg_ask, AVG(bid_price) as avg_bid,
+      AVG(ask_price - bid_price) as avg_spread, AVG(mark_price) as avg_mark,
+      MIN(strike) as min_strike, MAX(strike) as max_strike,
+      AVG(ask_delta_value) as avg_ask_dv, AVG(bid_delta_value) as avg_bid_dv
+    FROM options_snapshots WHERE timestamp > @since GROUP BY option_type
+  `),
+
+  // Hourly aggregations for correlation engine
+  getSpotPricesHourly: db.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(price) as avg_price
+    FROM spot_prices WHERE timestamp > @since GROUP BY hour ORDER BY hour ASC
+  `),
+
+  getOnchainHourly: db.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(liquidity_flow_magnitude) as avg_magnitude,
+           AVG(exhaustion_score) as avg_exhaustion,
+           (SELECT liquidity_flow_direction FROM onchain_data o2
+            WHERE strftime('%Y-%m-%dT%H:00:00Z', o2.timestamp) = strftime('%Y-%m-%dT%H:00:00Z', onchain_data.timestamp)
+              AND o2.timestamp > @since
+            GROUP BY liquidity_flow_direction
+            ORDER BY COUNT(*) DESC LIMIT 1) as direction
+    FROM onchain_data WHERE timestamp > @since GROUP BY hour ORDER BY hour ASC
+  `),
+
+  getBestPutDvHourly: db.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           MAX(ask_delta_value) as value
+    FROM options_snapshots
+    WHERE timestamp > @since AND (option_type = 'P' OR instrument_name LIKE '%-P')
+      AND delta <= -0.02 AND delta >= -0.12
+    GROUP BY hour ORDER BY hour ASC
+  `),
+
+  getBestCallDvHourly: db.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           MAX(bid_delta_value) as value
+    FROM options_snapshots
+    WHERE timestamp > @since AND (option_type = 'C' OR instrument_name LIKE '%-C')
+      AND delta >= 0.04 AND delta <= 0.12
+    GROUP BY hour ORDER BY hour ASC
   `),
 
   // 7-day average premium for call selling elevation check
@@ -350,7 +362,6 @@ const insertSignal = (signalType, details, actedOn = false) => {
 };
 
 // Read helpers
-const getOpenPositions = () => stmts.getOpenPositions.all();
 const getRecentSpotPrices = (since) => stmts.getRecentSpotPrices.all({ since });
 const getRecentSignals = (since, limit = 50) => stmts.getRecentSignals.all({ since, limit });
 const getRecentOnchain = (since) => stmts.getRecentOnchain.all({ since });
@@ -360,6 +371,14 @@ const insertTick = (timestamp, summary) => {
   stmts.insertTick.run({ timestamp, summary: typeof summary === 'string' ? summary : JSON.stringify(summary) });
 };
 const getRecentTicks = (limit = 50) => stmts.getRecentTicks.all({ limit });
+
+const getOptionsDistribution = (since) => stmts.getOptionsDistribution.all({ since });
+
+// Hourly helpers for correlation engine
+const getSpotPricesHourly = (since) => stmts.getSpotPricesHourly.all({ since });
+const getOnchainHourly = (since) => stmts.getOnchainHourly.all({ since });
+const getBestPutDvHourly = (since) => stmts.getBestPutDvHourly.all({ since });
+const getBestCallDvHourly = (since) => stmts.getBestCallDvHourly.all({ since });
 
 const getAvgCallPremium7d = () => {
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -444,13 +463,17 @@ module.exports = {
   insertOnchainData,
   insertSignal,
   markSignalActed: (id) => stmts.markSignalActed.run({ id }),
-  getOpenPositions,
   getRecentSpotPrices,
   getRecentSignals,
   getRecentOnchain,
   getRecentOptionsSnapshots,
   getStats,
+  getOptionsDistribution,
   getAvgCallPremium7d,
+  getSpotPricesHourly,
+  getOnchainHourly,
+  getBestPutDvHourly,
+  getBestCallDvHourly,
   insertTick,
   getRecentTicks,
   insertJournalEntry,

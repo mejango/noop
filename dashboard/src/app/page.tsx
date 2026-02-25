@@ -56,16 +56,6 @@ interface LiquidityPoint {
   [dex: string]: string | number;
 }
 
-interface TradeMarker {
-  timestamp: string;
-  direction: string;
-  amount: number;
-  price: number;
-  total_value: number;
-  instrument_name: string;
-  strike: number;
-}
-
 interface OptionDetail {
   delta: number | null;
   price: number | null;
@@ -138,7 +128,6 @@ interface ChartData {
   prices: SpotPrice[];
   options: OptionsPoint[];
   liquidity: LiquidityPoint[];
-  trades: TradeMarker[];
   bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
 }
@@ -155,23 +144,11 @@ const emptyStats: Stats = {
   budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [] };
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d'] as const;
 
-const CHART_MARGINS = { top: 10, right: 120, left: 10, bottom: 0 };
+const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 0 };
 const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 0 };
-
-// Custom star shape for trade markers
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const StarDot = (props: any) => {
-  const { cx, cy } = props;
-  if (!cx || !cy) return null;
-  return (
-    <svg x={cx - 8} y={cy - 8} width={16} height={16} viewBox="0 0 24 24" fill={chartColors.trade} stroke="#a16207" strokeWidth={1}>
-      <polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26" />
-    </svg>
-  );
-};
 
 // Momentum color helpers for bar cells (derivative-aware shading)
 const momentumBarColorMedium = (m: string | undefined | null, derivative: string | undefined | null) => {
@@ -261,8 +238,6 @@ export default function OverviewPage() {
       bestCall?: number | null;
       bestPutDetail?: OptionDetail;
       bestCallDetail?: OptionDetail;
-      trade?: number;
-      tradeInfo?: string;
     };
 
     // Build rows from price data (primary time axis)
@@ -341,20 +316,8 @@ export default function OverviewPage() {
       if (callSnap) rows[idx].bestCallDetail = makeDetail(callSnap, false);
     }
 
-    // Snap trade markers to nearest price point
-    for (const t of chart.trades) {
-      const idx = snapToNearest(new Date(t.timestamp).getTime());
-      rows[idx].trade = rows[idx].price;
-      rows[idx].tradeInfo = `${t.direction === 'buy' ? 'Bought' : 'Sold'} ${t.instrument_name} @ $${Number(t.price).toFixed(2)}`;
-    }
-
     return rows;
   }, [chart]);
-
-  const tradePoints = useMemo(() =>
-    merged.filter(d => d.trade != null).map(d => ({ ts: d.ts, trade: d.trade })),
-    [merged]
-  );
 
   // Data for momentum bar (only points with momentum data)
   const momentumData = useMemo(() =>
@@ -626,7 +589,6 @@ export default function OverviewPage() {
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
-          <span className="flex items-center gap-1"><span style={{ color: chartColors.trade }}>&#9733;</span> Trade</span>
         </div>
       </div>
 
@@ -722,10 +684,6 @@ export default function OverviewPage() {
               {/* PUT/CALL value overlays */}
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
-              {/* Trade markers (stars) */}
-              {tradePoints.length > 0 && (
-                <Scatter yAxisId="price" data={tradePoints} dataKey="trade" shape={<StarDot />} isAnimationActive={false} />
-              )}
             </ComposedChart>
           </ResponsiveContainer>
         )}
@@ -859,7 +817,7 @@ export default function OverviewPage() {
               </div>
             </div>
             <ResponsiveContainer width="100%" height={200}>
-              <ComposedChart data={filteredLiquidity} margin={margins} syncId="main">
+              <ComposedChart data={filteredLiquidity} margin={{ ...margins, right: mobile ? 10 : 60 }} syncId="main">
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 {dexNames.map((name, i) => (
                   <YAxis
