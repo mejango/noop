@@ -808,7 +808,7 @@ export default function OverviewPage() {
                 }}
               />
               {/* Band showing bot's active call delta range: 0.04–0.12 */}
-              <ReferenceArea y1={0.04} y2={0.12} fill="#5CEBDF" fillOpacity={0.04} />
+              <ReferenceArea y1={0.04} y2={0.12} fill="#5CEBDF" fillOpacity={0.12} stroke="#5CEBDF" strokeOpacity={0.15} />
               <Scatter
                 data={callHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -870,7 +870,7 @@ export default function OverviewPage() {
                 }}
               />
               {/* Band showing bot's active put delta range: 0.02–0.12 (abs) */}
-              <ReferenceArea y1={0.02} y2={0.12} fill="#f87171" fillOpacity={0.04} />
+              <ReferenceArea y1={0.02} y2={0.12} fill="#f87171" fillOpacity={0.12} stroke="#f87171" strokeOpacity={0.15} />
               <Scatter
                 data={putHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
