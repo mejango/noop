@@ -37,7 +37,7 @@ export default function Nav() {
   return (
     <nav className="border-b border-white/10 bg-juice-dark/80 backdrop-blur-md py-3">
       <div className="max-w-7xl mx-auto px-6 flex items-center justify-between">
-        <span className="text-2xl font-bold tracking-tight text-white">NO OPERATION</span>
+        <span className="text-2xl font-bold tracking-tight text-white">🥱 NO OPERATION</span>
         <div className="flex items-center gap-4 text-sm">
           <span className="text-juice-orange font-semibold">ETH {formatUSD(stats.last_price)}</span>
           <span className="text-gray-500 text-xs">{timeAgo(stats.last_price_time)}</span>

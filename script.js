@@ -2737,21 +2737,7 @@ const runBot = async () => {
       // SQLite: persist onchain data
       if (db) {
         try {
-          const flow = onchainAnalysis.dexLiquidity?.flowAnalysis;
-          const whale = onchainAnalysis.whaleMovements?.summary;
-          const exhaust = onchainAnalysis.exhaustionAnalysis;
-          db.insertOnchainData({
-            timestamp: onchainAnalysis.timestamp,
-            spot_price: onchainAnalysis.spotPrice ?? null,
-            liquidity_flow_direction: flow?.direction ?? null,
-            liquidity_flow_magnitude: flow?.magnitude ?? null,
-            liquidity_flow_confidence: flow?.confidence ?? null,
-            whale_count: whale?.whaleCount ?? null,
-            whale_total_txns: whale?.totalLargeTxns ?? null,
-            exhaustion_score: exhaust?.metrics?.overallExhaustionScore ?? null,
-            exhaustion_alert_level: exhaust?.alertLevel ?? null,
-            raw_data: JSON.stringify(onchainAnalysis),
-          });
+          db.insertOnchainData(onchainAnalysis);
         }
         catch (e) { console.log('DB: onchain write failed:', e.message); }
       }
