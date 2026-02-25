@@ -3073,6 +3073,42 @@ const runBot = async () => {
 
     console.log(`⏰ Next bot check in ${checkInterval / (1000 * 60)} minutes`);
 
+    // Write per-tick summary to database
+    if (db) {
+      try {
+        const tickSummary = {
+          price: spotPrice,
+          medium_momentum: botData.mediumTermMomentum,
+          short_momentum: botData.shortTermMomentum,
+          onchain: {
+            liquidity_flow: onchainAnalysis?.dexLiquidity?.flowAnalysis || null,
+            whale_count: onchainAnalysis?.whaleMovements?.summary?.whaleCount ?? 0,
+            whale_txns: onchainAnalysis?.whaleMovements?.summary?.totalLargeTxns ?? 0,
+            market_health: onchainAnalysis?.exhaustionAnalysis?.alertLevel || null,
+          },
+          instruments: {
+            total: instruments.length,
+            put_candidates: putCandidates.length,
+            call_candidates: callCandidates.length,
+          },
+          historical: {
+            total_data_points: historicalData.totalDataPoints,
+            filtered_data_points: historicalData.filteredDataPoints,
+            best_put_score: historicalData.bestPutScore,
+            best_call_score: historicalData.bestCallScore,
+          },
+          strategy: {
+            put_valid: processedPutOptions.length,
+            call_valid: processedCallOptions.length,
+          },
+          next_check_minutes: checkInterval / (1000 * 60),
+        };
+        db.insertTick(tickTimestamp, JSON.stringify(tickSummary));
+      } catch (e) {
+        console.log('DB: tick write failed:', e.message);
+      }
+    }
+
   botData.lastCheck = now;
 
   // Schedule next run

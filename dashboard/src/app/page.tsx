@@ -97,6 +97,28 @@ interface HeatmapDot {
   intensity: number; // 0-1 normalized
 }
 
+interface TickSummary {
+  id: number;
+  timestamp: string;
+  summary: string;
+}
+
+interface TickData {
+  price: number;
+  medium_momentum: { main: string; derivative: string | null } | string;
+  short_momentum: { main: string; derivative: string | null } | string;
+  onchain: {
+    liquidity_flow: { direction: string; magnitude: number; confidence: number } | null;
+    whale_count: number;
+    whale_txns: number;
+    market_health: string | null;
+  };
+  instruments: { total: number; put_candidates: number; call_candidates: number };
+  historical: { total_data_points: number; filtered_data_points: number; best_put_score: number; best_call_score: number };
+  strategy: { put_valid: number; call_valid: number };
+  next_check_minutes: number;
+}
+
 interface ChartData {
   prices: SpotPrice[];
   options: OptionsPoint[];
@@ -168,6 +190,7 @@ export default function OverviewPage() {
   const tableRef = useRef<HTMLDivElement>(null);
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart);
+  const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
 
   // Shared X-axis tick formatter
   const xTickFormatter = useCallback((ts: number) => {
@@ -428,15 +451,8 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      {/* Price + Momentum + Range Header */}
+      {/* Range + Tick + Momentum Header */}
       <div className="grid grid-cols-4 gap-4">
-        <Card title="ETH Spot" className="flex flex-col">
-          <div className="flex-1 flex flex-col justify-center">
-            <div className="text-3xl font-bold tracking-tight text-juice-orange">{formatUSD(stats.last_price)}</div>
-            <div className="text-xs text-gray-500 mt-1">{timeAgo(stats.last_price_time)}</div>
-          </div>
-        </Card>
-
         <Card title="Price Range" className="flex flex-col">
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
             <div className="flex items-center gap-3">
@@ -451,6 +467,70 @@ export default function OverviewPage() {
               <span className="text-gray-600">/</span>
               <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
             </div>
+          </div>
+        </Card>
+
+        <Card title="Tick Log" className="col-span-2 flex flex-col">
+          <div className="overflow-y-auto" style={{ maxHeight: 200 }}>
+            {ticks.length === 0 ? (
+              <div className="text-gray-500 text-xs py-4 text-center">No tick data yet</div>
+            ) : (
+              <div className="space-y-2">
+                {ticks.map((tick) => {
+                  let d: TickData | null = null;
+                  try { d = JSON.parse(tick.summary); } catch { /* skip */ }
+                  if (!d) return null;
+                  const medMain = typeof d.medium_momentum === 'object' ? d.medium_momentum.main : d.medium_momentum;
+                  const shortMain = typeof d.short_momentum === 'object' ? d.short_momentum.main : d.short_momentum;
+                  const flow = d.onchain?.liquidity_flow;
+                  return (
+                    <div key={tick.id} className="border-b border-white/5 pb-2 last:border-0">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-gray-500">{timeAgo(tick.timestamp)}</span>
+                        <span className="text-juice-orange font-medium">{formatUSD(d.price)}</span>
+                      </div>
+                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs mt-1">
+                        <span className="text-gray-400">
+                          Instruments: <span className="text-white">{d.instruments.total}</span>
+                          {' '}({d.instruments.put_candidates}P / {d.instruments.call_candidates}C)
+                        </span>
+                        <span className="text-gray-400">
+                          Scores: <span className="text-red-400">P {d.historical.best_put_score.toFixed(4)}</span>
+                          {' / '}
+                          <span className="text-cyan-400">C {d.historical.best_call_score.toFixed(2)}</span>
+                        </span>
+                        <span className="text-gray-400">
+                          Valid: <span className="text-white">{d.strategy.put_valid}P / {d.strategy.call_valid}C</span>
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs mt-0.5">
+                        <span className="text-gray-400">
+                          Momentum: <span className={momentumColor(medMain)}>{medMain || 'n/a'}</span>
+                          {' / '}
+                          <span className={momentumColor(shortMain)}>{shortMain || 'n/a'}</span>
+                        </span>
+                        {flow && (
+                          <span className="text-gray-400">
+                            Flow: <span className="text-white">{flow.direction}</span>
+                          </span>
+                        )}
+                        {d.onchain.whale_count > 0 && (
+                          <span className="text-gray-400">
+                            Whales: <span className="text-white">{d.onchain.whale_count}</span> ({d.onchain.whale_txns} txns)
+                          </span>
+                        )}
+                        {d.onchain.market_health && (
+                          <span className="text-gray-400">
+                            Health: <span className={d.onchain.market_health === 'normal' ? 'text-emerald-400' : 'text-yellow-400'}>{d.onchain.market_health}</span>
+                          </span>
+                        )}
+                        <span className="text-gray-500">Next: {d.next_check_minutes.toFixed(0)}m</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </Card>
 
@@ -469,26 +549,6 @@ export default function OverviewPage() {
                 {stats.short_momentum || 'neutral'}
               </span>
               {stats.short_derivative && <span className="text-xs text-gray-500 truncate">({stats.short_derivative})</span>}
-            </div>
-          </div>
-        </Card>
-
-        <Card title="Budget" className="flex flex-col">
-          <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 w-10">PUT</span>
-              <span className="text-white">{formatUSD(stats.budget.putRemaining)}</span>
-              <span className="text-gray-600">/</span>
-              <span className="text-gray-500 text-xs">{formatUSD(stats.budget.putTotalBudget)}</span>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 w-10">CALL</span>
-              <span className="text-white">{formatUSD(stats.budget.callRemaining)}</span>
-              <span className="text-gray-600">/</span>
-              <span className="text-gray-500 text-xs">{formatUSD(stats.budget.callTotalBudget)}</span>
-            </div>
-            <div className="text-xs text-gray-500">
-              {stats.budget.putDaysLeft > 0 ? `${stats.budget.putDaysLeft}d left` : 'cycle ended'} in {stats.budget.cycleDays}d cycle
             </div>
           </div>
         </Card>

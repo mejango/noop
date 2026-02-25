@@ -119,6 +119,13 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_type ON strategy_signals(signal_type);
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_timestamp ON strategy_signals(timestamp);
 
+  CREATE TABLE IF NOT EXISTS bot_ticks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    summary TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_bot_ticks_timestamp ON bot_ticks(timestamp);
+
   CREATE TABLE IF NOT EXISTS bot_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     put_cycle_start INTEGER,
@@ -229,6 +236,14 @@ const stmts = {
     ORDER BY timestamp ASC
   `),
 
+  insertTick: db.prepare(`
+    INSERT INTO bot_ticks (timestamp, summary) VALUES (@timestamp, @summary)
+  `),
+
+  getRecentTicks: db.prepare(`
+    SELECT id, timestamp, summary FROM bot_ticks ORDER BY timestamp DESC LIMIT @limit
+  `),
+
   // 7-day average premium for call selling elevation check
   getAvgCallPremium7d: db.prepare(`
     SELECT AVG(bid_price) as avg_premium
@@ -323,6 +338,11 @@ const getRecentSignals = (since, limit = 50) => stmts.getRecentSignals.all({ sin
 const getRecentOnchain = (since) => stmts.getRecentOnchain.all({ since });
 const getRecentOptionsSnapshots = (since) => stmts.getRecentOptionsSnapshots.all({ since });
 const getStats = () => stmts.getStats.get();
+const insertTick = (timestamp, summary) => {
+  stmts.insertTick.run({ timestamp, summary: typeof summary === 'string' ? summary : JSON.stringify(summary) });
+};
+const getRecentTicks = (limit = 50) => stmts.getRecentTicks.all({ limit });
+
 const getAvgCallPremium7d = () => {
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   return stmts.getAvgCallPremium7d.get({ since });
@@ -400,6 +420,8 @@ module.exports = {
   getRecentOptionsSnapshots,
   getStats,
   getAvgCallPremium7d,
+  insertTick,
+  getRecentTicks,
   saveBotState,
   loadBotState,
   loadPriceHistoryFromDb,
