@@ -304,18 +304,18 @@ const insertOptionsSnapshotBatch = (options, timestamp) => {
 
 const insertOnchainData = (analysis) => {
   const flow = analysis.dexLiquidity?.flowAnalysis || {};
-  const whaleData = analysis.whaleMovements || {};
+  const whaleSummary = analysis.whaleMovements?.summary || {};
   const exhaustion = analysis.exhaustionAnalysis || {};
 
   stmts.insertOnchainData.run({
     timestamp: analysis.timestamp || new Date().toISOString(),
     spot_price: analysis.spotPrice || null,
     liquidity_flow_direction: flow.direction || null,
-    liquidity_flow_magnitude: flow.magnitude || null,
-    liquidity_flow_confidence: flow.confidence || null,
-    whale_count: whaleData.uniqueWallets || whaleData.count || null,
-    whale_total_txns: whaleData.totalTransactions || whaleData.totalTxns || null,
-    exhaustion_score: exhaustion.metrics?.compositeScore || null,
+    liquidity_flow_magnitude: toNum(flow.magnitude),
+    liquidity_flow_confidence: toNum(flow.confidence),
+    whale_count: toNum(whaleSummary.whaleCount),
+    whale_total_txns: toNum(whaleSummary.totalLargeTxns),
+    exhaustion_score: toNum(exhaustion.metrics?.compositeScore ?? exhaustion.metrics?.overallExhaustionScore),
     exhaustion_alert_level: exhaustion.alertLevel || null,
     raw_data: JSON.stringify(analysis),
   });
