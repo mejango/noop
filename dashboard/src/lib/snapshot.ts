@@ -7,12 +7,15 @@ import {
   getRecentTrades,
   getOnchainData,
   getSignals,
+  getJournalEntries,
 } from './db';
+import { buildCorrelationAnalysis } from './correlation';
 
 export function buildMarketSnapshot() {
   const now = new Date();
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const since30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
   const stats = (getStats() as Record<string, unknown>) || {};
   const budget = getBotBudget();
@@ -120,6 +123,19 @@ export function buildMarketSnapshot() {
       count: ticks.length,
       latest_parsed: latestTickParsed,
       ticks: ticks,
+    },
+
+    cross_correlations: (() => {
+      try {
+        return buildCorrelationAnalysis();
+      } catch {
+        return { pairs: [], leading_indicators: [], series_descriptions: {}, computed_at: now.toISOString() };
+      }
+    })(),
+
+    ai_journal: {
+      _description: 'AI analytical journal. Persistent observations and hypotheses from past conversations.',
+      recent_entries: getJournalEntries(since30d, 20),
     },
   };
 }

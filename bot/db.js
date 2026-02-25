@@ -134,6 +134,16 @@ db.exec(`
     call_unspent_sell_limit REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
+
+  CREATE TABLE IF NOT EXISTS ai_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    entry_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    series_referenced TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_ai_journal_timestamp ON ai_journal(timestamp);
 `);
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
@@ -242,6 +252,19 @@ const stmts = {
     SELECT id, timestamp, summary FROM bot_ticks ORDER BY timestamp DESC LIMIT @limit
   `),
 
+  // AI journal
+  insertJournalEntry: db.prepare(`
+    INSERT INTO ai_journal (timestamp, entry_type, content, series_referenced)
+    VALUES (@timestamp, @entry_type, @content, @series_referenced)
+  `),
+
+  getRecentJournalEntries: db.prepare(`
+    SELECT id, timestamp, entry_type, content, series_referenced, created_at
+    FROM ai_journal
+    ORDER BY timestamp DESC
+    LIMIT @limit
+  `),
+
   // 7-day average premium for call selling elevation check
   getAvgCallPremium7d: db.prepare(`
     SELECT AVG(bid_price) as avg_premium
@@ -343,6 +366,19 @@ const getAvgCallPremium7d = () => {
   return stmts.getAvgCallPremium7d.get({ since });
 };
 
+// ─── AI Journal Helpers ──────────────────────────────────────────────────────
+
+const insertJournalEntry = (entryType, content, seriesReferenced = null) => {
+  stmts.insertJournalEntry.run({
+    timestamp: new Date().toISOString(),
+    entry_type: entryType,
+    content,
+    series_referenced: seriesReferenced ? JSON.stringify(seriesReferenced) : null,
+  });
+};
+
+const getRecentJournalEntries = (limit = 20) => stmts.getRecentJournalEntries.all({ limit });
+
 // ─── Bot State Helpers ────────────────────────────────────────────────────────
 
 const saveBotState = (botData) => {
@@ -417,6 +453,8 @@ module.exports = {
   getAvgCallPremium7d,
   insertTick,
   getRecentTicks,
+  insertJournalEntry,
+  getRecentJournalEntries,
   saveBotState,
   loadBotState,
   loadPriceHistoryFromDb,

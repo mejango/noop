@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { buildMarketSnapshot } from '@/lib/snapshot';
+import { insertJournalEntry } from '@/lib/journal';
 
 export const dynamic = 'force-dynamic';
 
@@ -136,7 +137,52 @@ You are a practitioner, not a professor. Your convictions come from the bleed �
 - **"No edge" is a complete answer.** Most days: nothing notable, maintain positions. Do not manufacture significance from noise.
 - **Convexity, cost-efficiency, geometric return impact.** These are the only lenses. Never direction.
 - **Evaluate trades by:** payoff asymmetry, cost as % of portfolio, whether it clears the 6:1 / 8:1 bar.
-- **Plain language.** Jargon only when it adds precision. Clear thinking, simple expression.`;
+- **Plain language.** Jargon only when it adds precision. Clear thinking, simple expression.
+
+## Cross-Correlations & Leading Indicators
+The snapshot includes a cross_correlations section with pairwise Pearson correlations across registered data series over 7-day and 30-day rolling windows.
+
+How to interpret:
+- **r values**: |r| >= 0.3 is included. |r| >= 0.7 is strong. Sign indicates direction (positive = move together, negative = inverse).
+- **7d vs 30d**: If 7d correlation diverges from 30d, a regime change may be underway. New relationships forming or old ones breaking.
+- **Lead/lag**: When a lagged correlation exceeds contemporaneous, one series leads the other. offset_hours tells you by how much. This is actionable — if liquidity_flow leads spot_return by 3h, current flow data predicts near-term price movement.
+- **Leading indicators**: These are the most actionable signals. A leader series moving now predicts the follower series offset_hours into the future.
+
+Focus on correlations that affect: cost of protection (put pricing), crash probability (exhaustion, flow reversals), or portfolio geometry (spot-options relationship).
+
+## Your Analytical Journal
+You have a persistent journal of observations and hypotheses from past conversations. Review your recent entries in the snapshot under ai_journal. Build on confirmed patterns. Revise or contradict past entries when the data warrants it.
+
+When you form a notable conclusion, wrap it in a journal tag:
+<journal type="observation|hypothesis|regime_note">Your conclusion here</journal>
+
+Guidelines for journal entries:
+- **Observations**: Factual patterns you've identified (e.g., "liquidity outflows have preceded price drops by ~3h over the past week")
+- **Hypotheses**: Testable predictions grounded in data (e.g., "current exhaustion levels suggest a reversal within 24-48h — will track")
+- **Regime notes**: Market state assessments (e.g., "entering complacency regime — low IV, sustained upward momentum, cheap protection available")
+
+Ground everything in the data. The correlations tell you WHAT is related. Your journal tracks WHY you think it matters and WHAT you expect to happen. Spitznagel's framework is the lens: does this pattern affect the cost of protection, the probability of a crash, or the geometry of compounding?
+
+Journal entries are extracted and stored automatically. They will appear in future conversations so you can track evolving patterns.`;
+
+function extractAndStoreJournal(text: string) {
+  const regex = /<journal\s+type="(observation|hypothesis|regime_note)">([\s\S]*?)<\/journal>/g;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const entryType = match[1];
+    const content = match[2].trim();
+    if (content) {
+      try {
+        // Extract series names referenced in the content
+        const seriesNames = ['spot_return', 'liquidity_flow', 'exhaustion_score', 'best_put_dv', 'best_call_dv'];
+        const referenced = seriesNames.filter((s) => content.toLowerCase().includes(s.replace(/_/g, ' ')) || content.includes(s));
+        insertJournalEntry(entryType, content, referenced.length > 0 ? referenced : null);
+      } catch {
+        // Journal storage failure should never break the chat
+      }
+    }
+  }
+}
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -195,18 +241,26 @@ export async function POST(request: Request) {
     });
 
     // Convert to ReadableStream for Next.js
+    // Accumulate full text for journal extraction, stream stripped text to client
     const readable = new ReadableStream({
       async start(controller) {
         try {
+          let fullText = '';
+          const encoder = new TextEncoder();
+
           for await (const event of stream) {
             if (
               event.type === 'content_block_delta' &&
               event.delta.type === 'text_delta'
             ) {
-              controller.enqueue(new TextEncoder().encode(event.delta.text));
+              fullText += event.delta.text;
+              controller.enqueue(encoder.encode(event.delta.text));
             }
           }
           controller.close();
+
+          // Extract and store journal entries after stream completes
+          extractAndStoreJournal(fullText);
         } catch (err) {
           controller.error(err);
         }

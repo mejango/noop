@@ -215,6 +215,84 @@ export function getSignals(since: string, limit = 50) {
   `).all(since, limit);
 }
 
+// ─── AI Journal ─────────────────────────────────────────────────────────────
+
+export function getJournalEntries(since: string, limit = 20) {
+  const d = getDb();
+  try {
+    return d.prepare(`
+      SELECT id, timestamp, entry_type, content, series_referenced, created_at
+      FROM ai_journal
+      WHERE timestamp > ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(since, limit);
+  } catch {
+    return []; // table may not exist yet
+  }
+}
+
+// ─── Hourly Series for Correlation Engine ───────────────────────────────────
+
+export function getSpotPricesHourly(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(price) as avg_price
+    FROM spot_prices
+    WHERE timestamp > ?
+    GROUP BY hour
+    ORDER BY hour ASC
+  `).all(since) as { hour: string; avg_price: number }[];
+}
+
+export function getOnchainHourly(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(liquidity_flow_magnitude) as avg_magnitude,
+           AVG(exhaustion_score) as avg_exhaustion,
+           -- Most common direction in the hour
+           (SELECT liquidity_flow_direction FROM onchain_data o2
+            WHERE strftime('%Y-%m-%dT%H:00:00Z', o2.timestamp) = strftime('%Y-%m-%dT%H:00:00Z', onchain_data.timestamp)
+              AND o2.timestamp > ?
+            GROUP BY liquidity_flow_direction
+            ORDER BY COUNT(*) DESC LIMIT 1) as direction
+    FROM onchain_data
+    WHERE timestamp > ?
+    GROUP BY hour
+    ORDER BY hour ASC
+  `).all(since, since) as { hour: string; avg_magnitude: number | null; avg_exhaustion: number | null; direction: string | null }[];
+}
+
+export function getBestPutDvHourly(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           MAX(ask_delta_value) as value
+    FROM options_snapshots
+    WHERE timestamp > ?
+      AND (option_type = 'P' OR instrument_name LIKE '%-P')
+      AND delta <= -0.02 AND delta >= -0.12
+    GROUP BY hour
+    ORDER BY hour ASC
+  `).all(since) as { hour: string; value: number | null }[];
+}
+
+export function getBestCallDvHourly(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           MAX(bid_delta_value) as value
+    FROM options_snapshots
+    WHERE timestamp > ?
+      AND (option_type = 'C' OR instrument_name LIKE '%-C')
+      AND delta >= 0.04 AND delta <= 0.12
+    GROUP BY hour
+    ORDER BY hour ASC
+  `).all(since) as { hour: string; value: number | null }[];
+}
+
 export function getBotBudget() {
   const empty = {
     putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0,
