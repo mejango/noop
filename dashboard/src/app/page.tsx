@@ -671,12 +671,24 @@ export default function OverviewPage() {
                   const fmtPut = bestPut != null && Number(bestPut) > 0 ? Number(bestPut).toFixed(6) : 'N/A';
                   const fmtCall = bestCall != null && Number(bestCall) > 0 ? Number(bestCall).toFixed(2) : 'N/A';
                   const { bestPutScore, bestCallScore, windowDays } = chart.bestScores;
+                  const pd = row.bestPutDetail;
+                  const cd = row.bestCallDetail;
                   return (
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
                       <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
                       <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}</div>
+                      {pd && (
+                        <div className="text-xs text-gray-500 pl-2 mb-0.5">
+                          Strike ${Number(pd.strike).toFixed(0)} | Delta {Number(pd.delta).toFixed(3)} | DTE {pd.dte ?? 'N/A'} | Ask {Number(pd.price).toFixed(4)}
+                        </div>
+                      )}
                       <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}</div>
+                      {cd && (
+                        <div className="text-xs text-gray-500 pl-2 mb-0.5">
+                          Strike ${Number(cd.strike).toFixed(0)} | Delta {Number(cd.delta).toFixed(3)} | DTE {cd.dte ?? 'N/A'} | Bid {Number(cd.price).toFixed(4)}
+                        </div>
+                      )}
                       <div className="border-t border-white/10 mt-1.5 pt-1.5 text-xs text-gray-500">
                         Best scores ({windowDays}d window):
                         <span style={{ color: chartColors.red }}> P {Number(bestPutScore).toFixed(6)}</span>
@@ -720,7 +732,62 @@ export default function OverviewPage() {
       </Card>
 
       {/* Momentum Bar — two rows: medium (top) + short (bottom) */}
-      {momentumData.length > 0 && (
+      {momentumData.length > 0 && (() => {
+        const MomentumTooltipBar = ({ data }: { data: typeof momentumData }) => {
+          // eslint-disable-next-line react-hooks/rules-of-hooks
+          const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+          const hovered = hoverIdx != null ? data[hoverIdx] : null;
+          return (
+            <>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">medium</span>
+                <div className="flex rounded-t overflow-hidden flex-1" style={{ height: 10 }}>
+                  {data.map((d, i) => (
+                    <div
+                      key={i}
+                      className="flex-1"
+                      style={{ background: momentumBarColorMedium(d.momentum, d.mediumDerivative) }}
+                      onMouseEnter={() => setHoverIdx(i)}
+                      onMouseLeave={() => setHoverIdx(null)}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">short</span>
+                <div className="flex rounded-b overflow-hidden flex-1" style={{ height: 10 }}>
+                  {data.map((d, i) => (
+                    <div
+                      key={i}
+                      className="flex-1"
+                      style={{ background: momentumBarColorShort(d.shortMomentum, d.shortDerivative) }}
+                      onMouseEnter={() => setHoverIdx(i)}
+                      onMouseLeave={() => setHoverIdx(null)}
+                    />
+                  ))}
+                </div>
+              </div>
+              {hovered && (
+                <div className="mt-1.5 px-1">
+                  <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs inline-block shadow-lg">
+                    <div className="text-gray-400 mb-1">{new Date(hovered.ts).toLocaleString()}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-sm inline-block" style={{ background: momentumBarColorMedium(hovered.momentum, hovered.mediumDerivative) }} />
+                      <span className="text-white">Medium: {hovered.momentum}</span>
+                      <span className="text-gray-500">{hovered.mediumDerivative ?? 'n/a'}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-sm inline-block" style={{ background: momentumBarColorShort(hovered.shortMomentum, hovered.shortDerivative) }} />
+                      <span className="text-white">Short: {hovered.shortMomentum}</span>
+                      <span className="text-gray-500">{hovered.shortDerivative ?? 'n/a'}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          );
+        };
+        return (
         <Card>
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Momentum</span>
@@ -731,32 +798,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <div style={{ marginLeft: margins.left + (mobile ? 45 : 70) - 44, marginRight: margins.right }}>
-            <div className="flex items-center gap-1">
-              <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">medium</span>
-              <div className="flex rounded-t overflow-hidden flex-1" style={{ height: 10 }}>
-                {momentumData.map((d, i) => (
-                  <div
-                    key={i}
-                    className="flex-1"
-                    style={{ background: momentumBarColorMedium(d.momentum, d.mediumDerivative) }}
-                    title={`${new Date(d.ts).toLocaleString()}\nMedium: ${d.momentum} (${d.mediumDerivative ?? 'n/a'})\nShort: ${d.shortMomentum} (${d.shortDerivative ?? 'n/a'})`}
-                  />
-                ))}
-              </div>
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">short</span>
-              <div className="flex rounded-b overflow-hidden flex-1" style={{ height: 10 }}>
-                {momentumData.map((d, i) => (
-                  <div
-                    key={i}
-                    className="flex-1"
-                    style={{ background: momentumBarColorShort(d.shortMomentum, d.shortDerivative) }}
-                    title={`${new Date(d.ts).toLocaleString()}\nMedium: ${d.momentum} (${d.mediumDerivative ?? 'n/a'})\nShort: ${d.shortMomentum} (${d.shortDerivative ?? 'n/a'})`}
-                  />
-                ))}
-              </div>
-            </div>
+            <MomentumTooltipBar data={momentumData} />
             {/* Time axis */}
             <div className="flex items-center gap-1">
               <span className="w-10 shrink-0" />
@@ -777,7 +819,8 @@ export default function OverviewPage() {
             </div>
           </div>
         </Card>
-      )}
+        );
+      })()}
 
       {/* DEX Liquidity (TVL) */}
       {filteredLiquidity.length > 0 && (() => {
