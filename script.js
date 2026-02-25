@@ -2661,6 +2661,8 @@ const runBot = async () => {
   // Shared timestamp for all DB writes this tick
   const tickTimestamp = new Date().toISOString();
 
+  let onchainAnalysis = null;
+
   if (spotPrice) {
     // Display run header
     console.log(`ETH: $${spotPrice?.toFixed(2) || 'N/A'} | ${new Date().toLocaleString()}`);
@@ -2689,8 +2691,8 @@ const runBot = async () => {
 
     // ===== ONCHAIN ANALYSIS =====
     console.log('🔗 Running onchain analysis...');
-    
-    let onchainAnalysis = {
+
+    onchainAnalysis = {
       error: 'analysis_failed',
       timestamp: new Date().toISOString()
     };
