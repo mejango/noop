@@ -183,10 +183,10 @@ const lerpColor = (a: [number, number, number], b: [number, number, number], t: 
   const bl = Math.round(a[2] + (b[2] - a[2]) * t);
   return `rgb(${r},${g},${bl})`;
 };
-const callColorDim: [number, number, number] = [60, 130, 160];   // muted cyan
-const callColorBright: [number, number, number] = [92, 235, 223]; // juice-cyan
-const putColorDim: [number, number, number] = [160, 80, 80];    // muted red
-const putColorBright: [number, number, number] = [248, 113, 113]; // red-400
+const callColorDim: [number, number, number] = [60, 90, 170];    // muted blue
+const callColorBright: [number, number, number] = [100, 160, 255]; // bright blue
+const putColorDim: [number, number, number] = [160, 100, 50];   // muted amber
+const putColorBright: [number, number, number] = [255, 160, 50]; // bright orange
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
@@ -775,12 +775,12 @@ export default function OverviewPage() {
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Put Market</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> cheap</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.8) }} /> rich</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> cheaper</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.8) }} /> pricier</span>
               <span className="text-gray-600">ask premium</span>
             </div>
           </div>
-          <ResponsiveContainer width="100%" height={200}>
+          <ResponsiveContainer width="100%" height={360}>
             <ScatterChart margin={margins} syncId="main">
               <XAxis
                 dataKey="ts"
@@ -809,17 +809,17 @@ export default function OverviewPage() {
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
-                      <div className="text-sm">Delta: <span className="text-red-300">{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Delta: <span style={{ color: 'rgb(255,160,50)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
                       <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
                       {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
                       <div className="text-sm">Bid: <span className="text-gray-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
-                      <div className="text-sm">Ask: <span className="text-red-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span style={{ color: 'rgb(255,160,50)' }}>{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
                     </div>
                   );
                 }}
               />
               {/* Band showing bot's active put delta range: 0.02–0.12 (abs) */}
-              <ReferenceArea y1={0.02} y2={0.12} fill="#f87171" fillOpacity={0.12} stroke="#f87171" strokeOpacity={0.15} />
+              <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.12} stroke="#FFA032" strokeOpacity={0.15} />
               <Scatter
                 data={filteredPutHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -837,12 +837,12 @@ export default function OverviewPage() {
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
             <span className="text-xs font-medium text-gray-400">Call Market</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> cheap</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> rich</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> cheaper</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> pricier</span>
               <span className="text-gray-600">bid premium</span>
             </div>
           </div>
-          <ResponsiveContainer width="100%" height={200}>
+          <ResponsiveContainer width="100%" height={360}>
             <ScatterChart margin={margins} syncId="main">
               <XAxis
                 dataKey="ts"
@@ -871,17 +871,17 @@ export default function OverviewPage() {
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
-                      <div className="text-sm">Delta: <span className="text-cyan-300">{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Delta: <span style={{ color: 'rgb(100,160,255)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
                       <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
                       {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
-                      <div className="text-sm">Bid: <span className="text-cyan-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Bid: <span style={{ color: 'rgb(100,160,255)' }}>{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
                       <div className="text-sm">Ask: <span className="text-gray-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
                     </div>
                   );
                 }}
               />
               {/* Band showing bot's active call delta range: 0.04–0.12 */}
-              <ReferenceArea y1={0.04} y2={0.12} fill="#5CEBDF" fillOpacity={0.12} stroke="#5CEBDF" strokeOpacity={0.15} />
+              <ReferenceArea y1={0.04} y2={0.12} fill="#64A0FF" fillOpacity={0.12} stroke="#64A0FF" strokeOpacity={0.15} />
               <Scatter
                 data={filteredCallHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
