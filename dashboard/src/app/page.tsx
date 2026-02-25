@@ -436,26 +436,47 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      {/* Range + Tick + Momentum Header */}
-      <div className="grid grid-cols-4 gap-4">
-        <Card title="Price Range" className="flex flex-col">
-          <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 w-10">3d H/L</span>
-              <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>
-              <span className="text-gray-600">/</span>
-              <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
+      {/* Left: Range + Momentum stacked | Right: Tick Log */}
+      <div className="grid grid-cols-2 gap-4">
+        <div className="flex flex-col gap-4">
+          <Card title="Price Range" className="flex flex-col">
+            <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-500 w-10">3d H/L</span>
+                <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>
+                <span className="text-gray-600">/</span>
+                <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-500 w-10">7d H/L</span>
+                <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
+                <span className="text-gray-600">/</span>
+                <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
+              </div>
             </div>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 w-10">7d H/L</span>
-              <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
-              <span className="text-gray-600">/</span>
-              <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
-            </div>
-          </div>
-        </Card>
+          </Card>
 
-        <Card title="Tick Log" className="col-span-2 flex flex-col">
+          <Card title="Momentum" className="flex flex-col overflow-hidden">
+            <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="text-xs text-gray-500 w-12 shrink-0">Medium</span>
+                <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
+                  {stats.medium_momentum || 'neutral'}
+                </span>
+                {stats.medium_derivative && <span className="text-xs text-gray-500 truncate">({stats.medium_derivative})</span>}
+              </div>
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="text-xs text-gray-500 w-12 shrink-0">Short</span>
+                <span className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
+                  {stats.short_momentum || 'neutral'}
+                </span>
+                {stats.short_derivative && <span className="text-xs text-gray-500 truncate">({stats.short_derivative})</span>}
+              </div>
+            </div>
+          </Card>
+        </div>
+
+        <Card title="Tick Log" className="flex flex-col">
           <div className="overflow-y-auto" style={{ maxHeight: 200 }}>
             {ticks.length === 0 ? (
               <div className="text-gray-500 text-xs py-4 text-center">No tick data yet</div>
@@ -516,25 +537,6 @@ export default function OverviewPage() {
                 })}
               </div>
             )}
-          </div>
-        </Card>
-
-        <Card title="Momentum" className="flex flex-col overflow-hidden">
-          <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
-            <div className="flex items-center gap-3 min-w-0">
-              <span className="text-xs text-gray-500 w-12 shrink-0">Medium</span>
-              <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
-                {stats.medium_momentum || 'neutral'}
-              </span>
-              {stats.medium_derivative && <span className="text-xs text-gray-500 truncate">({stats.medium_derivative})</span>}
-            </div>
-            <div className="flex items-center gap-3 min-w-0">
-              <span className="text-xs text-gray-500 w-12 shrink-0">Short</span>
-              <span className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
-                {stats.short_momentum || 'neutral'}
-              </span>
-              {stats.short_derivative && <span className="text-xs text-gray-500 truncate">({stats.short_derivative})</span>}
-            </div>
           </div>
         </Card>
       </div>
