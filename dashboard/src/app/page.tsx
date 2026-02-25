@@ -928,43 +928,43 @@ export default function OverviewPage() {
                     <td className="py-1.5 px-3 text-right text-juice-orange tabular-nums">
                       {formatUSD(d.price)}
                     </td>
-                    <td className="py-1.5 px-3 text-right tabular-nums text-xs relative group">
-                      <span className="cursor-help">
-                        <span style={{ color: chartColors.red }}>{Number(d.current_best_put ?? 0) > 0 ? Number(d.current_best_put).toFixed(6) : '--'}</span>
-                        <span className="text-gray-600"> / </span>
-                        <span className="text-gray-500">{Number(d.historical?.best_put_score) > 0 ? Number(d.historical.best_put_score).toFixed(6) : '--'}</span>
-                      </span>
-                      {d.best_put_detail && (
-                        <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
-                          <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                            <div className="text-gray-400 mb-1">Current best PUT</div>
-                            <div>Delta: <span className="text-white">{d.best_put_detail.delta != null ? Number(d.best_put_detail.delta).toFixed(4) : 'N/A'}</span></div>
-                            <div>Price: <span className="text-white">{d.best_put_detail.price != null ? Number(d.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
-                            <div>Strike: <span className="text-white">{d.best_put_detail.strike != null ? `$${Number(d.best_put_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                            <div>DTE: <span className="text-white">{dteDays(d.best_put_detail.expiry) ?? 'N/A'}</span></div>
-                            {d.best_put_detail.instrument && <div>Instrument: <span className="text-white">{d.best_put_detail.instrument}</span></div>}
+                    <td className="py-1.5 px-3 text-right tabular-nums text-xs">
+                      <span className="relative inline-block group/pn">
+                        <span style={{ color: chartColors.red }} className="cursor-help">{Number(d.current_best_put ?? 0) > 0 ? Number(d.current_best_put).toFixed(6) : '--'}</span>
+                        {d.best_put_detail && (
+                          <div className="absolute right-0 top-full mt-1 hidden group-hover/pn:block z-20 pointer-events-none">
+                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                              <div className="text-gray-400 mb-1">Current best PUT</div>
+                              <div>Delta: <span className="text-white">{Number(d.best_put_detail.delta).toFixed(4)}</span></div>
+                              <div>Price: <span className="text-white">{Number(d.best_put_detail.price).toFixed(6)}</span></div>
+                              <div>Strike: <span className="text-white">${Number(d.best_put_detail.strike).toFixed(0)}</span></div>
+                              <div>DTE: <span className="text-white">{dteDays(d.best_put_detail.expiry) ?? 'N/A'}</span></div>
+                              {d.best_put_detail.instrument && <div className="text-gray-400 mt-1">{d.best_put_detail.instrument}</div>}
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        )}
+                      </span>
+                      <span className="text-gray-600"> / </span>
+                      <span className="text-gray-500">{Number(d.historical?.best_put_score) > 0 ? Number(d.historical.best_put_score).toFixed(6) : '--'}</span>
                     </td>
-                    <td className="py-1.5 px-3 text-right tabular-nums text-xs relative group">
-                      <span className="cursor-help">
-                        <span style={{ color: chartColors.secondary }}>{Number(d.current_best_call ?? 0) > 0 ? Number(d.current_best_call).toFixed(2) : '--'}</span>
-                        <span className="text-gray-600"> / </span>
-                        <span className="text-gray-500">{Number(d.historical?.best_call_score) > 0 ? Number(d.historical.best_call_score).toFixed(2) : '--'}</span>
-                      </span>
-                      {d.best_call_detail && (
-                        <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
-                          <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                            <div className="text-gray-400 mb-1">Current best CALL</div>
-                            <div>Delta: <span className="text-white">{d.best_call_detail.delta != null ? Number(d.best_call_detail.delta).toFixed(4) : 'N/A'}</span></div>
-                            <div>Price: <span className="text-white">{d.best_call_detail.price != null ? Number(d.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
-                            <div>Strike: <span className="text-white">{d.best_call_detail.strike != null ? `$${Number(d.best_call_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                            <div>DTE: <span className="text-white">{dteDays(d.best_call_detail.expiry) ?? 'N/A'}</span></div>
-                            {d.best_call_detail.instrument && <div>Instrument: <span className="text-white">{d.best_call_detail.instrument}</span></div>}
+                    <td className="py-1.5 px-3 text-right tabular-nums text-xs">
+                      <span className="relative inline-block group/cn">
+                        <span style={{ color: chartColors.secondary }} className="cursor-help">{Number(d.current_best_call ?? 0) > 0 ? Number(d.current_best_call).toFixed(2) : '--'}</span>
+                        {d.best_call_detail && (
+                          <div className="absolute right-0 top-full mt-1 hidden group-hover/cn:block z-20 pointer-events-none">
+                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                              <div className="text-gray-400 mb-1">Current best CALL</div>
+                              <div>Delta: <span className="text-white">{Number(d.best_call_detail.delta).toFixed(4)}</span></div>
+                              <div>Price: <span className="text-white">{Number(d.best_call_detail.price).toFixed(6)}</span></div>
+                              <div>Strike: <span className="text-white">${Number(d.best_call_detail.strike).toFixed(0)}</span></div>
+                              <div>DTE: <span className="text-white">{dteDays(d.best_call_detail.expiry) ?? 'N/A'}</span></div>
+                              {d.best_call_detail.instrument && <div className="text-gray-400 mt-1">{d.best_call_detail.instrument}</div>}
+                            </div>
                           </div>
-                        </div>
-                      )}
+                        )}
+                      </span>
+                      <span className="text-gray-600"> / </span>
+                      <span className="text-gray-500">{Number(d.historical?.best_call_score) > 0 ? Number(d.historical.best_call_score).toFixed(2) : '--'}</span>
                     </td>
                     <td className="py-1.5 px-3 text-right text-xs text-gray-400">
                       {d.instruments.total} <span className="text-gray-600">({d.instruments.put_candidates}P/{d.instruments.call_candidates}C)</span>
