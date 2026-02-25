@@ -87,6 +87,7 @@ interface HeatmapSnapshot {
 interface HeatmapDot {
   ts: number;
   pctOtm: number;
+  absDelta: number;
   premium: number;
   strike: number;
   delta: number | null;
@@ -189,6 +190,7 @@ export default function OverviewPage() {
       ts: number;
       price?: number;
       momentum?: string;
+      shortMomentum?: string;
       momentumVal?: number;
       bestPut?: number | null;
       bestCall?: number | null;
@@ -206,6 +208,7 @@ export default function OverviewPage() {
         ts: new Date(p.timestamp).getTime(),
         price: p.price,
         momentum: m,
+        shortMomentum: p.short_momentum_main || 'neutral',
         momentumVal: 1, // all bars same height, color shows direction
       };
     });
@@ -349,9 +352,12 @@ export default function OverviewPage() {
 
       const dte = snap.expiry ? Math.max(0, Math.ceil((snap.expiry * 1000 - ts) / (1000 * 60 * 60 * 24))) : null;
 
+      if (snap.delta == null) continue; // need delta for Y-axis
+
       const dot: HeatmapDot = {
         ts,
         pctOtm: +pctOtm.toFixed(2),
+        absDelta: +Math.abs(snap.delta).toFixed(4),
         premium,
         strike: snap.strike,
         delta: snap.delta,
@@ -477,7 +483,7 @@ export default function OverviewPage() {
             <button
               key={r}
               onClick={() => { setRange(r); setVisibleCount(PAGE_SIZE); }}
-              className={`px-3 py-1 rounded text-sm transition-all duration-200 ${
+              className={`px-3 py-1 rounded text-sm ${
                 range === r
                   ? 'bg-white/10 text-white border border-white/20'
                   : 'text-gray-400 hover:bg-white/10 hover:text-white'
@@ -556,20 +562,20 @@ export default function OverviewPage() {
               )}
 
               {/* ETH price line */}
-              <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls />
+              <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls isAnimationActive={false} />
               {/* PUT/CALL value overlays */}
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               {/* Trade markers (stars) */}
               {tradePoints.length > 0 && (
-                <Scatter yAxisId="price" data={tradePoints} dataKey="trade" shape={<StarDot />} />
+                <Scatter yAxisId="price" data={tradePoints} dataKey="trade" shape={<StarDot />} isAnimationActive={false} />
               )}
             </ComposedChart>
           </ResponsiveContainer>
         )}
       </Card>
 
-      {/* Momentum Bar */}
+      {/* Momentum Bar — two rows: medium (top) + short (bottom) */}
       {momentumData.length > 0 && (
         <Card>
           <div className="flex items-center justify-between mb-1">
@@ -580,15 +586,33 @@ export default function OverviewPage() {
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: '#555' }} /> neutral</span>
             </div>
           </div>
-          <div className="flex rounded overflow-hidden" style={{ height: 20, marginLeft: CHART_MARGINS.left, marginRight: CHART_MARGINS.right }}>
-            {momentumData.map((d, i) => (
-              <div
-                key={i}
-                className="flex-1"
-                style={{ background: momentumBarColor(d.momentum) }}
-                title={`${new Date(d.ts).toLocaleString()}\nMomentum: ${d.momentum}`}
-              />
-            ))}
+          <div style={{ marginLeft: CHART_MARGINS.left, marginRight: CHART_MARGINS.right }}>
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">medium</span>
+              <div className="flex rounded-t overflow-hidden flex-1" style={{ height: 10 }}>
+                {momentumData.map((d, i) => (
+                  <div
+                    key={i}
+                    className="flex-1"
+                    style={{ background: momentumBarColor(d.momentum) }}
+                    title={`${new Date(d.ts).toLocaleString()}\nMedium: ${d.momentum}\nShort: ${d.shortMomentum}`}
+                  />
+                ))}
+              </div>
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">short</span>
+              <div className="flex rounded-b overflow-hidden flex-1" style={{ height: 10 }}>
+                {momentumData.map((d, i) => (
+                  <div
+                    key={i}
+                    className="flex-1"
+                    style={{ background: momentumBarColor(d.shortMomentum) }}
+                    title={`${new Date(d.ts).toLocaleString()}\nMedium: ${d.momentum}\nShort: ${d.shortMomentum}`}
+                  />
+                ))}
+              </div>
+            </div>
           </div>
         </Card>
       )}
@@ -618,7 +642,7 @@ export default function OverviewPage() {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 formatter={(val: any) => [`$${Number(val).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, 'TVL']}
               />
-              <Area type="stepAfter" dataKey="liquidity" stroke={chartColors.blue} strokeWidth={1.5} fill={chartColors.blue} fillOpacity={0.1} connectNulls dot={{ r: 2.5, strokeWidth: 0, fill: chartColors.blue }} />
+              <Area type="stepAfter" dataKey="liquidity" stroke={chartColors.blue} strokeWidth={1.5} fill={chartColors.blue} fillOpacity={0.1} connectNulls dot={{ r: 2.5, strokeWidth: 0, fill: chartColors.blue }} isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </Card>
@@ -646,10 +670,10 @@ export default function OverviewPage() {
                 tick={chartAxis.tick}
               />
               <YAxis
-                dataKey="pctOtm"
-                name="% OTM"
+                dataKey="absDelta"
+                name="Delta"
                 domain={[0, 'auto']}
-                tickFormatter={(v) => `${v}%`}
+                tickFormatter={(v) => v.toFixed(2)}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
                 width={55}
@@ -664,17 +688,17 @@ export default function OverviewPage() {
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
-                      <div className="text-sm">% OTM: <span className="text-cyan-300">{d.pctOtm.toFixed(1)}%</span></div>
+                      <div className="text-sm">Delta: <span className="text-cyan-300">{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
                       {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
-                      {d.delta != null && <div className="text-sm">Delta: <span className="text-gray-300">{d.delta.toFixed(3)}</span></div>}
                       <div className="text-sm">Bid: <span className="text-cyan-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
                       <div className="text-sm">Ask: <span className="text-gray-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
                     </div>
                   );
                 }}
               />
-              {/* Faint band showing bot's active delta trading range (~2-12% OTM as rough equivalent) */}
-              <ReferenceArea y1={2} y2={12} fill="#5CEBDF" fillOpacity={0.04} />
+              {/* Band showing bot's active call delta range: 0.04–0.12 */}
+              <ReferenceArea y1={0.04} y2={0.12} fill="#5CEBDF" fillOpacity={0.04} />
               <Scatter
                 data={callHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -708,10 +732,10 @@ export default function OverviewPage() {
                 tick={chartAxis.tick}
               />
               <YAxis
-                dataKey="pctOtm"
-                name="% OTM"
+                dataKey="absDelta"
+                name="Delta"
                 domain={[0, 'auto']}
-                tickFormatter={(v) => `${v}%`}
+                tickFormatter={(v) => v.toFixed(2)}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
                 width={55}
@@ -726,17 +750,17 @@ export default function OverviewPage() {
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
-                      <div className="text-sm">% OTM: <span className="text-red-300">{d.pctOtm.toFixed(1)}%</span></div>
+                      <div className="text-sm">Delta: <span className="text-red-300">{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
                       {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
-                      {d.delta != null && <div className="text-sm">Delta: <span className="text-gray-300">{d.delta.toFixed(3)}</span></div>}
                       <div className="text-sm">Bid: <span className="text-gray-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
                       <div className="text-sm">Ask: <span className="text-red-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
                     </div>
                   );
                 }}
               />
-              {/* Faint band showing bot's active delta trading range (~2-12% OTM as rough equivalent) */}
-              <ReferenceArea y1={2} y2={12} fill="#f87171" fillOpacity={0.04} />
+              {/* Band showing bot's active put delta range: 0.02–0.12 (abs) */}
+              <ReferenceArea y1={0.02} y2={0.12} fill="#f87171" fillOpacity={0.04} />
               <Scatter
                 data={putHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any

@@ -45,7 +45,7 @@ export default function PricesPage() {
             <button
               key={r}
               onClick={() => setRange(r)}
-              className={`px-3 py-1 rounded text-sm transition-all duration-200 ${
+              className={`px-3 py-1 rounded text-sm ${
                 range === r
                   ? 'bg-white/10 text-white border border-white/20'
                   : 'text-gray-400 hover:bg-white/10 hover:text-white'

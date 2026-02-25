@@ -61,7 +61,7 @@ export default function OptionsPage() {
               <button
                 key={t}
                 onClick={() => setOptionType(t)}
-                className={`px-3 py-1 rounded text-sm capitalize transition-all duration-200 ${
+                className={`px-3 py-1 rounded text-sm capitalize ${
                   optionType === t
                     ? 'bg-white/10 text-white border border-white/20'
                     : 'text-gray-400 hover:bg-white/10 hover:text-white'
@@ -76,7 +76,7 @@ export default function OptionsPage() {
               <button
                 key={r}
                 onClick={() => setRange(r)}
-                className={`px-3 py-1 rounded text-sm transition-all duration-200 ${
+                className={`px-3 py-1 rounded text-sm ${
                   range === r
                     ? 'bg-white/10 text-white border border-white/20'
                     : 'text-gray-400 hover:bg-white/10 hover:text-white'
@@ -148,7 +148,7 @@ export default function OptionsPage() {
               </thead>
               <tbody>
                 {latestSnapshots.slice(0, 30).map(s => (
-                  <tr key={s.id} className="border-b border-white/5 hover:bg-white/5 transition-colors">
+                  <tr key={s.id} className="border-b border-white/5 hover:bg-white/5">
                     <td className="py-1.5 px-2 text-xs">{s.instrument_name}</td>
                     <td className="text-right px-2">{formatUSD(s.strike)}</td>
                     <td className="text-right px-2 text-xs">{s.expiry ? new Date(s.expiry * 1000).toLocaleDateString() : '--'}</td>

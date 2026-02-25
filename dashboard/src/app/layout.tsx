@@ -25,7 +25,7 @@ export default function RootLayout({
     <html lang="en" className="dark">
       <body className={`${jetbrainsMono.variable} font-mono antialiased bg-juice-dark text-white min-h-screen`}>
         <Nav />
-        <main className="max-w-7xl mx-auto px-6 py-6 animate-fade-in">
+        <main className="max-w-7xl mx-auto px-6 py-6">
           {children}
         </main>
       </body>
