@@ -745,12 +745,17 @@ export default function OverviewPage() {
             <ResponsiveContainer width="100%" height={100}>
               <ComposedChart data={filteredLiquidity} margin={margins} syncId="main">
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
-                <YAxis
-                  tickFormatter={(v) => `$${(v / 1e6).toFixed(0)}M`}
-                  stroke={chartAxis.stroke}
-                  tick={chartAxis.tick}
-                  width={mobile ? 35 : 55}
-                />
+                {dexNames.map((name, i) => (
+                  <YAxis
+                    key={name}
+                    yAxisId={name}
+                    orientation={i === 0 ? 'left' : 'right'}
+                    tickFormatter={(v) => `$${(v / 1e6).toFixed(0)}M`}
+                    stroke={getColor(name, i)}
+                    tick={{ ...chartAxis.tick, fill: getColor(name, i) }}
+                    width={mobile ? 35 : 55}
+                  />
+                ))}
                 <Tooltip
                   {...chartTooltip}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -759,7 +764,7 @@ export default function OverviewPage() {
                   formatter={(val: any, name: any) => [`$${Number(val).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, formatDexName(name as string)]}
                 />
                 {dexNames.map((name, i) => (
-                  <Line key={name} type="stepAfter" dataKey={name} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
+                  <Line key={name} yAxisId={name} type="stepAfter" dataKey={name} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
