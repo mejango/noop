@@ -123,7 +123,7 @@ export default function AdvisorDrawer() {
         style={{ writingMode: 'vertical-rl' }}
       >
         <span className="bg-juice-orange/90 hover:bg-juice-orange text-black text-xs font-bold px-1.5 py-3 tracking-wider cursor-pointer select-none">
-          {open ? 'CLOSE' : 'AI'}
+          {open ? 'CLOSE' : 'SPITZ'}
         </span>
       </button>
 
