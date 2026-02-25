@@ -64,10 +64,20 @@ interface TradeMarker {
   strike: number;
 }
 
+interface OptionDetail {
+  delta: number | null;
+  price: number | null;
+  strike: number | null;
+  expiry: number | null;
+  instrument: string | null;
+}
+
 interface BestScores {
   bestPutScore: number;
   bestCallScore: number;
   windowDays: number;
+  bestPutDetail: OptionDetail | null;
+  bestCallDetail: OptionDetail | null;
 }
 
 interface HeatmapSnapshot {
@@ -144,7 +154,7 @@ const emptyStats: Stats = {
   budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2 }, optionsHeatmap: [] };
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 120, left: 10, bottom: 0 };
@@ -461,43 +471,75 @@ export default function OverviewPage() {
           </div>
         </Card>
 
-        <Card title="Options Value" subtitle={`Best (${chart.bestScores.windowDays}d) / Current`} className="flex flex-col">
+        <Card title="Options Value" subtitle={`Best (${chart.bestScores.windowDays}d) / Current`} className="flex flex-col overflow-visible">
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
-            <div className="flex items-center gap-3 relative group/put">
+            <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">PUT</span>
-              <span className="text-red-400 font-medium cursor-help">{Number(chart.bestScores.bestPutScore) > 0 ? Number(chart.bestScores.bestPutScore).toFixed(6) : '--'}</span>
-              <span className="text-gray-600">/</span>
-              <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : '--'}</span>
-              {latestTick?.best_put_detail && (
-                <div className="absolute left-0 top-full mt-1 hidden group-hover/put:block z-20 pointer-events-none">
-                  <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                    <div className="text-gray-400 mb-1">Current best PUT</div>
-                    <div>Delta: <span className="text-white">{latestTick.best_put_detail.delta != null ? Number(latestTick.best_put_detail.delta).toFixed(4) : 'N/A'}</span></div>
-                    <div>Price: <span className="text-white">{latestTick.best_put_detail.price != null ? Number(latestTick.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
-                    <div>Strike: <span className="text-white">{latestTick.best_put_detail.strike != null ? `$${Number(latestTick.best_put_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                    <div>DTE: <span className="text-white">{dteDays(latestTick.best_put_detail.expiry) ?? 'N/A'}</span></div>
-                    {latestTick.best_put_detail.instrument && <div>Instrument: <span className="text-white">{latestTick.best_put_detail.instrument}</span></div>}
+              <span className="relative group/pb">
+                <span className="text-red-400 font-medium cursor-help">{Number(chart.bestScores.bestPutScore) > 0 ? Number(chart.bestScores.bestPutScore).toFixed(6) : '--'}</span>
+                {chart.bestScores.bestPutDetail && (
+                  <div className="absolute left-0 bottom-full mb-1 hidden group-hover/pb:block z-20 pointer-events-none">
+                    <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                      <div className="text-gray-400 mb-1">Best PUT ({chart.bestScores.windowDays}d)</div>
+                      <div>Delta: <span className="text-white">{chart.bestScores.bestPutDetail.delta != null ? Number(chart.bestScores.bestPutDetail.delta).toFixed(4) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">{chart.bestScores.bestPutDetail.price != null ? Number(chart.bestScores.bestPutDetail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Strike: <span className="text-white">{chart.bestScores.bestPutDetail.strike != null ? `$${Number(chart.bestScores.bestPutDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                      <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestPutDetail.expiry) ?? 'N/A'}</span></div>
+                      {chart.bestScores.bestPutDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestPutDetail.instrument}</div>}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </span>
+              <span className="text-gray-600">/</span>
+              <span className="relative group/pc">
+                <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : '--'}</span>
+                {latestTick?.best_put_detail && (
+                  <div className="absolute left-0 bottom-full mb-1 hidden group-hover/pc:block z-20 pointer-events-none">
+                    <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                      <div className="text-gray-400 mb-1">Current best PUT</div>
+                      <div>Delta: <span className="text-white">{latestTick.best_put_detail.delta != null ? Number(latestTick.best_put_detail.delta).toFixed(4) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">{latestTick.best_put_detail.price != null ? Number(latestTick.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Strike: <span className="text-white">{latestTick.best_put_detail.strike != null ? `$${Number(latestTick.best_put_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                      <div>DTE: <span className="text-white">{dteDays(latestTick.best_put_detail.expiry) ?? 'N/A'}</span></div>
+                      {latestTick.best_put_detail.instrument && <div className="text-gray-400 mt-1">{latestTick.best_put_detail.instrument}</div>}
+                    </div>
+                  </div>
+                )}
+              </span>
             </div>
-            <div className="flex items-center gap-3 relative group/call">
+            <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
-              <span className="text-cyan-400 font-medium cursor-help">{Number(chart.bestScores.bestCallScore) > 0 ? Number(chart.bestScores.bestCallScore).toFixed(2) : '--'}</span>
-              <span className="text-gray-600">/</span>
-              <span className="text-cyan-400 cursor-help">{Number(latestTick?.current_best_call ?? 0) > 0 ? Number(latestTick!.current_best_call).toFixed(2) : '--'}</span>
-              {latestTick?.best_call_detail && (
-                <div className="absolute left-0 top-full mt-1 hidden group-hover/call:block z-20 pointer-events-none">
-                  <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                    <div className="text-gray-400 mb-1">Current best CALL</div>
-                    <div>Delta: <span className="text-white">{latestTick.best_call_detail.delta != null ? Number(latestTick.best_call_detail.delta).toFixed(4) : 'N/A'}</span></div>
-                    <div>Price: <span className="text-white">{latestTick.best_call_detail.price != null ? Number(latestTick.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
-                    <div>Strike: <span className="text-white">{latestTick.best_call_detail.strike != null ? `$${Number(latestTick.best_call_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                    <div>DTE: <span className="text-white">{dteDays(latestTick.best_call_detail.expiry) ?? 'N/A'}</span></div>
-                    {latestTick.best_call_detail.instrument && <div>Instrument: <span className="text-white">{latestTick.best_call_detail.instrument}</span></div>}
+              <span className="relative group/cb">
+                <span className="text-cyan-400 font-medium cursor-help">{Number(chart.bestScores.bestCallScore) > 0 ? Number(chart.bestScores.bestCallScore).toFixed(2) : '--'}</span>
+                {chart.bestScores.bestCallDetail && (
+                  <div className="absolute left-0 bottom-full mb-1 hidden group-hover/cb:block z-20 pointer-events-none">
+                    <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                      <div className="text-gray-400 mb-1">Best CALL ({chart.bestScores.windowDays}d)</div>
+                      <div>Delta: <span className="text-white">{chart.bestScores.bestCallDetail.delta != null ? Number(chart.bestScores.bestCallDetail.delta).toFixed(4) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">{chart.bestScores.bestCallDetail.price != null ? Number(chart.bestScores.bestCallDetail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Strike: <span className="text-white">{chart.bestScores.bestCallDetail.strike != null ? `$${Number(chart.bestScores.bestCallDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                      <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestCallDetail.expiry) ?? 'N/A'}</span></div>
+                      {chart.bestScores.bestCallDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestCallDetail.instrument}</div>}
+                    </div>
                   </div>
-                </div>
-              )}
+                )}
+              </span>
+              <span className="text-gray-600">/</span>
+              <span className="relative group/cc">
+                <span className="text-cyan-400 cursor-help">{Number(latestTick?.current_best_call ?? 0) > 0 ? Number(latestTick!.current_best_call).toFixed(2) : '--'}</span>
+                {latestTick?.best_call_detail && (
+                  <div className="absolute left-0 bottom-full mb-1 hidden group-hover/cc:block z-20 pointer-events-none">
+                    <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                      <div className="text-gray-400 mb-1">Current best CALL</div>
+                      <div>Delta: <span className="text-white">{latestTick.best_call_detail.delta != null ? Number(latestTick.best_call_detail.delta).toFixed(4) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">{latestTick.best_call_detail.price != null ? Number(latestTick.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Strike: <span className="text-white">{latestTick.best_call_detail.strike != null ? `$${Number(latestTick.best_call_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                      <div>DTE: <span className="text-white">{dteDays(latestTick.best_call_detail.expiry) ?? 'N/A'}</span></div>
+                      {latestTick.best_call_detail.instrument && <div className="text-gray-400 mt-1">{latestTick.best_call_detail.instrument}</div>}
+                    </div>
+                  </div>
+                )}
+              </span>
             </div>
           </div>
         </Card>

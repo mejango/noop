@@ -157,10 +157,40 @@ export function getBestScores() {
     FROM options_snapshots
     WHERE timestamp > ?
   `).get(since) as { best_put_score: number | null; best_call_score: number | null } | undefined;
+
+  // Fetch detail rows for best put and best call
+  const bestPutDetail = d.prepare(`
+    SELECT instrument_name, delta, ask_price, strike, expiry
+    FROM options_snapshots
+    WHERE timestamp > ? AND (option_type = 'P' OR instrument_name LIKE '%-P') AND ask_delta_value = ?
+    LIMIT 1
+  `).get(since, row?.best_put_score ?? 0) as { instrument_name: string; delta: number; ask_price: number; strike: number; expiry: number } | undefined;
+
+  const bestCallDetail = d.prepare(`
+    SELECT instrument_name, delta, bid_price, strike, expiry
+    FROM options_snapshots
+    WHERE timestamp > ? AND (option_type = 'C' OR instrument_name LIKE '%-C') AND bid_delta_value = ?
+    LIMIT 1
+  `).get(since, row?.best_call_score ?? 0) as { instrument_name: string; delta: number; bid_price: number; strike: number; expiry: number } | undefined;
+
   return {
     bestPutScore: row?.best_put_score ?? 0,
     bestCallScore: row?.best_call_score ?? 0,
     windowDays: MEASUREMENT_WINDOW_DAYS,
+    bestPutDetail: bestPutDetail ? {
+      delta: bestPutDetail.delta,
+      price: bestPutDetail.ask_price,
+      strike: bestPutDetail.strike,
+      expiry: bestPutDetail.expiry,
+      instrument: bestPutDetail.instrument_name,
+    } : null,
+    bestCallDetail: bestCallDetail ? {
+      delta: bestCallDetail.delta,
+      price: bestCallDetail.bid_price,
+      strike: bestCallDetail.strike,
+      expiry: bestCallDetail.expiry,
+      instrument: bestCallDetail.instrument_name,
+    } : null,
   };
 }
 
