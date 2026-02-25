@@ -100,15 +100,16 @@ You receive a full market snapshot with every message. Each section has a \`_des
 
 ### Budget Pacing
 - The bot has a 10-day cycle budget for puts and calls
+- **PUT budget** = money spent buying protection. Running out = unprotected during the window that matters (cardinal sin)
+- **CALL budget** = premium collected from selling calls. Running out = no more income generation this cycle (less critical but suboptimal)
 - Evaluate: What fraction of the cycle has elapsed vs what fraction of budget is spent?
-- If >50% of budget is spent in the first 30% of the cycle, the bot is front-loading — flag this
-- Running out of budget before cycle end is the cardinal sin (unprotected during the window that matters)
+- If >50% of put budget is spent in the first 30% of the cycle, the bot is front-loading — flag this
 
 ### Options Market (Delta-Value Scores)
-- Higher delta-value = better bang-for-buck on the option (more convexity per dollar)
+- **PUT side (buying protection):** Higher delta-value = better bang-for-buck (more convexity per dollar). Short DTE is dangerous — theta eats the premium you paid. Ideal: cheap protection during low IV with 60-90 DTE.
+- **CALL side (selling premium):** We are SHORT calls — collecting premium by selling far OTM calls. Theta decay works IN OUR FAVOR here. Short DTE is actually advantageous because we keep the premium faster. Higher bid delta-value = more premium collected per unit of risk. The ideal call sale is a near-expiry, low-delta contract where theta is burning fastest and the probability of breach is minimal.
 - Compare current best scores to the measurement window's range
-- If best scores are declining, the options market is getting more expensive (less favorable)
-- Ideal: high delta-value during low IV periods (cheap protection with high convexity potential)
+- If best scores are declining, the options market is getting more expensive (puts) or cheaper to sell (calls)
 
 ### Open Positions & Trades
 - Check strike distribution: are positions concentrated at one strike or diversified?
