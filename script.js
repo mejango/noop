@@ -3001,9 +3001,17 @@ const runBot = async () => {
     const bestPutScore = processedPutOptions.length > 0 ? 
       Math.max(...processedPutOptions.map(option => option.details?.askDeltaValue || 0)) : 0;
     
-    const bestCallScore = processedCallOptions.length > 0 ? 
+    const bestCallScore = processedCallOptions.length > 0 ?
       Math.max(...processedCallOptions.map(option => option.details?.bidDeltaValue || 0)) : 0;
-    
+
+    // Find the actual best options for detail info
+    const bestPutOption = processedPutOptions.length > 0
+      ? processedPutOptions.reduce((best, o) => (o.details?.askDeltaValue || 0) > (best.details?.askDeltaValue || 0) ? o : best)
+      : null;
+    const bestCallOption = processedCallOptions.length > 0
+      ? processedCallOptions.reduce((best, o) => (o.details?.bidDeltaValue || 0) > (best.details?.bidDeltaValue || 0) ? o : best)
+      : null;
+
     logOptionsData({
       bestPutScore: bestPutScore,
       bestCallScore: bestCallScore,
@@ -3089,6 +3097,22 @@ const runBot = async () => {
             put_valid: processedPutOptions.length,
             call_valid: processedCallOptions.length,
           },
+          current_best_put: bestPutScore,
+          current_best_call: bestCallScore,
+          best_put_detail: bestPutOption ? {
+            delta: bestPutOption.details?.delta || null,
+            price: bestPutOption.details?.askPrice || null,
+            strike: bestPutOption.option_details?.strike || null,
+            expiry: bestPutOption.option_details?.expiry || null,
+            instrument: bestPutOption.instrument_name || null,
+          } : null,
+          best_call_detail: bestCallOption ? {
+            delta: bestCallOption.details?.delta || null,
+            price: bestCallOption.details?.bidPrice || null,
+            strike: bestCallOption.option_details?.strike || null,
+            expiry: bestCallOption.option_details?.expiry || null,
+            instrument: bestCallOption.instrument_name || null,
+          } : null,
           next_check_minutes: checkInterval / (1000 * 60),
         };
         db.insertTick(tickTimestamp, JSON.stringify(tickSummary));

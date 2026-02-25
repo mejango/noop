@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useMemo, useRef, useCallback } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { usePolling } from '@/lib/hooks';
-import { formatUSD, timeAgo, momentumColor } from '@/lib/format';
+import { formatUSD, momentumColor, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import {
@@ -116,6 +116,10 @@ interface TickData {
   instruments: { total: number; put_candidates: number; call_candidates: number };
   historical: { total_data_points: number; filtered_data_points: number; best_put_score: number; best_call_score: number };
   strategy: { put_valid: number; call_valid: number };
+  current_best_put: number;
+  current_best_call: number;
+  best_put_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
+  best_call_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
   next_check_minutes: number;
 }
 
@@ -144,7 +148,6 @@ const emptyChart: ChartData = { prices: [], options: [], liquidity: [], trades: 
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 120, left: 10, bottom: 0 };
-const PAGE_SIZE = 100;
 
 // Custom star shape for trade markers
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -186,11 +189,15 @@ const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
 
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('6.2d');
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
-  const tableRef = useRef<HTMLDivElement>(null);
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
+
+  // Parse latest tick for current option values
+  const latestTick = useMemo<TickData | null>(() => {
+    if (ticks.length === 0) return null;
+    try { return JSON.parse(ticks[0].summary); } catch { return null; }
+  }, [ticks]);
 
   // Shared X-axis tick formatter
   const xTickFormatter = useCallback((ts: number) => {
@@ -414,21 +421,6 @@ export default function OverviewPage() {
     return { callHeatmap: calls, putHeatmap: puts };
   }, [chart.optionsHeatmap, merged]);
 
-  // Data for options value sub-chart (only points with options data)
-  // Table data: latest first, only rows with a price
-  const tableData = useMemo(() =>
-    [...merged].reverse().filter(d => d.price != null),
-    [merged]
-  );
-
-  const handleTableScroll = useCallback(() => {
-    const el = tableRef.current;
-    if (!el) return;
-    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 50) {
-      setVisibleCount(prev => Math.min(prev + PAGE_SIZE, tableData.length));
-    }
-  }, [tableData.length]);
-
   // Shared X-axis domain from main chart's time range
   const xDomain = merged.length > 0
     ? [merged[0].ts, merged[merged.length - 1].ts]
@@ -450,122 +442,58 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      {/* Left: Range + Best Options + Momentum stacked | Right: Tick Log */}
-      <div className="grid grid-cols-2 gap-4 items-stretch">
-        <div className="flex flex-col gap-4">
-          <div className="grid grid-cols-2 gap-4">
-            <Card title="Price Range High/Low" className="flex flex-col">
-              <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-gray-500 whitespace-nowrap">3d</span>
-                  <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>
-                  <span className="text-gray-600">/</span>
-                  <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-gray-500 whitespace-nowrap">7d</span>
-                  <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
-                  <span className="text-gray-600">/</span>
-                  <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
-                </div>
-              </div>
-            </Card>
-
-            <Card title={`Best Options (${chart.bestScores.windowDays}d)`} className="flex flex-col">
-              <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-gray-500 whitespace-nowrap">PUT</span>
-                  <span className="text-red-400 font-medium">{chart.bestScores.bestPutScore > 0 ? chart.bestScores.bestPutScore.toFixed(6) : 'N/A'}</span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
-                  <span className="text-cyan-400 font-medium">{chart.bestScores.bestCallScore > 0 ? chart.bestScores.bestCallScore.toFixed(2) : 'N/A'}</span>
-                </div>
-              </div>
-            </Card>
-          </div>
-
-          <Card title="Momentum" className="flex flex-col overflow-hidden flex-1">
-            <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
-              <div className="flex items-center gap-3 min-w-0">
-                <span className="text-xs text-gray-500 w-12 shrink-0">Medium</span>
-                <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
-                  {stats.medium_momentum || 'neutral'}
-                </span>
-                {stats.medium_derivative && <span className="text-xs text-gray-500 truncate">({stats.medium_derivative})</span>}
-              </div>
-              <div className="flex items-center gap-3 min-w-0">
-                <span className="text-xs text-gray-500 w-12 shrink-0">Short</span>
-                <span className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
-                  {stats.short_momentum || 'neutral'}
-                </span>
-                {stats.short_derivative && <span className="text-xs text-gray-500 truncate">({stats.short_derivative})</span>}
-              </div>
+      {/* Left: Range + Best Options | Right: Momentum */}
+      <div className="grid grid-cols-4 gap-4">
+        <Card title="Price Range" subtitle="High / Low" className="flex flex-col">
+          <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 whitespace-nowrap">3d</span>
+              <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>
+              <span className="text-gray-600">/</span>
+              <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
             </div>
-          </Card>
-        </div>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 whitespace-nowrap">7d</span>
+              <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
+              <span className="text-gray-600">/</span>
+              <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
+            </div>
+          </div>
+        </Card>
 
-        <Card title="Tick Log" className="flex flex-col">
-          <div className="overflow-y-auto" style={{ maxHeight: 200 }}>
-            {ticks.length === 0 ? (
-              <div className="text-gray-500 text-xs py-4 text-center">No tick data yet</div>
-            ) : (
-              <div className="space-y-2">
-                {ticks.map((tick) => {
-                  let d: TickData | null = null;
-                  try { d = JSON.parse(tick.summary); } catch { /* skip */ }
-                  if (!d) return null;
-                  const medMain = typeof d.medium_momentum === 'object' ? d.medium_momentum.main : d.medium_momentum;
-                  const shortMain = typeof d.short_momentum === 'object' ? d.short_momentum.main : d.short_momentum;
-                  const flow = d.onchain?.liquidity_flow;
-                  return (
-                    <div key={tick.id} className="border-b border-white/5 pb-2 last:border-0">
-                      <div className="flex items-center justify-between text-xs">
-                        <span className="text-gray-500">{timeAgo(tick.timestamp)}</span>
-                        <span className="text-juice-orange font-medium">{formatUSD(d.price)}</span>
-                      </div>
-                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs mt-1">
-                        <span className="text-gray-400">
-                          Instruments: <span className="text-white">{d.instruments.total}</span>
-                          {' '}({d.instruments.put_candidates}P / {d.instruments.call_candidates}C)
-                        </span>
-                        <span className="text-gray-400">
-                          Scores: <span className="text-red-400">P {d.historical.best_put_score.toFixed(4)}</span>
-                          {' / '}
-                          <span className="text-cyan-400">C {d.historical.best_call_score.toFixed(2)}</span>
-                        </span>
-                        <span className="text-gray-400">
-                          Valid: <span className="text-white">{d.strategy.put_valid}P / {d.strategy.call_valid}C</span>
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs mt-0.5">
-                        <span className="text-gray-400">
-                          Momentum: <span className={momentumColor(medMain)}>{medMain || 'n/a'}</span>
-                          {' / '}
-                          <span className={momentumColor(shortMain)}>{shortMain || 'n/a'}</span>
-                        </span>
-                        {flow && (
-                          <span className="text-gray-400">
-                            Flow: <span className="text-white">{flow.direction}</span>
-                          </span>
-                        )}
-                        {d.onchain.whale_count > 0 && (
-                          <span className="text-gray-400">
-                            Whales: <span className="text-white">{d.onchain.whale_count}</span> ({d.onchain.whale_txns} txns)
-                          </span>
-                        )}
-                        {d.onchain.market_health && (
-                          <span className="text-gray-400">
-                            Health: <span className={d.onchain.market_health === 'normal' ? 'text-emerald-400' : 'text-yellow-400'}>{d.onchain.market_health}</span>
-                          </span>
-                        )}
-                        <span className="text-gray-500">Next: {d.next_check_minutes.toFixed(0)}m</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+        <Card title="Options Value" subtitle={`Best (${chart.bestScores.windowDays}d) / Current`} className="flex flex-col">
+          <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 whitespace-nowrap">PUT</span>
+              <span className="text-red-400 font-medium">{chart.bestScores.bestPutScore > 0 ? chart.bestScores.bestPutScore.toFixed(6) : '--'}</span>
+              <span className="text-gray-600">/</span>
+              <span className="text-red-400">{(latestTick?.current_best_put ?? 0) > 0 ? latestTick!.current_best_put.toFixed(6) : '--'}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
+              <span className="text-cyan-400 font-medium">{chart.bestScores.bestCallScore > 0 ? chart.bestScores.bestCallScore.toFixed(2) : '--'}</span>
+              <span className="text-gray-600">/</span>
+              <span className="text-cyan-400">{(latestTick?.current_best_call ?? 0) > 0 ? latestTick!.current_best_call.toFixed(2) : '--'}</span>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="Momentum" className="col-span-2 flex flex-col overflow-hidden">
+          <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-xs text-gray-500 w-12 shrink-0">Medium</span>
+              <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
+                {stats.medium_momentum || 'neutral'}
+              </span>
+              {stats.medium_derivative && <span className="text-xs text-gray-500 truncate">({stats.medium_derivative})</span>}
+            </div>
+            <div className="flex items-center gap-3 min-w-0">
+              <span className="text-xs text-gray-500 w-12 shrink-0">Short</span>
+              <span className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
+                {stats.short_momentum || 'neutral'}
+              </span>
+              {stats.short_derivative && <span className="text-xs text-gray-500 truncate">({stats.short_derivative})</span>}
+            </div>
           </div>
         </Card>
       </div>
@@ -576,7 +504,7 @@ export default function OverviewPage() {
           {ranges.map(r => (
             <button
               key={r}
-              onClick={() => { setRange(r); setVisibleCount(PAGE_SIZE); }}
+              onClick={() => setRange(r)}
               className={`px-3 py-1 rounded text-sm ${
                 range === r
                   ? 'bg-white/10 text-white border border-white/20'
@@ -897,86 +825,103 @@ export default function OverviewPage() {
       )}
 
       {/* Data Table: spot price, best put, best call */}
-      {tableData.length > 0 && (
-        <Card>
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-gray-400">Price & Options History</span>
-            <span className="text-xs text-gray-600">{tableData.length} entries</span>
-          </div>
-          <div
-            ref={tableRef}
-            onScroll={handleTableScroll}
-            className="overflow-auto"
-            style={{ maxHeight: 400 }}
-          >
-            <table className="w-full text-sm">
-              <thead className="sticky top-0 bg-[#111] z-10">
-                <tr className="text-xs text-gray-500 border-b border-white/5">
-                  <th className="text-left py-2 px-3 font-medium">Time</th>
-                  <th className="text-right py-2 px-3 font-medium">Spot Price</th>
-                  <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.red }}>Best PUT Value</th>
-                  <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.secondary }}>Best CALL Value</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tableData.slice(0, visibleCount).map((d, i) => {
-                  const putDetail = d.bestPutDetail;
-                  const callDetail = d.bestCallDetail;
-                  return (
-                    <tr key={i} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                      <td className="py-1.5 px-3 text-gray-400 text-xs whitespace-nowrap">
-                        {new Date(d.ts).toLocaleString()}
-                      </td>
-                      <td className="py-1.5 px-3 text-right text-juice-orange tabular-nums">
-                        {formatUSD(d.price!)}
-                      </td>
-                      <td
-                        className="py-1.5 px-3 text-right tabular-nums relative group"
-                        style={{ color: d.bestPut && d.bestPut > 0 ? chartColors.red : '#444' }}
-                      >
-                        <span className="cursor-help">{d.bestPut === undefined ? '--' : d.bestPut && d.bestPut > 0 ? d.bestPut.toFixed(6) : 'N/A'}</span>
-                        {putDetail && (
-                          <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
-                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                              <div className="text-gray-400 mb-1">Best PUT option</div>
-                              <div>Delta: <span className="text-white">{putDetail.delta?.toFixed(4) ?? 'N/A'}</span></div>
-                              <div>Price: <span className="text-white">{putDetail.price?.toFixed(6) ?? 'N/A'}</span></div>
-                              <div>Strike: <span className="text-white">${putDetail.strike.toFixed(0)}</span></div>
-                              <div>DTE: <span className="text-white">{putDetail.dte ?? 'N/A'}</span></div>
-                            </div>
+      {/* Tick Log Table */}
+      <Card>
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-medium text-gray-400">Tick Log</span>
+          <span className="text-xs text-gray-600">{ticks.length} ticks</span>
+        </div>
+        <div className="overflow-auto" style={{ maxHeight: 400 }}>
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-[#111] z-10">
+              <tr className="text-xs text-gray-500 border-b border-white/5">
+                <th className="text-left py-2 px-3 font-medium">Time</th>
+                <th className="text-right py-2 px-3 font-medium">Price</th>
+                <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.red }}>PUT Now / Best</th>
+                <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.secondary }}>CALL Now / Best</th>
+                <th className="text-right py-2 px-3 font-medium">Instruments</th>
+                <th className="text-right py-2 px-3 font-medium">Valid</th>
+                <th className="text-right py-2 px-3 font-medium">Flow</th>
+                <th className="text-right py-2 px-3 font-medium">Health</th>
+                <th className="text-right py-2 px-3 font-medium">Next</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ticks.length === 0 ? (
+                <tr><td colSpan={9} className="py-4 text-center text-gray-500 text-xs">No tick data yet</td></tr>
+              ) : ticks.map((tick) => {
+                let d: TickData | null = null;
+                try { d = JSON.parse(tick.summary); } catch { /* skip */ }
+                if (!d) return null;
+                const flow = d.onchain?.liquidity_flow;
+                return (
+                  <tr key={tick.id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                    <td className="py-1.5 px-3 text-gray-400 text-xs whitespace-nowrap">
+                      {new Date(tick.timestamp).toLocaleString()}
+                    </td>
+                    <td className="py-1.5 px-3 text-right text-juice-orange tabular-nums">
+                      {formatUSD(d.price)}
+                    </td>
+                    <td className="py-1.5 px-3 text-right tabular-nums text-xs relative group">
+                      <span className="cursor-help">
+                        <span style={{ color: chartColors.red }}>{(d.current_best_put ?? 0) > 0 ? d.current_best_put.toFixed(6) : '--'}</span>
+                        <span className="text-gray-600"> / </span>
+                        <span className="text-gray-500">{d.historical.best_put_score > 0 ? d.historical.best_put_score.toFixed(6) : '--'}</span>
+                      </span>
+                      {d.best_put_detail && (
+                        <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
+                          <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                            <div className="text-gray-400 mb-1">Best PUT option</div>
+                            <div>Delta: <span className="text-white">{d.best_put_detail.delta?.toFixed(4) ?? 'N/A'}</span></div>
+                            <div>Price: <span className="text-white">{d.best_put_detail.price?.toFixed(6) ?? 'N/A'}</span></div>
+                            <div>Strike: <span className="text-white">${d.best_put_detail.strike?.toFixed(0) ?? 'N/A'}</span></div>
+                            <div>DTE: <span className="text-white">{dteDays(d.best_put_detail.expiry) ?? 'N/A'}</span></div>
                           </div>
-                        )}
-                      </td>
-                      <td
-                        className="py-1.5 px-3 text-right tabular-nums relative group"
-                        style={{ color: d.bestCall && d.bestCall > 0 ? chartColors.secondary : '#444' }}
-                      >
-                        <span className="cursor-help">{d.bestCall === undefined ? '--' : d.bestCall && d.bestCall > 0 ? d.bestCall.toFixed(2) : 'N/A'}</span>
-                        {callDetail && (
-                          <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
-                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                              <div className="text-gray-400 mb-1">Best CALL option</div>
-                              <div>Delta: <span className="text-white">{callDetail.delta?.toFixed(4) ?? 'N/A'}</span></div>
-                              <div>Price: <span className="text-white">{callDetail.price?.toFixed(6) ?? 'N/A'}</span></div>
-                              <div>Strike: <span className="text-white">${callDetail.strike.toFixed(0)}</span></div>
-                              <div>DTE: <span className="text-white">{callDetail.dte ?? 'N/A'}</span></div>
-                            </div>
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-1.5 px-3 text-right tabular-nums text-xs relative group">
+                      <span className="cursor-help">
+                        <span style={{ color: chartColors.secondary }}>{(d.current_best_call ?? 0) > 0 ? d.current_best_call.toFixed(2) : '--'}</span>
+                        <span className="text-gray-600"> / </span>
+                        <span className="text-gray-500">{d.historical.best_call_score > 0 ? d.historical.best_call_score.toFixed(2) : '--'}</span>
+                      </span>
+                      {d.best_call_detail && (
+                        <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
+                          <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                            <div className="text-gray-400 mb-1">Best CALL option</div>
+                            <div>Delta: <span className="text-white">{d.best_call_detail.delta?.toFixed(4) ?? 'N/A'}</span></div>
+                            <div>Price: <span className="text-white">{d.best_call_detail.price?.toFixed(6) ?? 'N/A'}</span></div>
+                            <div>Strike: <span className="text-white">${d.best_call_detail.strike?.toFixed(0) ?? 'N/A'}</span></div>
+                            <div>DTE: <span className="text-white">{dteDays(d.best_call_detail.expiry) ?? 'N/A'}</span></div>
                           </div>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-            {visibleCount < tableData.length && (
-              <div className="text-center py-3 text-xs text-gray-600">
-                Showing {visibleCount} of {tableData.length} — scroll for more
-              </div>
-            )}
-          </div>
-        </Card>
-      )}
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-1.5 px-3 text-right text-xs text-gray-400">
+                      {d.instruments.total} <span className="text-gray-600">({d.instruments.put_candidates}P/{d.instruments.call_candidates}C)</span>
+                    </td>
+                    <td className="py-1.5 px-3 text-right text-xs text-white">
+                      {d.strategy.put_valid}P / {d.strategy.call_valid}C
+                    </td>
+                    <td className="py-1.5 px-3 text-right text-xs text-white">
+                      {flow ? flow.direction : '--'}
+                    </td>
+                    <td className="py-1.5 px-3 text-right text-xs">
+                      <span className={d.onchain.market_health === 'normal' ? 'text-emerald-400' : d.onchain.market_health ? 'text-yellow-400' : 'text-gray-600'}>
+                        {d.onchain.market_health || '--'}
+                      </span>
+                    </td>
+                    <td className="py-1.5 px-3 text-right text-xs text-gray-500">
+                      {d.next_check_minutes.toFixed(0)}m
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
     </div>
   );
 }
