@@ -42,7 +42,6 @@ Then open: **http://localhost:3000/trading_dashboard.html**
 - **Best Put/Call Prices** - Optimal option prices from your bot's analysis
 - **Liquidity Score** - Market liquidity health indicator
 - **Trading Activity** - Buy/sell order frequency
-- **Whale Activity** - Large transaction monitoring
 
 ### Interactive Chart
 - **Multi-line overlay** showing all key metrics over time
@@ -139,7 +138,6 @@ noop/
 - Identify correlation between price and activity
 
 ### Risk Management
-- Monitor whale activity for market impact
 - Track liquidity changes
 - Spot unusual trading patterns
 

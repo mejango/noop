@@ -438,7 +438,7 @@ function parseFileContent(content, file) {
                     }
                 });
             }
-        } else if (file.endsWith('.json') && !file.includes('whale_') && !file.includes('performance_') && !file.includes('options_data') && !file.includes('onchain_analysis')) {
+        } else if (file.endsWith('.json') && !file.includes('performance_') && !file.includes('options_data') && !file.includes('onchain_analysis')) {
             // Parse general JSON data (main data files)
             const jsonData = JSON.parse(content);
             if (jsonData.ticks) {

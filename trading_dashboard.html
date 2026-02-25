@@ -282,10 +282,6 @@
                 <div class="stat-value" id="liquidityHealth">0%</div>
                 <div class="stat-label">Liquidity Health</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-value" id="whaleActivity">0</div>
-                <div class="stat-label">Whale Transactions</div>
-            </div>
         </div>
         
         <div class="chart-container">
@@ -772,7 +768,7 @@
                             }
                         });
                     }
-                } else if (fileName.includes('.json') && !fileName.includes('whale_') && !fileName.includes('performance_')) {
+                } else if (fileName.includes('.json') && !fileName.includes('performance_')) {
                     // Parse general JSON data (main data files)
                     const jsonData = JSON.parse(fileContent);
                     if (jsonData.ticks) {
@@ -1229,8 +1225,6 @@
             const liquidityHealth = Math.max(0, Math.min(100, 50 + avgLiquidityDelta * 10));
             
             document.getElementById('liquidityHealth').textContent = `${liquidityHealth.toFixed(1)}%`;
-            document.getElementById('whaleActivity').textContent = 
-                allData.filter(point => point.whaleCount).reduce((sum, point) => sum + (point.whaleCount || 0), 0);
         }
         
         // Show error message

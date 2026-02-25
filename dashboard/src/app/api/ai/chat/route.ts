@@ -116,7 +116,7 @@ You receive a full market snapshot with every message. Each section has a \`_des
 - Evaluate average cost: is the bot buying at reasonable prices or overpaying during vol spikes?
 
 ### On-Chain Metrics
-- Whale activity + outflow direction can front-run spot moves in crypto
+- Liquidity flow direction and magnitude signal capital movement before price confirms it
 - Exhaustion score near 1.0 = market participants are depleted, reversal probable
 - These signals matter more in crypto than traditional markets due to on-chain transparency
 

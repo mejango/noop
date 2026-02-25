@@ -197,7 +197,7 @@ export function getOnchainData(since: string) {
   const d = getDb();
   return d.prepare(`
     SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
-      liquidity_flow_confidence, whale_count, whale_total_txns, exhaustion_score, exhaustion_alert_level
+      liquidity_flow_confidence, exhaustion_score, exhaustion_alert_level
     FROM onchain_data
     WHERE timestamp > ?
     ORDER BY timestamp DESC

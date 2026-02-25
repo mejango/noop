@@ -119,8 +119,6 @@ interface TickData {
   short_momentum: { main: string; derivative: string | null } | string;
   onchain: {
     liquidity_flow: { direction: string; magnitude: number; confidence: number } | null;
-    whale_count: number;
-    whale_txns: number;
     market_health: string | null;
   };
   instruments: { total: number; put_candidates: number; call_candidates: number };

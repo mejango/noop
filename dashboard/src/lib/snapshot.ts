@@ -103,7 +103,7 @@ export function buildMarketSnapshot() {
     },
 
     onchain_metrics: {
-      _description: 'On-chain data from last 24h. liquidity_flow_direction is "inflow"|"outflow"|"neutral", magnitude 0-1, confidence 0-1. whale_count = large transactions detected. exhaustion_score 0-1 (1=fully exhausted). exhaustion_alert_level is "low"|"medium"|"high".',
+      _description: 'On-chain data from last 24h. liquidity_flow_direction is "inflow"|"outflow"|"neutral", magnitude 0-1, confidence 0-1. exhaustion_score 0-1 (1=fully exhausted). exhaustion_alert_level is "low"|"medium"|"high".',
       data_points: onchain.length,
       latest: onchain.length > 0 ? onchain[0] : null,
       history: onchain,

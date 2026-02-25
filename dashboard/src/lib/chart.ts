@@ -4,7 +4,7 @@ export const chartColors = {
   primary: '#F5A623',    // juice-orange — ETH price, primary series
   secondary: '#5CEBDF',  // juice-cyan — secondary series
   tertiary: '#10b981',   // emerald — call scores, success
-  quaternary: '#f59e0b', // amber — whale activity, warnings
+  quaternary: '#f59e0b', // amber — warnings
   red: '#f87171',        // red — put scores, exhaustion
   blue: '#3b82f6',       // blue — liquidity
   trade: '#facc15',      // yellow — trade markers

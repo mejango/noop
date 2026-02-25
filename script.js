@@ -135,9 +135,6 @@ const DEX_APIS = {
   UNISWAP_V4: `https://gateway.thegraph.com/api/${_THEGRAPH_KEY}/subgraphs/id/DiYPVdygkfjDWhbxGSqAQxwBKmfKnkWQojqeM2rkLb3G`
 };
 
-// Etherscan API for whale detection (V2 with chainid)
-const ETHERSCAN_API = 'https://api.etherscan.io/v2/api';
-const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || 'YT53NPT32Z7ZGYRHA7X7GGVNZWZJIY1VW4';
 
 // Common configuration
 const DERIVE_ACCOUNT_ADDRESS = '0xD87890df93bf74173b51077e5c6cD12121d87903';
@@ -1167,303 +1164,6 @@ const analyzeDEXLiquidity = async (spotPrice) => {
   }
 };
 
-// Get unique whale wallets over past 7 days with percentage change
-const getUniqueWhaleWallets7Days = () => {
-  try {
-    const now = Date.now();
-    const sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000);
-    const fourteenDaysAgo = now - (14 * 24 * 60 * 60 * 1000);
-    
-    // Current 7 days - use mapping for efficient storage
-    const currentUniqueWallets = {};
-    let currentTotalTxns = 0;
-    
-    // Previous 7 days (7-14 days ago) - use mapping for efficient storage
-    const previousUniqueWallets = {};
-    let previousTotalTxns = 0;
-    
-    // Read whale data from per-day files
-    for (let i = 0; i < 14; i++) {
-      const date = new Date(now - (i * 24 * 60 * 60 * 1000));
-      const dateStr = date.toISOString().split('T')[0];
-      const whaleFile = path.join(ARCHIVE_DIR, `whale_${dateStr}.json`);
-      
-      if (fs.existsSync(whaleFile)) {
-        try {
-          const dayData = JSON.parse(fs.readFileSync(whaleFile, 'utf-8'));
-          const entryTime = new Date(dayData.timestamp || date).getTime();
-          
-          if (entryTime >= sevenDaysAgo) {
-            // Current 7 days
-            if (dayData.uniqueWallets && typeof dayData.uniqueWallets === 'object') {
-              Object.keys(dayData.uniqueWallets).forEach(wallet => {
-                currentUniqueWallets[wallet] = true;
-              });
-            }
-            currentTotalTxns += dayData.whaleCount || 0;
-          } else if (entryTime >= fourteenDaysAgo) {
-            // Previous 7 days
-            if (dayData.uniqueWallets && typeof dayData.uniqueWallets === 'object') {
-              Object.keys(dayData.uniqueWallets).forEach(wallet => {
-                previousUniqueWallets[wallet] = true;
-              });
-            }
-            previousTotalTxns += dayData.whaleCount || 0;
-          }
-        } catch (error) {
-          // Skip invalid files
-          continue;
-        }
-      }
-    }
-    
-    // Calculate percentage change
-    let pctChange = 0;
-    if (previousTotalTxns > 0) {
-      pctChange = ((currentTotalTxns - previousTotalTxns) / previousTotalTxns) * 100;
-    } else if (currentTotalTxns > 0) {
-      pctChange = 100; // 100% increase from 0
-    }
-    
-    return { 
-      count: Object.keys(currentUniqueWallets).length, 
-      totalTxns: currentTotalTxns,
-      pctChange: pctChange,
-      previousTxns: previousTotalTxns
-    };
-  } catch (error) {
-    console.log('⚠️ Error reading whale history:', error.message);
-    return { count: 0, totalTxns: 0, pctChange: 0, previousTxns: 0 };
-  }
-};
-
-// Get previously seen transaction hashes to avoid duplicates
-const getPreviouslySeenTxHashes = () => {
-  const seenHashes = new Set();
-  try {
-    // Read last 7 days of whale files to get all previously seen transaction hashes
-    const now = Date.now();
-    const sevenDaysAgo = now - (7 * 24 * 60 * 60 * 1000);
-    
-    for (let i = 0; i < 7; i++) {
-      const date = new Date(now - (i * 24 * 60 * 60 * 1000));
-      const dateStr = date.toISOString().split('T')[0];
-      const whaleFile = path.join(ARCHIVE_DIR, `whale_${dateStr}.json`);
-      
-      if (fs.existsSync(whaleFile)) {
-        try {
-          const dayData = JSON.parse(fs.readFileSync(whaleFile, 'utf-8'));
-          if (dayData.entries && Array.isArray(dayData.entries)) {
-            for (const entry of dayData.entries) {
-              if (entry.largeTransactions && Array.isArray(entry.largeTransactions)) {
-                for (const tx of entry.largeTransactions) {
-                  if (tx.hash) seenHashes.add(tx.hash);
-                }
-              }
-            }
-          }
-        } catch (error) {
-          // Skip invalid files
-          continue;
-        }
-      }
-    }
-  } catch (error) {
-    // Return empty set if there's any error
-  }
-  return seenHashes;
-};
-
-// Save whale data to per-day history files
-const saveWhaleHistory = (whaleData) => {
-  try {
-    ensureArchiveDir(ARCHIVE_DIR);
-    
-    // Create daily whale data entry
-    const dailyWhaleData = {
-      timestamp: new Date().toISOString(),
-      whaleCount: whaleData.summary?.totalLargeTxns || 0,
-      totalVolume: whaleData.summary?.totalVolume || 0,
-      uniqueWallets: whaleData.uniqueWallets || {}, // Store as mapping
-      uniqueWalletCount: whaleData.summary?.whaleCount || 0
-    };
-    
-    // Save to today's file
-    const today = new Date().toISOString().split('T')[0];
-    const whaleFile = path.join(ARCHIVE_DIR, `whale_${today}.json`);
-    
-    // Read existing data for today if it exists
-    let existingData = { entries: [] };
-    if (fs.existsSync(whaleFile)) {
-      try {
-        const data = fs.readFileSync(whaleFile, 'utf-8');
-        if (data) existingData = JSON.parse(data);
-      } catch (error) {
-        console.log(`⚠️ Error reading existing whale file ${whaleFile}:`, error.message);
-      }
-    }
-    
-    // Add current entry
-    existingData.entries.push(dailyWhaleData);
-    
-    // Keep only last 24 hours of entries for this day
-    const dayStart = new Date().setHours(0, 0, 0, 0);
-    existingData.entries = existingData.entries.filter(entry => 
-      new Date(entry.timestamp).getTime() >= dayStart
-    );
-    
-    fs.writeFileSync(whaleFile, JSON.stringify(existingData, null, 2));
-    
-  } catch (error) {
-    console.log('⚠️ Error saving whale history:', error.message);
-  }
-};
-
-// Whale Movement Detection
-const detectWhaleMovements = async (spotPrice) => {
-  try {
-    const whaleData = {
-      timestamp: new Date().toISOString(),
-      largeTransactions: [],
-      whaleWallets: new Set(),
-      summary: {
-        totalLargeTxns: 0,
-        totalVolume: 0,
-        avgTxSize: 0,
-        whaleCount: 0
-      }
-    };
-
-    // Get recent large transactions (last 100 blocks to avoid duplicates)
-    const latestBlock = await getLatestBlockNumber();
-    
-    if (latestBlock === 0 || isNaN(latestBlock)) {
-      return { error: 'failed_to_get_block_number', timestamp: new Date().toISOString() };
-    }
-    
-    const startBlock = Math.max(0, latestBlock - 100);
-    console.log(`🐋 Checking blocks ${startBlock} to ${latestBlock} for whale transactions`);
-    
-    // Query for large ETH transactions (50 ETH threshold, will filter to $1M+ in processing)
-    const largeEthThreshold = 100;
-    const largeTransactions = await getLargeTransactions(startBlock, latestBlock, largeEthThreshold);
-    
-    // Get previously seen transaction hashes to avoid duplicates
-    const seenTxHashes = getPreviouslySeenTxHashes();
-    
-    // Process transactions - only count $1M+ USD transactions
-    for (const tx of largeTransactions) {
-      // Skip if we've already processed this transaction in previous runs
-      if (seenTxHashes.has(tx.hash)) continue;
-      
-      const ethValue = parseFloat(tx.value) / Math.pow(10, 18);
-      const usdValue = ethValue * spotPrice;
-      
-      if (usdValue >= 1000000) { // $1M+ threshold
-        whaleData.largeTransactions.push({
-          hash: tx.hash,
-          from: tx.from,
-          to: tx.to,
-          ethValue: ethValue,
-          usdValue: usdValue,
-          blockNumber: tx.blockNumber,
-          timestamp: tx.timeStamp
-        });
-        
-        // Track unique whale wallets
-        if (tx.from) whaleData.whaleWallets.add(tx.from.toLowerCase());
-        if (tx.to) whaleData.whaleWallets.add(tx.to.toLowerCase());
-      }
-    }
-    
-    // Calculate summary statistics
-    whaleData.summary.totalLargeTxns = whaleData.largeTransactions.length;
-    whaleData.summary.totalVolume = whaleData.largeTransactions.reduce((sum, tx) => sum + tx.usdValue, 0);
-    whaleData.summary.avgTxSize = whaleData.summary.totalLargeTxns > 0 
-      ? whaleData.summary.totalVolume / whaleData.summary.totalLargeTxns 
-      : 0;
-    // Convert Set to mapping for efficient storage
-    const uniqueWallets = {};
-    whaleData.whaleWallets.forEach(wallet => {
-      uniqueWallets[wallet] = true;
-    });
-    whaleData.uniqueWallets = uniqueWallets;
-    whaleData.summary.whaleCount = Object.keys(uniqueWallets).length;
-    delete whaleData.whaleWallets; // Remove the Set
-    
-    // Save to history for 7-day tracking
-    saveWhaleHistory(whaleData);
-    
-    return whaleData;
-  } catch (error) {
-    console.log('⚠️ Whale movement detection failed:', error.message);
-    return { error: error.message, timestamp: new Date().toISOString() };
-  }
-};
-
-// Helper function to get latest block number
-const getLatestBlockNumber = async () => {
-  try {
-    const response = await axios.get(ETHERSCAN_API, {
-      params: {
-        chainid: 1,
-        module: 'proxy',
-        action: 'eth_blockNumber',
-        apikey: ETHERSCAN_API_KEY
-      },
-      timeout: 10000
-    });
-    
-    if (response.data && response.data.result) {
-      const blockNumber = parseInt(response.data.result, 16);
-      return blockNumber;
-    }
-    
-    throw new Error('No result in response');
-  } catch (error) {
-    console.log('⚠️ Failed to get latest block number:', error.message);
-    return 0;
-  }
-};
-
-// Helper function to get large transactions
-const getLargeTransactions = async (startBlock, endBlock, minEthValue) => {
-  try {
-    // Use a simple approach - get recent transactions from a known large wallet
-    const response = await axios.get(ETHERSCAN_API, {
-      params: {
-        chainid: 1,
-        module: 'account',
-        action: 'txlist',
-        address: '0x3f5CE5FBFe3E9af3971dD833D26bA9b5C936f0bE', // Binance hot wallet
-        startblock: startBlock,
-        endblock: endBlock,
-        page: 1,
-        offset: 100,
-        sort: 'desc',
-        apikey: ETHERSCAN_API_KEY
-      },
-      timeout: 15000
-    });
-    
-    if (response.data && response.data.result && Array.isArray(response.data.result)) {
-      return response.data.result.filter(tx => {
-        try {
-          const ethValue = parseFloat(tx.value) / Math.pow(10, 18);
-          return ethValue >= minEthValue && tx.to && tx.to !== '';
-        } catch (err) {
-          return false;
-        }
-      });
-    }
-    
-    return [];
-  } catch (error) {
-    console.log('⚠️ Failed to get large transactions:', error.message);
-    return [];
-  }
-};
-
 // Helper function to calculate volatility
 const calculateVolatility = (priceData) => {
   if (!priceData || priceData.length < 2) return 0;
@@ -1481,7 +1181,7 @@ const calculateVolatility = (priceData) => {
 };
 
 // Liquidity Exhaustion Detection
-const detectLiquidityExhaustion = (liquidityData, priceHistory, whaleData) => {
+const detectLiquidityExhaustion = (liquidityData, priceHistory) => {
   try {
     if (!liquidityData || !priceHistory) {
       return { error: 'insufficient_data', timestamp: new Date().toISOString() };
@@ -1500,7 +1200,6 @@ const detectLiquidityExhaustion = (liquidityData, priceHistory, whaleData) => {
       timestamp: new Date().toISOString(),
       signals: {
         decreasingLiquidity: false,
-        increasingWhaleActivity: false,
         highVolatility: false,
         liquidityGaps: false,
         dexImbalance: false,
@@ -1508,7 +1207,6 @@ const detectLiquidityExhaustion = (liquidityData, priceHistory, whaleData) => {
       },
       metrics: {
         liquidityScore: 0,
-        whaleActivityScore: 0,
         volatilityScore: 0,
         multiTimeframeScore: 0,
         overallExhaustionScore: 0
@@ -1577,17 +1275,6 @@ const detectLiquidityExhaustion = (liquidityData, priceHistory, whaleData) => {
       }
     }
 
-    // Analyze whale activity
-    if (whaleData && whaleData.summary) {
-      const whaleActivity = whaleData.summary.totalLargeTxns;
-      const whaleVolume = whaleData.summary.totalVolume;
-      
-      if (whaleActivity > 5 || whaleVolume > 50000000) { // 5+ large txns or $50M+ volume
-        exhaustionSignals.signals.increasingWhaleActivity = true;
-        exhaustionSignals.metrics.whaleActivityScore += 0.4;
-      }
-    }
-
     // Analyze volatility
     const recentPrices = priceHistory.slice(-10);
     const volatility = calculateVolatility(recentPrices);
@@ -1598,9 +1285,8 @@ const detectLiquidityExhaustion = (liquidityData, priceHistory, whaleData) => {
     }
 
     // Calculate overall exhaustion score
-    exhaustionSignals.metrics.overallExhaustionScore = 
-      exhaustionSignals.metrics.liquidityScore + 
-      exhaustionSignals.metrics.whaleActivityScore + 
+    exhaustionSignals.metrics.overallExhaustionScore =
+      exhaustionSignals.metrics.liquidityScore +
       exhaustionSignals.metrics.volatilityScore +
       Math.max(0, exhaustionSignals.metrics.multiTimeframeScore);
 
@@ -2698,29 +2384,21 @@ const runBot = async () => {
     };
     
     try {
-      // Run all onchain analysis functions with individual error handling
-      const [dexLiquidity, whaleMovements] = await Promise.allSettled([
-        analyzeDEXLiquidity(spotPrice).catch(err => ({ error: err.message, timestamp: new Date().toISOString() })),
-        detectWhaleMovements(spotPrice).catch(err => ({ error: err.message, timestamp: new Date().toISOString() }))
-      ]);
-      
-      // Get the results with fallback error handling
-      const dexLiquidityResult = dexLiquidity.status === 'fulfilled' ? dexLiquidity.value : { error: dexLiquidity.reason?.message || 'unknown_error' };
-      const whaleMovementsResult = whaleMovements.status === 'fulfilled' ? whaleMovements.value : { error: whaleMovements.reason?.message || 'unknown_error' };
-      
+      // Run onchain analysis functions with individual error handling
+      const dexLiquidityResult = await analyzeDEXLiquidity(spotPrice).catch(err => ({ error: err.message, timestamp: new Date().toISOString() }));
+
       // Calculate exhaustion analysis with error handling
       let exhaustionAnalysisResult = { error: 'calculation_failed', timestamp: new Date().toISOString() };
       try {
-        exhaustionAnalysisResult = detectLiquidityExhaustion(dexLiquidityResult, priceHistory, whaleMovementsResult);
+        exhaustionAnalysisResult = detectLiquidityExhaustion(dexLiquidityResult, priceHistory);
       } catch (err) {
         console.log('⚠️ Exhaustion analysis failed:', err.message);
         exhaustionAnalysisResult = { error: err.message, timestamp: new Date().toISOString() };
       }
-      
+
       // Compile onchain analysis results
       onchainAnalysis = {
         dexLiquidity: dexLiquidityResult,
-        whaleMovements: whaleMovementsResult,
         exhaustionAnalysis: exhaustionAnalysisResult,
         spotPrice: spotPrice,
         momentumData: momentumResult,
@@ -2818,25 +2496,6 @@ const runBot = async () => {
           }
         }
         
-        // Display 7-day unique whale wallets with percentage change
-        const whaleData7Days = getUniqueWhaleWallets7Days();
-        
-        // Format percentage change with appropriate emoji and color
-        let pctChangeStr = '';
-        if (whaleData7Days.pctChange > 0) {
-          pctChangeStr = ` (+${whaleData7Days.pctChange.toFixed(1)}%)`;
-        } else if (whaleData7Days.pctChange < 0) {
-          pctChangeStr = ` (${whaleData7Days.pctChange.toFixed(1)}%)`;
-        } else if (whaleData7Days.previousTxns === 0 && whaleData7Days.totalTxns > 0) {
-          pctChangeStr = ' (NEW)';
-        } else {
-          pctChangeStr = ' (0%)';
-        }
-        
-        console.log(' ');
-        console.log(`🐋 Unique whale wallets (7d): ${whaleData7Days.count} | Total txs: ${whaleData7Days.totalTxns}${pctChangeStr}`);
-        console.log(' ');
-        
         if (onchainAnalysis.exhaustionAnalysis) {
           const exhaustion = onchainAnalysis.exhaustionAnalysis;
           
@@ -2870,7 +2529,6 @@ const runBot = async () => {
             // Show clear breakdown of what's affecting liquidity
             const liquidityIssues = [];
             if (exhaustion.metrics.liquidityScore > 0) liquidityIssues.push('Pool depth issues');
-            if (exhaustion.metrics.whaleActivityScore > 0) liquidityIssues.push('Whale activity');
             if (exhaustion.metrics.volatilityScore > 0) liquidityIssues.push('High volatility');
             if (exhaustion.metrics.multiTimeframeScore > 0) liquidityIssues.push('Multi-timeframe pressure');
             
@@ -3078,8 +2736,6 @@ const runBot = async () => {
           short_momentum: botData.shortTermMomentum,
           onchain: {
             liquidity_flow: onchainAnalysis?.dexLiquidity?.flowAnalysis || null,
-            whale_count: onchainAnalysis?.whaleMovements?.summary?.whaleCount ?? 0,
-            whale_txns: onchainAnalysis?.whaleMovements?.summary?.totalLargeTxns ?? 0,
             market_health: onchainAnalysis?.exhaustionAnalysis?.alertLevel || null,
           },
           instruments: {

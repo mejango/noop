@@ -92,8 +92,6 @@ db.exec(`
     liquidity_flow_direction TEXT,
     liquidity_flow_magnitude REAL,
     liquidity_flow_confidence REAL,
-    whale_count INTEGER,
-    whale_total_txns INTEGER,
     exhaustion_score REAL,
     exhaustion_alert_level TEXT,
     raw_data TEXT
@@ -161,10 +159,10 @@ const stmts = {
 
   insertOnchainData: db.prepare(`
     INSERT INTO onchain_data (timestamp, spot_price, liquidity_flow_direction,
-      liquidity_flow_magnitude, liquidity_flow_confidence, whale_count, whale_total_txns,
+      liquidity_flow_magnitude, liquidity_flow_confidence,
       exhaustion_score, exhaustion_alert_level, raw_data)
     VALUES (@timestamp, @spot_price, @liquidity_flow_direction,
-      @liquidity_flow_magnitude, @liquidity_flow_confidence, @whale_count, @whale_total_txns,
+      @liquidity_flow_magnitude, @liquidity_flow_confidence,
       @exhaustion_score, @exhaustion_alert_level, @raw_data)
   `),
 
@@ -304,7 +302,6 @@ const insertOptionsSnapshotBatch = (options, timestamp) => {
 
 const insertOnchainData = (analysis) => {
   const flow = analysis.dexLiquidity?.flowAnalysis || {};
-  const whaleSummary = analysis.whaleMovements?.summary || {};
   const exhaustion = analysis.exhaustionAnalysis || {};
 
   stmts.insertOnchainData.run({
@@ -313,8 +310,6 @@ const insertOnchainData = (analysis) => {
     liquidity_flow_direction: flow.direction || null,
     liquidity_flow_magnitude: toNum(flow.magnitude),
     liquidity_flow_confidence: toNum(flow.confidence),
-    whale_count: toNum(whaleSummary.whaleCount),
-    whale_total_txns: toNum(whaleSummary.totalLargeTxns),
     exhaustion_score: toNum(exhaustion.metrics?.compositeScore ?? exhaustion.metrics?.overallExhaustionScore),
     exhaustion_alert_level: exhaustion.alertLevel || null,
     raw_data: JSON.stringify(analysis),
