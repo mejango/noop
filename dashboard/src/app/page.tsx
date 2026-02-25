@@ -442,13 +442,13 @@ export default function OverviewPage() {
           <Card title="Price Range" className="flex flex-col">
             <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
               <div className="flex items-center gap-3">
-                <span className="text-xs text-gray-500 w-10">3d H/L</span>
+                <span className="text-xs text-gray-500 whitespace-nowrap">3d H/L</span>
                 <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>
                 <span className="text-gray-600">/</span>
                 <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-xs text-gray-500 w-10">7d H/L</span>
+                <span className="text-xs text-gray-500 whitespace-nowrap">7d H/L</span>
                 <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
                 <span className="text-gray-600">/</span>
                 <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
@@ -892,7 +892,7 @@ export default function OverviewPage() {
                       >
                         <span className="cursor-help">{d.bestPut === undefined ? '--' : d.bestPut && d.bestPut > 0 ? d.bestPut.toFixed(6) : 'N/A'}</span>
                         {putDetail && (
-                          <div className="absolute right-0 bottom-full mb-1 hidden group-hover:block z-20 pointer-events-none">
+                          <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                               <div className="text-gray-400 mb-1">Best PUT option</div>
                               <div>Delta: <span className="text-white">{putDetail.delta?.toFixed(4) ?? 'N/A'}</span></div>
@@ -909,7 +909,7 @@ export default function OverviewPage() {
                       >
                         <span className="cursor-help">{d.bestCall === undefined ? '--' : d.bestCall && d.bestCall > 0 ? d.bestCall.toFixed(2) : 'N/A'}</span>
                         {callDetail && (
-                          <div className="absolute right-0 bottom-full mb-1 hidden group-hover:block z-20 pointer-events-none">
+                          <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                               <div className="text-gray-400 mb-1">Best CALL option</div>
                               <div>Delta: <span className="text-white">{callDetail.delta?.toFixed(4) ?? 'N/A'}</span></div>
