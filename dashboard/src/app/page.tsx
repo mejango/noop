@@ -463,17 +463,41 @@ export default function OverviewPage() {
 
         <Card title="Options Value" subtitle={`Best (${chart.bestScores.windowDays}d) / Current`} className="flex flex-col">
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 relative group/put">
               <span className="text-xs text-gray-500 whitespace-nowrap">PUT</span>
-              <span className="text-red-400 font-medium">{Number(chart.bestScores.bestPutScore) > 0 ? Number(chart.bestScores.bestPutScore).toFixed(6) : '--'}</span>
+              <span className="text-red-400 font-medium cursor-help">{Number(chart.bestScores.bestPutScore) > 0 ? Number(chart.bestScores.bestPutScore).toFixed(6) : '--'}</span>
               <span className="text-gray-600">/</span>
-              <span className="text-red-400">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : '--'}</span>
+              <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : '--'}</span>
+              {latestTick?.best_put_detail && (
+                <div className="absolute left-0 top-full mt-1 hidden group-hover/put:block z-20 pointer-events-none">
+                  <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                    <div className="text-gray-400 mb-1">Current best PUT</div>
+                    <div>Delta: <span className="text-white">{latestTick.best_put_detail.delta != null ? Number(latestTick.best_put_detail.delta).toFixed(4) : 'N/A'}</span></div>
+                    <div>Price: <span className="text-white">{latestTick.best_put_detail.price != null ? Number(latestTick.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
+                    <div>Strike: <span className="text-white">{latestTick.best_put_detail.strike != null ? `$${Number(latestTick.best_put_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                    <div>DTE: <span className="text-white">{dteDays(latestTick.best_put_detail.expiry) ?? 'N/A'}</span></div>
+                    {latestTick.best_put_detail.instrument && <div>Instrument: <span className="text-white">{latestTick.best_put_detail.instrument}</span></div>}
+                  </div>
+                </div>
+              )}
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 relative group/call">
               <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
-              <span className="text-cyan-400 font-medium">{Number(chart.bestScores.bestCallScore) > 0 ? Number(chart.bestScores.bestCallScore).toFixed(2) : '--'}</span>
+              <span className="text-cyan-400 font-medium cursor-help">{Number(chart.bestScores.bestCallScore) > 0 ? Number(chart.bestScores.bestCallScore).toFixed(2) : '--'}</span>
               <span className="text-gray-600">/</span>
-              <span className="text-cyan-400">{Number(latestTick?.current_best_call ?? 0) > 0 ? Number(latestTick!.current_best_call).toFixed(2) : '--'}</span>
+              <span className="text-cyan-400 cursor-help">{Number(latestTick?.current_best_call ?? 0) > 0 ? Number(latestTick!.current_best_call).toFixed(2) : '--'}</span>
+              {latestTick?.best_call_detail && (
+                <div className="absolute left-0 top-full mt-1 hidden group-hover/call:block z-20 pointer-events-none">
+                  <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                    <div className="text-gray-400 mb-1">Current best CALL</div>
+                    <div>Delta: <span className="text-white">{latestTick.best_call_detail.delta != null ? Number(latestTick.best_call_detail.delta).toFixed(4) : 'N/A'}</span></div>
+                    <div>Price: <span className="text-white">{latestTick.best_call_detail.price != null ? Number(latestTick.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
+                    <div>Strike: <span className="text-white">{latestTick.best_call_detail.strike != null ? `$${Number(latestTick.best_call_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                    <div>DTE: <span className="text-white">{dteDays(latestTick.best_call_detail.expiry) ?? 'N/A'}</span></div>
+                    {latestTick.best_call_detail.instrument && <div>Instrument: <span className="text-white">{latestTick.best_call_detail.instrument}</span></div>}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </Card>
@@ -871,11 +895,12 @@ export default function OverviewPage() {
                       {d.best_put_detail && (
                         <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
                           <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                            <div className="text-gray-400 mb-1">Best PUT option</div>
+                            <div className="text-gray-400 mb-1">Current best PUT</div>
                             <div>Delta: <span className="text-white">{d.best_put_detail.delta != null ? Number(d.best_put_detail.delta).toFixed(4) : 'N/A'}</span></div>
                             <div>Price: <span className="text-white">{d.best_put_detail.price != null ? Number(d.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
                             <div>Strike: <span className="text-white">{d.best_put_detail.strike != null ? `$${Number(d.best_put_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
                             <div>DTE: <span className="text-white">{dteDays(d.best_put_detail.expiry) ?? 'N/A'}</span></div>
+                            {d.best_put_detail.instrument && <div>Instrument: <span className="text-white">{d.best_put_detail.instrument}</span></div>}
                           </div>
                         </div>
                       )}
@@ -889,11 +914,12 @@ export default function OverviewPage() {
                       {d.best_call_detail && (
                         <div className="absolute right-0 top-full mt-1 hidden group-hover:block z-20 pointer-events-none">
                           <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                            <div className="text-gray-400 mb-1">Best CALL option</div>
+                            <div className="text-gray-400 mb-1">Current best CALL</div>
                             <div>Delta: <span className="text-white">{d.best_call_detail.delta != null ? Number(d.best_call_detail.delta).toFixed(4) : 'N/A'}</span></div>
                             <div>Price: <span className="text-white">{d.best_call_detail.price != null ? Number(d.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
                             <div>Strike: <span className="text-white">{d.best_call_detail.strike != null ? `$${Number(d.best_call_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
                             <div>DTE: <span className="text-white">{dteDays(d.best_call_detail.expiry) ?? 'N/A'}</span></div>
+                            {d.best_call_detail.instrument && <div>Instrument: <span className="text-white">{d.best_call_detail.instrument}</span></div>}
                           </div>
                         </div>
                       )}
