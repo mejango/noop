@@ -753,6 +753,24 @@ export default function OverviewPage() {
                 ))}
               </div>
             </div>
+            {/* Time axis */}
+            <div className="flex items-center gap-1">
+              <span className="w-10 shrink-0" />
+              <div className="flex justify-between flex-1 mt-1">
+                {(() => {
+                  const tickCount = mobile ? 4 : 6;
+                  const len = momentumData.length;
+                  if (len === 0) return null;
+                  const ticks: number[] = [];
+                  for (let i = 0; i < tickCount; i++) {
+                    ticks.push(momentumData[Math.round(i * (len - 1) / (tickCount - 1))].ts);
+                  }
+                  return ticks.map((ts, i) => (
+                    <span key={i} className="text-[10px] text-gray-500">{xTickFormatter(ts)}</span>
+                  ));
+                })()}
+              </div>
+            </div>
           </div>
         </Card>
       )}
