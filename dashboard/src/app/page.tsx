@@ -436,25 +436,40 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      {/* Left: Range + Momentum stacked | Right: Tick Log */}
+      {/* Left: Range + Best Options + Momentum stacked | Right: Tick Log */}
       <div className="grid grid-cols-2 gap-4">
         <div className="flex flex-col gap-4">
-          <Card title="Price Range" className="flex flex-col">
-            <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-gray-500 whitespace-nowrap">3d H/L</span>
-                <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>
-                <span className="text-gray-600">/</span>
-                <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
+          <div className="grid grid-cols-2 gap-4">
+            <Card title="Price Range High/Low" className="flex flex-col">
+              <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-gray-500 whitespace-nowrap">3d</span>
+                  <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>
+                  <span className="text-gray-600">/</span>
+                  <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-gray-500 whitespace-nowrap">7d</span>
+                  <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
+                  <span className="text-gray-600">/</span>
+                  <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
+                </div>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-gray-500 whitespace-nowrap">7d H/L</span>
-                <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
-                <span className="text-gray-600">/</span>
-                <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
+            </Card>
+
+            <Card title={`Best Options (${chart.bestScores.windowDays}d)`} className="flex flex-col">
+              <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-gray-500 whitespace-nowrap">PUT</span>
+                  <span className="text-red-400 font-medium">{chart.bestScores.bestPutScore > 0 ? chart.bestScores.bestPutScore.toFixed(6) : 'N/A'}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
+                  <span className="text-cyan-400 font-medium">{chart.bestScores.bestCallScore > 0 ? chart.bestScores.bestCallScore.toFixed(2) : 'N/A'}</span>
+                </div>
               </div>
-            </div>
-          </Card>
+            </Card>
+          </div>
 
           <Card title="Momentum" className="flex flex-col overflow-hidden">
             <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
