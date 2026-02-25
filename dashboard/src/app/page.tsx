@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef } from 'react';
 import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, momentumColor, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
@@ -736,12 +736,24 @@ export default function OverviewPage() {
         const MomentumTooltipBar = ({ data }: { data: typeof momentumData }) => {
           // eslint-disable-next-line react-hooks/rules-of-hooks
           const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+          // eslint-disable-next-line react-hooks/rules-of-hooks
+          const barRef = useRef<HTMLDivElement>(null);
           const hovered = hoverIdx != null ? data[hoverIdx] : null;
+
+          // Compute fixed position for tooltip based on bar bounding rect
+          let tipX = 0, tipY = 0;
+          if (hoverIdx != null && barRef.current) {
+            const rect = barRef.current.getBoundingClientRect();
+            const cellFrac = (hoverIdx + 0.5) / data.length;
+            tipX = rect.left + rect.width * cellFrac;
+            tipY = rect.bottom + 6;
+          }
+
           return (
-            <>
+            <div ref={barRef}>
               <div className="flex items-center gap-1">
                 <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">medium</span>
-                <div className="flex rounded-t overflow-hidden flex-1" style={{ height: 10 }}>
+                <div className="flex overflow-hidden flex-1" style={{ height: 16 }}>
                   {data.map((d, i) => (
                     <div
                       key={i}
@@ -753,9 +765,9 @@ export default function OverviewPage() {
                   ))}
                 </div>
               </div>
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1 -mt-px">
                 <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">short</span>
-                <div className="flex rounded-b overflow-hidden flex-1" style={{ height: 10 }}>
+                <div className="flex overflow-hidden flex-1" style={{ height: 16 }}>
                   {data.map((d, i) => (
                     <div
                       key={i}
@@ -768,8 +780,11 @@ export default function OverviewPage() {
                 </div>
               </div>
               {hovered && (
-                <div className="mt-1.5 px-1">
-                  <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs inline-block shadow-lg">
+                <div
+                  className="fixed z-50 pointer-events-none"
+                  style={{ top: tipY, left: tipX, transform: 'translateX(-50%)' }}
+                >
+                  <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                     <div className="text-gray-400 mb-1">{new Date(hovered.ts).toLocaleString()}</div>
                     <div className="flex items-center gap-2">
                       <span className="w-2 h-2 rounded-sm inline-block" style={{ background: momentumBarColorMedium(hovered.momentum, hovered.mediumDerivative) }} />
@@ -784,7 +799,7 @@ export default function OverviewPage() {
                   </div>
                 </div>
               )}
-            </>
+            </div>
           );
         };
         return (
