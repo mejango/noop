@@ -429,10 +429,24 @@ export default function OverviewPage() {
     }
   }, [tableData.length]);
 
-  // Shared X-axis props for sub-charts (synced with main chart)
+  // Shared X-axis domain from main chart's time range
   const xDomain = merged.length > 0
     ? [merged[0].ts, merged[merged.length - 1].ts]
     : [0, 1];
+
+  // Filter sub-chart data to match the selected time range
+  const filteredLiquidity = useMemo(() =>
+    liquidityData.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
+    [liquidityData, xDomain]
+  );
+  const filteredCallHeatmap = useMemo(() =>
+    callHeatmap.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
+    [callHeatmap, xDomain]
+  );
+  const filteredPutHeatmap = useMemo(() =>
+    putHeatmap.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
+    [putHeatmap, xDomain]
+  );
 
   return (
     <div className="space-y-6">
@@ -713,7 +727,7 @@ export default function OverviewPage() {
       )}
 
       {/* DEX Liquidity (TVL) */}
-      {liquidityData.length > 0 && (() => {
+      {filteredLiquidity.length > 0 && (() => {
         const dexColors: Record<string, string> = {
           uniswap_v3: '#ff007a', // Uniswap pink
           uniswap_v4: '#fc72ff', // Uniswap V4 purple-pink
@@ -734,8 +748,8 @@ export default function OverviewPage() {
               </div>
             </div>
             <ResponsiveContainer width="100%" height={100}>
-              <ComposedChart data={liquidityData} margin={CHART_MARGINS}>
-                <XAxis dataKey="ts" type="number" domain={['dataMin', 'dataMax']} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <ComposedChart data={filteredLiquidity} margin={CHART_MARGINS} syncId="main">
+                <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 <YAxis
                   tickFormatter={(v) => `$${(v / 1e6).toFixed(0)}M`}
                   stroke={chartAxis.stroke}
@@ -759,7 +773,7 @@ export default function OverviewPage() {
       })()}
 
       {/* Call Market Heatmap */}
-      {callHeatmap.length > 0 && (
+      {filteredCallHeatmap.length > 0 && (
         <Card>
           <div className="flex items-center justify-between mb-1">
             <span className="text-xs font-medium text-gray-400">Call Market</span>
@@ -810,7 +824,7 @@ export default function OverviewPage() {
               {/* Band showing bot's active call delta range: 0.04–0.12 */}
               <ReferenceArea y1={0.04} y2={0.12} fill="#5CEBDF" fillOpacity={0.12} stroke="#5CEBDF" strokeOpacity={0.15} />
               <Scatter
-                data={callHeatmap}
+                data={filteredCallHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 shape={(props: any) => <HeatmapDotShape {...props} type="call" />}
                 isAnimationActive={false}
@@ -821,7 +835,7 @@ export default function OverviewPage() {
       )}
 
       {/* Put Market Heatmap */}
-      {putHeatmap.length > 0 && (
+      {filteredPutHeatmap.length > 0 && (
         <Card>
           <div className="flex items-center justify-between mb-1">
             <span className="text-xs font-medium text-gray-400">Put Market</span>
@@ -872,7 +886,7 @@ export default function OverviewPage() {
               {/* Band showing bot's active put delta range: 0.02–0.12 (abs) */}
               <ReferenceArea y1={0.02} y2={0.12} fill="#f87171" fillOpacity={0.12} stroke="#f87171" strokeOpacity={0.15} />
               <Scatter
-                data={putHeatmap}
+                data={filteredPutHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 shape={(props: any) => <HeatmapDotShape {...props} type="put" />}
                 isAnimationActive={false}
