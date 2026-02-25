@@ -51,7 +51,7 @@ interface OptionsPoint {
 
 interface LiquidityPoint {
   timestamp: string;
-  tvl: number;
+  [dex: string]: string | number;
 }
 
 interface TradeMarker {
@@ -219,7 +219,6 @@ export default function OverviewPage() {
       bestCall?: number | null;
       bestPutDetail?: OptionDetail;
       bestCallDetail?: OptionDetail;
-      liquidity?: Record<string, number>;
       trade?: number;
       tradeInfo?: string;
     };
@@ -298,20 +297,6 @@ export default function OverviewPage() {
       if (callSnap) rows[idx].bestCallDetail = makeDetail(callSnap, false);
     }
 
-    // Snap liquidity data to nearest price point
-    for (const l of chart.liquidity) {
-      const idx = snapToNearest(new Date(l.timestamp as string).getTime());
-      const dexValues: Record<string, number> = {};
-      for (const [key, val] of Object.entries(l)) {
-        if (key !== 'timestamp' && typeof val === 'number') {
-          dexValues[key] = val;
-        }
-      }
-      if (Object.keys(dexValues).length > 0) {
-        rows[idx].liquidity = dexValues;
-      }
-    }
-
     // Snap trade markers to nearest price point
     for (const t of chart.trades) {
       const idx = snapToNearest(new Date(t.timestamp).getTime());
@@ -333,21 +318,21 @@ export default function OverviewPage() {
     [merged]
   );
 
-  // Data for liquidity chart: flatten per-dex values into top-level keys
+  // Data for liquidity chart: build directly from API data (not snapped to spot prices)
   const { liquidityData, dexNames } = useMemo(() => {
     const nameSet = new Set<string>();
-    const data = merged
-      .filter(d => d.liquidity != null)
-      .map(d => {
-        const flat: Record<string, number> = { ts: d.ts };
-        for (const [name, val] of Object.entries(d.liquidity!)) {
-          flat[name] = val;
-          nameSet.add(name);
+    const data = chart.liquidity.map(l => {
+      const flat: Record<string, number> = { ts: new Date(l.timestamp as string).getTime() };
+      for (const [key, val] of Object.entries(l)) {
+        if (key !== 'timestamp' && typeof val === 'number') {
+          flat[key] = val;
+          nameSet.add(key);
         }
-        return flat;
-      });
+      }
+      return flat;
+    }).filter(d => Object.keys(d).length > 1);
     return { liquidityData: data, dexNames: Array.from(nameSet).sort() };
-  }, [merged]);
+  }, [chart.liquidity]);
 
   // Heatmap data: split by option type, calculate % OTM and normalize premium
   const { callHeatmap, putHeatmap } = useMemo(() => {
