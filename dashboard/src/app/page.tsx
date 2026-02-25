@@ -437,7 +437,7 @@ export default function OverviewPage() {
   return (
     <div className="space-y-6">
       {/* Left: Range + Best Options + Momentum stacked | Right: Tick Log */}
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-2 gap-4 items-stretch">
         <div className="flex flex-col gap-4">
           <div className="grid grid-cols-2 gap-4">
             <Card title="Price Range High/Low" className="flex flex-col">
@@ -471,7 +471,7 @@ export default function OverviewPage() {
             </Card>
           </div>
 
-          <Card title="Momentum" className="flex flex-col overflow-hidden">
+          <Card title="Momentum" className="flex flex-col overflow-hidden flex-1">
             <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
               <div className="flex items-center gap-3 min-w-0">
                 <span className="text-xs text-gray-500 w-12 shrink-0">Medium</span>
