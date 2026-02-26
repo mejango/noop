@@ -61,6 +61,13 @@ body {
   display: none;
 }
 
+/* Remove focus outline on chart containers */
+.recharts-wrapper,
+.recharts-wrapper *,
+.recharts-surface {
+  outline: none !important;
+}
+
 /* Glow effects */
 .glow-orange {
   box-shadow: 0 0 20px rgba(245, 166, 35, 0.3);

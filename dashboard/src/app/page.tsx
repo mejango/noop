@@ -623,6 +623,7 @@ export default function OverviewPage() {
               <YAxis yAxisId="putVal" orientation="right" hide domain={['auto', 'auto']} />
               <YAxis yAxisId="callVal" orientation="right" hide domain={['auto', 'auto']} />
               <Tooltip
+                trigger="click"
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload, label }: any) => {
@@ -707,8 +708,8 @@ export default function OverviewPage() {
           return (
             <div>
               <div className="flex items-center gap-1">
-                <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">medium</span>
-                <div className="flex overflow-hidden flex-1" style={{ height: 16 }}>
+                <span className="text-[10px] leading-tight text-gray-500 w-10 shrink-0 text-right">medium<br/>term</span>
+                <div className="flex overflow-hidden flex-1" style={{ height: 28 }}>
                   {data.map((d, i) => (
                     <div
                       key={i}
@@ -722,8 +723,8 @@ export default function OverviewPage() {
                 </div>
               </div>
               <div className="flex items-center gap-1 -mt-px">
-                <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">short</span>
-                <div className="flex overflow-hidden flex-1" style={{ height: 16 }}>
+                <span className="text-[10px] leading-tight text-gray-500 w-10 shrink-0 text-right">short<br/>term</span>
+                <div className="flex overflow-hidden flex-1" style={{ height: 28 }}>
                   {data.map((d, i) => (
                     <div
                       key={i}
@@ -845,6 +846,7 @@ export default function OverviewPage() {
                   width={mobile ? 40 : 55}
                 />
                 <Tooltip
+                  trigger="click"
                   {...chartTooltip}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
@@ -914,6 +916,7 @@ export default function OverviewPage() {
                 width={mobile ? 35 : 55}
               />
               <Tooltip
+                trigger="click"
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload }: any) => {
@@ -976,6 +979,7 @@ export default function OverviewPage() {
                 width={mobile ? 35 : 55}
               />
               <Tooltip
+                trigger="click"
                 {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload }: any) => {
