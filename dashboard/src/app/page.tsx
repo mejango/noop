@@ -705,11 +705,14 @@ export default function OverviewPage() {
             setHover({ idx: i, x: e.clientX, y: e.clientY });
           };
 
+          const yAxisWidth = mobile ? 35 : 55;
+          const leftPad = margins.left + yAxisWidth;
+
           return (
-            <div>
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] leading-tight text-gray-500 w-10 shrink-0 text-right">medium<br/>term</span>
-                <div className="flex overflow-hidden flex-1" style={{ height: 28 }}>
+            <div style={{ paddingLeft: leftPad, paddingRight: margins.right }}>
+              <div className="relative" style={{ height: 28 }}>
+                <span className="absolute right-full pr-1 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 whitespace-nowrap">medium term</span>
+                <div className="flex overflow-hidden h-full">
                   {data.map((d, i) => (
                     <div
                       key={i}
@@ -722,9 +725,9 @@ export default function OverviewPage() {
                   ))}
                 </div>
               </div>
-              <div className="flex items-center gap-1 -mt-px">
-                <span className="text-[10px] leading-tight text-gray-500 w-10 shrink-0 text-right">short<br/>term</span>
-                <div className="flex overflow-hidden flex-1" style={{ height: 28 }}>
+              <div className="relative -mt-px" style={{ height: 28 }}>
+                <span className="absolute right-full pr-1 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 whitespace-nowrap">short term</span>
+                <div className="flex overflow-hidden h-full">
                   {data.map((d, i) => (
                     <div
                       key={i}
