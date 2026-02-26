@@ -191,21 +191,29 @@ function prepareAll(d: Database.Database) {
     `),
 
     getOnchainHourly: d.prepare(`
-      SELECT hour, avg_magnitude, direction FROM (
-        SELECT
-          strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-          liquidity_flow_direction as direction,
-          AVG(liquidity_flow_magnitude) OVER (PARTITION BY strftime('%Y-%m-%dT%H:00:00Z', timestamp)) as avg_magnitude,
-          ROW_NUMBER() OVER (
-            PARTITION BY strftime('%Y-%m-%dT%H:00:00Z', timestamp)
-            ORDER BY COUNT(*) OVER (
-              PARTITION BY strftime('%Y-%m-%dT%H:00:00Z', timestamp), liquidity_flow_direction
-            ) DESC
-          ) as rn
-        FROM onchain_data
-        WHERE timestamp > ?
-      ) WHERE rn = 1
-      ORDER BY hour ASC
+      WITH hourly_agg AS (
+        SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+               AVG(liquidity_flow_magnitude) as avg_magnitude
+        FROM onchain_data WHERE timestamp > ?
+        GROUP BY hour
+      ),
+      direction_counts AS (
+        SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+               liquidity_flow_direction as direction,
+               COUNT(*) as cnt
+        FROM onchain_data WHERE timestamp > ?
+        GROUP BY hour, liquidity_flow_direction
+      ),
+      top_direction AS (
+        SELECT hour, direction FROM (
+          SELECT hour, direction, ROW_NUMBER() OVER (PARTITION BY hour ORDER BY cnt DESC) as rn
+          FROM direction_counts
+        ) WHERE rn = 1
+      )
+      SELECT h.hour, h.avg_magnitude, t.direction
+      FROM hourly_agg h
+      LEFT JOIN top_direction t ON h.hour = t.hour
+      ORDER BY h.hour ASC
     `),
 
     getBestPutDvHourly: d.prepare(`
@@ -416,7 +424,7 @@ export function getSpotPricesHourly(since: string) {
 }
 
 export function getOnchainHourly(since: string) {
-  return getStmts().getOnchainHourly.all(since) as { hour: string; avg_magnitude: number | null; direction: string | null }[];
+  return getStmts().getOnchainHourly.all(since, since) as { hour: string; avg_magnitude: number | null; direction: string | null }[];
 }
 
 export function getBestPutDvHourly(since: string) {
