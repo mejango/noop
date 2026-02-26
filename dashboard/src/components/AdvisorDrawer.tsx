@@ -246,9 +246,12 @@ export default function AdvisorDrawer() {
               return (
                 <div key={entry.id} className="border border-white/5 px-3 py-2.5 space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className={`text-[10px] font-bold px-1.5 py-0.5 ${style.color}`}>
-                      {style.label}
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 ${style.color}`}>
+                        {style.label}
+                      </span>
+                      <span className="text-[10px] text-gray-500 font-mono">#{entry.id}</span>
+                    </div>
                     <span className="text-[10px] text-gray-600">{timeAgo(entry.timestamp)}</span>
                   </div>
                   <div className="prose prose-invert prose-xs max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h2]:text-sm [&_h2]:font-bold [&_h2]:text-white [&_h2]:mt-3 [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:font-bold [&_h3]:text-white [&_h3]:mt-2 [&_h3]:mb-1 [&_p]:text-xs [&_p]:leading-relaxed [&_p]:my-1 [&_strong]:text-white [&_ul]:text-xs [&_ul]:my-1 [&_ul]:pl-4 [&_ol]:text-xs [&_ol]:my-1 [&_ol]:pl-4 [&_li]:my-0.5 [&_hr]:border-white/10 [&_hr]:my-2 [&_code]:text-juice-orange [&_code]:text-[11px] [&_code]:bg-white/5 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_table]:w-full [&_table]:text-xs [&_table]:my-2 [&_table]:border-collapse [&_th]:text-left [&_th]:text-gray-400 [&_th]:font-medium [&_th]:border-b [&_th]:border-white/10 [&_th]:px-2 [&_th]:py-1 [&_td]:text-gray-300 [&_td]:border-b [&_td]:border-white/5 [&_td]:px-2 [&_td]:py-1">
