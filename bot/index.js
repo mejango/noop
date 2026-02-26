@@ -7,21 +7,17 @@ const fs = require('fs');
 const path = require('path');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
-const ARCHIVE_DIR = path.join(DATA_DIR, 'archive');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
 
-// Ensure data directories exist
-[DATA_DIR, ARCHIVE_DIR].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-});
+// Ensure data directory exists
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
 
 console.log('='.repeat(70));
 console.log('NOOP-C Bot Starting');
 console.log(`Data dir: ${DATA_DIR}`);
 console.log(`DB path: ${DB_PATH}`);
-console.log(`Archive: ${ARCHIVE_DIR}`);
 console.log('='.repeat(70));
 
 // Export db for script.js to use

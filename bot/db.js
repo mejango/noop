@@ -105,6 +105,26 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_ai_journal_timestamp ON ai_journal(timestamp);
+
+  CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    action TEXT NOT NULL,
+    success INTEGER NOT NULL,
+    reason TEXT,
+    instrument_name TEXT,
+    strike REAL,
+    expiry TEXT,
+    delta REAL,
+    price REAL,
+    intended_amount REAL,
+    filled_amount REAL,
+    fill_price REAL,
+    total_value REAL,
+    spot_price REAL,
+    raw_response TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_orders_timestamp ON orders(timestamp);
 `);
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
@@ -277,6 +297,17 @@ const stmts = {
     GROUP BY hour ORDER BY hour ASC
   `),
 
+  insertOrder: db.prepare(`
+    INSERT INTO orders (timestamp, action, success, reason, instrument_name, strike, expiry,
+      delta, price, intended_amount, filled_amount, fill_price, total_value, spot_price, raw_response)
+    VALUES (@timestamp, @action, @success, @reason, @instrument_name, @strike, @expiry,
+      @delta, @price, @intended_amount, @filled_amount, @fill_price, @total_value, @spot_price, @raw_response)
+  `),
+
+  getRecentOrders: db.prepare(`
+    SELECT * FROM orders WHERE timestamp > @since ORDER BY timestamp DESC LIMIT @limit
+  `),
+
   // 7-day average premium for call selling elevation check
   getAvgCallPremium7d: db.prepare(`
     SELECT AVG(bid_price) as avg_premium
@@ -380,6 +411,28 @@ const getOnchainHourly = (since) => stmts.getOnchainHourly.all({ since });
 const getBestPutDvHourly = (since) => stmts.getBestPutDvHourly.all({ since });
 const getBestCallDvHourly = (since) => stmts.getBestCallDvHourly.all({ since });
 
+const insertOrder = (data) => {
+  stmts.insertOrder.run({
+    timestamp: data.timestamp || new Date().toISOString(),
+    action: data.action || 'unknown',
+    success: data.success ? 1 : 0,
+    reason: data.reason || null,
+    instrument_name: data.instrument_name || null,
+    strike: toNum(data.strike),
+    expiry: data.expiry || null,
+    delta: toNum(data.delta),
+    price: toNum(data.price),
+    intended_amount: toNum(data.intended_amount),
+    filled_amount: toNum(data.filled_amount),
+    fill_price: toNum(data.fill_price),
+    total_value: toNum(data.total_value),
+    spot_price: toNum(data.spot_price),
+    raw_response: data.raw_response ? (typeof data.raw_response === 'string' ? data.raw_response : JSON.stringify(data.raw_response)) : null,
+  });
+};
+
+const getRecentOrders = (since, limit = 50) => stmts.getRecentOrders.all({ since, limit });
+
 const getAvgCallPremium7d = () => {
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   return stmts.getAvgCallPremium7d.get({ since });
@@ -476,6 +529,8 @@ module.exports = {
   getBestCallDvHourly,
   insertTick,
   getRecentTicks,
+  insertOrder,
+  getRecentOrders,
   insertJournalEntry,
   getRecentJournalEntries,
   saveBotState,

@@ -84,9 +84,8 @@
  *
  * Data & Logging:
  * ---------------
- *   • Archives price/momentum logs, trading decisions, performance metrics, and raw order responses
- *   • State persisted in bot_data.json across restarts
- *   • Rotation: daily JSON/TXT files under ./archive
+ *   • All data persisted to SQLite (spot prices, options snapshots, onchain data, orders)
+ *   • Cycle state persisted in SQLite across restarts
  *   • Enhanced logging with strategy-specific reasons and performance tracking
  *
  * Requirements:
@@ -173,7 +172,6 @@ const DYNAMIC_INTERVALS = {
 };
 
 // Configuration
-const ARCHIVE_DIR = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'archive') : './archive';
 const BOT_DATA_PATH = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'bot_data.json') : './bot_data.json';
 
 const PERIOD = 10 * 1000 * 60 * 60 * 24;
@@ -261,377 +259,61 @@ const loadData = () => {
   }
 };
 
-// Archive and logging functions
-const saveSpotPriceMomentum = (spotPrice, momentumAnalysis, botData, archiveDir) => {
-  ensureArchiveDir(archiveDir);
 
-  const date = new Date().toISOString().split('T')[0];
-  const monthYear = date.substring(0, 7); // Gets YYYY-MM format
-  const momentumFile = path.join(archiveDir, `${monthYear}_spot_momentum.txt`);
-  
-  const now = new Date();
-  const timestamp = now.toISOString();
-  
-  // Calculate price change from previous
-  let priceChange = '';
-  let secondsSincePrevious = '';
-  
-  if (botData.lastSpotPrice) {
-    const change = ((spotPrice - botData.lastSpotPrice) / botData.lastSpotPrice) * 100;
-    const sign = change >= 0 ? '+' : '';
-    priceChange = ` (${sign}${change.toFixed(3)}%)`;
-  }
-  
-  if (botData.lastSpotPriceTimestamp) {
-    const secondsDiff = Math.floor((now - new Date(botData.lastSpotPriceTimestamp)) / 1000);
-    secondsSincePrevious = ` (+${secondsDiff})`;
-  }
-  
-  // Format: <spot price> (+-x%):<momentum>:<timestamp> (+ x)
-  const mediumMomentumStr = typeof momentumAnalysis.mediumTermMomentum === 'object' 
-    ? `${momentumAnalysis.mediumTermMomentum.main}${momentumAnalysis.mediumTermMomentum.derivative ? `(${momentumAnalysis.mediumTermMomentum.derivative})` : ''}`
-    : momentumAnalysis.mediumTermMomentum;
-  const shortMomentumStr = typeof momentumAnalysis.shortTermMomentum === 'object' 
-    ? `${momentumAnalysis.shortTermMomentum.main}${momentumAnalysis.shortTermMomentum.derivative ? `(${momentumAnalysis.shortTermMomentum.derivative})` : ''}`
-    : momentumAnalysis.shortTermMomentum;
-  const line = `${spotPrice.toFixed(2)}${priceChange}::${shortMomentumStr}::${mediumMomentumStr}::${timestamp}${secondsSincePrevious}\n`;
-  
-  fs.appendFileSync(momentumFile, line);
-  
-  botData.lastSpotPrice = spotPrice;
-  botData.lastSpotPriceTimestamp = now;
-};
-
-const appendToArchive = ({ instruments, otmOptions }, archiveDir) => {
-  ensureArchiveDir(archiveDir);
-
-  const date = new Date().toISOString().split('T')[0];
-  const chunkFile = path.join(archiveDir, `${date}.json`);
-  let chunkData = { ticks: [] };
-
-  if (fs.existsSync(chunkFile)) {
-      const fileContents = fs.readFileSync(chunkFile, 'utf-8');
-      if (fileContents) {
-          chunkData = JSON.parse(fileContents);
-      }
-  }
-
-  // Batch data into manageable chunks to prevent serialization issues
-  const batchSize = 50; // Adjust this number if needed
-  
-  if (instruments && instruments.length > batchSize) {
-    // Split instruments into batches
-    for (let i = 0; i < instruments.length; i += batchSize) {
-      const batch = instruments.slice(i, i + batchSize);
-      const batchOtmOptions = {
-        putCandidates: otmOptions?.putCandidates ? otmOptions.putCandidates.slice(i, i + batchSize) : [],
-        callCandidates: otmOptions?.callCandidates ? otmOptions.callCandidates.slice(i, i + batchSize) : []
-      };
-      
-      chunkData.ticks.push({
-        timestamp: new Date().toISOString(),
-        batchNumber: Math.floor(i / batchSize) + 1,
-        totalBatches: Math.ceil(instruments.length / batchSize),
-        instruments: batch,
-        otmOptions: batchOtmOptions,
-      });
-    }
-  } else {
-    // Single batch for smaller datasets
-    chunkData.ticks.push({
-      timestamp: new Date().toISOString(),
-      batchNumber: 1,
-      totalBatches: 1,
-      instruments: instruments || [],
-      otmOptions: otmOptions || { putCandidates: [], callCandidates: [] },
-    });
-  }
-
-  try {
-    fs.writeFileSync(chunkFile, JSON.stringify(chunkData, null, 2));
-  } catch (error) {
-    console.error('Error writing to archive:', error.message);
-    // If still too large, try writing without instruments data
-    const fallbackData = {
-      ticks: chunkData.ticks.map(tick => ({
-        timestamp: tick.timestamp,
-        batchNumber: tick.batchNumber,
-        totalBatches: tick.totalBatches,
-        instrumentsCount: tick.instruments ? tick.instruments.length : 0,
-        putCandidatesCount: tick.otmOptions?.putCandidates ? tick.otmOptions.putCandidates.length : 0,
-        callCandidatesCount: tick.otmOptions?.callCandidates ? tick.otmOptions.callCandidates.length : 0
-      }))
-    };
-    fs.writeFileSync(chunkFile, JSON.stringify(fallbackData, null, 2));
-  }
-};
-
-const logTradingDecision = (decision, archiveDir) => {
-  ensureArchiveDir(archiveDir);
-
-  const date = new Date().toISOString().split('T')[0];
-  const tradingLogFile = path.join(archiveDir, `${date}_trading_decisions.json`);
-  
-  let tradingLog = { decisions: [] };
-  
-  if (fs.existsSync(tradingLogFile)) {
-    const fileContents = fs.readFileSync(tradingLogFile, 'utf-8');
-    if (fileContents) {
-      tradingLog = JSON.parse(fileContents);
-    }
-  }
-
-  tradingLog.decisions.push({
-    timestamp: new Date().toISOString(),
-    ...decision
-  });
-
-  fs.writeFileSync(tradingLogFile, JSON.stringify(tradingLog, null, 2));
-};
-
-const logPerformanceMetrics = (metrics, archiveDir) => {
-  ensureArchiveDir(archiveDir);
-
-  const date = new Date().toISOString().split('T')[0];
-  const metricsLogFile = path.join(archiveDir, `${date}_performance_metrics.json`);
-  
-  let metricsLog = { metrics: [] };
-  
-  if (fs.existsSync(metricsLogFile)) {
-    const fileContents = fs.readFileSync(metricsLogFile, 'utf-8');
-    if (fileContents) {
-      metricsLog = JSON.parse(fileContents);
-    }
-  }
-
-  metricsLog.metrics.push({
-    timestamp: new Date().toISOString(),
-    ...metrics
-  });
-
-  fs.writeFileSync(metricsLogFile, JSON.stringify(metricsLog, null, 2));
-};
-
-const logOptionsData = (optionsData, archiveDir) => {
-  ensureArchiveDir(archiveDir);
-
-  const date = new Date().toISOString().split('T')[0];
-  const optionsLogFile = path.join(archiveDir, `${date}_options_data.json`);
-  
-  let optionsLog = { options: [] };
-  
-  if (fs.existsSync(optionsLogFile)) {
-    const fileContents = fs.readFileSync(optionsLogFile, 'utf-8');
-    if (fileContents) {
-      optionsLog = JSON.parse(fileContents);
-    }
-  }
-
-  optionsLog.options.push({
-    timestamp: new Date().toISOString(),
-    ...optionsData
-  });
-
-  fs.writeFileSync(optionsLogFile, JSON.stringify(optionsLog, null, 2));
-};
-
-const logOnchainAnalysis = (analysisData, archiveDir) => {
-  ensureArchiveDir(archiveDir);
-
-  const date = new Date().toISOString().split('T')[0];
-  const onchainLogFile = path.join(archiveDir, `${date}_onchain_analysis.json`);
-  
-  let onchainLog = { analysis: [] };
-  
-  if (fs.existsSync(onchainLogFile)) {
-    const fileContents = fs.readFileSync(onchainLogFile, 'utf-8');
-    if (fileContents) {
-      onchainLog = JSON.parse(fileContents);
-    }
-  }
-
-  onchainLog.analysis.push({
-    timestamp: new Date().toISOString(),
-    ...analysisData
-  });
-
-  fs.writeFileSync(onchainLogFile, JSON.stringify(onchainLog, null, 2));
-};
-
-const analyzePastOptionsData = (archiveDir, days = 6.2) => {
+const analyzePastOptionsData = (days = 6.2) => {
   const now = new Date();
   const cutoffDate = new Date(now.getTime() - (days * 24 * 60 * 60 * 1000));
-  
-  let allOptionsData = [];
-  
-  // Read all options data files from the past N days
-  for (let i = 0; i < days; i++) {
-    const date = new Date(now.getTime() - (i * TIME_CONSTANTS.DAY));
-    const dateStr = date.toISOString().split('T')[0];
-    const optionsLogFile = path.join(archiveDir, `${dateStr}_options_data.json`);
-    
-    if (fs.existsSync(optionsLogFile)) {
-      try {
-        const fileContents = fs.readFileSync(optionsLogFile, 'utf-8');
-        if (fileContents) {
-          const optionsLog = JSON.parse(fileContents);
-          if (optionsLog.options && Array.isArray(optionsLog.options)) {
-            allOptionsData = allOptionsData.concat(optionsLog.options);
-          }
-        }
-      } catch (error) {
-        console.log(`Warning: Could not read options data from ${dateStr}: ${error.message}`);
-      }
-    }
+
+  if (!db) {
+    return { bestPutScore: 0, bestCallScore: 0, totalDataPoints: 0, filteredDataPoints: 0, excludedUpwardPeriods: 0, dateRange: { from: cutoffDate.toISOString(), to: now.toISOString() } };
   }
-  
-  // Filter to only include data from the past N days
-  allOptionsData = allOptionsData.filter(data => {
-    const dataDate = new Date(data.timestamp);
-    return dataDate >= cutoffDate;
-  });
-  
-  // Filter out data from periods when the algorithm would NOT trade new positions
+
+  const rows = db.getRecentTicks(5000).filter(r => r.timestamp > cutoffDate.toISOString());
+
+  let allOptionsData = [];
+  for (const row of rows) {
+    try {
+      const summary = typeof row.summary === 'string' ? JSON.parse(row.summary) : row.summary;
+      allOptionsData.push({
+        timestamp: row.timestamp,
+        bestPutScore: summary.current_best_put || 0,
+        bestCallScore: summary.current_best_call || 0,
+        mediumTermMomentum: summary.medium_momentum || null,
+        shortTermMomentum: summary.short_momentum || null,
+      });
+    } catch { /* skip unparseable rows */ }
+  }
+
   const filteredOptionsData = allOptionsData.filter(data => {
-    // Check if momentum data exists
-    if (!data.mediumTermMomentum && !data.shortTermMomentum) {
-      // If no momentum data, include it (backward compatibility)
-      return true;
-    }
-    
-    // Extract momentum values to match the actual trading algorithm
+    if (!data.mediumTermMomentum && !data.shortTermMomentum) return true;
+
     const { mainMomentum, shortMainMomentum, shortDerivative } = extractMomentumValues(
-      data.mediumTermMomentum, 
-      data.shortTermMomentum
+      data.mediumTermMomentum, data.shortTermMomentum
     );
-    
-    // Check for confident downtrend setup (would trade regardless of historical best)
+
     const hasConfidentDowntrend = hasDowntrendWith7DayDownwardSpikeAndShortTermDowntrend(
-      data.mediumTermMomentum, 
-      data.shortTermMomentum
+      data.mediumTermMomentum, data.shortTermMomentum
     );
-    
-    // Check for standard entry conditions (would trade if better than historical best)
     const hasStandardEntry = shouldEnterStandard(mainMomentum, shortMainMomentum, shortDerivative);
-    
-    // Include data only when the algorithm would be eligible to trade new positions
-    // Since exits are now manual, we only need to check entry conditions
-    const wouldTradeNewPositions = hasConfidentDowntrend || hasStandardEntry;
-    
-    return wouldTradeNewPositions;
+
+    return hasConfidentDowntrend || hasStandardEntry;
   });
-  
-  // Extract best scores for puts and calls from filtered data
+
   let bestPutScore = 0;
   let bestCallScore = 0;
-  
   filteredOptionsData.forEach(data => {
-    if (data.bestPutScore && data.bestPutScore > bestPutScore) {
-      bestPutScore = data.bestPutScore;
-    }
-    
-    if (data.bestCallScore && data.bestCallScore > bestCallScore) {
-      bestCallScore = data.bestCallScore;
-    }
+    if (data.bestPutScore > bestPutScore) bestPutScore = data.bestPutScore;
+    if (data.bestCallScore > bestCallScore) bestCallScore = data.bestCallScore;
   });
-  
+
   return {
     bestPutScore,
     bestCallScore,
     totalDataPoints: allOptionsData.length,
     filteredDataPoints: filteredOptionsData.length,
     excludedUpwardPeriods: allOptionsData.length - filteredOptionsData.length,
-    dateRange: {
-      from: cutoffDate.toISOString(),
-      to: now.toISOString()
-    }
+    dateRange: { from: cutoffDate.toISOString(), to: now.toISOString() },
   };
-};
-
-const logOrderResponse = (orderResponse, orderDetails, archiveDir) => {
-  ensureArchiveDir(archiveDir);
-
-  const date = new Date().toISOString().split('T')[0];
-  const orderLogFile = path.join(archiveDir, `${date}_order_responses.json`);
-  
-  let orderLog = { orders: [] };
-  
-  if (fs.existsSync(orderLogFile)) {
-    const fileContents = fs.readFileSync(orderLogFile, 'utf-8');
-    if (fileContents) {
-      orderLog = JSON.parse(fileContents);
-    }
-  }
-
-  // Extract trade details for sold options tracking
-  let tradeDetails = null;
-  let allTrades = [];
-  
-  if (orderResponse && orderResponse.result && orderResponse.result.trades && orderResponse.result.trades.length > 0) {
-    // Store all trades for comprehensive tracking
-    orderResponse.result.trades.forEach((trade, index) => {
-      allTrades.push({
-        trade_index: index,
-        trade_id: trade.trade_id,
-        order_id: trade.order_id,
-        instrument_name: trade.instrument_name,
-        direction: trade.direction,
-        trade_amount: trade.trade_amount,
-        trade_price: trade.trade_price,
-        trade_fee: trade.trade_fee,
-        realized_pnl: trade.realized_pnl,
-        realized_pnl_excl_fees: trade.realized_pnl_excl_fees,
-        mark_price: trade.mark_price,
-        index_price: trade.index_price,
-        timestamp: trade.timestamp,
-        subaccount_id: trade.subaccount_id,
-        liquidity_role: trade.liquidity_role,
-        quote_id: trade.quote_id,
-        is_transfer: trade.is_transfer,
-        label: trade.label,
-        transaction_id: trade.transaction_id,
-        tx_hash: trade.tx_hash,
-        tx_status: trade.tx_status
-      });
-    });
-    
-    // Use the first trade for backward compatibility (main trade details)
-    const trade = orderResponse.result.trades[0];
-    tradeDetails = {
-      trade_id: trade.trade_id,
-      order_id: trade.order_id,
-      instrument_name: trade.instrument_name,
-      direction: trade.direction,
-      trade_amount: trade.trade_amount,
-      trade_price: trade.trade_price,
-      trade_fee: trade.trade_fee,
-      realized_pnl: trade.realized_pnl,
-      realized_pnl_excl_fees: trade.realized_pnl_excl_fees,
-      mark_price: trade.mark_price,
-      index_price: trade.index_price,
-      timestamp: trade.timestamp,
-      subaccount_id: trade.subaccount_id,
-      liquidity_role: trade.liquidity_role,
-      quote_id: trade.quote_id,
-      is_transfer: trade.is_transfer,
-      label: trade.label,
-      transaction_id: trade.transaction_id,
-      tx_hash: trade.tx_hash,
-      tx_status: trade.tx_status,
-      total_trades: orderResponse.result.trades.length
-    };
-  }
-
-  orderLog.orders.push({
-    timestamp: new Date().toISOString(),
-    orderDetails: orderDetails,
-    response: orderResponse,
-    tradeDetails: tradeDetails,
-    allTrades: allTrades,
-    success: orderResponse && !orderResponse.error
-  });
-
-  fs.writeFileSync(orderLogFile, JSON.stringify(orderLog, null, 2));
 };
 
 // ADX-gated momentum with proper OHLC resampling.
@@ -831,13 +513,6 @@ const extractMomentumValues = (mediumTermMomentum, shortTermMomentum) => {
   return { mainMomentum, shortMainMomentum, shortDerivative };
 };
 
-// Utility function to ensure archive directory exists
-const ensureArchiveDir = (archiveDir) => {
-  if (!fs.existsSync(archiveDir)) {
-    fs.mkdirSync(archiveDir);
-  }
-};
-
 // Helper function to determine standard entry conditions
 const shouldEnterStandard = (mainMomentum, shortMainMomentum, shortDerivative) => {
   return (
@@ -854,37 +529,21 @@ const shouldEnterStandard = (mainMomentum, shortMainMomentum, shortDerivative) =
 // ===== ONCHAIN ANALYSIS FUNCTIONS =====
 
 // DEX Liquidity Analysis
-// Load historical liquidity data
+// Load historical liquidity data from SQLite
 const loadHistoricalLiquidity = () => {
+  if (!db) return [];
   try {
-    const filePath = path.join(ARCHIVE_DIR, 'liquidity_history.json');
-    if (fs.existsSync(filePath)) {
-      const data = fs.readFileSync(filePath, 'utf-8');
-      return JSON.parse(data);
-    }
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const rows = db.getRecentOnchain(since);
+    return rows.map(row => {
+      try {
+        const raw = typeof row.raw_data === 'string' ? JSON.parse(row.raw_data) : row.raw_data;
+        return raw?.dexLiquidity || null;
+      } catch { return null; }
+    }).filter(Boolean);
   } catch (error) {
     console.log('⚠️ Failed to load historical liquidity data:', error.message);
-  }
-  return [];
-};
-
-// Save liquidity data to history
-const saveLiquidityToHistory = (liquidityData) => {
-  try {
-    const filePath = path.join(ARCHIVE_DIR, 'liquidity_history.json');
-    let history = loadHistoricalLiquidity();
-    
-    // Keep only last 30 days of data for comprehensive analysis
-    const cutoffTime = Date.now() - (30 * 24 * 60 * 60 * 1000);
-    history = history.filter(entry => new Date(entry.timestamp).getTime() > cutoffTime);
-    
-    // Add current data
-    history.push(liquidityData);
-    
-    // Save back to file
-    fs.writeFileSync(filePath, JSON.stringify(history, null, 2));
-  } catch (error) {
-    console.log('⚠️ Failed to save liquidity history:', error.message);
+    return [];
   }
 };
 
@@ -1157,9 +816,6 @@ const analyzeDEXLiquidity = async (spotPrice) => {
     const historicalData = loadHistoricalLiquidity();
     const flowAnalysis = calculateLiquidityFlow(liquidityData, historicalData);
     liquidityData.flowAnalysis = flowAnalysis;
-    
-    // Save current data to history for future analysis
-    saveLiquidityToHistory(liquidityData);
 
     return liquidityData;
   } catch (error) {
@@ -1702,7 +1358,7 @@ function encodeTradeData(order, assetAddress, optionSubId) {
 }
 
 // Place order function
-const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, archiveDir = null, reduceOnly = true) => {
+const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, reduceOnly = true) => {
   try {
     const wallet = createWallet();
     const timestamp = Date.now(); // Current UTC timestamp in ms
@@ -1762,20 +1418,6 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
       }
     );
     
-    // Archive order response if archiveDir is provided
-    if (archiveDir) {
-      const orderDetails = {
-        instrument_name: name,
-        amount: amount,
-        direction: direction,
-        price: price,
-        assetAddress: assetAddress,
-        optionSubId: optionSubId,
-        timestamp: new Date().toISOString()
-      };
-      logOrderResponse(response.data, orderDetails, archiveDir);
-    }
-    
     if (response.data.error) {
       console.error(`Error placing limit order for ${name}:`, response.data.error);
       return null;
@@ -1784,21 +1426,6 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     return response.data;
   } catch (error) {
     console.error(`Error placing limit order for ${name}:`, error.message);
-    
-    // Archive error response if archiveDir is provided
-    if (archiveDir) {
-      const orderDetails = {
-        instrument_name: name,
-        amount: amount,
-        direction: direction,
-        price: price,
-        assetAddress: assetAddress,
-        optionSubId: optionSubId,
-        timestamp: new Date().toISOString()
-      };
-      logOrderResponse({ error: error.message }, orderDetails, archiveDir);
-    }
-    
     return null;
   }
 };
@@ -2060,20 +1687,19 @@ const executeCallSellOrder = async (option, reason, spotPrice) => {
         bidPx,
         option.base_asset_address,
         option.base_asset_sub_id,
-        ARCHIVE_DIR,
         false
       );
     } catch (error) {
       console.error(`❌ Error placing CALL sell order for ${option.instrument_name}:`, error.message);
-      logTradingDecision({ action: 'sell_call', success: false, reason: `Order placement error: ${error.message}`, option: { instrument_name: option.instrument_name } }, ARCHIVE_DIR);
+      if (db) db.insertOrder({ action: 'sell_call', success: false, reason: `Order placement error: ${error.message}`, instrument_name: option.instrument_name, spot_price: spotPrice });
       return false;
     }
-    
+
     if (!order) {
-      logTradingDecision({ action: 'sell_call', success: false, reason: 'Order placement failed', option: { instrument_name: option.instrument_name } }, ARCHIVE_DIR);
+      if (db) db.insertOrder({ action: 'sell_call', success: false, reason: 'Order placement failed', instrument_name: option.instrument_name, spot_price: spotPrice });
       return false;
     }
-  
+
     // Fill accounting (prefer actual fills)
     let filledAmt = qty, avgPx = bidPx, gross = filledAmt * avgPx;
     if (order.result?.trades?.length) {
@@ -2084,17 +1710,19 @@ const executeCallSellOrder = async (option, reason, spotPrice) => {
       }
       if (totAmt > 0) { filledAmt = totAmt; avgPx = totVal / totAmt; gross = totVal; }
     }
-  
+
     botData.callNetSold += gross; // can go negative later from buybacks (earned capacity)
     persistCycleState();
 
-    logTradingDecision({
-      action: 'sell_call', success: true,
-      option: { instrument_name: option.instrument_name, strike: option.option_details.strike, expiration: option.option_details.expiry, delta: option.details.delta, bidPrice: bidPx },
-      actualTradeAmount: filledAmt, actualTradePrice: avgPx, totalRevenue: gross,
-      callNetSold: botData.callNetSold, reason, spotPrice
-    }, ARCHIVE_DIR);
-  
+    if (db) db.insertOrder({
+      action: 'sell_call', success: true, reason,
+      instrument_name: option.instrument_name, strike: option.option_details.strike,
+      expiry: option.option_details.expiry, delta: option.details.delta,
+      price: bidPx, intended_amount: qty, filled_amount: filledAmt,
+      fill_price: avgPx, total_value: gross, spot_price: spotPrice,
+      raw_response: order,
+    });
+
     console.log(`✅ SOLD ${filledAmt} @ $${avgPx} | callNetSold now $${botData.callNetSold.toFixed(4)}`);
 
     return true;
@@ -2297,20 +1925,19 @@ const executePutBuyOrder = async (option, reason, spotPrice) => {
         askPx,
         option.base_asset_address,
         option.base_asset_sub_id,
-        ARCHIVE_DIR,
         false
       );
     } catch (error) {
       console.error(`❌ Error placing PUT buy order for ${option.instrument_name}:`, error.message);
-      logTradingDecision({ action: 'buy_put', success: false, reason: `Order placement error: ${error.message}`, option: { instrument_name: option.instrument_name } }, ARCHIVE_DIR);
+      if (db) db.insertOrder({ action: 'buy_put', success: false, reason: `Order placement error: ${error.message}`, instrument_name: option.instrument_name, spot_price: spotPrice });
       return false;
     }
-    
+
     if (!order) {
-      logTradingDecision({ action: 'buy_put', success: false, reason: 'Order placement failed', option: { instrument_name: option.instrument_name } }, ARCHIVE_DIR);
+      if (db) db.insertOrder({ action: 'buy_put', success: false, reason: 'Order placement failed', instrument_name: option.instrument_name, spot_price: spotPrice });
       return false;
     }
-  
+
     // Fill accounting (use actual fills if present)
     let filledAmt = qty, avgPx = askPx, cost = filledAmt * avgPx;
     if (order.result?.trades?.length) {
@@ -2321,17 +1948,19 @@ const executePutBuyOrder = async (option, reason, spotPrice) => {
       }
       filledAmt = totAmt; avgPx = totVal / totAmt; cost = totVal;
     }
-  
+
     botData.putNetBought += cost; // stays signed (sellbacks can drive it negative = earned capacity)
     persistCycleState();
 
-    logTradingDecision({
-      action: 'buy_put', success: true,
-      option: { instrument_name: option.instrument_name, strike: option.option_details.strike, expiration: option.option_details.expiry, delta: option.details.delta, askPrice: askPx },
-      actualTradeAmount: filledAmt, actualTradePrice: avgPx, totalCost: cost,
-      putNetBought: botData.putNetBought, reason, spotPrice
-    }, ARCHIVE_DIR);
-  
+    if (db) db.insertOrder({
+      action: 'buy_put', success: true, reason,
+      instrument_name: option.instrument_name, strike: option.option_details.strike,
+      expiry: option.option_details.expiry, delta: option.details.delta,
+      price: askPx, intended_amount: qty, filled_amount: filledAmt,
+      fill_price: avgPx, total_value: cost, spot_price: spotPrice,
+      raw_response: order,
+    });
+
     console.log(`✅ BOUGHT ${filledAmt} @ $${avgPx} | putNetBought now $${botData.putNetBought.toFixed(4)}`);
 
     return true;
@@ -2513,9 +2142,6 @@ const runBot = async () => {
     botData.mediumTermMomentum = momentumResult.mediumTermMomentum;
     botData.shortTermMomentum = momentumResult.shortTermMomentum;
 
-    // Save spot price momentum data
-    saveSpotPriceMomentum(spotPrice, momentumResult, botData, ARCHIVE_DIR);
-
     // SQLite: persist spot price
     if (db) {
       try { db.insertSpotPrice(spotPrice, momentumResult, botData, tickTimestamp); }
@@ -2552,13 +2178,6 @@ const runBot = async () => {
         timestamp: new Date().toISOString()
       };
       
-      // Log onchain analysis
-      try {
-        logOnchainAnalysis(onchainAnalysis, ARCHIVE_DIR);
-      } catch (err) {
-        console.log('⚠️ Failed to log onchain analysis:', err.message);
-      }
-
       // SQLite: persist onchain data
       if (db) {
         try {
@@ -2721,7 +2340,7 @@ const runBot = async () => {
   }
   
   // Analyze past 6.2 days of options data once for both strategies
-  const historicalData = analyzePastOptionsData(ARCHIVE_DIR, 6.2);
+  const historicalData = analyzePastOptionsData(6.2);
   console.log(`👴🏼 Historical analysis (${historicalData.totalDataPoints} total data points from past 6.2 days):`);
   console.log(`   📊 Filtered data points (excluding upward momentum): ${historicalData.filteredDataPoints}`);
   console.log(`   🚫 Excluded upward momentum periods: ${historicalData.excludedUpwardPeriods}`);
@@ -2817,14 +2436,6 @@ const runBot = async () => {
       ? processedCallOptions.reduce((best, o) => (o.details?.bidDeltaValue || 0) > (best.details?.bidDeltaValue || 0) ? o : best)
       : null;
 
-    logOptionsData({
-      bestPutScore: bestPutScore,
-      bestCallScore: bestCallScore,
-      spotPrice: spotPrice,
-      mediumTermMomentum: botData.mediumTermMomentum,
-      shortTermMomentum: botData.shortTermMomentum
-    }, ARCHIVE_DIR);
-
     // SQLite: persist options snapshots
     if (db) {
       try {
@@ -2840,37 +2451,6 @@ const runBot = async () => {
 
     // Determine next check interval
     const checkInterval = determineCheckInterval(botData.mediumTermMomentum, botData.shortTermMomentum, botData);
-
-    // Log performance metrics
-    try {
-      logPerformanceMetrics({
-        timestamp: new Date().toISOString(),
-        spotPrice: spotPrice,
-        mediumTermMomentum: botData.mediumTermMomentum,
-        shortTermMomentum: botData.shortTermMomentum,
-        putNetBought: botData.putNetBought,
-        putUnspentBuyLimit: botData.putUnspentBuyLimit,
-        callNetSold: botData.callNetSold,
-        callUnspentSellLimit: botData.callUnspentSellLimit,
-      }, ARCHIVE_DIR);
-    } catch (error) {
-      console.error('❌ Error logging performance metrics:', error.message);
-      console.log('⚠️ Continuing execution despite metrics logging failure');
-    }
-
-    // Archive instrument data
-    try {
-      appendToArchive({ 
-        instruments, 
-        otmOptions: { 
-          putCandidates, 
-          callCandidates 
-        } 
-      }, ARCHIVE_DIR);
-    } catch (error) {
-      console.error('❌ Error archiving instrument data:', error.message);
-      console.log('⚠️ Continuing execution despite archiving failure');
-    }
 
     console.log(`⏰ Next bot check in ${checkInterval / (1000 * 60)} minutes`);
 
