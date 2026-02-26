@@ -988,6 +988,42 @@ export default function OverviewPage() {
           return out;
         });
 
+        // Bucket into ~50 time bins so volume bars are wide & readable
+        const TARGET_BARS = 50;
+        const chartData = normalizedData.length > TARGET_BARS ? (() => {
+          const minTs = normalizedData[0].ts;
+          const maxTs = normalizedData[normalizedData.length - 1].ts;
+          const bucketWidth = (maxTs - minTs) / TARGET_BARS;
+          const buckets: Record<string, number>[] = [];
+
+          for (let b = 0; b < TARGET_BARS; b++) {
+            const bStart = minTs + b * bucketWidth;
+            const bEnd = bStart + bucketWidth;
+            const points = normalizedData.filter(d =>
+              d.ts >= bStart && (b === TARGET_BARS - 1 ? d.ts <= bEnd : d.ts < bEnd)
+            );
+            if (points.length === 0) continue;
+
+            const entry: Record<string, number> = { ts: bStart + bucketWidth / 2 };
+            // TVL + metadata: take last value in bucket (step-after semantics)
+            const last = points[points.length - 1];
+            for (const [k, v] of Object.entries(last)) {
+              if (k !== 'ts' && !k.endsWith('_volDelta')) entry[k] = v;
+            }
+            // Volume deltas: sum within bucket
+            for (const name of dexNames) {
+              let sum = 0;
+              for (const p of points) {
+                const vd = p[`${name}_volDelta`];
+                if (vd != null && vd > 0) sum += vd;
+              }
+              if (sum > 0) entry[`${name}_volDelta`] = sum;
+            }
+            buckets.push(entry);
+          }
+          return buckets;
+        })() : normalizedData;
+
         return (
           <Card>
             <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
@@ -1007,7 +1043,7 @@ export default function OverviewPage() {
             </div>
             <div {...pinLiquidity.containerProps}>
             <ResponsiveContainer width="100%" height={200}>
-              <ComposedChart data={normalizedData} margin={margins}>
+              <ComposedChart data={chartData} margin={margins}>
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 <YAxis
                   yAxisId="tvl"
@@ -1058,7 +1094,7 @@ export default function OverviewPage() {
                   <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
                 {hasVolume && volDexes.map((name, i) => (
-                  <Bar key={`${name}_vol`} yAxisId="vol" dataKey={`${name}_volDelta`} fill={getColor(name, i)} fillOpacity={0.8} isAnimationActive={false} />
+                  <Bar key={`${name}_vol`} yAxisId="vol" dataKey={`${name}_volDelta`} fill={getColor(name, i)} fillOpacity={0.8} stroke={getColor(name, i)} strokeOpacity={0.9} isAnimationActive={false} />
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
