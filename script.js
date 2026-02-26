@@ -2876,8 +2876,9 @@ const runBot = async () => {
 
     // Write per-tick summary to database
     if (db) {
+      let tickSummary;
       try {
-        const tickSummary = {
+        tickSummary = {
           price: spotPrice,
           medium_momentum: botData.mediumTermMomentum,
           short_momentum: botData.shortTermMomentum,
@@ -2924,7 +2925,7 @@ const runBot = async () => {
       }
 
       // Auto-generate journal entries once per day
-      if (Date.now() - lastJournalGeneration >= JOURNAL_INTERVAL_MS && process.env.ANTHROPIC_API_KEY) {
+      if (tickSummary && Date.now() - lastJournalGeneration >= JOURNAL_INTERVAL_MS && process.env.ANTHROPIC_API_KEY) {
         lastJournalGeneration = Date.now();
         generateJournalEntries(tickSummary, botData).catch(e => {
           console.log('📓 Journal generation failed:', e.message);
