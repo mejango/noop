@@ -1021,8 +1021,38 @@ export default function OverviewPage() {
             }
             buckets.push(entry);
           }
+          // Normalize each DEX's volume independently (0-1) so smaller DEXes are visible
+          for (const name of volDexes) {
+            let maxVol = 0;
+            for (const b of buckets) {
+              const v = b[`${name}_volDelta`];
+              if (v != null && v > maxVol) maxVol = v;
+            }
+            if (maxVol > 0) {
+              for (const b of buckets) {
+                const v = b[`${name}_volDelta`];
+                b[`${name}_volNorm`] = v != null ? v / maxVol : 0;
+              }
+            }
+          }
           return buckets;
-        })() : normalizedData;
+        })() : (() => {
+          // Still normalize volume even without bucketing
+          for (const name of volDexes) {
+            let maxVol = 0;
+            for (const d of normalizedData) {
+              const v = d[`${name}_volDelta`];
+              if (v != null && v > maxVol) maxVol = v;
+            }
+            if (maxVol > 0) {
+              for (const d of normalizedData) {
+                const v = d[`${name}_volDelta`];
+                d[`${name}_volNorm`] = v != null ? v / maxVol : 0;
+              }
+            }
+          }
+          return normalizedData;
+        })();
 
         return (
           <Card>
@@ -1043,7 +1073,7 @@ export default function OverviewPage() {
             </div>
             <div {...pinLiquidity.containerProps}>
             <ResponsiveContainer width="100%" height={200}>
-              <ComposedChart data={chartData} margin={margins}>
+              <ComposedChart data={chartData} margin={margins} barGap={0} barCategoryGap={0}>
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 <YAxis
                   yAxisId="tvl"
@@ -1053,7 +1083,7 @@ export default function OverviewPage() {
                   tick={chartAxis.tick}
                   width={mobile ? 40 : 55}
                 />
-                {hasVolume && <YAxis yAxisId="vol" orientation="right" hide domain={[0, 'auto']} />}
+                {hasVolume && <YAxis yAxisId="vol" orientation="right" hide domain={[0, 1]} />}
                 <Tooltip
                                     {...chartTooltip}
                   {...pinLiquidity.tooltipActive}
@@ -1094,7 +1124,7 @@ export default function OverviewPage() {
                   <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
                 {hasVolume && volDexes.map((name, i) => (
-                  <Bar key={`${name}_vol`} yAxisId="vol" dataKey={`${name}_volDelta`} fill={getColor(name, i)} fillOpacity={0.8} stroke={getColor(name, i)} strokeOpacity={0.9} isAnimationActive={false} />
+                  <Bar key={`${name}_vol`} yAxisId="vol" dataKey={`${name}_volNorm`} fill={getColor(name, i)} fillOpacity={0.8} stroke={getColor(name, i)} strokeOpacity={0.9} isAnimationActive={false} />
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
