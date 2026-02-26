@@ -23,17 +23,11 @@ function getDb(): Database.Database {
 export function getStats() {
   const d = getDb();
   return d.prepare(`
-    SELECT
-      (SELECT price FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as last_price,
-      (SELECT timestamp FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as last_price_time,
-      (SELECT short_momentum_main FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as short_momentum,
-      (SELECT short_momentum_derivative FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as short_derivative,
-      (SELECT medium_momentum_main FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as medium_momentum,
-      (SELECT medium_momentum_derivative FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as medium_derivative,
-      (SELECT three_day_high FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as three_day_high,
-      (SELECT three_day_low FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as three_day_low,
-      (SELECT seven_day_high FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as seven_day_high,
-      (SELECT seven_day_low FROM spot_prices ORDER BY timestamp DESC LIMIT 1) as seven_day_low
+    SELECT price as last_price, timestamp as last_price_time,
+      short_momentum_main as short_momentum, short_momentum_derivative as short_derivative,
+      medium_momentum_main as medium_momentum, medium_momentum_derivative as medium_derivative,
+      three_day_high, three_day_low, seven_day_high, seven_day_low
+    FROM spot_prices ORDER BY timestamp DESC LIMIT 1
   `).get();
 }
 
@@ -221,6 +215,17 @@ export function getAvgCallPremium7d() {
     FROM options_snapshots
     WHERE option_type = 'call' AND timestamp > ? AND bid_price > 0
   `).all(since) as { avg_premium: number | null }[];
+}
+
+export function getLatestOnchainRawData(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT raw_data
+    FROM onchain_data
+    WHERE timestamp > ?
+    ORDER BY timestamp DESC
+    LIMIT 1
+  `).get(since) as { raw_data: string } | undefined;
 }
 
 export function getOnchainWithRawData(since: string, limit = 5) {

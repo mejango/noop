@@ -253,8 +253,8 @@ export default function OverviewPage() {
   const [range, setRange] = useState<string>('6h');
   const mobile = useIsMobile();
   const margins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
-  const { data: stats } = usePolling<Stats>('/api/stats', emptyStats);
-  const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart);
+  const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
+  const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart, 90_000);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
   const pinPrice = usePinnableTooltip();
   const pinLiquidity = usePinnableTooltip();
@@ -562,28 +562,17 @@ export default function OverviewPage() {
     [merged]
   );
 
-  // Filter sub-chart data to match the selected time range
-  const filteredLiquidity = useMemo(() =>
-    liquidityData.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
-    [liquidityData, xDomain]
-  );
-  const filteredCallHeatmap = useMemo(() =>
-    callHeatmap.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
-    [callHeatmap, xDomain]
-  );
-  const filteredPutHeatmap = useMemo(() =>
-    putHeatmap.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
-    [putHeatmap, xDomain]
-  );
-
-  const filteredPutMQ = useMemo(() =>
-    putMQ.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
-    [putMQ, xDomain]
-  );
-  const filteredCallMQ = useMemo(() =>
-    callMQ.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
-    [callMQ, xDomain]
-  );
+  // Filter sub-chart data to match the selected time range (single pass)
+  const { filteredLiquidity, filteredCallHeatmap, filteredPutHeatmap, filteredPutMQ, filteredCallMQ } = useMemo(() => {
+    const [lo, hi] = xDomain;
+    return {
+      filteredLiquidity: liquidityData.filter(d => d.ts >= lo && d.ts <= hi),
+      filteredCallHeatmap: callHeatmap.filter(d => d.ts >= lo && d.ts <= hi),
+      filteredPutHeatmap: putHeatmap.filter(d => d.ts >= lo && d.ts <= hi),
+      filteredPutMQ: putMQ.filter(d => d.ts >= lo && d.ts <= hi),
+      filteredCallMQ: callMQ.filter(d => d.ts >= lo && d.ts <= hi),
+    };
+  }, [liquidityData, callHeatmap, putHeatmap, putMQ, callMQ, xDomain]);
 
   return (
     <div className="space-y-6">

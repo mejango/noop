@@ -2,9 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 
-const POLL_INTERVAL = 60_000; // 60 seconds
-
-export function usePolling<T>(url: string, initialData: T): { data: T; loading: boolean; error: string | null; refetch: () => void } {
+export function usePolling<T>(url: string, initialData: T, interval = 60_000): { data: T; loading: boolean; error: string | null; refetch: () => void } {
   const [data, setData] = useState<T>(initialData);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -25,9 +23,9 @@ export function usePolling<T>(url: string, initialData: T): { data: T; loading: 
 
   useEffect(() => {
     fetchData();
-    const interval = setInterval(fetchData, POLL_INTERVAL);
-    return () => clearInterval(interval);
-  }, [fetchData]);
+    const id = setInterval(fetchData, interval);
+    return () => clearInterval(id);
+  }, [fetchData, interval]);
 
   return { data, loading, error, refetch: fetchData };
 }

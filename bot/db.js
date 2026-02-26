@@ -77,6 +77,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_onchain_data_timestamp ON onchain_data(timestamp);
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_type ON strategy_signals(signal_type);
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_timestamp ON strategy_signals(timestamp);
+
+  CREATE INDEX IF NOT EXISTS idx_options_snapshots_ts_type
+    ON options_snapshots(timestamp, option_type);
+  CREATE INDEX IF NOT EXISTS idx_options_snapshots_ts_delta
+    ON options_snapshots(timestamp, delta);
 `);
 
 // Idempotent migrations for new columns

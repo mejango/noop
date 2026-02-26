@@ -8,12 +8,23 @@ import {
   getJournalEntries,
   getOptionsDistribution,
   getAvgCallPremium7d,
-  getOnchainWithRawData,
+  getLatestOnchainRawData,
   getMarketQualitySummary,
 } from './db';
 import { buildCorrelationAnalysis } from './correlation';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _cache: { data: any; ts: number } | null = null;
+const TTL = 60_000;
+
 export function buildMarketSnapshot() {
+  if (_cache && Date.now() - _cache.ts < TTL) return _cache.data;
+  const result = _buildUncached();
+  _cache = { data: result, ts: Date.now() };
+  return result;
+}
+
+function _buildUncached() {
   const now = new Date();
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -23,6 +34,7 @@ export function buildMarketSnapshot() {
   const budget = getBotBudget();
   const bestScores = getBestScores();
   const onchain = getOnchainData(since24h) as Record<string, unknown>[];
+  const latestRawRow = getLatestOnchainRawData(since24h);
   const signals = getSignals(since7d, 30) as Record<string, unknown>[];
 
   // bot_ticks may not exist yet — handle gracefully
@@ -130,9 +142,8 @@ export function buildMarketSnapshot() {
       history: onchain,
       pool_breakdown: (() => {
         try {
-          const rows = getOnchainWithRawData(since24h, 1);
-          if (!rows.length || !rows[0].raw_data) return null;
-          const raw = JSON.parse(rows[0].raw_data);
+          if (!latestRawRow?.raw_data) return null;
+          const raw = JSON.parse(latestRawRow.raw_data);
           const dexes = raw?.dexLiquidity?.dexes;
           if (!dexes) return null;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
