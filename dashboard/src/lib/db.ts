@@ -235,6 +235,40 @@ export function getOnchainWithRawData(since: string, limit = 5) {
   `).all(since, limit) as { timestamp: string; raw_data: string; [key: string]: unknown }[];
 }
 
+export function getMarketQualitySummary(since: string) {
+  const d = getDb();
+  // Aggregate spread, IV, and depth from latest options snapshot batch
+  // Only considers instruments within the bot's delta range
+  const rows = d.prepare(`
+    SELECT
+      option_type,
+      COUNT(*) as count,
+      AVG(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as avg_spread,
+      MIN(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as min_spread,
+      MAX(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as max_spread,
+      AVG(implied_vol) as avg_iv,
+      AVG(ask_amount + bid_amount) as avg_depth,
+      SUM(ask_amount + bid_amount) as total_depth
+    FROM options_snapshots
+    WHERE timestamp = (SELECT MAX(timestamp) FROM options_snapshots WHERE timestamp > ?)
+      AND mark_price > 0
+      AND ask_price > 0
+      AND bid_price > 0
+      AND ABS(delta) BETWEEN 0.02 AND 0.12
+    GROUP BY option_type
+  `).all(since) as {
+    option_type: string;
+    count: number;
+    avg_spread: number | null;
+    min_spread: number | null;
+    max_spread: number | null;
+    avg_iv: number | null;
+    avg_depth: number | null;
+    total_depth: number | null;
+  }[];
+  return rows;
+}
+
 // ─── AI Journal ─────────────────────────────────────────────────────────────
 
 export function getJournalEntries(since: string, limit = 20) {

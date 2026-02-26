@@ -944,126 +944,6 @@ export default function OverviewPage() {
         );
       })()}
 
-      {/* Put Market Quality */}
-      {filteredPutMQ.length > 0 && (
-        <Card>
-          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
-            <span className="text-xs font-medium text-gray-400">Put Market Quality</span>
-            <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.9) }} /> tight spread</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.1) }} /> wide spread</span>
-              <span className="flex items-center gap-1 text-gray-600">size = depth</span>
-            </div>
-          </div>
-          <div {...pinPutMQ.containerProps}>
-          <ResponsiveContainer width="100%" height={300}>
-            <ScatterChart margin={margins}>
-              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
-              <YAxis
-                dataKey="absDelta"
-                name="Delta"
-                domain={[0, 'auto']}
-                tickFormatter={(v) => v.toFixed(2)}
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tick}
-                width={mobile ? 35 : 55}
-              />
-              <Tooltip
-                {...chartTooltip}
-                {...pinPutMQ.tooltipActive}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                content={({ active, payload }: any) => {
-                  if (!active || !payload?.[0]?.payload) return pinPutMQ.wrap(null);
-                  const d = payload[0].payload as MQDot;
-                  return pinPutMQ.wrap(
-                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
-                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
-                      <div className="text-xs text-gray-500 mb-1">{d.instrument}</div>
-                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
-                      <div className="text-sm">Delta: <span style={{ color: 'rgb(255,160,50)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
-                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
-                      <div className="text-sm">Spread: <span style={{ color: lerpColor(mqBadColor, mqGoodColor, d.spreadIntensity) }}>{d.spreadPct != null ? `${d.spreadPct.toFixed(1)}%` : 'N/A'}</span></div>
-                      <div className="text-sm">IV: <span className="text-gray-300">{d.iv != null ? `${d.iv.toFixed(1)}%` : 'N/A'}</span></div>
-                      <div className="text-sm">Depth: <span className="text-gray-300">{d.depth != null ? `${d.depth.toFixed(1)}` : 'N/A'}</span></div>
-                      <div className="text-sm">Bid: <span className="text-gray-300">{d.bid != null ? `$${d.bid.toFixed(4)}` : 'N/A'}</span></div>
-                      <div className="text-sm">Ask: <span style={{ color: 'rgb(255,160,50)' }}>{d.ask != null ? `$${d.ask.toFixed(4)}` : 'N/A'}</span></div>
-                    </div>
-                  );
-                }}
-              />
-              <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.08} stroke="#FFA032" strokeOpacity={0.1} />
-              <Scatter
-                data={filteredPutMQ}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                shape={(props: any) => <MQDotShape {...props} />}
-                isAnimationActive={false}
-              />
-            </ScatterChart>
-          </ResponsiveContainer>
-          </div>
-        </Card>
-      )}
-
-      {/* Call Market Quality */}
-      {filteredCallMQ.length > 0 && (
-        <Card>
-          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
-            <span className="text-xs font-medium text-gray-400">Call Market Quality</span>
-            <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.9) }} /> tight spread</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.1) }} /> wide spread</span>
-              <span className="flex items-center gap-1 text-gray-600">size = depth</span>
-            </div>
-          </div>
-          <div {...pinCallMQ.containerProps}>
-          <ResponsiveContainer width="100%" height={300}>
-            <ScatterChart margin={margins}>
-              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
-              <YAxis
-                dataKey="absDelta"
-                name="Delta"
-                domain={[0, 'auto']}
-                tickFormatter={(v) => v.toFixed(2)}
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tick}
-                width={mobile ? 35 : 55}
-              />
-              <Tooltip
-                {...chartTooltip}
-                {...pinCallMQ.tooltipActive}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                content={({ active, payload }: any) => {
-                  if (!active || !payload?.[0]?.payload) return pinCallMQ.wrap(null);
-                  const d = payload[0].payload as MQDot;
-                  return pinCallMQ.wrap(
-                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
-                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
-                      <div className="text-xs text-gray-500 mb-1">{d.instrument}</div>
-                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
-                      <div className="text-sm">Delta: <span style={{ color: 'rgb(100,160,255)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
-                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
-                      <div className="text-sm">Spread: <span style={{ color: lerpColor(mqBadColor, mqGoodColor, d.spreadIntensity) }}>{d.spreadPct != null ? `${d.spreadPct.toFixed(1)}%` : 'N/A'}</span></div>
-                      <div className="text-sm">IV: <span className="text-gray-300">{d.iv != null ? `${d.iv.toFixed(1)}%` : 'N/A'}</span></div>
-                      <div className="text-sm">Depth: <span className="text-gray-300">{d.depth != null ? `${d.depth.toFixed(1)}` : 'N/A'}</span></div>
-                      <div className="text-sm">Bid: <span style={{ color: 'rgb(100,160,255)' }}>{d.bid != null ? `$${d.bid.toFixed(4)}` : 'N/A'}</span></div>
-                      <div className="text-sm">Ask: <span className="text-gray-300">{d.ask != null ? `$${d.ask.toFixed(4)}` : 'N/A'}</span></div>
-                    </div>
-                  );
-                }}
-              />
-              <ReferenceArea y1={0.04} y2={0.12} fill="#64A0FF" fillOpacity={0.08} stroke="#64A0FF" strokeOpacity={0.1} />
-              <Scatter
-                data={filteredCallMQ}
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                shape={(props: any) => <MQDotShape {...props} />}
-                isAnimationActive={false}
-              />
-            </ScatterChart>
-          </ResponsiveContainer>
-          </div>
-        </Card>
-      )}
-
       {/* DEX Liquidity (TVL) */}
       {filteredLiquidity.length > 0 && (() => {
         const dexColors: Record<string, string> = {
@@ -1176,7 +1056,7 @@ export default function OverviewPage() {
                   <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
                 {hasVolume && dexNames.map((name, i) => (
-                  <Line key={`${name}_vol`} yAxisId="vol" type="monotone" dataKey={`${name}_volDelta`} stroke={getColor(name, i)} strokeWidth={1} strokeDasharray="4 3" strokeOpacity={0.6} dot={false} connectNulls={false} isAnimationActive={false} />
+                  <Line key={`${name}_vol`} yAxisId="vol" type="stepAfter" dataKey={`${name}_volDelta`} stroke={getColor(name, i)} strokeWidth={1} strokeDasharray="4 3" strokeOpacity={0.6} dot={false} connectNulls isAnimationActive={false} />
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
@@ -1315,7 +1195,126 @@ export default function OverviewPage() {
         </Card>
       )}
 
-      {/* Data Table: spot price, best put, best call */}
+      {/* Put Market Quality */}
+      {filteredPutMQ.length > 0 && (
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+            <span className="text-xs font-medium text-gray-400">Put Market Quality</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.9) }} /> tight spread</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.1) }} /> wide spread</span>
+              <span className="flex items-center gap-1 text-gray-600">size = depth</span>
+            </div>
+          </div>
+          <div {...pinPutMQ.containerProps}>
+          <ResponsiveContainer width="100%" height={300}>
+            <ScatterChart margin={margins}>
+              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <YAxis
+                dataKey="absDelta"
+                name="Delta"
+                domain={[0, 'auto']}
+                tickFormatter={(v) => v.toFixed(2)}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={mobile ? 35 : 55}
+              />
+              <Tooltip
+                {...chartTooltip}
+                {...pinPutMQ.tooltipActive}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                content={({ active, payload }: any) => {
+                  if (!active || !payload?.[0]?.payload) return pinPutMQ.wrap(null);
+                  const d = payload[0].payload as MQDot;
+                  return pinPutMQ.wrap(
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
+                      <div className="text-xs text-gray-500 mb-1">{d.instrument}</div>
+                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
+                      <div className="text-sm">Delta: <span style={{ color: 'rgb(255,160,50)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
+                      <div className="text-sm">Spread: <span style={{ color: lerpColor(mqBadColor, mqGoodColor, d.spreadIntensity) }}>{d.spreadPct != null ? `${d.spreadPct.toFixed(1)}%` : 'N/A'}</span></div>
+                      <div className="text-sm">IV: <span className="text-gray-300">{d.iv != null ? `${d.iv.toFixed(1)}%` : 'N/A'}</span></div>
+                      <div className="text-sm">Depth: <span className="text-gray-300">{d.depth != null ? `${d.depth.toFixed(1)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Bid: <span className="text-gray-300">{d.bid != null ? `$${d.bid.toFixed(4)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span style={{ color: 'rgb(255,160,50)' }}>{d.ask != null ? `$${d.ask.toFixed(4)}` : 'N/A'}</span></div>
+                    </div>
+                  );
+                }}
+              />
+              <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.08} stroke="#FFA032" strokeOpacity={0.1} />
+              <Scatter
+                data={filteredPutMQ}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                shape={(props: any) => <MQDotShape {...props} />}
+                isAnimationActive={false}
+              />
+            </ScatterChart>
+          </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
+
+      {/* Call Market Quality */}
+      {filteredCallMQ.length > 0 && (
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+            <span className="text-xs font-medium text-gray-400">Call Market Quality</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.9) }} /> tight spread</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.1) }} /> wide spread</span>
+              <span className="flex items-center gap-1 text-gray-600">size = depth</span>
+            </div>
+          </div>
+          <div {...pinCallMQ.containerProps}>
+          <ResponsiveContainer width="100%" height={300}>
+            <ScatterChart margin={margins}>
+              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <YAxis
+                dataKey="absDelta"
+                name="Delta"
+                domain={[0, 'auto']}
+                tickFormatter={(v) => v.toFixed(2)}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={mobile ? 35 : 55}
+              />
+              <Tooltip
+                {...chartTooltip}
+                {...pinCallMQ.tooltipActive}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                content={({ active, payload }: any) => {
+                  if (!active || !payload?.[0]?.payload) return pinCallMQ.wrap(null);
+                  const d = payload[0].payload as MQDot;
+                  return pinCallMQ.wrap(
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
+                      <div className="text-xs text-gray-500 mb-1">{d.instrument}</div>
+                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
+                      <div className="text-sm">Delta: <span style={{ color: 'rgb(100,160,255)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
+                      <div className="text-sm">Spread: <span style={{ color: lerpColor(mqBadColor, mqGoodColor, d.spreadIntensity) }}>{d.spreadPct != null ? `${d.spreadPct.toFixed(1)}%` : 'N/A'}</span></div>
+                      <div className="text-sm">IV: <span className="text-gray-300">{d.iv != null ? `${d.iv.toFixed(1)}%` : 'N/A'}</span></div>
+                      <div className="text-sm">Depth: <span className="text-gray-300">{d.depth != null ? `${d.depth.toFixed(1)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Bid: <span style={{ color: 'rgb(100,160,255)' }}>{d.bid != null ? `$${d.bid.toFixed(4)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span className="text-gray-300">{d.ask != null ? `$${d.ask.toFixed(4)}` : 'N/A'}</span></div>
+                    </div>
+                  );
+                }}
+              />
+              <ReferenceArea y1={0.04} y2={0.12} fill="#64A0FF" fillOpacity={0.08} stroke="#64A0FF" strokeOpacity={0.1} />
+              <Scatter
+                data={filteredCallMQ}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                shape={(props: any) => <MQDotShape {...props} />}
+                isAnimationActive={false}
+              />
+            </ScatterChart>
+          </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
+
       {/* Tick Log Table */}
       <Card>
         <div className="flex items-center justify-between mb-2">

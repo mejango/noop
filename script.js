@@ -790,7 +790,7 @@ const analyzeDEXLiquidity = async (spotPrice) => {
                       id
                       totalValueLockedUSD
                       volumeUSD
-                      swapFee
+                      feeTier
                       liquidity
                       txCount
                       totalValueLockedToken0
@@ -838,7 +838,7 @@ const analyzeDEXLiquidity = async (spotPrice) => {
               liquidity: tvlUsd, // Store in USD terms (consistent)
               liquidityUSD: tvlUsd, // Keep USD for reference
               volumeUSD: parseFloat(pool.volumeUSD) || 0,
-              feeTier: parseInt(pool.swapFee) || 0,
+              feeTier: parseInt(pool.feeTier) || 0,
               activeLiquidity: pool.liquidity || '0',
               txCount: parseInt(pool.txCount) || 0,
               tvlToken0: parseFloat(pool.totalValueLockedToken0) || 0,

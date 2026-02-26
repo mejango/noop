@@ -9,6 +9,7 @@ import {
   getOptionsDistribution,
   getAvgCallPremium7d,
   getOnchainWithRawData,
+  getMarketQualitySummary,
 } from './db';
 import { buildCorrelationAnalysis } from './correlation';
 
@@ -84,7 +85,7 @@ export function buildMarketSnapshot() {
     },
 
     options_market: {
-      _description: 'Best options scores over the measurement window. Higher delta-value = better risk/reward. distribution shows put/call aggregate stats from last 24h. avg_call_premium_7d is rolling 7d average call bid price.',
+      _description: 'Best options scores over the measurement window. Higher delta-value = better risk/reward. distribution shows put/call aggregate stats from last 24h. avg_call_premium_7d is rolling 7d average call bid price. market_quality shows spread, IV, and depth for instruments within the bot delta range (0.02-0.12 abs delta).',
       best_put_score: bestScores.bestPutScore,
       best_call_score: bestScores.bestCallScore,
       window_days: bestScores.windowDays,
@@ -97,6 +98,27 @@ export function buildMarketSnapshot() {
         try {
           const rows = getAvgCallPremium7d();
           return rows.length > 0 ? rows[0].avg_premium : null;
+        } catch { return null; }
+      })(),
+      market_quality: (() => {
+        try {
+          const rows = getMarketQualitySummary(since24h);
+          if (!rows.length) return null;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const byType: Record<string, any> = {};
+          for (const r of rows) {
+            const key = (r.option_type === 'P' ? 'put' : 'call');
+            byType[key] = {
+              instruments_in_range: r.count,
+              avg_spread_pct: r.avg_spread != null ? +(r.avg_spread * 100).toFixed(2) : null,
+              min_spread_pct: r.min_spread != null ? +(r.min_spread * 100).toFixed(2) : null,
+              max_spread_pct: r.max_spread != null ? +(r.max_spread * 100).toFixed(2) : null,
+              avg_implied_vol_pct: r.avg_iv != null ? +(r.avg_iv * 100).toFixed(1) : null,
+              avg_depth: r.avg_depth != null ? +r.avg_depth.toFixed(2) : null,
+              total_depth: r.total_depth != null ? +r.total_depth.toFixed(2) : null,
+            };
+          }
+          return byType;
         } catch { return null; }
       })(),
     },
