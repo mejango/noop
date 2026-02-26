@@ -1037,7 +1037,7 @@ export default function OverviewPage() {
                           const raw = row[name];
                           const pct = row[`${name}_pct`];
                           if (raw == null) return null;
-                          const volDelta = row[`${name}_volDelta`];
+                          const vol = row[`${name}_vol`];
                           const fee = row[`${name}_fee`];
                           const active = row[`${name}_active`];
                           return (
@@ -1045,7 +1045,7 @@ export default function OverviewPage() {
                               <div className="text-xs" style={{ color: getColor(name, i) }}>
                                 {formatDexName(name)}: ${Number(raw).toLocaleString(undefined, { maximumFractionDigits: 0 })}
                                 <span className="text-gray-500 ml-1">({pct > 0 ? '+' : ''}{pct?.toFixed(2)}%)</span>
-                                {volDelta != null && <span className="text-gray-500 ml-1">| Vol: {formatCompact(volDelta)}</span>}
+                                {vol != null && <span className="text-gray-500 ml-1">| Vol: {formatCompact(vol)}</span>}
                                 {fee != null && <span className="text-gray-500 ml-1">| Fee: {formatFeeTier(fee)}</span>}
                               </div>
                               {active != null && (
