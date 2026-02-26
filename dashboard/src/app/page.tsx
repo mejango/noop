@@ -693,22 +693,18 @@ export default function OverviewPage() {
       {momentumData.length > 0 && (() => {
         const MomentumTooltipBar = ({ data }: { data: typeof momentumData }) => {
           // eslint-disable-next-line react-hooks/rules-of-hooks
-          const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-          // eslint-disable-next-line react-hooks/rules-of-hooks
-          const barRef = useRef<HTMLDivElement>(null);
-          const hovered = hoverIdx != null ? data[hoverIdx] : null;
+          const [hover, setHover] = useState<{ idx: number; x: number; y: number } | null>(null);
+          const hovered = hover ? data[hover.idx] : null;
 
-          // Compute fixed position for tooltip based on bar bounding rect
-          let tipX = 0, tipY = 0;
-          if (hoverIdx != null && barRef.current) {
-            const rect = barRef.current.getBoundingClientRect();
-            const cellFrac = (hoverIdx + 0.5) / data.length;
-            tipX = rect.left + rect.width * cellFrac;
-            tipY = rect.top - 6;
-          }
+          const onCellEnter = (i: number, e: React.MouseEvent) => {
+            setHover({ idx: i, x: e.clientX, y: e.clientY });
+          };
+          const onCellMove = (i: number, e: React.MouseEvent) => {
+            setHover({ idx: i, x: e.clientX, y: e.clientY });
+          };
 
           return (
-            <div ref={barRef}>
+            <div>
               <div className="flex items-center gap-1">
                 <span className="text-[10px] text-gray-500 w-10 shrink-0 text-right">medium</span>
                 <div className="flex overflow-hidden flex-1" style={{ height: 16 }}>
@@ -717,8 +713,9 @@ export default function OverviewPage() {
                       key={i}
                       className="flex-1"
                       style={{ background: momentumBarColorMedium(d.momentum, d.mediumDerivative) }}
-                      onMouseEnter={() => setHoverIdx(i)}
-                      onMouseLeave={() => setHoverIdx(null)}
+                      onMouseEnter={(e) => onCellEnter(i, e)}
+                      onMouseMove={(e) => onCellMove(i, e)}
+                      onMouseLeave={() => setHover(null)}
                     />
                   ))}
                 </div>
@@ -731,16 +728,17 @@ export default function OverviewPage() {
                       key={i}
                       className="flex-1"
                       style={{ background: momentumBarColorShort(d.shortMomentum, d.shortDerivative) }}
-                      onMouseEnter={() => setHoverIdx(i)}
-                      onMouseLeave={() => setHoverIdx(null)}
+                      onMouseEnter={(e) => onCellEnter(i, e)}
+                      onMouseMove={(e) => onCellMove(i, e)}
+                      onMouseLeave={() => setHover(null)}
                     />
                   ))}
                 </div>
               </div>
-              {hovered && (
+              {hovered && hover && (
                 <div
                   className="fixed z-50 pointer-events-none"
-                  style={{ top: tipY, left: tipX, transform: 'translate(-50%, -100%)' }}
+                  style={{ top: hover.y - 12, left: hover.x, transform: 'translate(-50%, -100%)' }}
                 >
                   <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                     <div className="text-gray-400 mb-1">{new Date(hovered.ts).toLocaleString()}</div>
@@ -804,6 +802,24 @@ export default function OverviewPage() {
         const fallbackColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
         const getColor = (name: string, i: number) => dexColors[name] || fallbackColors[i % fallbackColors.length];
         const formatDexName = (name: string) => name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+        // Normalize each DEX to % change from its first value so they share one Y-axis
+        const baselines: Record<string, number> = {};
+        for (const name of dexNames) {
+          const first = filteredLiquidity.find(d => d[name] != null);
+          baselines[name] = first ? first[name] : 1;
+        }
+        const normalizedData = filteredLiquidity.map(d => {
+          const out: Record<string, number> = { ts: d.ts };
+          for (const name of dexNames) {
+            if (d[name] != null) {
+              out[`${name}_pct`] = ((d[name] - baselines[name]) / baselines[name]) * 100;
+              out[name] = d[name]; // keep raw for tooltip
+            }
+          }
+          return out;
+        });
+
         return (
           <Card>
             <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
@@ -817,29 +833,48 @@ export default function OverviewPage() {
               </div>
             </div>
             <ResponsiveContainer width="100%" height={200}>
-              <ComposedChart data={filteredLiquidity} margin={{ ...margins, right: mobile ? 10 : 60 }} syncId="main">
+              <ComposedChart data={normalizedData} margin={margins} syncId="main">
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
-                {dexNames.map((name, i) => (
-                  <YAxis
-                    key={name}
-                    yAxisId={name}
-                    orientation={i === 0 ? 'left' : 'right'}
-                    domain={['auto', 'auto']}
-                    tickFormatter={(v) => `$${(v / 1e6).toFixed(0)}M`}
-                    stroke={getColor(name, i)}
-                    tick={{ ...chartAxis.tick, fill: getColor(name, i) }}
-                    width={mobile ? 35 : 55}
-                  />
-                ))}
+                <YAxis
+                  domain={['auto', 'auto']}
+                  tickFormatter={(v) => `${v > 0 ? '+' : ''}${v.toFixed(1)}%`}
+                  stroke={chartAxis.stroke}
+                  tick={chartAxis.tick}
+                  width={mobile ? 40 : 55}
+                />
                 <Tooltip
                   {...chartTooltip}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  formatter={(val: any, name: any) => [`$${Number(val).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, formatDexName(name as string)]}
+                  formatter={(_val: any, key: any) => {
+                    // key is "uniswap_v3_pct" — extract raw value from the same data point
+                    const rawName = (key as string).replace(/_pct$/, '');
+                    return [null, formatDexName(rawName)]; // placeholder, custom content handles it
+                  }}
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  content={({ active, payload, label }: any) => {
+                    if (!active || !payload?.length) return null;
+                    return (
+                      <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                        <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
+                        {dexNames.map((name, i) => {
+                          const raw = payload[0]?.payload?.[name];
+                          const pct = payload[0]?.payload?.[`${name}_pct`];
+                          if (raw == null) return null;
+                          return (
+                            <div key={name} className="text-xs" style={{ color: getColor(name, i) }}>
+                              {formatDexName(name)}: ${Number(raw).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                              <span className="text-gray-500 ml-1">({pct > 0 ? '+' : ''}{pct?.toFixed(2)}%)</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  }}
                 />
                 {dexNames.map((name, i) => (
-                  <Line key={name} yAxisId={name} type="stepAfter" dataKey={name} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
+                  <Line key={name} type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
