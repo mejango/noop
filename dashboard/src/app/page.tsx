@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback, ReactNode } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, momentumColor, dteDays } from '@/lib/format';
@@ -11,20 +11,33 @@ import {
   ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
 } from 'recharts';
 
-/** Wraps a recharts chart: hover shows tooltip normally, click pins it, next click anywhere unpins */
-function PinnableChart({ children }: { children: ReactNode }) {
+/** Hook: hover shows tooltip, click pins it, next click anywhere unpins */
+function usePinnableTooltip() {
   const [pinned, setPinned] = useState(false);
-  return (
-    <div className="relative" onClick={() => { if (!pinned) setPinned(true); }}>
-      {pinned && createPortal(
-        <div className="fixed inset-0" style={{ zIndex: 50 }} onClick={(e) => { e.stopPropagation(); setPinned(false); }} />,
-        document.body
-      )}
-      <div style={pinned ? { pointerEvents: 'none' } : undefined}>
-        {children}
-      </div>
-    </div>
-  );
+  const cache = useRef<ReactNode>(null);
+
+  useEffect(() => {
+    if (!pinned) return;
+    const dismiss = () => setPinned(false);
+    document.addEventListener('click', dismiss, { once: true });
+    return () => document.removeEventListener('click', dismiss);
+  }, [pinned]);
+
+  return {
+    pinned,
+    /** Props for the div wrapping the chart */
+    containerProps: {
+      onClick: () => { if (!pinned) setPinned(true); },
+      style: pinned ? { pointerEvents: 'none' as const } : undefined,
+    },
+    /** Spread onto <Tooltip> to force active when pinned */
+    tooltipActive: pinned ? { active: true as const } : {},
+    /** Wrap tooltip content return value to cache last valid content */
+    wrap(content: ReactNode): ReactNode {
+      if (content != null) cache.current = content;
+      return content ?? (pinned ? cache.current : null);
+    },
+  };
 }
 
 interface Budget {
@@ -219,6 +232,10 @@ export default function OverviewPage() {
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
+  const pinPrice = usePinnableTooltip();
+  const pinLiquidity = usePinnableTooltip();
+  const pinPut = usePinnableTooltip();
+  const pinCall = usePinnableTooltip();
 
   // Parse latest tick for current option values
   const latestTick = useMemo<TickData | null>(() => {
@@ -616,7 +633,7 @@ export default function OverviewPage() {
         ) : merged.length === 0 ? (
           <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
-          <PinnableChart>
+          <div {...pinPrice.containerProps}>
           <ResponsiveContainer width="100%" height={mobile ? 300 : 500}>
             <ComposedChart data={merged} margin={margins}>
               <XAxis
@@ -641,11 +658,12 @@ export default function OverviewPage() {
               <YAxis yAxisId="callVal" orientation="right" hide domain={['auto', 'auto']} />
               <Tooltip
                                 {...chartTooltip}
+                {...pinPrice.tooltipActive}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload, label }: any) => {
-                  if (!active || !payload?.length) return null;
+                  if (!active || !payload?.length) return pinPrice.wrap(null);
                   const row = payload[0]?.payload;
-                  if (!row) return null;
+                  if (!row) return pinPrice.wrap(null);
                   const bestPut = row.bestPut;
                   const bestCall = row.bestCall;
                   const fmtPut = bestPut != null && Number(bestPut) > 0 ? Number(bestPut).toFixed(6) : 'N/A';
@@ -653,7 +671,7 @@ export default function OverviewPage() {
                   const { bestPutScore, bestCallScore, windowDays } = chart.bestScores;
                   const pd = row.bestPutDetail;
                   const cd = row.bestCallDetail;
-                  return (
+                  return pinPrice.wrap(
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
                       <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
@@ -704,7 +722,7 @@ export default function OverviewPage() {
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
-          </PinnableChart>
+          </div>
         )}
       </Card>
 
@@ -868,7 +886,7 @@ export default function OverviewPage() {
                 ))}
               </div>
             </div>
-            <PinnableChart>
+            <div {...pinLiquidity.containerProps}>
             <ResponsiveContainer width="100%" height={200}>
               <ComposedChart data={normalizedData} margin={margins}>
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
@@ -881,6 +899,7 @@ export default function OverviewPage() {
                 />
                 <Tooltip
                                     {...chartTooltip}
+                  {...pinLiquidity.tooltipActive}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -891,8 +910,8 @@ export default function OverviewPage() {
                   }}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   content={({ active, payload, label }: any) => {
-                    if (!active || !payload?.length) return null;
-                    return (
+                    if (!active || !payload?.length) return pinLiquidity.wrap(null);
+                    return pinLiquidity.wrap(
                       <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                         <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
                         {dexNames.map((name, i) => {
@@ -915,7 +934,7 @@ export default function OverviewPage() {
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
-            </PinnableChart>
+            </div>
           </Card>
         );
       })()}
@@ -930,7 +949,7 @@ export default function OverviewPage() {
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> worse buy</span>
             </div>
           </div>
-          <PinnableChart>
+          <div {...pinPut.containerProps}>
           <ResponsiveContainer width="100%" height={360}>
             <ScatterChart margin={margins}>
               <XAxis
@@ -952,11 +971,12 @@ export default function OverviewPage() {
               />
               <Tooltip
                                 {...chartTooltip}
+                {...pinPut.tooltipActive}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload }: any) => {
-                  if (!active || !payload?.[0]?.payload) return null;
+                  if (!active || !payload?.[0]?.payload) return pinPut.wrap(null);
                   const d = payload[0].payload as HeatmapDot;
-                  return (
+                  return pinPut.wrap(
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
@@ -980,7 +1000,7 @@ export default function OverviewPage() {
               />
             </ScatterChart>
           </ResponsiveContainer>
-          </PinnableChart>
+          </div>
         </Card>
       )}
 
@@ -994,7 +1014,7 @@ export default function OverviewPage() {
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> worse sell</span>
             </div>
           </div>
-          <PinnableChart>
+          <div {...pinCall.containerProps}>
           <ResponsiveContainer width="100%" height={360}>
             <ScatterChart margin={margins}>
               <XAxis
@@ -1016,11 +1036,12 @@ export default function OverviewPage() {
               />
               <Tooltip
                                 {...chartTooltip}
+                {...pinCall.tooltipActive}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload }: any) => {
-                  if (!active || !payload?.[0]?.payload) return null;
+                  if (!active || !payload?.[0]?.payload) return pinCall.wrap(null);
                   const d = payload[0].payload as HeatmapDot;
-                  return (
+                  return pinCall.wrap(
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
@@ -1044,7 +1065,7 @@ export default function OverviewPage() {
               />
             </ScatterChart>
           </ResponsiveContainer>
-          </PinnableChart>
+          </div>
         </Card>
       )}
 
