@@ -1000,7 +1000,7 @@ export default function OverviewPage() {
                 ))}
                 {hasVolume && volDexes.map((name, i) => (
                   <span key={`${name}_vol`} className="flex items-center gap-1">
-                    <span className="w-2 h-2 inline-block rounded-sm" style={{ background: getColor(name, i), opacity: 0.3 }} /> {formatDexName(name)} Vol
+                    <span className="w-2 h-2 inline-block rounded-sm" style={{ background: getColor(name, i), opacity: 0.8 }} /> {formatDexName(name)} Vol
                   </span>
                 ))}
               </div>
@@ -1058,7 +1058,7 @@ export default function OverviewPage() {
                   <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
                 {hasVolume && volDexes.map((name, i) => (
-                  <Bar key={`${name}_vol`} yAxisId="vol" dataKey={`${name}_volDelta`} fill={getColor(name, i)} fillOpacity={0.25} isAnimationActive={false} />
+                  <Bar key={`${name}_vol`} yAxisId="vol" dataKey={`${name}_volDelta`} fill={getColor(name, i)} fillOpacity={0.8} isAnimationActive={false} />
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
