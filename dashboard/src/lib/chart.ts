@@ -25,4 +25,5 @@ export const chartTooltip = {
     borderRadius: 8,
     fontSize: 12,
   },
+  isAnimationActive: false,
 } as const;

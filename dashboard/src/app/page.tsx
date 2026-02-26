@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useMemo, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, momentumColor, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
@@ -600,7 +601,7 @@ export default function OverviewPage() {
           <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
           <ResponsiveContainer width="100%" height={mobile ? 300 : 500}>
-            <ComposedChart data={merged} margin={margins} syncId="main">
+            <ComposedChart data={merged} margin={margins}>
               <XAxis
                 dataKey="ts"
                 type="number"
@@ -735,10 +736,10 @@ export default function OverviewPage() {
                   ))}
                 </div>
               </div>
-              {hovered && hover && (
+              {hovered && hover && createPortal(
                 <div
-                  className="fixed z-50 pointer-events-none"
-                  style={{ top: hover.y - 12, left: hover.x, transform: 'translate(-50%, -100%)' }}
+                  className="fixed pointer-events-none"
+                  style={{ top: hover.y - 12, left: hover.x, transform: 'translate(-50%, -100%)', zIndex: 9999 }}
                 >
                   <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                     <div className="text-gray-400 mb-1">{new Date(hovered.ts).toLocaleString()}</div>
@@ -753,7 +754,8 @@ export default function OverviewPage() {
                       <span className="text-gray-500">{hovered.shortDerivative ?? 'n/a'}</span>
                     </div>
                   </div>
-                </div>
+                </div>,
+                document.body
               )}
             </div>
           );
@@ -833,7 +835,7 @@ export default function OverviewPage() {
               </div>
             </div>
             <ResponsiveContainer width="100%" height={200}>
-              <ComposedChart data={normalizedData} margin={margins} syncId="main">
+              <ComposedChart data={normalizedData} margin={margins}>
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 <YAxis
                   domain={['auto', 'auto']}
@@ -893,7 +895,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <ResponsiveContainer width="100%" height={360}>
-            <ScatterChart margin={margins} syncId="main">
+            <ScatterChart margin={margins}>
               <XAxis
                 dataKey="ts"
                 type="number"
@@ -955,7 +957,7 @@ export default function OverviewPage() {
             </div>
           </div>
           <ResponsiveContainer width="100%" height={360}>
-            <ScatterChart margin={margins} syncId="main">
+            <ScatterChart margin={margins}>
               <XAxis
                 dataKey="ts"
                 type="number"
