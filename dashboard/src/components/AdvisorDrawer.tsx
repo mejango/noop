@@ -33,9 +33,9 @@ function timeAgo(ts: string): string {
 }
 
 const TYPE_STYLES: Record<string, { label: string; color: string }> = {
-  observation: { label: 'OBS', color: 'bg-blue-500/20 text-blue-400' },
-  hypothesis: { label: 'HYP', color: 'bg-amber-500/20 text-amber-400' },
-  regime_note: { label: 'REG', color: 'bg-purple-500/20 text-purple-400' },
+  observation: { label: 'Observation', color: 'bg-blue-500/20 text-blue-400' },
+  hypothesis: { label: 'Hypothesis', color: 'bg-amber-500/20 text-amber-400' },
+  regime_note: { label: 'Regime', color: 'bg-purple-500/20 text-purple-400' },
 };
 
 const STARTERS = [
