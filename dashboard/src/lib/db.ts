@@ -52,7 +52,8 @@ export function getOptionsHeatmap(since: string) {
   const d = getDb();
   return d.prepare(`
     SELECT timestamp, option_type, instrument_name, strike, delta, ask_price, bid_price,
-      index_price, expiry, ask_delta_value, bid_delta_value
+      index_price, expiry, ask_delta_value, bid_delta_value,
+      mark_price, implied_vol, ask_amount, bid_amount
     FROM options_snapshots
     WHERE timestamp > ?
     ORDER BY timestamp ASC
@@ -93,9 +94,27 @@ export function getLiquidityOverTime(since: string) {
       const data = JSON.parse(row.raw_data);
       const dexes = data?.dexLiquidity?.dexes;
       if (dexes) {
-        for (const [name, dex] of Object.entries(dexes) as [string, { totalLiquidity?: number; error?: string }][]) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        for (const [name, dex] of Object.entries(dexes) as [string, any][]) {
           if (!dex.error && dex.totalLiquidity && !isNaN(dex.totalLiquidity)) {
             entry[name] = dex.totalLiquidity;
+          }
+          if (dex.totalVolume != null && !isNaN(dex.totalVolume)) {
+            entry[`${name}_vol`] = dex.totalVolume;
+          }
+          if (dex.totalTxCount != null && !isNaN(dex.totalTxCount)) {
+            entry[`${name}_txCount`] = dex.totalTxCount;
+          }
+          if (Array.isArray(dex.poolDetails)) {
+            // Sum active liquidity across pools (store as string for bigint safety)
+            const activeSum = dex.poolDetails.reduce((sum: number, p: { activeLiquidity?: string }) => {
+              const v = Number(p.activeLiquidity);
+              return isNaN(v) ? sum : sum + v;
+            }, 0);
+            if (activeSum > 0) entry[`${name}_active`] = activeSum;
+            // Store first pool's fee tier for tooltip display
+            const firstPool = dex.poolDetails[0];
+            if (firstPool?.feeTier) entry[`${name}_fee`] = firstPool.feeTier;
           }
         }
       }
@@ -345,26 +364,6 @@ export function getImpliedVolHourly(since: string) {
   `).all(since) as { hour: string; value: number | null }[];
 }
 
-export function getOptionsMarketQuality(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           AVG(CASE WHEN ask_price > 0 AND bid_price > 0 AND mark_price > 0
-                    AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
-               THEN (ask_price - bid_price) / mark_price END) as spread,
-           AVG(CASE WHEN (delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12)
-               THEN ask_amount + bid_amount END) as depth,
-           SUM(CASE WHEN open_interest IS NOT NULL AND open_interest > 0
-               THEN open_interest END) as oi,
-           AVG(CASE WHEN implied_vol IS NOT NULL
-                    AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
-               THEN implied_vol END) as iv
-    FROM options_snapshots
-    WHERE timestamp > ?
-    GROUP BY hour
-    ORDER BY hour ASC
-  `).all(since) as { hour: string; spread: number | null; depth: number | null; oi: number | null; iv: number | null }[];
-}
 
 export function getBotBudget() {
   const empty = {

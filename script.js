@@ -706,6 +706,12 @@ const analyzeDEXLiquidity = async (spotPrice) => {
                     ]}) {
                       id
                       totalValueLockedUSD
+                      volumeUSD
+                      feeTier
+                      liquidity
+                      txCount
+                      totalValueLockedToken0
+                      totalValueLockedToken1
                       token0 {
                         symbol
                         id
@@ -732,16 +738,33 @@ const analyzeDEXLiquidity = async (spotPrice) => {
           return isNaN(tvlUsd) ? sum : sum + tvlUsd;
         }, 0);
         
+        const totalVolume = response.data.data.pools.reduce((sum, pool) => {
+          const v = parseFloat(pool.volumeUSD);
+          return isNaN(v) ? sum : sum + v;
+        }, 0);
+        const totalTxCount = response.data.data.pools.reduce((sum, pool) => {
+          const t = parseInt(pool.txCount);
+          return isNaN(t) ? sum : sum + t;
+        }, 0);
+
         liquidityData.dexes.uniswap_v3 = {
           pools: response.data.data.pools.length,
           totalLiquidity: totalTVLUSD, // TVL in USD terms (consistent)
+          totalVolume,
+          totalTxCount,
           poolDetails: response.data.data.pools.map(pool => {
             const tvlUsd = parseFloat(pool.totalValueLockedUSD);
-            
+
             return {
               id: pool.id,
               liquidity: tvlUsd, // Store in USD terms (consistent)
               liquidityUSD: tvlUsd, // Keep USD for reference
+              volumeUSD: parseFloat(pool.volumeUSD) || 0,
+              feeTier: parseInt(pool.feeTier) || 0,
+              activeLiquidity: pool.liquidity || '0',
+              txCount: parseInt(pool.txCount) || 0,
+              tvlToken0: parseFloat(pool.totalValueLockedToken0) || 0,
+              tvlToken1: parseFloat(pool.totalValueLockedToken1) || 0,
               token0: pool.token0,
               token1: pool.token1
             };
@@ -766,6 +789,12 @@ const analyzeDEXLiquidity = async (spotPrice) => {
                     ]}) {
                       id
                       totalValueLockedUSD
+                      volumeUSD
+                      swapFee
+                      liquidity
+                      txCount
+                      totalValueLockedToken0
+                      totalValueLockedToken1
                       token0 {
                         symbol
                         id
@@ -787,17 +816,33 @@ const analyzeDEXLiquidity = async (spotPrice) => {
           return isNaN(tvlUsd) ? sum : sum + tvlUsd;
         }, 0);
         
+        const totalVolumeV4 = response.data.data.pools.reduce((sum, pool) => {
+          const v = parseFloat(pool.volumeUSD);
+          return isNaN(v) ? sum : sum + v;
+        }, 0);
+        const totalTxCountV4 = response.data.data.pools.reduce((sum, pool) => {
+          const t = parseInt(pool.txCount);
+          return isNaN(t) ? sum : sum + t;
+        }, 0);
+
         liquidityData.dexes.uniswap_v4 = {
           pools: response.data.data.pools.length,
           totalLiquidity: totalTVLUSD, // TVL in USD terms (consistent with V3)
-          avgFee: 0, // V4 doesn't have fee field
+          totalVolume: totalVolumeV4,
+          totalTxCount: totalTxCountV4,
           poolDetails: response.data.data.pools.map(pool => {
             const tvlUsd = parseFloat(pool.totalValueLockedUSD);
-            
+
             return {
               id: pool.id,
               liquidity: tvlUsd, // Store in USD terms (consistent)
               liquidityUSD: tvlUsd, // Keep USD for reference
+              volumeUSD: parseFloat(pool.volumeUSD) || 0,
+              feeTier: parseInt(pool.swapFee) || 0,
+              activeLiquidity: pool.liquidity || '0',
+              txCount: parseInt(pool.txCount) || 0,
+              tvlToken0: parseFloat(pool.totalValueLockedToken0) || 0,
+              tvlToken1: parseFloat(pool.totalValueLockedToken1) || 0,
               token0: pool.token0,
               token1: pool.token1
             };

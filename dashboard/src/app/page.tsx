@@ -114,6 +114,10 @@ interface HeatmapSnapshot {
   expiry: number | null;
   ask_delta_value: number | null;
   bid_delta_value: number | null;
+  mark_price: number | null;
+  implied_vol: number | null;
+  ask_amount: number | null;
+  bid_amount: number | null;
 }
 
 interface HeatmapDot {
@@ -128,6 +132,15 @@ interface HeatmapDot {
   ask: number | null;
   dte: number | null;
   intensity: number; // 0-1 normalized
+  spreadPct: number | null; // (ask - bid) / mark as %
+  iv: number | null; // implied vol as %
+  depth: number | null; // ask_amount + bid_amount
+  instrument: string;
+}
+
+interface MQDot extends HeatmapDot {
+  spreadIntensity: number; // 0=wide (bad), 1=tight (good)
+  depthIntensity: number;  // 0=thin, 1=deep
 }
 
 interface TickSummary {
@@ -153,21 +166,12 @@ interface TickData {
   next_check_minutes: number;
 }
 
-interface MarketQualityPoint {
-  hour: string;
-  spread: number | null;
-  depth: number | null;
-  oi: number | null;
-  iv: number | null;
-}
-
 interface ChartData {
   prices: SpotPrice[];
   options: OptionsPoint[];
   liquidity: LiquidityPoint[];
   bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
-  marketQuality: MarketQualityPoint[];
 }
 
 const emptyBudget: Budget = {
@@ -182,7 +186,7 @@ const emptyStats: Stats = {
   budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [], marketQuality: [] };
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 0 };
@@ -233,6 +237,18 @@ const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
   return <circle cx={cx} cy={cy} r={3.5} fill={fill} fillOpacity={0.75 + t * 0.25} />;
 };
 
+// Market quality dot: color = spread quality (tighter=brighter), size = depth
+const mqGoodColor: [number, number, number] = [80, 220, 120]; // green = tight spread
+const mqBadColor: [number, number, number] = [220, 60, 60];   // red = wide spread
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const MQDotShape = ({ cx, cy, payload }: any) => {
+  if (!cx || !cy || !payload) return null;
+  const t = payload.spreadIntensity ?? 0.5; // 0 = wide spread (bad), 1 = tight (good)
+  const fill = lerpColor(mqBadColor, mqGoodColor, t);
+  const r = 2.5 + (payload.depthIntensity ?? 0.3) * 4; // 2.5–6.5px radius based on depth
+  return <circle cx={cx} cy={cy} r={r} fill={fill} fillOpacity={0.7 + t * 0.3} />;
+};
+
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('6h');
   const mobile = useIsMobile();
@@ -244,7 +260,8 @@ export default function OverviewPage() {
   const pinLiquidity = usePinnableTooltip();
   const pinPut = usePinnableTooltip();
   const pinCall = usePinnableTooltip();
-  const pinMarketQuality = usePinnableTooltip();
+  const pinPutMQ = usePinnableTooltip();
+  const pinCallMQ = usePinnableTooltip();
 
   // Parse latest tick for current option values
   const latestTick = useMemo<TickData | null>(() => {
@@ -371,16 +388,37 @@ export default function OverviewPage() {
   // Data for liquidity chart: build directly from API data (not snapped to spot prices)
   const { liquidityData, dexNames } = useMemo(() => {
     const nameSet = new Set<string>();
+    // Suffixes that are metadata, not primary DEX TVL series
+    const metaSuffixes = ['_vol', '_txCount', '_active', '_fee'];
     const data = chart.liquidity.map(l => {
       const flat: Record<string, number> = { ts: new Date(l.timestamp as string).getTime() };
       for (const [key, val] of Object.entries(l)) {
         if (key !== 'timestamp' && typeof val === 'number') {
           flat[key] = val;
-          nameSet.add(key);
+          if (!metaSuffixes.some(s => key.endsWith(s))) {
+            nameSet.add(key);
+          }
         }
       }
       return flat;
     }).filter(d => Object.keys(d).length > 1);
+
+    // Compute volume deltas between consecutive data points
+    const names = Array.from(nameSet);
+    for (let i = 1; i < data.length; i++) {
+      let totalVolDelta = 0;
+      for (const name of names) {
+        const currVol = data[i][`${name}_vol`];
+        const prevVol = data[i - 1][`${name}_vol`];
+        if (currVol != null && prevVol != null) {
+          const delta = currVol - prevVol;
+          data[i][`${name}_volDelta`] = delta > 0 ? delta : 0;
+          totalVolDelta += delta > 0 ? delta : 0;
+        }
+      }
+      if (totalVolDelta > 0) data[i].vol_total = totalVolDelta;
+    }
+
     return { liquidityData: data, dexNames: Array.from(nameSet).sort() };
   }, [chart.liquidity]);
 
@@ -432,6 +470,13 @@ export default function OverviewPage() {
 
       const value = isCall ? (snap.bid_delta_value ?? null) : (snap.ask_delta_value ?? null);
 
+      // Market quality metrics per instrument
+      const spreadPct = (snap.ask_price && snap.bid_price && snap.mark_price && snap.mark_price > 0)
+        ? ((snap.ask_price - snap.bid_price) / snap.mark_price) * 100 : null;
+      const iv = snap.implied_vol != null ? snap.implied_vol * 100 : null;
+      const depth = (snap.ask_amount != null && snap.bid_amount != null)
+        ? snap.ask_amount + snap.bid_amount : null;
+
       const dot: HeatmapDot = {
         ts,
         pctOtm: +pctOtm.toFixed(2),
@@ -444,6 +489,10 @@ export default function OverviewPage() {
         ask: snap.ask_price,
         dte,
         intensity: 0, // normalized below
+        spreadPct,
+        iv,
+        depth,
+        instrument: snap.instrument_name,
       };
 
       if (isCall) calls.push(dot);
@@ -478,6 +527,36 @@ export default function OverviewPage() {
     return { callHeatmap: calls, putHeatmap: puts };
   }, [chart.optionsHeatmap, merged]);
 
+  // Market quality dots: filter heatmap dots to bot's delta range and normalize spread/depth
+  const { putMQ, callMQ } = useMemo(() => {
+    const buildMQ = (dots: HeatmapDot[]): MQDot[] => {
+      // Only include dots with spread data and within bot's delta range
+      const eligible = dots.filter(d =>
+        d.spreadPct != null && d.absDelta >= 0.02 && d.absDelta <= 0.12
+      );
+      if (eligible.length === 0) return [];
+
+      // Compute spread range for normalization (invert: lower spread = higher intensity)
+      const spreads = eligible.map(d => d.spreadPct!);
+      const minSpread = Math.min(...spreads);
+      const maxSpread = Math.max(...spreads);
+      const spreadRange = maxSpread - minSpread || 1;
+
+      // Compute depth range
+      const depths = eligible.filter(d => d.depth != null).map(d => d.depth!);
+      const minDepth = depths.length > 0 ? Math.min(...depths) : 0;
+      const maxDepth = depths.length > 0 ? Math.max(...depths) : 1;
+      const depthRange = maxDepth - minDepth || 1;
+
+      return eligible.map(d => ({
+        ...d,
+        spreadIntensity: 1 - ((d.spreadPct! - minSpread) / spreadRange), // invert: tight=1
+        depthIntensity: d.depth != null ? (d.depth - minDepth) / depthRange : 0.3,
+      }));
+    };
+    return { putMQ: buildMQ(putHeatmap), callMQ: buildMQ(callHeatmap) };
+  }, [putHeatmap, callHeatmap]);
+
   // Shared X-axis domain from main chart's time range
   const xDomain = merged.length > 0
     ? [merged[0].ts, merged[merged.length - 1].ts]
@@ -497,17 +576,13 @@ export default function OverviewPage() {
     [putHeatmap, xDomain]
   );
 
-  const filteredMarketQuality = useMemo(() =>
-    chart.marketQuality
-      .map(d => ({
-        ts: new Date(d.hour).getTime(),
-        spread: d.spread != null ? d.spread * 100 : null,
-        depth: d.depth,
-        oi: d.oi,
-        iv: d.iv != null ? d.iv * 100 : null,
-      }))
-      .filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
-    [chart.marketQuality, xDomain]
+  const filteredPutMQ = useMemo(() =>
+    putMQ.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
+    [putMQ, xDomain]
+  );
+  const filteredCallMQ = useMemo(() =>
+    callMQ.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
+    [callMQ, xDomain]
   );
 
   return (
@@ -869,61 +944,121 @@ export default function OverviewPage() {
         );
       })()}
 
-      {/* Options Market Quality */}
-      {filteredMarketQuality.length > 0 && (
+      {/* Put Market Quality */}
+      {filteredPutMQ.length > 0 && (
         <Card>
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
-            <span className="text-xs font-medium text-gray-400">Options Market Quality</span>
+            <span className="text-xs font-medium text-gray-400">Put Market Quality</span>
             <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red }} /> Spread</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.quaternary }} /> IV</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.blue }} /> Depth</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.9) }} /> tight spread</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.1) }} /> wide spread</span>
+              <span className="flex items-center gap-1 text-gray-600">size = depth</span>
             </div>
           </div>
-          <div {...pinMarketQuality.containerProps}>
-          <ResponsiveContainer width="100%" height={200}>
-            <ComposedChart data={filteredMarketQuality} margin={margins}>
+          <div {...pinPutMQ.containerProps}>
+          <ResponsiveContainer width="100%" height={300}>
+            <ScatterChart margin={margins}>
               <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
               <YAxis
-                yAxisId="pct"
-                domain={['auto', 'auto']}
-                tickFormatter={(v) => `${v.toFixed(1)}%`}
+                dataKey="absDelta"
+                name="Delta"
+                domain={[0, 'auto']}
+                tickFormatter={(v) => v.toFixed(2)}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={mobile ? 40 : 55}
-              />
-              <YAxis
-                yAxisId="depth"
-                orientation="right"
-                domain={['auto', 'auto']}
-                tickFormatter={(v) => `${Number(v).toFixed(1)}`}
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tickSecondary}
-                width={mobile ? 35 : 50}
+                width={mobile ? 35 : 55}
               />
               <Tooltip
                 {...chartTooltip}
-                {...pinMarketQuality.tooltipActive}
+                {...pinPutMQ.tooltipActive}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                content={({ active, payload, label }: any) => {
-                  if (!active || !payload?.length) return pinMarketQuality.wrap(null);
-                  const row = payload[0]?.payload;
-                  if (!row) return pinMarketQuality.wrap(null);
-                  return pinMarketQuality.wrap(
+                content={({ active, payload }: any) => {
+                  if (!active || !payload?.[0]?.payload) return pinPutMQ.wrap(null);
+                  const d = payload[0].payload as MQDot;
+                  return pinPutMQ.wrap(
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
-                      <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
-                      <div className="text-xs" style={{ color: chartColors.red }}>Spread: {row.spread != null ? `${row.spread.toFixed(2)}%` : 'N/A'}</div>
-                      <div className="text-xs" style={{ color: chartColors.quaternary }}>IV: {row.iv != null ? `${row.iv.toFixed(1)}%` : 'N/A'}</div>
-                      <div className="text-xs" style={{ color: chartColors.blue }}>Depth: {row.depth != null ? `${row.depth.toFixed(1)} ETH` : 'N/A'}</div>
-                      <div className="text-xs text-gray-500">OI: {row.oi != null ? Number(row.oi).toLocaleString() : 'N/A'}</div>
+                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
+                      <div className="text-xs text-gray-500 mb-1">{d.instrument}</div>
+                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
+                      <div className="text-sm">Delta: <span style={{ color: 'rgb(255,160,50)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
+                      <div className="text-sm">Spread: <span style={{ color: lerpColor(mqBadColor, mqGoodColor, d.spreadIntensity) }}>{d.spreadPct != null ? `${d.spreadPct.toFixed(1)}%` : 'N/A'}</span></div>
+                      <div className="text-sm">IV: <span className="text-gray-300">{d.iv != null ? `${d.iv.toFixed(1)}%` : 'N/A'}</span></div>
+                      <div className="text-sm">Depth: <span className="text-gray-300">{d.depth != null ? `${d.depth.toFixed(1)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Bid: <span className="text-gray-300">{d.bid != null ? `$${d.bid.toFixed(4)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span style={{ color: 'rgb(255,160,50)' }}>{d.ask != null ? `$${d.ask.toFixed(4)}` : 'N/A'}</span></div>
                     </div>
                   );
                 }}
               />
-              <Line yAxisId="pct" type="stepAfter" dataKey="spread" stroke={chartColors.red} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
-              <Line yAxisId="pct" type="stepAfter" dataKey="iv" stroke={chartColors.quaternary} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
-              <Line yAxisId="depth" type="stepAfter" dataKey="depth" stroke={chartColors.blue} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
-            </ComposedChart>
+              <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.08} stroke="#FFA032" strokeOpacity={0.1} />
+              <Scatter
+                data={filteredPutMQ}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                shape={(props: any) => <MQDotShape {...props} />}
+                isAnimationActive={false}
+              />
+            </ScatterChart>
+          </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
+
+      {/* Call Market Quality */}
+      {filteredCallMQ.length > 0 && (
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+            <span className="text-xs font-medium text-gray-400">Call Market Quality</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.9) }} /> tight spread</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.1) }} /> wide spread</span>
+              <span className="flex items-center gap-1 text-gray-600">size = depth</span>
+            </div>
+          </div>
+          <div {...pinCallMQ.containerProps}>
+          <ResponsiveContainer width="100%" height={300}>
+            <ScatterChart margin={margins}>
+              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <YAxis
+                dataKey="absDelta"
+                name="Delta"
+                domain={[0, 'auto']}
+                tickFormatter={(v) => v.toFixed(2)}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={mobile ? 35 : 55}
+              />
+              <Tooltip
+                {...chartTooltip}
+                {...pinCallMQ.tooltipActive}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                content={({ active, payload }: any) => {
+                  if (!active || !payload?.[0]?.payload) return pinCallMQ.wrap(null);
+                  const d = payload[0].payload as MQDot;
+                  return pinCallMQ.wrap(
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
+                      <div className="text-xs text-gray-500 mb-1">{d.instrument}</div>
+                      <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
+                      <div className="text-sm">Delta: <span style={{ color: 'rgb(100,160,255)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
+                      {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
+                      <div className="text-sm">Spread: <span style={{ color: lerpColor(mqBadColor, mqGoodColor, d.spreadIntensity) }}>{d.spreadPct != null ? `${d.spreadPct.toFixed(1)}%` : 'N/A'}</span></div>
+                      <div className="text-sm">IV: <span className="text-gray-300">{d.iv != null ? `${d.iv.toFixed(1)}%` : 'N/A'}</span></div>
+                      <div className="text-sm">Depth: <span className="text-gray-300">{d.depth != null ? `${d.depth.toFixed(1)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Bid: <span style={{ color: 'rgb(100,160,255)' }}>{d.bid != null ? `$${d.bid.toFixed(4)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span className="text-gray-300">{d.ask != null ? `$${d.ask.toFixed(4)}` : 'N/A'}</span></div>
+                    </div>
+                  );
+                }}
+              />
+              <ReferenceArea y1={0.04} y2={0.12} fill="#64A0FF" fillOpacity={0.08} stroke="#64A0FF" strokeOpacity={0.1} />
+              <Scatter
+                data={filteredCallMQ}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                shape={(props: any) => <MQDotShape {...props} />}
+                isAnimationActive={false}
+              />
+            </ScatterChart>
           </ResponsiveContainer>
           </div>
         </Card>
@@ -938,6 +1073,16 @@ export default function OverviewPage() {
         const fallbackColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
         const getColor = (name: string, i: number) => dexColors[name] || fallbackColors[i % fallbackColors.length];
         const formatDexName = (name: string) => name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const formatCompact = (v: number) => {
+          if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
+          if (v >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
+          if (v >= 1e3) return `$${(v / 1e3).toFixed(0)}K`;
+          return `$${v.toFixed(0)}`;
+        };
+        const formatFeeTier = (bps: number) => {
+          if (!bps) return null;
+          return `${(bps / 10000).toFixed(2)}%`;
+        };
 
         // Normalize each DEX to % change from its first value so they share one Y-axis
         const baselines: Record<string, number> = {};
@@ -945,6 +1090,7 @@ export default function OverviewPage() {
           const first = filteredLiquidity.find(d => d[name] != null);
           baselines[name] = first ? first[name] : 1;
         }
+        const hasVolume = filteredLiquidity.some(d => d.vol_total != null && d.vol_total > 0);
         const normalizedData = filteredLiquidity.map(d => {
           const out: Record<string, number> = { ts: d.ts };
           for (const name of dexNames) {
@@ -952,7 +1098,12 @@ export default function OverviewPage() {
               out[`${name}_pct`] = ((d[name] - baselines[name]) / baselines[name]) * 100;
               out[name] = d[name]; // keep raw for tooltip
             }
+            // Pass through metadata fields for tooltip
+            for (const suffix of ['_vol', '_volDelta', '_active', '_fee', '_txCount']) {
+              if (d[`${name}${suffix}`] != null) out[`${name}${suffix}`] = d[`${name}${suffix}`];
+            }
           }
+          if (d.vol_total != null) out.vol_total = d.vol_total;
           return out;
         });
 
@@ -966,6 +1117,11 @@ export default function OverviewPage() {
                     <span className="w-3 h-0.5 inline-block" style={{ background: getColor(name, i) }} /> {formatDexName(name)}
                   </span>
                 ))}
+                {hasVolume && (
+                  <span className="flex items-center gap-1">
+                    <span className="w-3 h-0.5 inline-block" style={{ background: chartColors.tertiary }} /> Volume
+                  </span>
+                )}
               </div>
             </div>
             <div {...pinLiquidity.containerProps}>
@@ -973,47 +1129,71 @@ export default function OverviewPage() {
               <ComposedChart data={normalizedData} margin={margins}>
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 <YAxis
+                  yAxisId="tvl"
                   domain={['auto', 'auto']}
                   tickFormatter={(v) => `${v > 0 ? '+' : ''}${v.toFixed(1)}%`}
                   stroke={chartAxis.stroke}
                   tick={chartAxis.tick}
                   width={mobile ? 40 : 55}
                 />
+                {hasVolume && (
+                  <YAxis
+                    yAxisId="vol"
+                    orientation="right"
+                    domain={['auto', 'auto']}
+                    tickFormatter={(v) => formatCompact(v)}
+                    stroke={chartAxis.stroke}
+                    tick={chartAxis.tickSecondary}
+                    width={mobile ? 40 : 55}
+                  />
+                )}
                 <Tooltip
                                     {...chartTooltip}
                   {...pinLiquidity.tooltipActive}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  formatter={(_val: any, key: any) => {
-                    // key is "uniswap_v3_pct" — extract raw value from the same data point
-                    const rawName = (key as string).replace(/_pct$/, '');
-                    return [null, formatDexName(rawName)]; // placeholder, custom content handles it
-                  }}
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   content={({ active, payload, label }: any) => {
                     if (!active || !payload?.length) return pinLiquidity.wrap(null);
+                    const row = payload[0]?.payload;
+                    if (!row) return pinLiquidity.wrap(null);
                     return pinLiquidity.wrap(
                       <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                         <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
                         {dexNames.map((name, i) => {
-                          const raw = payload[0]?.payload?.[name];
-                          const pct = payload[0]?.payload?.[`${name}_pct`];
+                          const raw = row[name];
+                          const pct = row[`${name}_pct`];
                           if (raw == null) return null;
+                          const volDelta = row[`${name}_volDelta`];
+                          const fee = row[`${name}_fee`];
+                          const active = row[`${name}_active`];
                           return (
-                            <div key={name} className="text-xs" style={{ color: getColor(name, i) }}>
-                              {formatDexName(name)}: ${Number(raw).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                              <span className="text-gray-500 ml-1">({pct > 0 ? '+' : ''}{pct?.toFixed(2)}%)</span>
+                            <div key={name} className="mb-0.5">
+                              <div className="text-xs" style={{ color: getColor(name, i) }}>
+                                {formatDexName(name)}: ${Number(raw).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                <span className="text-gray-500 ml-1">({pct > 0 ? '+' : ''}{pct?.toFixed(2)}%)</span>
+                                {volDelta != null && <span className="text-gray-500 ml-1">| Vol: {formatCompact(volDelta)}</span>}
+                                {fee != null && <span className="text-gray-500 ml-1">| Fee: {formatFeeTier(fee)}</span>}
+                              </div>
+                              {active != null && (
+                                <div className="text-[10px] text-gray-600 pl-2">Active liq: {Number(active).toLocaleString()}</div>
+                              )}
                             </div>
                           );
                         })}
+                        {row.vol_total != null && (
+                          <div className="text-xs border-t border-white/10 mt-1 pt-1" style={{ color: chartColors.tertiary }}>
+                            Total interval volume: {formatCompact(row.vol_total)}
+                          </div>
+                        )}
                       </div>
                     );
                   }}
                 />
                 {dexNames.map((name, i) => (
-                  <Line key={name} type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
+                  <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
+                {hasVolume && (
+                  <Line yAxisId="vol" type="monotone" dataKey="vol_total" stroke={chartColors.tertiary} strokeWidth={1.5} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
+                )}
               </ComposedChart>
             </ResponsiveContainer>
             </div>

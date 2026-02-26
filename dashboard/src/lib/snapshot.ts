@@ -9,7 +9,6 @@ import {
   getOptionsDistribution,
   getAvgCallPremium7d,
   getOnchainWithRawData,
-  getOptionsMarketQuality,
 } from './db';
 import { buildCorrelationAnalysis } from './correlation';
 
@@ -100,20 +99,6 @@ export function buildMarketSnapshot() {
           return rows.length > 0 ? rows[0].avg_premium : null;
         } catch { return null; }
       })(),
-      market_quality: (() => {
-        try {
-          const since1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-          const rows = getOptionsMarketQuality(since1h);
-          if (rows.length === 0) return null;
-          const last = rows[rows.length - 1];
-          return {
-            spread_pct: last.spread != null ? +(last.spread * 100).toFixed(2) : null,
-            depth_eth: last.depth != null ? +last.depth.toFixed(2) : null,
-            open_interest: last.oi != null ? Math.round(last.oi) : null,
-            implied_vol_pct: last.iv != null ? +(last.iv * 100).toFixed(1) : null,
-          };
-        } catch { return null; }
-      })(),
     },
 
     onchain_metrics: {
@@ -129,15 +114,26 @@ export function buildMarketSnapshot() {
           const dexes = raw?.dexLiquidity?.dexes;
           if (!dexes) return null;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return Object.entries(dexes).map(([name, dex]: [string, any]) => ({
-            dex: name,
-            total_liquidity: dex.totalLiquidity ?? null,
-            pool_count: dex.pools?.length ?? null,
-            top_pool: dex.pools?.[0] ? {
-              pair: dex.pools[0].pair || dex.pools[0].name || null,
-              liquidity: dex.pools[0].liquidity ?? dex.pools[0].totalLiquidity ?? null,
-            } : null,
-          }));
+          return Object.entries(dexes).map(([name, dex]: [string, any]) => {
+            const pools = dex.poolDetails ?? dex.pools ?? [];
+            const topPool = pools[0] ?? null;
+            return {
+              dex: name,
+              total_liquidity: dex.totalLiquidity ?? null,
+              total_volume_usd: dex.totalVolume ?? null,
+              total_tx_count: dex.totalTxCount ?? null,
+              pool_count: pools.length || null,
+              top_pool: topPool ? {
+                pair: topPool.token0?.symbol && topPool.token1?.symbol
+                  ? `${topPool.token0.symbol}/${topPool.token1.symbol}`
+                  : topPool.pair || topPool.name || null,
+                liquidity: topPool.liquidity ?? topPool.liquidityUSD ?? topPool.totalLiquidity ?? null,
+                volume_usd: topPool.volumeUSD ?? null,
+                fee_tier_bps: topPool.feeTier ?? null,
+                active_liquidity: topPool.activeLiquidity ?? null,
+              } : null,
+            };
+          });
         } catch { return null; }
       })(),
     },
