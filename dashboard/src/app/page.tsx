@@ -7,7 +7,7 @@ import { formatUSD, momentumColor, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
 import {
-  ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip,
+  ComposedChart, Line, Bar, Scatter, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
 } from 'recharts';
 
@@ -980,11 +980,7 @@ export default function OverviewPage() {
               out[`${name}_pct`] = ((d[name] - baselines[name]) / baselines[name]) * 100;
               out[name] = d[name]; // keep raw for tooltip
             }
-            // Raw cumulative volume for chart line
-            if (d[`${name}_vol`] != null) {
-              out[`${name}_volRaw`] = d[`${name}_vol`];
-            }
-            // Pass through metadata fields for tooltip
+            // Pass through metadata fields for tooltip and volume bars
             for (const suffix of ['_vol', '_volDelta', '_active', '_fee', '_txCount']) {
               if (d[`${name}${suffix}`] != null) out[`${name}${suffix}`] = d[`${name}${suffix}`];
             }
@@ -1004,7 +1000,7 @@ export default function OverviewPage() {
                 ))}
                 {hasVolume && volDexes.map((name, i) => (
                   <span key={`${name}_vol`} className="flex items-center gap-1">
-                    <span className="w-3 h-0.5 inline-block" style={{ background: getColor(name, i), opacity: 0.4 }} /> {formatDexName(name)} Vol
+                    <span className="w-2 h-2 inline-block rounded-sm" style={{ background: getColor(name, i), opacity: 0.3 }} /> {formatDexName(name)} Vol
                   </span>
                 ))}
               </div>
@@ -1037,7 +1033,7 @@ export default function OverviewPage() {
                           const raw = row[name];
                           const pct = row[`${name}_pct`];
                           if (raw == null) return null;
-                          const vol = row[`${name}_vol`];
+                          const volDelta = row[`${name}_volDelta`];
                           const fee = row[`${name}_fee`];
                           const active = row[`${name}_active`];
                           return (
@@ -1045,7 +1041,7 @@ export default function OverviewPage() {
                               <div className="text-xs" style={{ color: getColor(name, i) }}>
                                 {formatDexName(name)}: ${Number(raw).toLocaleString(undefined, { maximumFractionDigits: 0 })}
                                 <span className="text-gray-500 ml-1">({pct > 0 ? '+' : ''}{pct?.toFixed(2)}%)</span>
-                                {vol != null && <span className="text-gray-500 ml-1">| Vol: {formatCompact(vol)}</span>}
+                                {volDelta != null && volDelta > 0 && <span className="text-gray-500 ml-1">| Vol: {formatCompact(volDelta)}</span>}
                                 {fee != null && <span className="text-gray-500 ml-1">| Fee: {formatFeeTier(fee)}</span>}
                               </div>
                               {active != null && (
@@ -1062,7 +1058,7 @@ export default function OverviewPage() {
                   <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
                 {hasVolume && volDexes.map((name, i) => (
-                  <Line key={`${name}_vol`} yAxisId="vol" type="monotone" dataKey={`${name}_volRaw`} stroke={getColor(name, i)} strokeWidth={1} strokeDasharray="4 3" strokeOpacity={0.5} dot={false} connectNulls isAnimationActive={false} />
+                  <Bar key={`${name}_vol`} yAxisId="vol" dataKey={`${name}_volDelta`} fill={getColor(name, i)} fillOpacity={0.25} isAnimationActive={false} />
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
