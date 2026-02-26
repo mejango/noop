@@ -657,16 +657,16 @@ export default function OverviewPage() {
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
                       <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
-                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}</div>
+                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}{pd ? <span className="text-xs text-gray-400 ml-2">Ask {Number(pd.price).toFixed(4)} ETH</span> : null}</div>
                       {pd && (
                         <div className="text-xs text-gray-500 pl-2 mb-0.5">
-                          Strike ${Number(pd.strike).toFixed(0)} | Delta {Number(pd.delta).toFixed(3)} | DTE {pd.dte ?? 'N/A'} | Ask {Number(pd.price).toFixed(4)}
+                          Strike ${Number(pd.strike).toFixed(0)} | Delta {Number(pd.delta).toFixed(3)} | DTE {pd.dte ?? 'N/A'}
                         </div>
                       )}
-                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}</div>
+                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}{cd ? <span className="text-xs text-gray-400 ml-2">Bid {Number(cd.price).toFixed(4)} ETH</span> : null}</div>
                       {cd && (
                         <div className="text-xs text-gray-500 pl-2 mb-0.5">
-                          Strike ${Number(cd.strike).toFixed(0)} | Delta {Number(cd.delta).toFixed(3)} | DTE {cd.dte ?? 'N/A'} | Bid {Number(cd.price).toFixed(4)}
+                          Strike ${Number(cd.strike).toFixed(0)} | Delta {Number(cd.delta).toFixed(3)} | DTE {cd.dte ?? 'N/A'}
                         </div>
                       )}
                       <div className="border-t border-white/10 mt-1.5 pt-1.5 text-xs text-gray-500">
