@@ -704,7 +704,7 @@ export default function OverviewPage() {
             const rect = barRef.current.getBoundingClientRect();
             const cellFrac = (hoverIdx + 0.5) / data.length;
             tipX = rect.left + rect.width * cellFrac;
-            tipY = rect.bottom + 6;
+            tipY = rect.top - 6;
           }
 
           return (
@@ -740,7 +740,7 @@ export default function OverviewPage() {
               {hovered && (
                 <div
                   className="fixed z-50 pointer-events-none"
-                  style={{ top: tipY, left: tipX, transform: 'translateX(-50%)' }}
+                  style={{ top: tipY, left: tipX, transform: 'translate(-50%, -100%)' }}
                 >
                   <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                     <div className="text-gray-400 mb-1">{new Date(hovered.ts).toLocaleString()}</div>
