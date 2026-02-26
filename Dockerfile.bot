@@ -17,4 +17,4 @@ COPY script.js ./
 ENV DATA_DIR=/data
 ENV NODE_ENV=production
 
-CMD ["node", "bot/index.js"]
+CMD ["sh", "-c", "node bot/backfill-hourly.js && node bot/index.js"]
