@@ -279,6 +279,24 @@ function prepareAll(d: Database.Database) {
     `),
 
     getBotState: d.prepare('SELECT * FROM bot_state WHERE id = 1'),
+
+    // ─── Hourly Rollup Queries ──────────────────────────────────────────
+    getSpotPricesHourlyRollup: d.prepare(`
+      SELECT hour as timestamp, open as price, high, low, close,
+        avg_price, short_momentum as short_momentum_main,
+        medium_momentum as medium_momentum_main
+      FROM spot_prices_hourly WHERE hour > ? ORDER BY hour ASC
+    `),
+
+    getBestOptionsHourlyRollup: d.prepare(`
+      SELECT hour as timestamp, best_put_dv as best_put_value, best_call_dv as best_call_value
+      FROM options_hourly WHERE hour > ? ORDER BY hour ASC
+    `),
+
+    getLiquidityHourlyRollup: d.prepare(`
+      SELECT hour as timestamp, dex, tvl, volume, tx_count
+      FROM onchain_hourly WHERE hour > ? ORDER BY hour ASC
+    `),
   };
 }
 
@@ -449,6 +467,41 @@ export function getOpenInterestHourly(since: string) {
 
 export function getImpliedVolHourly(since: string) {
   return getStmts().getImpliedVolHourly.all(since) as { hour: string; value: number | null }[];
+}
+
+// ─── Hourly Rollup Public Functions ─────────────────────────────────────────
+
+export function getSpotPricesHourly_rollup(since: string) {
+  return getStmts().getSpotPricesHourlyRollup.all(since) as {
+    timestamp: string; price: number; high: number; low: number; close: number;
+    avg_price: number; short_momentum_main: string | null; medium_momentum_main: string | null;
+  }[];
+}
+
+export function getBestOptionsHourly_rollup(since: string) {
+  return getStmts().getBestOptionsHourlyRollup.all(since) as {
+    timestamp: string; best_put_value: number | null; best_call_value: number | null;
+  }[];
+}
+
+export function getLiquidityHourly_rollup(since: string) {
+  const rows = getStmts().getLiquidityHourlyRollup.all(since) as {
+    timestamp: string; dex: string; tvl: number; volume: number; tx_count: number;
+  }[];
+
+  // Pivot dex rows into { timestamp, dexName: tvl, dexName_vol: volume, ... } shape
+  const byHour = new Map<string, Record<string, number | string>>();
+  for (const row of rows) {
+    if (!byHour.has(row.timestamp)) {
+      byHour.set(row.timestamp, { timestamp: row.timestamp });
+    }
+    const entry = byHour.get(row.timestamp)!;
+    if (row.tvl != null && !isNaN(row.tvl)) entry[row.dex] = row.tvl;
+    if (row.volume != null && !isNaN(row.volume)) entry[`${row.dex}_vol`] = row.volume;
+    if (row.tx_count != null && !isNaN(row.tx_count)) entry[`${row.dex}_txCount`] = row.tx_count;
+  }
+
+  return Array.from(byHour.values()).filter(r => Object.keys(r).length > 1);
 }
 
 export function getBotBudget() {

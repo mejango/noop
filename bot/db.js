@@ -82,6 +82,31 @@ db.exec(`
     ON options_snapshots(timestamp, option_type);
   CREATE INDEX IF NOT EXISTS idx_options_snapshots_ts_delta
     ON options_snapshots(timestamp, delta);
+
+  -- Hourly rollup tables (Phase 1)
+  CREATE TABLE IF NOT EXISTS spot_prices_hourly (
+    hour TEXT PRIMARY KEY,
+    open REAL, high REAL, low REAL, close REAL,
+    avg_price REAL,
+    short_momentum TEXT, medium_momentum TEXT,
+    count INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS options_hourly (
+    hour TEXT PRIMARY KEY,
+    best_put_dv REAL, best_call_dv REAL,
+    avg_spread REAL, avg_depth REAL, avg_iv REAL,
+    total_oi REAL, count INTEGER
+  );
+
+  CREATE TABLE IF NOT EXISTS onchain_hourly (
+    hour TEXT NOT NULL,
+    dex TEXT NOT NULL,
+    tvl REAL, volume REAL, tx_count INTEGER,
+    avg_magnitude REAL, direction TEXT,
+    PRIMARY KEY (hour, dex)
+  );
+  CREATE INDEX IF NOT EXISTS idx_onchain_hourly_hour ON onchain_hourly(hour);
 `);
 
 // Idempotent migrations for new columns
@@ -369,6 +394,44 @@ const stmts = {
     SELECT * FROM orders WHERE timestamp > @since ORDER BY timestamp DESC LIMIT @limit
   `),
 
+  // Hourly rollup upserts
+  upsertSpotHourly: db.prepare(`
+    INSERT INTO spot_prices_hourly (hour, open, high, low, close, avg_price, short_momentum, medium_momentum, count)
+    VALUES (@hour, @price, @price, @price, @price, @price, @short_momentum, @medium_momentum, 1)
+    ON CONFLICT(hour) DO UPDATE SET
+      high = MAX(spot_prices_hourly.high, @price),
+      low = MIN(spot_prices_hourly.low, @price),
+      close = @price,
+      avg_price = (spot_prices_hourly.avg_price * spot_prices_hourly.count + @price) / (spot_prices_hourly.count + 1),
+      short_momentum = @short_momentum,
+      medium_momentum = @medium_momentum,
+      count = spot_prices_hourly.count + 1
+  `),
+
+  upsertOptionsHourly: db.prepare(`
+    INSERT INTO options_hourly (hour, best_put_dv, best_call_dv, avg_spread, avg_depth, avg_iv, total_oi, count)
+    VALUES (@hour, @best_put_dv, @best_call_dv, @avg_spread, @avg_depth, @avg_iv, @total_oi, 1)
+    ON CONFLICT(hour) DO UPDATE SET
+      best_put_dv = MAX(options_hourly.best_put_dv, @best_put_dv),
+      best_call_dv = MAX(options_hourly.best_call_dv, @best_call_dv),
+      avg_spread = (options_hourly.avg_spread * options_hourly.count + @avg_spread) / (options_hourly.count + 1),
+      avg_depth = (options_hourly.avg_depth * options_hourly.count + @avg_depth) / (options_hourly.count + 1),
+      avg_iv = (options_hourly.avg_iv * options_hourly.count + @avg_iv) / (options_hourly.count + 1),
+      total_oi = @total_oi,
+      count = options_hourly.count + 1
+  `),
+
+  upsertOnchainHourly: db.prepare(`
+    INSERT INTO onchain_hourly (hour, dex, tvl, volume, tx_count, avg_magnitude, direction)
+    VALUES (@hour, @dex, @tvl, @volume, @tx_count, @avg_magnitude, @direction)
+    ON CONFLICT(hour, dex) DO UPDATE SET
+      tvl = @tvl,
+      volume = @volume,
+      tx_count = @tx_count,
+      avg_magnitude = (onchain_hourly.avg_magnitude + @avg_magnitude) / 2,
+      direction = @direction
+  `),
+
   // 7-day average premium for call selling elevation check
   getAvgCallPremium7d: db.prepare(`
     SELECT AVG(bid_price) as avg_premium
@@ -387,8 +450,9 @@ const insertSpotPrice = (spotPrice, momentumResult, botData, timestamp) => {
   const medMomentum = typeof momentumResult.mediumTermMomentum === 'object'
     ? momentumResult.mediumTermMomentum : { main: momentumResult.mediumTermMomentum };
 
-  return stmts.insertSpotPrice.run({
-    timestamp: timestamp || new Date().toISOString(),
+  const ts = timestamp || new Date().toISOString();
+  const result = stmts.insertSpotPrice.run({
+    timestamp: ts,
     price: spotPrice,
     short_momentum_main: shortMomentum.main || null,
     short_momentum_derivative: shortMomentum.derivative || null,
@@ -399,9 +463,22 @@ const insertSpotPrice = (spotPrice, momentumResult, botData, timestamp) => {
     seven_day_high: botData.shortTermMomentum?.sevenDayHigh || null,
     seven_day_low: botData.shortTermMomentum?.sevenDayLow || null,
   });
+
+  // Upsert into hourly rollup
+  try {
+    stmts.upsertSpotHourly.run({
+      hour: toHourKey(ts),
+      price: spotPrice,
+      short_momentum: shortMomentum.main || null,
+      medium_momentum: medMomentum.main || null,
+    });
+  } catch (e) { /* rollup failure should not block raw insert */ }
+
+  return result;
 };
 
 const toNum = (v) => v != null && v !== '' ? Number(v) : null;
+const toHourKey = (ts) => ts.slice(0, 13) + ':00:00Z';
 
 const insertOptionsSnapshotBatch = (options, timestamp) => {
   const insert = db.transaction((opts) => {
@@ -427,13 +504,74 @@ const insertOptionsSnapshotBatch = (options, timestamp) => {
     }
   });
   insert(options);
+
+  // Upsert hourly rollup from batch aggregates
+  try {
+    const hour = toHourKey(timestamp);
+    let bestPutDv = 0, bestCallDv = 0;
+    let spreadSum = 0, spreadCount = 0;
+    let depthSum = 0, depthCount = 0;
+    let ivSum = 0, ivCount = 0;
+    let totalOi = 0;
+
+    for (const opt of options) {
+      const delta = toNum(opt.details?.delta);
+      const askDv = toNum(opt.details?.askDeltaValue);
+      const bidDv = toNum(opt.details?.bidDeltaValue);
+      const askPrice = toNum(opt.details?.askPrice);
+      const bidPrice = toNum(opt.details?.bidPrice);
+      const markPrice = toNum(opt.details?.markPrice);
+      const askAmount = toNum(opt.details?.askAmount);
+      const bidAmount = toNum(opt.details?.bidAmount);
+      const iv = toNum(opt.details?.impliedVol);
+      const oi = toNum(opt.details?.openInterest);
+      const isPut = (opt.option_details?.option_type === 'P') || opt.instrument_name?.includes('-P');
+      const isCall = (opt.option_details?.option_type === 'C') || opt.instrument_name?.includes('-C');
+
+      // Best put DV (delta -0.02 to -0.12)
+      if (isPut && delta != null && delta <= -0.02 && delta >= -0.12 && askDv != null && askDv > bestPutDv) {
+        bestPutDv = askDv;
+      }
+      // Best call DV (delta 0.04 to 0.12)
+      if (isCall && delta != null && delta >= 0.04 && delta <= 0.12 && bidDv != null && bidDv > bestCallDv) {
+        bestCallDv = bidDv;
+      }
+      // Spread (within bot's delta range)
+      if (delta != null && ((delta <= -0.02 && delta >= -0.12) || (delta >= 0.04 && delta <= 0.12))) {
+        if (askPrice > 0 && bidPrice > 0 && markPrice > 0) {
+          spreadSum += (askPrice - bidPrice) / markPrice;
+          spreadCount++;
+        }
+        if (askAmount != null && bidAmount != null) {
+          depthSum += askAmount + bidAmount;
+          depthCount++;
+        }
+        if (iv != null) {
+          ivSum += iv;
+          ivCount++;
+        }
+      }
+      if (oi != null && oi > 0) totalOi += oi;
+    }
+
+    stmts.upsertOptionsHourly.run({
+      hour,
+      best_put_dv: bestPutDv,
+      best_call_dv: bestCallDv,
+      avg_spread: spreadCount > 0 ? spreadSum / spreadCount : 0,
+      avg_depth: depthCount > 0 ? depthSum / depthCount : 0,
+      avg_iv: ivCount > 0 ? ivSum / ivCount : 0,
+      total_oi: totalOi,
+    });
+  } catch (e) { /* rollup failure should not block raw insert */ }
 };
 
 const insertOnchainData = (analysis) => {
   const flow = analysis.dexLiquidity?.flowAnalysis || {};
+  const ts = analysis.timestamp || new Date().toISOString();
 
   stmts.insertOnchainData.run({
-    timestamp: analysis.timestamp || new Date().toISOString(),
+    timestamp: ts,
     spot_price: analysis.spotPrice || null,
     liquidity_flow_direction: flow.direction || null,
     liquidity_flow_magnitude: toNum(flow.magnitude),
@@ -442,6 +580,26 @@ const insertOnchainData = (analysis) => {
     exhaustion_alert_level: null,
     raw_data: JSON.stringify(analysis),
   });
+
+  // Upsert per-DEX hourly rollup
+  try {
+    const hour = toHourKey(ts);
+    const dexes = analysis.dexLiquidity?.dexes;
+    if (dexes) {
+      for (const [name, dex] of Object.entries(dexes)) {
+        if (dex.error) continue;
+        stmts.upsertOnchainHourly.run({
+          hour,
+          dex: name,
+          tvl: toNum(dex.totalLiquidity) || 0,
+          volume: toNum(dex.totalVolume) || 0,
+          tx_count: toNum(dex.totalTxCount) || 0,
+          avg_magnitude: toNum(flow.magnitude) || 0,
+          direction: flow.direction || null,
+        });
+      }
+    }
+  } catch (e) { /* rollup failure should not block raw insert */ }
 };
 
 const insertSignal = (signalType, details, actedOn = false) => {

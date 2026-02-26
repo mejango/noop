@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap } from '@/lib/db';
+import {
+  getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap,
+  getSpotPricesHourly_rollup, getBestOptionsHourly_rollup, getLiquidityHourly_rollup,
+} from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
+
+const HOURLY_RANGES = new Set(['24h', '3d', '6.2d', '7d', '30d', 'all']);
 
 export function GET(request: NextRequest) {
   try {
@@ -18,14 +23,21 @@ export function GET(request: NextRequest) {
     };
     const ms = rangeMs[range] || rangeMs['7d'];
     const since = new Date(Date.now() - ms).toISOString();
+    const bestScores = getBestScores();
+
+    if (HOURLY_RANGES.has(range)) {
+      const prices = getSpotPricesHourly_rollup(since);
+      const options = getBestOptionsHourly_rollup(since);
+      const liquidity = getLiquidityHourly_rollup(since);
+      return NextResponse.json({ prices, options, liquidity, bestScores, optionsHeatmap: [], tier: 'hourly' });
+    }
 
     const prices = getSpotPrices(since, 5000);
     const options = getBestOptionsOverTime(since);
     const liquidity = getLiquidityOverTime(since);
-    const bestScores = getBestScores();
     const optionsHeatmap = getOptionsHeatmap(since);
 
-    return NextResponse.json({ prices, options, liquidity, bestScores, optionsHeatmap });
+    return NextResponse.json({ prices, options, liquidity, bestScores, optionsHeatmap, tier: 'raw' });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });

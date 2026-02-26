@@ -172,6 +172,7 @@ interface ChartData {
   liquidity: LiquidityPoint[];
   bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
+  tier?: string;
 }
 
 const emptyBudget: Budget = {
@@ -256,6 +257,7 @@ export default function OverviewPage() {
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart, 90_000);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
+  const isHourly = chart.tier === 'hourly';
   const pinPrice = usePinnableTooltip();
   const pinLiquidity = usePinnableTooltip();
   const pinPut = usePinnableTooltip();
@@ -421,6 +423,7 @@ export default function OverviewPage() {
 
   // Heatmap data: split by option type, calculate % OTM and normalize premium
   const { callHeatmap, putHeatmap } = useMemo(() => {
+    if (isHourly) return { callHeatmap: [], putHeatmap: [] };
     const calls: HeatmapDot[] = [];
     const puts: HeatmapDot[] = [];
 
@@ -522,10 +525,11 @@ export default function OverviewPage() {
     normalize(puts);
 
     return { callHeatmap: calls, putHeatmap: puts };
-  }, [chart.optionsHeatmap, merged]);
+  }, [chart.optionsHeatmap, merged, isHourly]);
 
   // Market quality dots: filter heatmap dots to bot's delta range and normalize spread/depth
   const { putMQ, callMQ } = useMemo(() => {
+    if (isHourly) return { putMQ: [], callMQ: [] };
     const buildMQ = (dots: HeatmapDot[]): MQDot[] => {
       // Only include dots with spread data and within bot's delta range
       const eligible = dots.filter(d =>
@@ -552,7 +556,7 @@ export default function OverviewPage() {
       }));
     };
     return { putMQ: buildMQ(putHeatmap), callMQ: buildMQ(callHeatmap) };
-  }, [putHeatmap, callHeatmap]);
+  }, [putHeatmap, callHeatmap, isHourly]);
 
   // Shared X-axis domain from main chart's time range
   const xDomain = useMemo(() =>
@@ -1370,6 +1374,13 @@ export default function OverviewPage() {
           </ResponsiveContainer>
           </div>
         </Card>
+      )}
+
+      {/* Hourly tier info note */}
+      {isHourly && (
+        <div className="text-xs text-gray-500 text-center py-2">
+          Instrument-level heatmaps hidden at hourly resolution. Zoom to 6h or less for detail.
+        </div>
       )}
 
       {/* Tick Log Table */}
