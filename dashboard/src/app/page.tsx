@@ -558,9 +558,12 @@ export default function OverviewPage() {
   }, [putHeatmap, callHeatmap]);
 
   // Shared X-axis domain from main chart's time range
-  const xDomain = merged.length > 0
-    ? [merged[0].ts, merged[merged.length - 1].ts]
-    : [0, 1];
+  const xDomain = useMemo(() =>
+    merged.length > 0
+      ? [merged[0].ts, merged[merged.length - 1].ts]
+      : [0, 1],
+    [merged]
+  );
 
   // Filter sub-chart data to match the selected time range
   const filteredLiquidity = useMemo(() =>
