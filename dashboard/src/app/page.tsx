@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, momentumColor, dteDays } from '@/lib/format';
@@ -10,6 +10,22 @@ import {
   ComposedChart, Line, Scatter, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
 } from 'recharts';
+
+/** Wraps a recharts chart: hover shows tooltip normally, click pins it, next click anywhere unpins */
+function PinnableChart({ children }: { children: ReactNode }) {
+  const [pinned, setPinned] = useState(false);
+  return (
+    <div className="relative" onClick={() => { if (!pinned) setPinned(true); }}>
+      {pinned && createPortal(
+        <div className="fixed inset-0" style={{ zIndex: 50 }} onClick={(e) => { e.stopPropagation(); setPinned(false); }} />,
+        document.body
+      )}
+      <div style={pinned ? { pointerEvents: 'none' } : undefined}>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 interface Budget {
   putTotalBudget: number;
@@ -600,6 +616,7 @@ export default function OverviewPage() {
         ) : merged.length === 0 ? (
           <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
+          <PinnableChart>
           <ResponsiveContainer width="100%" height={mobile ? 300 : 500}>
             <ComposedChart data={merged} margin={margins}>
               <XAxis
@@ -623,8 +640,7 @@ export default function OverviewPage() {
               <YAxis yAxisId="putVal" orientation="right" hide domain={['auto', 'auto']} />
               <YAxis yAxisId="callVal" orientation="right" hide domain={['auto', 'auto']} />
               <Tooltip
-                trigger="click"
-                {...chartTooltip}
+                                {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload, label }: any) => {
                   if (!active || !payload?.length) return null;
@@ -688,6 +704,7 @@ export default function OverviewPage() {
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
+          </PinnableChart>
         )}
       </Card>
 
@@ -696,13 +713,20 @@ export default function OverviewPage() {
         const MomentumTooltipBar = ({ data }: { data: typeof momentumData }) => {
           // eslint-disable-next-line react-hooks/rules-of-hooks
           const [hover, setHover] = useState<{ idx: number; x: number; y: number } | null>(null);
-          const hovered = hover ? data[hover.idx] : null;
+          // eslint-disable-next-line react-hooks/rules-of-hooks
+          const [pinned, setPinned] = useState<{ idx: number; x: number; y: number } | null>(null);
+          const active = pinned ?? hover;
+          const hovered = active ? data[active.idx] : null;
 
           const onCellEnter = (i: number, e: React.MouseEvent) => {
-            setHover({ idx: i, x: e.clientX, y: e.clientY });
+            if (!pinned) setHover({ idx: i, x: e.clientX, y: e.clientY });
           };
           const onCellMove = (i: number, e: React.MouseEvent) => {
-            setHover({ idx: i, x: e.clientX, y: e.clientY });
+            if (!pinned) setHover({ idx: i, x: e.clientX, y: e.clientY });
+          };
+          const onCellClick = (i: number, e: React.MouseEvent) => {
+            e.stopPropagation();
+            if (pinned) { setPinned(null); } else { setPinned({ idx: i, x: e.clientX, y: e.clientY }); }
           };
 
           const yAxisWidth = mobile ? 35 : 55;
@@ -720,7 +744,8 @@ export default function OverviewPage() {
                       style={{ background: momentumBarColorMedium(d.momentum, d.mediumDerivative) }}
                       onMouseEnter={(e) => onCellEnter(i, e)}
                       onMouseMove={(e) => onCellMove(i, e)}
-                      onMouseLeave={() => setHover(null)}
+                      onMouseLeave={() => { if (!pinned) setHover(null); }}
+                      onClick={(e) => onCellClick(i, e)}
                     />
                   ))}
                 </div>
@@ -735,15 +760,20 @@ export default function OverviewPage() {
                       style={{ background: momentumBarColorShort(d.shortMomentum, d.shortDerivative) }}
                       onMouseEnter={(e) => onCellEnter(i, e)}
                       onMouseMove={(e) => onCellMove(i, e)}
-                      onMouseLeave={() => setHover(null)}
+                      onMouseLeave={() => { if (!pinned) setHover(null); }}
+                      onClick={(e) => onCellClick(i, e)}
                     />
                   ))}
                 </div>
               </div>
-              {hovered && hover && createPortal(
+              {pinned && createPortal(
+                <div className="fixed inset-0" style={{ zIndex: 9998 }} onClick={() => setPinned(null)} />,
+                document.body
+              )}
+              {hovered && active && createPortal(
                 <div
                   className="fixed pointer-events-none"
-                  style={{ top: hover.y - 12, left: hover.x, transform: 'translate(-50%, -100%)', zIndex: 9999 }}
+                  style={{ top: active.y - 12, left: active.x, transform: 'translate(-50%, -100%)', zIndex: 9999 }}
                 >
                   <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                     <div className="text-gray-400 mb-1">{new Date(hovered.ts).toLocaleString()}</div>
@@ -838,6 +868,7 @@ export default function OverviewPage() {
                 ))}
               </div>
             </div>
+            <PinnableChart>
             <ResponsiveContainer width="100%" height={200}>
               <ComposedChart data={normalizedData} margin={margins}>
                 <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
@@ -849,8 +880,7 @@ export default function OverviewPage() {
                   width={mobile ? 40 : 55}
                 />
                 <Tooltip
-                  trigger="click"
-                  {...chartTooltip}
+                                    {...chartTooltip}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   labelFormatter={(ts: any) => new Date(ts as number).toLocaleString()}
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -885,6 +915,7 @@ export default function OverviewPage() {
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
+            </PinnableChart>
           </Card>
         );
       })()}
@@ -899,6 +930,7 @@ export default function OverviewPage() {
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> worse buy</span>
             </div>
           </div>
+          <PinnableChart>
           <ResponsiveContainer width="100%" height={360}>
             <ScatterChart margin={margins}>
               <XAxis
@@ -919,8 +951,7 @@ export default function OverviewPage() {
                 width={mobile ? 35 : 55}
               />
               <Tooltip
-                trigger="click"
-                {...chartTooltip}
+                                {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload }: any) => {
                   if (!active || !payload?.[0]?.payload) return null;
@@ -949,6 +980,7 @@ export default function OverviewPage() {
               />
             </ScatterChart>
           </ResponsiveContainer>
+          </PinnableChart>
         </Card>
       )}
 
@@ -962,6 +994,7 @@ export default function OverviewPage() {
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> worse sell</span>
             </div>
           </div>
+          <PinnableChart>
           <ResponsiveContainer width="100%" height={360}>
             <ScatterChart margin={margins}>
               <XAxis
@@ -982,8 +1015,7 @@ export default function OverviewPage() {
                 width={mobile ? 35 : 55}
               />
               <Tooltip
-                trigger="click"
-                {...chartTooltip}
+                                {...chartTooltip}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload }: any) => {
                   if (!active || !payload?.[0]?.payload) return null;
@@ -1012,6 +1044,7 @@ export default function OverviewPage() {
               />
             </ScatterChart>
           </ResponsiveContainer>
+          </PinnableChart>
         </Card>
       )}
 
