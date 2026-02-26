@@ -520,7 +520,7 @@ export default function OverviewPage() {
                     <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                       <div className="text-gray-400 mb-1">Best PUT ({chart.bestScores.windowDays}d)</div>
                       <div>Delta: <span className="text-white">{chart.bestScores.bestPutDetail.delta != null ? Number(chart.bestScores.bestPutDetail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">{chart.bestScores.bestPutDetail.price != null ? Number(chart.bestScores.bestPutDetail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">${chart.bestScores.bestPutDetail.price != null ? Number(chart.bestScores.bestPutDetail.price).toFixed(6) : 'N/A'}</span></div>
                       <div>Strike: <span className="text-white">{chart.bestScores.bestPutDetail.strike != null ? `$${Number(chart.bestScores.bestPutDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
                       <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestPutDetail.expiry) ?? 'N/A'}</span></div>
                       {chart.bestScores.bestPutDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestPutDetail.instrument}</div>}
@@ -536,7 +536,7 @@ export default function OverviewPage() {
                     <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                       <div className="text-gray-400 mb-1">Current best PUT</div>
                       <div>Delta: <span className="text-white">{latestTick.best_put_detail.delta != null ? Number(latestTick.best_put_detail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">{latestTick.best_put_detail.price != null ? Number(latestTick.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">${latestTick.best_put_detail.price != null ? Number(latestTick.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
                       <div>Strike: <span className="text-white">{latestTick.best_put_detail.strike != null ? `$${Number(latestTick.best_put_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
                       <div>DTE: <span className="text-white">{dteDays(latestTick.best_put_detail.expiry) ?? 'N/A'}</span></div>
                       {latestTick.best_put_detail.instrument && <div className="text-gray-400 mt-1">{latestTick.best_put_detail.instrument}</div>}
@@ -554,7 +554,7 @@ export default function OverviewPage() {
                     <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                       <div className="text-gray-400 mb-1">Best CALL ({chart.bestScores.windowDays}d)</div>
                       <div>Delta: <span className="text-white">{chart.bestScores.bestCallDetail.delta != null ? Number(chart.bestScores.bestCallDetail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">{chart.bestScores.bestCallDetail.price != null ? Number(chart.bestScores.bestCallDetail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">${chart.bestScores.bestCallDetail.price != null ? Number(chart.bestScores.bestCallDetail.price).toFixed(6) : 'N/A'}</span></div>
                       <div>Strike: <span className="text-white">{chart.bestScores.bestCallDetail.strike != null ? `$${Number(chart.bestScores.bestCallDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
                       <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestCallDetail.expiry) ?? 'N/A'}</span></div>
                       {chart.bestScores.bestCallDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestCallDetail.instrument}</div>}
@@ -570,7 +570,7 @@ export default function OverviewPage() {
                     <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                       <div className="text-gray-400 mb-1">Current best CALL</div>
                       <div>Delta: <span className="text-white">{latestTick.best_call_detail.delta != null ? Number(latestTick.best_call_detail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">{latestTick.best_call_detail.price != null ? Number(latestTick.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">${latestTick.best_call_detail.price != null ? Number(latestTick.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
                       <div>Strike: <span className="text-white">{latestTick.best_call_detail.strike != null ? `$${Number(latestTick.best_call_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
                       <div>DTE: <span className="text-white">{dteDays(latestTick.best_call_detail.expiry) ?? 'N/A'}</span></div>
                       {latestTick.best_call_detail.instrument && <div className="text-gray-400 mt-1">{latestTick.best_call_detail.instrument}</div>}
@@ -675,13 +675,13 @@ export default function OverviewPage() {
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
                       <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
-                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}{pd ? <span className="text-xs text-gray-400 ml-2">Ask {Number(pd.price).toFixed(4)} ETH</span> : null}</div>
+                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}{pd ? <span className="text-xs text-gray-400 ml-2">Ask ${Number(pd.price).toFixed(4)}</span> : null}</div>
                       {pd && (
                         <div className="text-xs text-gray-500 pl-2 mb-0.5">
                           Strike ${Number(pd.strike).toFixed(0)} | Delta {Number(pd.delta).toFixed(3)} | DTE {pd.dte ?? 'N/A'}
                         </div>
                       )}
-                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}{cd ? <span className="text-xs text-gray-400 ml-2">Bid {Number(cd.price).toFixed(4)} ETH</span> : null}</div>
+                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}{cd ? <span className="text-xs text-gray-400 ml-2">Bid ${Number(cd.price).toFixed(4)}</span> : null}</div>
                       {cd && (
                         <div className="text-xs text-gray-500 pl-2 mb-0.5">
                           Strike ${Number(cd.strike).toFixed(0)} | Delta {Number(cd.delta).toFixed(3)} | DTE {cd.dte ?? 'N/A'}
@@ -984,8 +984,8 @@ export default function OverviewPage() {
                       <div className="text-sm">Value: <span style={{ color: 'rgb(255,160,50)' }}>{d.value != null ? d.value.toFixed(6) : 'N/A'}</span></div>
                       <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
                       {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
-                      <div className="text-sm">Bid: <span className="text-gray-300">{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
-                      <div className="text-sm">Ask: <span style={{ color: 'rgb(255,160,50)' }}>{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Bid: <span className="text-gray-300">{d.bid != null ? `$${d.bid.toFixed(4)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span style={{ color: 'rgb(255,160,50)' }}>{d.ask != null ? `$${d.ask.toFixed(4)}` : 'N/A'}</span></div>
                     </div>
                   );
                 }}
@@ -1046,11 +1046,11 @@ export default function OverviewPage() {
                       <div className="text-xs text-gray-400">{new Date(d.ts).toLocaleString()}</div>
                       <div className="text-sm">Strike: <span className="text-white font-medium">${d.strike.toFixed(0)}</span></div>
                       <div className="text-sm">Delta: <span style={{ color: 'rgb(100,160,255)' }}>{d.delta?.toFixed(3) ?? 'N/A'}</span></div>
-                      <div className="text-sm">Value: <span style={{ color: 'rgb(100,160,255)' }}>{d.value != null ? d.value.toFixed(2) : 'N/A'}</span></div>
+                      <div className="text-sm">Value: <span style={{ color: 'rgb(100,160,255)' }}>{d.value != null ? d.value.toFixed(6) : 'N/A'}</span></div>
                       <div className="text-sm">% OTM: <span className="text-gray-300">{d.pctOtm.toFixed(1)}%</span></div>
                       {d.dte != null && <div className="text-sm">DTE: <span className="text-gray-300">{d.dte}</span></div>}
-                      <div className="text-sm">Bid: <span style={{ color: 'rgb(100,160,255)' }}>{d.bid?.toFixed(4) ?? 'N/A'}</span></div>
-                      <div className="text-sm">Ask: <span className="text-gray-300">{d.ask?.toFixed(4) ?? 'N/A'}</span></div>
+                      <div className="text-sm">Bid: <span style={{ color: 'rgb(100,160,255)' }}>{d.bid != null ? `$${d.bid.toFixed(4)}` : 'N/A'}</span></div>
+                      <div className="text-sm">Ask: <span className="text-gray-300">{d.ask != null ? `$${d.ask.toFixed(4)}` : 'N/A'}</span></div>
                     </div>
                   );
                 }}
@@ -1115,7 +1115,7 @@ export default function OverviewPage() {
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                               <div className="text-gray-400 mb-1">Current best PUT</div>
                               <div>Delta: <span className="text-white">{Number(d.best_put_detail.delta).toFixed(4)}</span></div>
-                              <div>Price: <span className="text-white">{Number(d.best_put_detail.price).toFixed(6)}</span></div>
+                              <div>Price: <span className="text-white">${Number(d.best_put_detail.price).toFixed(6)}</span></div>
                               <div>Strike: <span className="text-white">${Number(d.best_put_detail.strike).toFixed(0)}</span></div>
                               <div>DTE: <span className="text-white">{dteDays(d.best_put_detail.expiry) ?? 'N/A'}</span></div>
                               {d.best_put_detail.instrument && <div className="text-gray-400 mt-1">{d.best_put_detail.instrument}</div>}
@@ -1131,7 +1131,7 @@ export default function OverviewPage() {
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                               <div className="text-gray-400 mb-1">Best PUT ({chart.bestScores.windowDays}d)</div>
                               <div>Delta: <span className="text-white">{Number(chart.bestScores.bestPutDetail.delta).toFixed(4)}</span></div>
-                              <div>Price: <span className="text-white">{Number(chart.bestScores.bestPutDetail.price).toFixed(6)}</span></div>
+                              <div>Price: <span className="text-white">${Number(chart.bestScores.bestPutDetail.price).toFixed(6)}</span></div>
                               <div>Strike: <span className="text-white">${Number(chart.bestScores.bestPutDetail.strike).toFixed(0)}</span></div>
                               <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestPutDetail.expiry) ?? 'N/A'}</span></div>
                               {chart.bestScores.bestPutDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestPutDetail.instrument}</div>}
@@ -1148,7 +1148,7 @@ export default function OverviewPage() {
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                               <div className="text-gray-400 mb-1">Current best CALL</div>
                               <div>Delta: <span className="text-white">{Number(d.best_call_detail.delta).toFixed(4)}</span></div>
-                              <div>Price: <span className="text-white">{Number(d.best_call_detail.price).toFixed(6)}</span></div>
+                              <div>Price: <span className="text-white">${Number(d.best_call_detail.price).toFixed(6)}</span></div>
                               <div>Strike: <span className="text-white">${Number(d.best_call_detail.strike).toFixed(0)}</span></div>
                               <div>DTE: <span className="text-white">{dteDays(d.best_call_detail.expiry) ?? 'N/A'}</span></div>
                               {d.best_call_detail.instrument && <div className="text-gray-400 mt-1">{d.best_call_detail.instrument}</div>}
@@ -1164,7 +1164,7 @@ export default function OverviewPage() {
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                               <div className="text-gray-400 mb-1">Best CALL ({chart.bestScores.windowDays}d)</div>
                               <div>Delta: <span className="text-white">{Number(chart.bestScores.bestCallDetail.delta).toFixed(4)}</span></div>
-                              <div>Price: <span className="text-white">{Number(chart.bestScores.bestCallDetail.price).toFixed(6)}</span></div>
+                              <div>Price: <span className="text-white">${Number(chart.bestScores.bestCallDetail.price).toFixed(6)}</span></div>
                               <div>Strike: <span className="text-white">${Number(chart.bestScores.bestCallDetail.strike).toFixed(0)}</span></div>
                               <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestCallDetail.expiry) ?? 'N/A'}</span></div>
                               {chart.bestScores.bestCallDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestCallDetail.instrument}</div>}
