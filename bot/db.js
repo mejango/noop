@@ -279,14 +279,21 @@ const stmts = {
   `),
 
   getOnchainHourly: db.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           AVG(liquidity_flow_magnitude) as avg_magnitude,
-           (SELECT liquidity_flow_direction FROM onchain_data o2
-            WHERE strftime('%Y-%m-%dT%H:00:00Z', o2.timestamp) = strftime('%Y-%m-%dT%H:00:00Z', onchain_data.timestamp)
-              AND o2.timestamp > @since
-            GROUP BY liquidity_flow_direction
-            ORDER BY COUNT(*) DESC LIMIT 1) as direction
-    FROM onchain_data WHERE timestamp > @since GROUP BY hour ORDER BY hour ASC
+    SELECT hour, avg_magnitude, direction FROM (
+      SELECT
+        strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+        liquidity_flow_direction as direction,
+        AVG(liquidity_flow_magnitude) OVER (PARTITION BY strftime('%Y-%m-%dT%H:00:00Z', timestamp)) as avg_magnitude,
+        ROW_NUMBER() OVER (
+          PARTITION BY strftime('%Y-%m-%dT%H:00:00Z', timestamp)
+          ORDER BY COUNT(*) OVER (
+            PARTITION BY strftime('%Y-%m-%dT%H:00:00Z', timestamp), liquidity_flow_direction
+          ) DESC
+        ) as rn
+      FROM onchain_data
+      WHERE timestamp > @since
+    ) WHERE rn = 1
+    ORDER BY hour ASC
   `),
 
   getBestPutDvHourly: db.prepare(`

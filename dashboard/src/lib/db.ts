@@ -20,67 +20,280 @@ function getDb(): Database.Database {
   return db;
 }
 
+// ─── Prepared Statements (created once, reused) ─────────────────────────────
+
+let _stmts: ReturnType<typeof prepareAll> | null = null;
+
+function getStmts() {
+  if (!_stmts) _stmts = prepareAll(getDb());
+  return _stmts;
+}
+
+function prepareAll(d: Database.Database) {
+  return {
+    getStats: d.prepare(`
+      SELECT price as last_price, timestamp as last_price_time,
+        short_momentum_main as short_momentum, short_momentum_derivative as short_derivative,
+        medium_momentum_main as medium_momentum, medium_momentum_derivative as medium_derivative,
+        three_day_high, three_day_low, seven_day_high, seven_day_low
+      FROM spot_prices ORDER BY timestamp DESC LIMIT 1
+    `),
+
+    getSpotPrices: d.prepare(`
+      SELECT * FROM spot_prices
+      WHERE timestamp > ?
+      ORDER BY timestamp ASC
+      LIMIT ?
+    `),
+
+    getOptionsHeatmap: d.prepare(`
+      SELECT timestamp, option_type, instrument_name, strike, delta, ask_price, bid_price,
+        index_price, expiry, ask_delta_value, bid_delta_value,
+        mark_price, implied_vol, ask_amount, bid_amount
+      FROM options_snapshots
+      WHERE timestamp > ?
+      ORDER BY timestamp ASC
+    `),
+
+    getBestOptionsOverTime: d.prepare(`
+      SELECT timestamp,
+        MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
+          AND delta <= -0.02 AND delta >= -0.12
+          THEN ask_delta_value END) as best_put_value,
+        MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
+          AND delta >= 0.04 AND delta <= 0.12
+          THEN bid_delta_value END) as best_call_value
+      FROM options_snapshots
+      WHERE timestamp > ?
+      GROUP BY timestamp
+      ORDER BY timestamp ASC
+    `),
+
+    getLiquidityRawData: d.prepare(`
+      SELECT timestamp, raw_data
+      FROM onchain_data
+      WHERE timestamp > ?
+      ORDER BY timestamp ASC
+    `),
+
+    getBestScoresAgg: d.prepare(`
+      SELECT
+        MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
+        MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_score
+      FROM options_snapshots
+      WHERE timestamp > ?
+    `),
+
+    getBestPutDetail: d.prepare(`
+      SELECT instrument_name, delta, ask_price, strike, expiry
+      FROM options_snapshots
+      WHERE timestamp > ? AND (option_type = 'P' OR instrument_name LIKE '%-P') AND ask_delta_value = ?
+      LIMIT 1
+    `),
+
+    getBestCallDetail: d.prepare(`
+      SELECT instrument_name, delta, bid_price, strike, expiry
+      FROM options_snapshots
+      WHERE timestamp > ? AND (option_type = 'C' OR instrument_name LIKE '%-C') AND bid_delta_value = ?
+      LIMIT 1
+    `),
+
+    getRecentTicks: d.prepare(`
+      SELECT id, timestamp, summary FROM bot_ticks
+      ORDER BY timestamp DESC LIMIT ?
+    `),
+
+    getOnchainData: d.prepare(`
+      SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
+        liquidity_flow_confidence
+      FROM onchain_data
+      WHERE timestamp > ?
+      ORDER BY timestamp DESC
+    `),
+
+    getSignals: d.prepare(`
+      SELECT id, timestamp, signal_type, details, acted_on
+      FROM strategy_signals
+      WHERE timestamp > ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `),
+
+    getOptionsDistribution: d.prepare(`
+      SELECT option_type, COUNT(*) as count,
+        AVG(delta) as avg_delta, MIN(delta) as min_delta, MAX(delta) as max_delta,
+        AVG(ask_price) as avg_ask, AVG(bid_price) as avg_bid,
+        AVG(ask_price - bid_price) as avg_spread, AVG(mark_price) as avg_mark,
+        MIN(strike) as min_strike, MAX(strike) as max_strike,
+        AVG(ask_delta_value) as avg_ask_dv, AVG(bid_delta_value) as avg_bid_dv
+      FROM options_snapshots WHERE timestamp > ? GROUP BY option_type
+    `),
+
+    getAvgCallPremium7d: d.prepare(`
+      SELECT AVG(bid_price) as avg_premium
+      FROM options_snapshots
+      WHERE option_type = 'call' AND timestamp > ? AND bid_price > 0
+    `),
+
+    getLatestOnchainRawData: d.prepare(`
+      SELECT raw_data
+      FROM onchain_data
+      WHERE timestamp > ?
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `),
+
+    getOnchainWithRawData: d.prepare(`
+      SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
+        liquidity_flow_confidence, raw_data
+      FROM onchain_data
+      WHERE timestamp > ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `),
+
+    getMarketQualitySummary: d.prepare(`
+      SELECT
+        option_type,
+        COUNT(*) as count,
+        AVG(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as avg_spread,
+        MIN(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as min_spread,
+        MAX(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as max_spread,
+        AVG(implied_vol) as avg_iv,
+        AVG(ask_amount + bid_amount) as avg_depth,
+        SUM(ask_amount + bid_amount) as total_depth
+      FROM options_snapshots
+      WHERE timestamp = (SELECT MAX(timestamp) FROM options_snapshots WHERE timestamp > ?)
+        AND mark_price > 0
+        AND ask_price > 0
+        AND bid_price > 0
+        AND ABS(delta) BETWEEN 0.02 AND 0.12
+      GROUP BY option_type
+    `),
+
+    getJournalEntries: d.prepare(`
+      SELECT id, timestamp, entry_type, content, series_referenced, created_at
+      FROM ai_journal
+      WHERE timestamp > ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `),
+
+    // ─── Hourly Series for Correlation Engine ─────────────────────────────
+
+    getSpotPricesHourly: d.prepare(`
+      SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+             AVG(price) as avg_price
+      FROM spot_prices
+      WHERE timestamp > ?
+      GROUP BY hour
+      ORDER BY hour ASC
+    `),
+
+    getOnchainHourly: d.prepare(`
+      SELECT hour, avg_magnitude, direction FROM (
+        SELECT
+          strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+          liquidity_flow_direction as direction,
+          AVG(liquidity_flow_magnitude) OVER (PARTITION BY strftime('%Y-%m-%dT%H:00:00Z', timestamp)) as avg_magnitude,
+          ROW_NUMBER() OVER (
+            PARTITION BY strftime('%Y-%m-%dT%H:00:00Z', timestamp)
+            ORDER BY COUNT(*) OVER (
+              PARTITION BY strftime('%Y-%m-%dT%H:00:00Z', timestamp), liquidity_flow_direction
+            ) DESC
+          ) as rn
+        FROM onchain_data
+        WHERE timestamp > ?
+      ) WHERE rn = 1
+      ORDER BY hour ASC
+    `),
+
+    getBestPutDvHourly: d.prepare(`
+      SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+             MAX(ask_delta_value) as value
+      FROM options_snapshots
+      WHERE timestamp > ?
+        AND (option_type = 'P' OR instrument_name LIKE '%-P')
+        AND delta <= -0.02 AND delta >= -0.12
+      GROUP BY hour
+      ORDER BY hour ASC
+    `),
+
+    getBestCallDvHourly: d.prepare(`
+      SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+             MAX(bid_delta_value) as value
+      FROM options_snapshots
+      WHERE timestamp > ?
+        AND (option_type = 'C' OR instrument_name LIKE '%-C')
+        AND delta >= 0.04 AND delta <= 0.12
+      GROUP BY hour
+      ORDER BY hour ASC
+    `),
+
+    getOptionsSpreadHourly: d.prepare(`
+      SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+             AVG((ask_price - bid_price) / mark_price) as value
+      FROM options_snapshots
+      WHERE timestamp > ?
+        AND ask_price > 0 AND bid_price > 0 AND mark_price > 0
+        AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+      GROUP BY hour
+      ORDER BY hour ASC
+    `),
+
+    getOptionsDepthHourly: d.prepare(`
+      SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+             AVG(ask_amount + bid_amount) as value
+      FROM options_snapshots
+      WHERE timestamp > ?
+        AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+      GROUP BY hour
+      ORDER BY hour ASC
+    `),
+
+    getOpenInterestHourly: d.prepare(`
+      SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+             SUM(open_interest) as value
+      FROM options_snapshots
+      WHERE timestamp > ? AND open_interest IS NOT NULL AND open_interest > 0
+      GROUP BY hour
+      ORDER BY hour ASC
+    `),
+
+    getImpliedVolHourly: d.prepare(`
+      SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+             AVG(implied_vol) as value
+      FROM options_snapshots
+      WHERE timestamp > ? AND implied_vol IS NOT NULL
+        AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+      GROUP BY hour
+      ORDER BY hour ASC
+    `),
+
+    getBotState: d.prepare('SELECT * FROM bot_state WHERE id = 1'),
+  };
+}
+
+// ─── Public API ─────────────────────────────────────────────────────────────
+
 export function getStats() {
-  const d = getDb();
-  return d.prepare(`
-    SELECT price as last_price, timestamp as last_price_time,
-      short_momentum_main as short_momentum, short_momentum_derivative as short_derivative,
-      medium_momentum_main as medium_momentum, medium_momentum_derivative as medium_derivative,
-      three_day_high, three_day_low, seven_day_high, seven_day_low
-    FROM spot_prices ORDER BY timestamp DESC LIMIT 1
-  `).get();
+  return getStmts().getStats.get();
 }
 
 export function getSpotPrices(since: string, limit = 2000) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT * FROM spot_prices
-    WHERE timestamp > ?
-    ORDER BY timestamp ASC
-    LIMIT ?
-  `).all(since, limit);
+  return getStmts().getSpotPrices.all(since, limit);
 }
 
-
 export function getOptionsHeatmap(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT timestamp, option_type, instrument_name, strike, delta, ask_price, bid_price,
-      index_price, expiry, ask_delta_value, bid_delta_value,
-      mark_price, implied_vol, ask_amount, bid_amount
-    FROM options_snapshots
-    WHERE timestamp > ?
-    ORDER BY timestamp ASC
-  `).all(since);
+  return getStmts().getOptionsHeatmap.all(since);
 }
 
 export function getBestOptionsOverTime(since: string) {
-  const d = getDb();
-  // Only consider options within the bot's trading delta range
-  // PUTs: delta between -0.12 and -0.02, CALLs: delta between 0.04 and 0.12
-  return d.prepare(`
-    SELECT timestamp,
-      MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
-        AND delta <= -0.02 AND delta >= -0.12
-        THEN ask_delta_value END) as best_put_value,
-      MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
-        AND delta >= 0.04 AND delta <= 0.12
-        THEN bid_delta_value END) as best_call_value
-    FROM options_snapshots
-    WHERE timestamp > ?
-    GROUP BY timestamp
-    ORDER BY timestamp ASC
-  `).all(since);
+  return getStmts().getBestOptionsOverTime.all(since);
 }
 
 export function getLiquidityOverTime(since: string) {
-  const d = getDb();
-  const rows = d.prepare(`
-    SELECT timestamp, raw_data
-    FROM onchain_data
-    WHERE timestamp > ?
-    ORDER BY timestamp ASC
-  `).all(since) as { timestamp: string; raw_data: string }[];
+  const rows = getStmts().getLiquidityRawData.all(since) as { timestamp: string; raw_data: string }[];
 
   return rows.map(row => {
     const entry: Record<string, number | string> = { timestamp: row.timestamp };
@@ -100,13 +313,11 @@ export function getLiquidityOverTime(since: string) {
             entry[`${name}_txCount`] = dex.totalTxCount;
           }
           if (Array.isArray(dex.poolDetails)) {
-            // Sum active liquidity across pools (store as string for bigint safety)
             const activeSum = dex.poolDetails.reduce((sum: number, p: { activeLiquidity?: string }) => {
               const v = Number(p.activeLiquidity);
               return isNaN(v) ? sum : sum + v;
             }, 0);
             if (activeSum > 0) entry[`${name}_active`] = activeSum;
-            // Store first pool's fee tier for tooltip display
             const firstPool = dex.poolDetails[0];
             if (firstPool?.feeTier) entry[`${name}_fee`] = firstPool.feeTier;
           }
@@ -114,34 +325,16 @@ export function getLiquidityOverTime(since: string) {
       }
     } catch { /* skip malformed rows */ }
     return entry;
-  }).filter(r => Object.keys(r).length > 1); // must have at least one dex value
+  }).filter(r => Object.keys(r).length > 1);
 }
 
 export function getBestScores() {
-  const d = getDb();
+  const s = getStmts();
   const since = new Date(Date.now() - MEASUREMENT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const row = d.prepare(`
-    SELECT
-      MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
-      MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_score
-    FROM options_snapshots
-    WHERE timestamp > ?
-  `).get(since) as { best_put_score: number | null; best_call_score: number | null } | undefined;
+  const row = s.getBestScoresAgg.get(since) as { best_put_score: number | null; best_call_score: number | null } | undefined;
 
-  // Fetch detail rows for best put and best call
-  const bestPutDetail = d.prepare(`
-    SELECT instrument_name, delta, ask_price, strike, expiry
-    FROM options_snapshots
-    WHERE timestamp > ? AND (option_type = 'P' OR instrument_name LIKE '%-P') AND ask_delta_value = ?
-    LIMIT 1
-  `).get(since, row?.best_put_score ?? 0) as { instrument_name: string; delta: number; ask_price: number; strike: number; expiry: number } | undefined;
-
-  const bestCallDetail = d.prepare(`
-    SELECT instrument_name, delta, bid_price, strike, expiry
-    FROM options_snapshots
-    WHERE timestamp > ? AND (option_type = 'C' OR instrument_name LIKE '%-C') AND bid_delta_value = ?
-    LIMIT 1
-  `).get(since, row?.best_call_score ?? 0) as { instrument_name: string; delta: number; bid_price: number; strike: number; expiry: number } | undefined;
+  const bestPutDetail = s.getBestPutDetail.get(since, row?.best_put_score ?? 0) as { instrument_name: string; delta: number; ask_price: number; strike: number; expiry: number } | undefined;
+  const bestCallDetail = s.getBestCallDetail.get(since, row?.best_call_score ?? 0) as { instrument_name: string; delta: number; bid_price: number; strike: number; expiry: number } | undefined;
 
   return {
     bestPutScore: row?.best_put_score ?? 0,
@@ -165,103 +358,36 @@ export function getBestScores() {
 }
 
 export function getRecentTicks(limit = 50) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT id, timestamp, summary FROM bot_ticks
-    ORDER BY timestamp DESC LIMIT ?
-  `).all(limit);
+  return getStmts().getRecentTicks.all(limit);
 }
 
 export function getOnchainData(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
-      liquidity_flow_confidence
-    FROM onchain_data
-    WHERE timestamp > ?
-    ORDER BY timestamp DESC
-  `).all(since);
+  return getStmts().getOnchainData.all(since);
 }
 
 export function getSignals(since: string, limit = 50) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT id, timestamp, signal_type, details, acted_on
-    FROM strategy_signals
-    WHERE timestamp > ?
-    ORDER BY timestamp DESC
-    LIMIT ?
-  `).all(since, limit);
+  return getStmts().getSignals.all(since, limit);
 }
 
 export function getOptionsDistribution(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT option_type, COUNT(*) as count,
-      AVG(delta) as avg_delta, MIN(delta) as min_delta, MAX(delta) as max_delta,
-      AVG(ask_price) as avg_ask, AVG(bid_price) as avg_bid,
-      AVG(ask_price - bid_price) as avg_spread, AVG(mark_price) as avg_mark,
-      MIN(strike) as min_strike, MAX(strike) as max_strike,
-      AVG(ask_delta_value) as avg_ask_dv, AVG(bid_delta_value) as avg_bid_dv
-    FROM options_snapshots WHERE timestamp > ? GROUP BY option_type
-  `).all(since);
+  return getStmts().getOptionsDistribution.all(since);
 }
 
 export function getAvgCallPremium7d() {
-  const d = getDb();
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  return d.prepare(`
-    SELECT AVG(bid_price) as avg_premium
-    FROM options_snapshots
-    WHERE option_type = 'call' AND timestamp > ? AND bid_price > 0
-  `).all(since) as { avg_premium: number | null }[];
+  return getStmts().getAvgCallPremium7d.all(since) as { avg_premium: number | null }[];
 }
 
 export function getLatestOnchainRawData(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT raw_data
-    FROM onchain_data
-    WHERE timestamp > ?
-    ORDER BY timestamp DESC
-    LIMIT 1
-  `).get(since) as { raw_data: string } | undefined;
+  return getStmts().getLatestOnchainRawData.get(since) as { raw_data: string } | undefined;
 }
 
 export function getOnchainWithRawData(since: string, limit = 5) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
-      liquidity_flow_confidence, raw_data
-    FROM onchain_data
-    WHERE timestamp > ?
-    ORDER BY timestamp DESC
-    LIMIT ?
-  `).all(since, limit) as { timestamp: string; raw_data: string; [key: string]: unknown }[];
+  return getStmts().getOnchainWithRawData.all(since, limit) as { timestamp: string; raw_data: string; [key: string]: unknown }[];
 }
 
 export function getMarketQualitySummary(since: string) {
-  const d = getDb();
-  // Aggregate spread, IV, and depth from latest options snapshot batch
-  // Only considers instruments within the bot's delta range
-  const rows = d.prepare(`
-    SELECT
-      option_type,
-      COUNT(*) as count,
-      AVG(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as avg_spread,
-      MIN(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as min_spread,
-      MAX(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as max_spread,
-      AVG(implied_vol) as avg_iv,
-      AVG(ask_amount + bid_amount) as avg_depth,
-      SUM(ask_amount + bid_amount) as total_depth
-    FROM options_snapshots
-    WHERE timestamp = (SELECT MAX(timestamp) FROM options_snapshots WHERE timestamp > ?)
-      AND mark_price > 0
-      AND ask_price > 0
-      AND bid_price > 0
-      AND ABS(delta) BETWEEN 0.02 AND 0.12
-    GROUP BY option_type
-  `).all(since) as {
+  return getStmts().getMarketQualitySummary.all(since) as {
     option_type: string;
     count: number;
     avg_spread: number | null;
@@ -271,21 +397,13 @@ export function getMarketQualitySummary(since: string) {
     avg_depth: number | null;
     total_depth: number | null;
   }[];
-  return rows;
 }
 
 // ─── AI Journal ─────────────────────────────────────────────────────────────
 
 export function getJournalEntries(since: string, limit = 20) {
-  const d = getDb();
   try {
-    return d.prepare(`
-      SELECT id, timestamp, entry_type, content, series_referenced, created_at
-      FROM ai_journal
-      WHERE timestamp > ?
-      ORDER BY timestamp DESC
-      LIMIT ?
-    `).all(since, limit);
+    return getStmts().getJournalEntries.all(since, limit);
   } catch {
     return []; // table may not exist yet
   }
@@ -294,115 +412,36 @@ export function getJournalEntries(since: string, limit = 20) {
 // ─── Hourly Series for Correlation Engine ───────────────────────────────────
 
 export function getSpotPricesHourly(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           AVG(price) as avg_price
-    FROM spot_prices
-    WHERE timestamp > ?
-    GROUP BY hour
-    ORDER BY hour ASC
-  `).all(since) as { hour: string; avg_price: number }[];
+  return getStmts().getSpotPricesHourly.all(since) as { hour: string; avg_price: number }[];
 }
 
 export function getOnchainHourly(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           AVG(liquidity_flow_magnitude) as avg_magnitude,
-           -- Most common direction in the hour
-           (SELECT liquidity_flow_direction FROM onchain_data o2
-            WHERE strftime('%Y-%m-%dT%H:00:00Z', o2.timestamp) = strftime('%Y-%m-%dT%H:00:00Z', onchain_data.timestamp)
-              AND o2.timestamp > ?
-            GROUP BY liquidity_flow_direction
-            ORDER BY COUNT(*) DESC LIMIT 1) as direction
-    FROM onchain_data
-    WHERE timestamp > ?
-    GROUP BY hour
-    ORDER BY hour ASC
-  `).all(since, since) as { hour: string; avg_magnitude: number | null; direction: string | null }[];
+  return getStmts().getOnchainHourly.all(since) as { hour: string; avg_magnitude: number | null; direction: string | null }[];
 }
 
 export function getBestPutDvHourly(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           MAX(ask_delta_value) as value
-    FROM options_snapshots
-    WHERE timestamp > ?
-      AND (option_type = 'P' OR instrument_name LIKE '%-P')
-      AND delta <= -0.02 AND delta >= -0.12
-    GROUP BY hour
-    ORDER BY hour ASC
-  `).all(since) as { hour: string; value: number | null }[];
+  return getStmts().getBestPutDvHourly.all(since) as { hour: string; value: number | null }[];
 }
 
 export function getBestCallDvHourly(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           MAX(bid_delta_value) as value
-    FROM options_snapshots
-    WHERE timestamp > ?
-      AND (option_type = 'C' OR instrument_name LIKE '%-C')
-      AND delta >= 0.04 AND delta <= 0.12
-    GROUP BY hour
-    ORDER BY hour ASC
-  `).all(since) as { hour: string; value: number | null }[];
+  return getStmts().getBestCallDvHourly.all(since) as { hour: string; value: number | null }[];
 }
 
 export function getOptionsSpreadHourly(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           AVG((ask_price - bid_price) / mark_price) as value
-    FROM options_snapshots
-    WHERE timestamp > ?
-      AND ask_price > 0 AND bid_price > 0 AND mark_price > 0
-      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
-    GROUP BY hour
-    ORDER BY hour ASC
-  `).all(since) as { hour: string; value: number | null }[];
+  return getStmts().getOptionsSpreadHourly.all(since) as { hour: string; value: number | null }[];
 }
 
 export function getOptionsDepthHourly(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           AVG(ask_amount + bid_amount) as value
-    FROM options_snapshots
-    WHERE timestamp > ?
-      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
-    GROUP BY hour
-    ORDER BY hour ASC
-  `).all(since) as { hour: string; value: number | null }[];
+  return getStmts().getOptionsDepthHourly.all(since) as { hour: string; value: number | null }[];
 }
 
 export function getOpenInterestHourly(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           SUM(open_interest) as value
-    FROM options_snapshots
-    WHERE timestamp > ? AND open_interest IS NOT NULL AND open_interest > 0
-    GROUP BY hour
-    ORDER BY hour ASC
-  `).all(since) as { hour: string; value: number | null }[];
+  return getStmts().getOpenInterestHourly.all(since) as { hour: string; value: number | null }[];
 }
 
 export function getImpliedVolHourly(since: string) {
-  const d = getDb();
-  return d.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           AVG(implied_vol) as value
-    FROM options_snapshots
-    WHERE timestamp > ? AND implied_vol IS NOT NULL
-      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
-    GROUP BY hour
-    ORDER BY hour ASC
-  `).all(since) as { hour: string; value: number | null }[];
+  return getStmts().getImpliedVolHourly.all(since) as { hour: string; value: number | null }[];
 }
-
 
 export function getBotBudget() {
   const empty = {
@@ -412,8 +451,7 @@ export function getBotBudget() {
   };
 
   try {
-    const d = getDb();
-    const row = d.prepare('SELECT * FROM bot_state WHERE id = 1').get() as {
+    const row = getStmts().getBotState.get() as {
       put_cycle_start: number | null;
       put_net_bought: number;
       put_unspent_buy_limit: number;

@@ -1,4 +1,10 @@
-import { extractAllSeries, getRegisteredSeries } from './series-registry';
+import { extractAllSeries, getRegisteredSeries, type AlignedSeries } from './series-registry';
+
+// ─── Cache ──────────────────────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _corrCache: { data: any; ts: number } | null = null;
+const CORRELATION_TTL = 300_000; // 5 minutes
 
 // ─── Pearson Correlation ────────────────────────────────────────────────────
 
@@ -107,6 +113,25 @@ export interface CorrelationSnapshot {
 }
 
 export function buildCorrelationAnalysis(): CorrelationSnapshot {
+  if (_corrCache && Date.now() - _corrCache.ts < CORRELATION_TTL) return _corrCache.data;
+  const result = _buildCorrelationUncached();
+  _corrCache = { data: result, ts: Date.now() };
+  return result;
+}
+
+function sliceLast7d(data30d: AlignedSeries): AlignedSeries {
+  // 7 days = 168 hours; take the tail of the 30d data
+  const n = Math.min(168, data30d.hours.length);
+  const start = data30d.hours.length - n;
+  const hours = data30d.hours.slice(start);
+  const series: Record<string, (number | null)[]> = {};
+  for (const [name, values] of Object.entries(data30d.series)) {
+    series[name] = values.slice(start);
+  }
+  return { hours, series };
+}
+
+function _buildCorrelationUncached(): CorrelationSnapshot {
   const registry = getRegisteredSeries();
   const names = registry.map((s) => s.name);
   const descriptions: Record<string, string> = {};
@@ -114,11 +139,11 @@ export function buildCorrelationAnalysis(): CorrelationSnapshot {
     descriptions[s.name] = s.description;
   }
 
-  let data7d: ReturnType<typeof extractAllSeries>;
-  let data30d: ReturnType<typeof extractAllSeries>;
+  let data7d: AlignedSeries;
+  let data30d: AlignedSeries;
   try {
-    data7d = extractAllSeries(7);
     data30d = extractAllSeries(30);
+    data7d = sliceLast7d(data30d);
   } catch {
     return {
       pairs: [],
