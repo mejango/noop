@@ -403,20 +403,17 @@ export default function OverviewPage() {
       return flat;
     }).filter(d => Object.keys(d).length > 1);
 
-    // Compute volume deltas between consecutive data points
+    // Compute per-DEX volume deltas between consecutive data points
     const names = Array.from(nameSet);
     for (let i = 1; i < data.length; i++) {
-      let totalVolDelta = 0;
       for (const name of names) {
         const currVol = data[i][`${name}_vol`];
         const prevVol = data[i - 1][`${name}_vol`];
         if (currVol != null && prevVol != null) {
           const delta = currVol - prevVol;
           data[i][`${name}_volDelta`] = delta > 0 ? delta : 0;
-          totalVolDelta += delta > 0 ? delta : 0;
         }
       }
-      if (totalVolDelta > 0) data[i].vol_total = totalVolDelta;
     }
 
     return { liquidityData: data, dexNames: Array.from(nameSet).sort() };
@@ -1093,7 +1090,7 @@ export default function OverviewPage() {
           const first = filteredLiquidity.find(d => d[name] != null);
           baselines[name] = first ? first[name] : 1;
         }
-        const hasVolume = filteredLiquidity.some(d => d.vol_total != null && d.vol_total > 0);
+        const hasVolume = filteredLiquidity.some(d => dexNames.some(n => d[`${n}_volDelta`] != null && d[`${n}_volDelta`] > 0));
         const normalizedData = filteredLiquidity.map(d => {
           const out: Record<string, number> = { ts: d.ts };
           for (const name of dexNames) {
@@ -1101,12 +1098,11 @@ export default function OverviewPage() {
               out[`${name}_pct`] = ((d[name] - baselines[name]) / baselines[name]) * 100;
               out[name] = d[name]; // keep raw for tooltip
             }
-            // Pass through metadata fields for tooltip
+            // Pass through metadata fields for tooltip + per-DEX volume delta for charting
             for (const suffix of ['_vol', '_volDelta', '_active', '_fee', '_txCount']) {
               if (d[`${name}${suffix}`] != null) out[`${name}${suffix}`] = d[`${name}${suffix}`];
             }
           }
-          if (d.vol_total != null) out.vol_total = d.vol_total;
           return out;
         });
 
@@ -1120,11 +1116,11 @@ export default function OverviewPage() {
                     <span className="w-3 h-0.5 inline-block" style={{ background: getColor(name, i) }} /> {formatDexName(name)}
                   </span>
                 ))}
-                {hasVolume && (
-                  <span className="flex items-center gap-1">
-                    <span className="w-3 h-0.5 inline-block" style={{ background: chartColors.tertiary }} /> Volume
+                {hasVolume && dexNames.map((name, i) => (
+                  <span key={`${name}_vol`} className="flex items-center gap-1">
+                    <span className="w-3 h-0.5 inline-block border-b border-dashed" style={{ borderColor: getColor(name, i), background: 'transparent' }} /> {formatDexName(name)} Vol
                   </span>
-                )}
+                ))}
               </div>
             </div>
             <div {...pinLiquidity.containerProps}>
@@ -1139,17 +1135,7 @@ export default function OverviewPage() {
                   tick={chartAxis.tick}
                   width={mobile ? 40 : 55}
                 />
-                {hasVolume && (
-                  <YAxis
-                    yAxisId="vol"
-                    orientation="right"
-                    domain={['auto', 'auto']}
-                    tickFormatter={(v) => formatCompact(v)}
-                    stroke={chartAxis.stroke}
-                    tick={chartAxis.tickSecondary}
-                    width={mobile ? 40 : 55}
-                  />
-                )}
+                <YAxis yAxisId="vol" orientation="right" hide domain={['auto', 'auto']} />
                 <Tooltip
                                     {...chartTooltip}
                   {...pinLiquidity.tooltipActive}
@@ -1182,11 +1168,6 @@ export default function OverviewPage() {
                             </div>
                           );
                         })}
-                        {row.vol_total != null && (
-                          <div className="text-xs border-t border-white/10 mt-1 pt-1" style={{ color: chartColors.tertiary }}>
-                            Total interval volume: {formatCompact(row.vol_total)}
-                          </div>
-                        )}
                       </div>
                     );
                   }}
@@ -1194,9 +1175,9 @@ export default function OverviewPage() {
                 {dexNames.map((name, i) => (
                   <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
-                {hasVolume && (
-                  <Line yAxisId="vol" type="monotone" dataKey="vol_total" stroke={chartColors.tertiary} strokeWidth={1.5} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
-                )}
+                {hasVolume && dexNames.map((name, i) => (
+                  <Line key={`${name}_vol`} yAxisId="vol" type="monotone" dataKey={`${name}_volDelta`} stroke={getColor(name, i)} strokeWidth={1} strokeDasharray="4 3" strokeOpacity={0.6} dot={false} connectNulls={false} isAnimationActive={false} />
+                ))}
               </ComposedChart>
             </ResponsiveContainer>
             </div>
