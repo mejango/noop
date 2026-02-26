@@ -966,11 +966,13 @@ export default function OverviewPage() {
 
         // Normalize each DEX to % change from its first value so they share one Y-axis
         const baselines: Record<string, number> = {};
+        const volDexes: string[] = [];
         for (const name of dexNames) {
           const first = filteredLiquidity.find(d => d[name] != null);
           baselines[name] = first ? first[name] : 1;
+          if (filteredLiquidity.some(d => d[`${name}_vol`] != null)) volDexes.push(name);
         }
-        const hasVolume = filteredLiquidity.some(d => dexNames.some(n => d[`${n}_volDelta`] != null && d[`${n}_volDelta`] > 0));
+        const hasVolume = volDexes.length > 0;
         const normalizedData = filteredLiquidity.map(d => {
           const out: Record<string, number> = { ts: d.ts };
           for (const name of dexNames) {
@@ -978,7 +980,11 @@ export default function OverviewPage() {
               out[`${name}_pct`] = ((d[name] - baselines[name]) / baselines[name]) * 100;
               out[name] = d[name]; // keep raw for tooltip
             }
-            // Pass through metadata fields for tooltip + per-DEX volume delta for charting
+            // Raw cumulative volume for chart line
+            if (d[`${name}_vol`] != null) {
+              out[`${name}_volRaw`] = d[`${name}_vol`];
+            }
+            // Pass through metadata fields for tooltip
             for (const suffix of ['_vol', '_volDelta', '_active', '_fee', '_txCount']) {
               if (d[`${name}${suffix}`] != null) out[`${name}${suffix}`] = d[`${name}${suffix}`];
             }
@@ -996,9 +1002,9 @@ export default function OverviewPage() {
                     <span className="w-3 h-0.5 inline-block" style={{ background: getColor(name, i) }} /> {formatDexName(name)}
                   </span>
                 ))}
-                {hasVolume && dexNames.map((name, i) => (
+                {hasVolume && volDexes.map((name, i) => (
                   <span key={`${name}_vol`} className="flex items-center gap-1">
-                    <span className="w-3 h-0.5 inline-block border-b border-dashed" style={{ borderColor: getColor(name, i), background: 'transparent' }} /> {formatDexName(name)} Vol
+                    <span className="w-3 h-0.5 inline-block" style={{ background: getColor(name, i), opacity: 0.4 }} /> {formatDexName(name)} Vol
                   </span>
                 ))}
               </div>
@@ -1015,7 +1021,7 @@ export default function OverviewPage() {
                   tick={chartAxis.tick}
                   width={mobile ? 40 : 55}
                 />
-                <YAxis yAxisId="vol" orientation="right" hide domain={['auto', 'auto']} />
+                {hasVolume && <YAxis yAxisId="vol" orientation="right" hide domain={[0, 'auto']} />}
                 <Tooltip
                                     {...chartTooltip}
                   {...pinLiquidity.tooltipActive}
@@ -1055,8 +1061,8 @@ export default function OverviewPage() {
                 {dexNames.map((name, i) => (
                   <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
-                {hasVolume && dexNames.map((name, i) => (
-                  <Line key={`${name}_vol`} yAxisId="vol" type="stepAfter" dataKey={`${name}_volDelta`} stroke={getColor(name, i)} strokeWidth={1} strokeDasharray="4 3" strokeOpacity={0.6} dot={false} connectNulls isAnimationActive={false} />
+                {hasVolume && volDexes.map((name, i) => (
+                  <Line key={`${name}_vol`} yAxisId="vol" type="monotone" dataKey={`${name}_volRaw`} stroke={getColor(name, i)} strokeWidth={1} strokeDasharray="4 3" strokeOpacity={0.5} dot={false} connectNulls isAnimationActive={false} />
                 ))}
               </ComposedChart>
             </ResponsiveContainer>
