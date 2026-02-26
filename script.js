@@ -824,162 +824,6 @@ const analyzeDEXLiquidity = async (spotPrice) => {
   }
 };
 
-// Helper function to calculate volatility
-const calculateVolatility = (priceData) => {
-  if (!priceData || priceData.length < 2) return 0;
-  
-  const returns = [];
-  for (let i = 1; i < priceData.length; i++) {
-    const return_ = (priceData[i].price - priceData[i-1].price) / priceData[i-1].price;
-    returns.push(return_);
-  }
-  
-  const mean = returns.reduce((sum, r) => sum + r, 0) / returns.length;
-  const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length;
-  
-  return Math.sqrt(variance);
-};
-
-// Liquidity Exhaustion Detection
-const detectLiquidityExhaustion = (liquidityData, priceHistory) => {
-  try {
-    if (!liquidityData || !priceHistory) {
-      return { error: 'insufficient_data', timestamp: new Date().toISOString() };
-    }
-
-    // Check if liquidity data is unreliable due to DEX query failures
-    if (liquidityData.flowAnalysis && liquidityData.flowAnalysis.dataReliability === 'unreliable') {
-      return { 
-        error: 'unreliable_data', 
-        message: 'DEX queries failed - liquidity analysis unreliable',
-        timestamp: new Date().toISOString() 
-      };
-    }
-
-    const exhaustionSignals = {
-      timestamp: new Date().toISOString(),
-      signals: {
-        decreasingLiquidity: false,
-        highVolatility: false,
-        liquidityGaps: false,
-        dexImbalance: false,
-        persistentOutflow: false
-      },
-      metrics: {
-        liquidityScore: 0,
-        volatilityScore: 0,
-        multiTimeframeScore: 0,
-        overallExhaustionScore: 0
-      },
-      timeframes: {
-        hourly: { direction: 'unknown', score: 0 },
-        daily: { direction: 'unknown', score: 0 },
-        weekly: { direction: 'unknown', score: 0 }
-      },
-      recommendations: [],
-      alertLevel: 'NORMAL' // NORMAL, CAUTION, WARNING, CRITICAL
-    };
-
-    // Analyze multi-timeframe liquidity trends
-    if (liquidityData.flowAnalysis && liquidityData.flowAnalysis.timeframes) {
-      const timeframes = liquidityData.flowAnalysis.timeframes;
-      
-      // Score each timeframe based on outflow severity
-      Object.keys(timeframes).forEach(timeframe => {
-        const tf = timeframes[timeframe];
-        let score = 0;
-        
-        if (tf.direction === 'outflow') {
-          // Higher score for larger outflows
-          const outflowMagnitude = Math.abs(tf.change);
-          if (outflowMagnitude > 0.1) score = 0.8; // >10% outflow
-          else if (outflowMagnitude > 0.05) score = 0.6; // >5% outflow
-          else if (outflowMagnitude > 0.02) score = 0.4; // >2% outflow
-          else score = 0.2; // >0.5% outflow
-        } else if (tf.direction === 'inflow') {
-          score = -0.2; // Inflow reduces exhaustion risk
-        }
-        
-        exhaustionSignals.timeframes[timeframe] = {
-          direction: tf.direction,
-          score: score,
-          change: tf.change,
-          total: tf.total
-        };
-      });
-      
-      // Calculate multi-timeframe score (weekly gets highest weight)
-      exhaustionSignals.metrics.multiTimeframeScore = 
-        (exhaustionSignals.timeframes.weekly.score * 0.5) +
-        (exhaustionSignals.timeframes.daily.score * 0.3) +
-        (exhaustionSignals.timeframes.hourly.score * 0.2);
-      
-      // Check for persistent outflow across timeframes
-      const outflowCount = Object.values(exhaustionSignals.timeframes)
-        .filter(tf => tf.direction === 'outflow').length;
-      
-      if (outflowCount >= 2) {
-        exhaustionSignals.signals.persistentOutflow = true;
-        exhaustionSignals.metrics.liquidityScore += 0.4;
-      }
-    }
-
-    // Analyze DEX API health
-    if (liquidityData.dexes) {
-      const dexCount = Object.keys(liquidityData.dexes).length;
-      const errorCount = Object.values(liquidityData.dexes).filter(dex => dex.error).length;
-      
-      if (errorCount > dexCount / 2) {
-        exhaustionSignals.signals.decreasingLiquidity = true;
-        exhaustionSignals.metrics.liquidityScore += 0.3;
-      }
-    }
-
-    // Analyze volatility
-    const recentPrices = priceHistory.slice(-10);
-    const volatility = calculateVolatility(recentPrices);
-    
-    if (volatility > 0.05) { // 5% volatility
-      exhaustionSignals.signals.highVolatility = true;
-      exhaustionSignals.metrics.volatilityScore += 0.3;
-    }
-
-    // Calculate overall exhaustion score
-    exhaustionSignals.metrics.overallExhaustionScore =
-      exhaustionSignals.metrics.liquidityScore +
-      exhaustionSignals.metrics.volatilityScore +
-      Math.max(0, exhaustionSignals.metrics.multiTimeframeScore);
-
-    // Determine alert level
-    if (exhaustionSignals.metrics.overallExhaustionScore > 0.8) {
-      exhaustionSignals.alertLevel = 'CRITICAL';
-    } else if (exhaustionSignals.metrics.overallExhaustionScore > 0.6) {
-      exhaustionSignals.alertLevel = 'WARNING';
-    } else if (exhaustionSignals.metrics.overallExhaustionScore > 0.4) {
-      exhaustionSignals.alertLevel = 'CAUTION';
-    }
-
-    // Generate recommendations based on alert level
-    if (exhaustionSignals.alertLevel === 'CRITICAL') {
-      exhaustionSignals.recommendations.push('🚨 CRITICAL: Significant liquidity exhaustion detected - Consider reducing positions immediately');
-    } else if (exhaustionSignals.alertLevel === 'WARNING') {
-      exhaustionSignals.recommendations.push('⚠️ WARNING: High liquidity exhaustion risk - Monitor closely and consider position adjustments');
-    } else if (exhaustionSignals.alertLevel === 'CAUTION') {
-      exhaustionSignals.recommendations.push('⚡ CAUTION: Moderate liquidity exhaustion signals - Stay alert for further deterioration');
-    }
-
-    // Add timeframe-specific recommendations
-    if (exhaustionSignals.signals.persistentOutflow) {
-      exhaustionSignals.recommendations.push('📉 Persistent liquidity outflow across multiple timeframes detected');
-    }
-
-    return exhaustionSignals;
-  } catch (error) {
-    console.log('⚠️ Liquidity exhaustion detection failed:', error.message);
-    return { error: error.message, timestamp: new Date().toISOString() };
-  }
-};
-
 // Helper function to check for downtrend with 3-day downward spike and short-term downtrend (new entry strategy)
 const hasDowntrendWith7DayDownwardSpikeAndShortTermDowntrend = (mediumTermMomentum, shortTermMomentum) => {
   // Check if medium-term momentum is downward
@@ -1279,6 +1123,8 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
   const bidAmount = Number(ticker.B);
   const markPrice = Number(ticker.M) || null;
   const indexPrice = Number(ticker.I) || spotPrice || null;
+  const openInterest = Number(ticker.stats?.oi) || null;
+  const impliedVol = Number(ticker.option_pricing?.i) || null;
 
   const askDeltaValue = askPrice == 0 ? 0 : Math.abs(delta) / askPrice;
   const bidDeltaValue = bidPrice == 0 ? 0 : bidPrice / Math.abs(delta);
@@ -1295,6 +1141,8 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
       bidAmount,
       markPrice,
       indexPrice,
+      openInterest,
+      impliedVol,
     }
   };
 };
@@ -2063,7 +1911,7 @@ Output 2-5 journal entries using these tags:
 <journal type="hypothesis">Testable predictions grounded in data</journal>
 <journal type="regime_note">Market state assessments and regime classifications</journal>
 
-Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (exhaustion signals, flow reversals), and portfolio geometry (spot-options relationship).`;
+Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).`;
 
     const userMessage = `Here is today's daily snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nAnalyze across short, medium, and long time scales. Review previous journal entries and build on, revise, or contradict them as warranted.`;
 
@@ -2085,7 +1933,7 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
 
     // Extract journal entries (same pattern as chat route)
     const regex = /<journal\s+type="(observation|hypothesis|regime_note)">([\s\S]*?)<\/journal>/g;
-    const seriesNames = ['spot_return', 'liquidity_flow', 'exhaustion_score', 'best_put_dv', 'best_call_dv'];
+    const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol'];
     let match;
     let count = 0;
 
@@ -2160,19 +2008,9 @@ const runBot = async () => {
       // Run onchain analysis functions with individual error handling
       const dexLiquidityResult = await analyzeDEXLiquidity(spotPrice).catch(err => ({ error: err.message, timestamp: new Date().toISOString() }));
 
-      // Calculate exhaustion analysis with error handling
-      let exhaustionAnalysisResult = { error: 'calculation_failed', timestamp: new Date().toISOString() };
-      try {
-        exhaustionAnalysisResult = detectLiquidityExhaustion(dexLiquidityResult, priceHistory);
-      } catch (err) {
-        console.log('⚠️ Exhaustion analysis failed:', err.message);
-        exhaustionAnalysisResult = { error: err.message, timestamp: new Date().toISOString() };
-      }
-
       // Compile onchain analysis results
       onchainAnalysis = {
         dexLiquidity: dexLiquidityResult,
-        exhaustionAnalysis: exhaustionAnalysisResult,
         spotPrice: spotPrice,
         momentumData: momentumResult,
         timestamp: new Date().toISOString()
@@ -2262,52 +2100,6 @@ const runBot = async () => {
           }
         }
         
-        if (onchainAnalysis.exhaustionAnalysis) {
-          const exhaustion = onchainAnalysis.exhaustionAnalysis;
-          
-          // Handle unreliable data case
-          if (exhaustion.error === 'unreliable_data') {
-            console.log(`Liquidity Exhaustion: ⚠️ UNRELIABLE (DEX queries failed)`);
-            console.log(`${exhaustion.message}`);
-            // Continue execution - don't return early as this prevents options trading
-          }
-          
-          // Handle other errors
-          if (exhaustion.error) {
-            console.log(`Liquidity Exhaustion: ❌ ERROR (${exhaustion.error})`);
-            // Continue execution - don't return early as this prevents options trading
-          }
-          
-          // Normal case with metrics
-          if (exhaustion.metrics) {
-            // Show alert level with appropriate emoji
-            const alertEmoji = exhaustion.alertLevel === 'CRITICAL' ? '🚨' :
-                             exhaustion.alertLevel === 'WARNING' ? '⚠️' :
-                             exhaustion.alertLevel === 'CAUTION' ? '⚡' : '✅';
-            
-            // Show clear, actionable liquidity status
-            const liquidityStatus = exhaustion.alertLevel === 'CRITICAL' ? 'CRITICAL - High slippage risk' :
-                                  exhaustion.alertLevel === 'WARNING' ? 'WARNING - Monitor closely' :
-                                  exhaustion.alertLevel === 'CAUTION' ? 'CAUTION - Stay alert' : 'HEALTHY - Good trading conditions';
-            
-            console.log(`📊 Market Liquidity: ${alertEmoji} ${liquidityStatus}`);
-            
-            // Show clear breakdown of what's affecting liquidity
-            const liquidityIssues = [];
-            if (exhaustion.metrics.liquidityScore > 0) liquidityIssues.push('Pool depth issues');
-            if (exhaustion.metrics.volatilityScore > 0) liquidityIssues.push('High volatility');
-            if (exhaustion.metrics.multiTimeframeScore > 0) liquidityIssues.push('Multi-timeframe pressure');
-            
-            if (liquidityIssues.length > 0) {
-              console.log(`⚠️ Issues detected: ${liquidityIssues.join(', ')}`);
-            }
-          
-            // Show recommendations
-            if (exhaustion.recommendations && exhaustion.recommendations.length > 0) {
-              console.log(`${exhaustion.recommendations.join(' | ')}`);
-            }
-          }
-        }
       } catch (err) {
         console.log('⚠️ Failed to display analysis summary:', err.message);
       }
@@ -2464,7 +2256,6 @@ const runBot = async () => {
           short_momentum: botData.shortTermMomentum,
           onchain: {
             liquidity_flow: onchainAnalysis?.dexLiquidity?.flowAnalysis || null,
-            market_health: onchainAnalysis?.exhaustionAnalysis?.alertLevel || null,
           },
           instruments: {
             total: instruments.length,

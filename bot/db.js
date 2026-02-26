@@ -77,7 +77,13 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_onchain_data_timestamp ON onchain_data(timestamp);
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_type ON strategy_signals(signal_type);
   CREATE INDEX IF NOT EXISTS idx_strategy_signals_timestamp ON strategy_signals(timestamp);
+`);
 
+// Idempotent migrations for new columns
+try { db.exec('ALTER TABLE options_snapshots ADD COLUMN open_interest REAL'); } catch {}
+try { db.exec('ALTER TABLE options_snapshots ADD COLUMN implied_vol REAL'); } catch {}
+
+db.exec(`
   CREATE TABLE IF NOT EXISTS bot_ticks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     timestamp TEXT NOT NULL,
@@ -142,10 +148,10 @@ const stmts = {
   insertOptionsSnapshot: db.prepare(`
     INSERT INTO options_snapshots (timestamp, instrument_name, strike, expiry, option_type,
       delta, ask_price, bid_price, ask_amount, bid_amount, mark_price, index_price,
-      ask_delta_value, bid_delta_value)
+      ask_delta_value, bid_delta_value, open_interest, implied_vol)
     VALUES (@timestamp, @instrument_name, @strike, @expiry, @option_type,
       @delta, @ask_price, @bid_price, @ask_amount, @bid_amount, @mark_price, @index_price,
-      @ask_delta_value, @bid_delta_value)
+      @ask_delta_value, @bid_delta_value, @open_interest, @implied_vol)
   `),
 
   insertOnchainData: db.prepare(`
@@ -270,7 +276,6 @@ const stmts = {
   getOnchainHourly: db.prepare(`
     SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
            AVG(liquidity_flow_magnitude) as avg_magnitude,
-           AVG(exhaustion_score) as avg_exhaustion,
            (SELECT liquidity_flow_direction FROM onchain_data o2
             WHERE strftime('%Y-%m-%dT%H:00:00Z', o2.timestamp) = strftime('%Y-%m-%dT%H:00:00Z', onchain_data.timestamp)
               AND o2.timestamp > @since
@@ -294,6 +299,42 @@ const stmts = {
     FROM options_snapshots
     WHERE timestamp > @since AND (option_type = 'C' OR instrument_name LIKE '%-C')
       AND delta >= 0.04 AND delta <= 0.12
+    GROUP BY hour ORDER BY hour ASC
+  `),
+
+  getOptionsSpreadHourly: db.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG((ask_price - bid_price) / mark_price) as value
+    FROM options_snapshots
+    WHERE timestamp > @since
+      AND ask_price > 0 AND bid_price > 0 AND mark_price > 0
+      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+    GROUP BY hour ORDER BY hour ASC
+  `),
+
+  getOptionsDepthHourly: db.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(ask_amount + bid_amount) as value
+    FROM options_snapshots
+    WHERE timestamp > @since
+      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+    GROUP BY hour ORDER BY hour ASC
+  `),
+
+  getOpenInterestHourly: db.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           SUM(open_interest) as value
+    FROM options_snapshots
+    WHERE timestamp > @since AND open_interest IS NOT NULL AND open_interest > 0
+    GROUP BY hour ORDER BY hour ASC
+  `),
+
+  getImpliedVolHourly: db.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(implied_vol) as value
+    FROM options_snapshots
+    WHERE timestamp > @since AND implied_vol IS NOT NULL
+      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
     GROUP BY hour ORDER BY hour ASC
   `),
 
@@ -360,6 +401,8 @@ const insertOptionsSnapshotBatch = (options, timestamp) => {
         index_price: toNum(opt.details?.indexPrice),
         ask_delta_value: toNum(opt.details?.askDeltaValue),
         bid_delta_value: toNum(opt.details?.bidDeltaValue),
+        open_interest: toNum(opt.details?.openInterest),
+        implied_vol: toNum(opt.details?.impliedVol),
       });
     }
   });
@@ -368,7 +411,6 @@ const insertOptionsSnapshotBatch = (options, timestamp) => {
 
 const insertOnchainData = (analysis) => {
   const flow = analysis.dexLiquidity?.flowAnalysis || {};
-  const exhaustion = analysis.exhaustionAnalysis || {};
 
   stmts.insertOnchainData.run({
     timestamp: analysis.timestamp || new Date().toISOString(),
@@ -376,8 +418,8 @@ const insertOnchainData = (analysis) => {
     liquidity_flow_direction: flow.direction || null,
     liquidity_flow_magnitude: toNum(flow.magnitude),
     liquidity_flow_confidence: toNum(flow.confidence),
-    exhaustion_score: toNum(exhaustion.metrics?.compositeScore ?? exhaustion.metrics?.overallExhaustionScore),
-    exhaustion_alert_level: exhaustion.alertLevel || null,
+    exhaustion_score: null,
+    exhaustion_alert_level: null,
     raw_data: JSON.stringify(analysis),
   });
 };
@@ -410,6 +452,10 @@ const getSpotPricesHourly = (since) => stmts.getSpotPricesHourly.all({ since });
 const getOnchainHourly = (since) => stmts.getOnchainHourly.all({ since });
 const getBestPutDvHourly = (since) => stmts.getBestPutDvHourly.all({ since });
 const getBestCallDvHourly = (since) => stmts.getBestCallDvHourly.all({ since });
+const getOptionsSpreadHourly = (since) => stmts.getOptionsSpreadHourly.all({ since });
+const getOptionsDepthHourly = (since) => stmts.getOptionsDepthHourly.all({ since });
+const getOpenInterestHourly = (since) => stmts.getOpenInterestHourly.all({ since });
+const getImpliedVolHourly = (since) => stmts.getImpliedVolHourly.all({ since });
 
 const insertOrder = (data) => {
   stmts.insertOrder.run({
@@ -527,6 +573,10 @@ module.exports = {
   getOnchainHourly,
   getBestPutDvHourly,
   getBestCallDvHourly,
+  getOptionsSpreadHourly,
+  getOptionsDepthHourly,
+  getOpenInterestHourly,
+  getImpliedVolHourly,
   insertTick,
   getRecentTicks,
   insertOrder,

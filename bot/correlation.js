@@ -95,14 +95,6 @@ const SERIES_DEFS = [
     },
   },
   {
-    name: 'exhaustion_score',
-    description: 'Market exhaustion score (0=fresh, 1=fully exhausted)',
-    extract: (db, since) => {
-      const rows = db.getOnchainHourly(since);
-      return rows.map(r => ({ hour: r.hour, value: r.avg_exhaustion }));
-    },
-  },
-  {
     name: 'best_put_dv',
     description: 'Best PUT delta-value score (higher = cheaper protection)',
     extract: (db, since) => db.getBestPutDvHourly(since),
@@ -111,6 +103,26 @@ const SERIES_DEFS = [
     name: 'best_call_dv',
     description: 'Best CALL delta-value score (higher = richer premium to sell)',
     extract: (db, since) => db.getBestCallDvHourly(since),
+  },
+  {
+    name: 'options_spread',
+    description: 'Avg bid-ask spread as % of mark price (higher = worse liquidity)',
+    extract: (db, since) => db.getOptionsSpreadHourly(since),
+  },
+  {
+    name: 'options_depth',
+    description: 'Avg order book depth (ask_amount + bid_amount) in ETH',
+    extract: (db, since) => db.getOptionsDepthHourly(since),
+  },
+  {
+    name: 'open_interest',
+    description: 'Total open interest across tracked instruments',
+    extract: (db, since) => db.getOpenInterestHourly(since),
+  },
+  {
+    name: 'implied_vol',
+    description: 'Avg implied volatility within trading delta range',
+    extract: (db, since) => db.getImpliedVolHourly(since),
   },
 ];
 

@@ -148,7 +148,7 @@ How to interpret:
 - **Lead/lag**: When a lagged correlation exceeds contemporaneous, one series leads the other. offset_hours tells you by how much. This is actionable — if liquidity_flow leads spot_return by 3h, current flow data predicts near-term price movement.
 - **Leading indicators**: These are the most actionable signals. A leader series moving now predicts the follower series offset_hours into the future.
 
-Focus on correlations that affect: cost of protection (put pricing), crash probability (exhaustion, flow reversals), or portfolio geometry (spot-options relationship).
+Focus on correlations that affect: cost of protection (put pricing), crash probability (flow reversals), or portfolio geometry (spot-options relationship).
 
 ## Your Analytical Journal
 You have a persistent journal of observations and hypotheses from past conversations. Review your recent entries in the snapshot under ai_journal. Build on confirmed patterns. Revise or contradict past entries when the data warrants it.
@@ -158,7 +158,7 @@ When you form a notable conclusion, wrap it in a journal tag:
 
 Guidelines for journal entries:
 - **Observations**: Factual patterns you've identified (e.g., "liquidity outflows have preceded price drops by ~3h over the past week")
-- **Hypotheses**: Testable predictions grounded in data (e.g., "current exhaustion levels suggest a reversal within 24-48h — will track")
+- **Hypotheses**: Testable predictions grounded in data (e.g., "sustained outflows suggest a reversal within 24-48h — will track")
 - **Regime notes**: Market state assessments (e.g., "entering complacency regime — low IV, sustained upward momentum, cheap protection available")
 
 Ground everything in the data. The correlations tell you WHAT is related. Your journal tracks WHY you think it matters and WHAT you expect to happen. Spitznagel's framework is the lens: does this pattern affect the cost of protection, the probability of a crash, or the geometry of compounding?
@@ -174,7 +174,7 @@ function extractAndStoreJournal(text: string) {
     if (content) {
       try {
         // Extract series names referenced in the content
-        const seriesNames = ['spot_return', 'liquidity_flow', 'exhaustion_score', 'best_put_dv', 'best_call_dv'];
+        const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol'];
         const referenced = seriesNames.filter((s) => content.toLowerCase().includes(s.replace(/_/g, ' ')) || content.includes(s));
         insertJournalEntry(entryType, content, referenced.length > 0 ? referenced : null);
       } catch {

@@ -142,7 +142,6 @@ interface TickData {
   short_momentum: { main: string; derivative: string | null } | string;
   onchain: {
     liquidity_flow: { direction: string; magnitude: number; confidence: number } | null;
-    market_health: string | null;
   };
   instruments: { total: number; put_candidates: number; call_candidates: number };
   historical: { total_data_points: number; filtered_data_points: number; best_put_score: number; best_call_score: number };
@@ -154,12 +153,21 @@ interface TickData {
   next_check_minutes: number;
 }
 
+interface MarketQualityPoint {
+  hour: string;
+  spread: number | null;
+  depth: number | null;
+  oi: number | null;
+  iv: number | null;
+}
+
 interface ChartData {
   prices: SpotPrice[];
   options: OptionsPoint[];
   liquidity: LiquidityPoint[];
   bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
+  marketQuality: MarketQualityPoint[];
 }
 
 const emptyBudget: Budget = {
@@ -174,7 +182,7 @@ const emptyStats: Stats = {
   budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [] };
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [], marketQuality: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 0 };
@@ -236,6 +244,7 @@ export default function OverviewPage() {
   const pinLiquidity = usePinnableTooltip();
   const pinPut = usePinnableTooltip();
   const pinCall = usePinnableTooltip();
+  const pinMarketQuality = usePinnableTooltip();
 
   // Parse latest tick for current option values
   const latestTick = useMemo<TickData | null>(() => {
@@ -486,6 +495,19 @@ export default function OverviewPage() {
   const filteredPutHeatmap = useMemo(() =>
     putHeatmap.filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
     [putHeatmap, xDomain]
+  );
+
+  const filteredMarketQuality = useMemo(() =>
+    chart.marketQuality
+      .map(d => ({
+        ts: new Date(d.hour).getTime(),
+        spread: d.spread != null ? d.spread * 100 : null,
+        depth: d.depth,
+        oi: d.oi,
+        iv: d.iv != null ? d.iv * 100 : null,
+      }))
+      .filter(d => d.ts >= xDomain[0] && d.ts <= xDomain[1]),
+    [chart.marketQuality, xDomain]
   );
 
   return (
@@ -847,6 +869,66 @@ export default function OverviewPage() {
         );
       })()}
 
+      {/* Options Market Quality */}
+      {filteredMarketQuality.length > 0 && (
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+            <span className="text-xs font-medium text-gray-400">Options Market Quality</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red }} /> Spread</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.quaternary }} /> IV</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.blue }} /> Depth</span>
+            </div>
+          </div>
+          <div {...pinMarketQuality.containerProps}>
+          <ResponsiveContainer width="100%" height={200}>
+            <ComposedChart data={filteredMarketQuality} margin={margins}>
+              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <YAxis
+                yAxisId="pct"
+                domain={['auto', 'auto']}
+                tickFormatter={(v) => `${v.toFixed(1)}%`}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={mobile ? 40 : 55}
+              />
+              <YAxis
+                yAxisId="depth"
+                orientation="right"
+                domain={['auto', 'auto']}
+                tickFormatter={(v) => `${Number(v).toFixed(1)}`}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tickSecondary}
+                width={mobile ? 35 : 50}
+              />
+              <Tooltip
+                {...chartTooltip}
+                {...pinMarketQuality.tooltipActive}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                content={({ active, payload, label }: any) => {
+                  if (!active || !payload?.length) return pinMarketQuality.wrap(null);
+                  const row = payload[0]?.payload;
+                  if (!row) return pinMarketQuality.wrap(null);
+                  return pinMarketQuality.wrap(
+                    <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                      <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
+                      <div className="text-xs" style={{ color: chartColors.red }}>Spread: {row.spread != null ? `${row.spread.toFixed(2)}%` : 'N/A'}</div>
+                      <div className="text-xs" style={{ color: chartColors.quaternary }}>IV: {row.iv != null ? `${row.iv.toFixed(1)}%` : 'N/A'}</div>
+                      <div className="text-xs" style={{ color: chartColors.blue }}>Depth: {row.depth != null ? `${row.depth.toFixed(1)} ETH` : 'N/A'}</div>
+                      <div className="text-xs text-gray-500">OI: {row.oi != null ? Number(row.oi).toLocaleString() : 'N/A'}</div>
+                    </div>
+                  );
+                }}
+              />
+              <Line yAxisId="pct" type="stepAfter" dataKey="spread" stroke={chartColors.red} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
+              <Line yAxisId="pct" type="stepAfter" dataKey="iv" stroke={chartColors.quaternary} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
+              <Line yAxisId="depth" type="stepAfter" dataKey="depth" stroke={chartColors.blue} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
+
       {/* DEX Liquidity (TVL) */}
       {filteredLiquidity.length > 0 && (() => {
         const dexColors: Record<string, string> = {
@@ -1087,7 +1169,6 @@ export default function OverviewPage() {
                 <th className="text-right py-2 px-3 font-medium">Instruments</th>
                 <th className="text-right py-2 px-3 font-medium">Valid</th>
                 <th className="text-right py-2 px-3 font-medium">Flow</th>
-                <th className="text-right py-2 px-3 font-medium">Health</th>
                 <th className="text-right py-2 px-3 font-medium">Next</th>
               </tr>
             </thead>
@@ -1181,11 +1262,6 @@ export default function OverviewPage() {
                     </td>
                     <td className="py-1.5 px-3 text-right text-xs text-white">
                       {flow ? flow.direction : '--'}
-                    </td>
-                    <td className="py-1.5 px-3 text-right text-xs">
-                      <span className={d.onchain.market_health === 'normal' ? 'text-emerald-400' : d.onchain.market_health ? 'text-yellow-400' : 'text-gray-600'}>
-                        {d.onchain.market_health || '--'}
-                      </span>
                     </td>
                     <td className="py-1.5 px-3 text-right text-xs text-gray-500">
                       {Number(d.next_check_minutes ?? 0).toFixed(0)}m

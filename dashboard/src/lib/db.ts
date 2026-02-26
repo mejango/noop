@@ -163,7 +163,7 @@ export function getOnchainData(since: string) {
   const d = getDb();
   return d.prepare(`
     SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
-      liquidity_flow_confidence, exhaustion_score, exhaustion_alert_level
+      liquidity_flow_confidence
     FROM onchain_data
     WHERE timestamp > ?
     ORDER BY timestamp DESC
@@ -208,7 +208,7 @@ export function getOnchainWithRawData(since: string, limit = 5) {
   const d = getDb();
   return d.prepare(`
     SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
-      liquidity_flow_confidence, exhaustion_score, exhaustion_alert_level, raw_data
+      liquidity_flow_confidence, raw_data
     FROM onchain_data
     WHERE timestamp > ?
     ORDER BY timestamp DESC
@@ -252,7 +252,6 @@ export function getOnchainHourly(since: string) {
   return d.prepare(`
     SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
            AVG(liquidity_flow_magnitude) as avg_magnitude,
-           AVG(exhaustion_score) as avg_exhaustion,
            -- Most common direction in the hour
            (SELECT liquidity_flow_direction FROM onchain_data o2
             WHERE strftime('%Y-%m-%dT%H:00:00Z', o2.timestamp) = strftime('%Y-%m-%dT%H:00:00Z', onchain_data.timestamp)
@@ -263,7 +262,7 @@ export function getOnchainHourly(since: string) {
     WHERE timestamp > ?
     GROUP BY hour
     ORDER BY hour ASC
-  `).all(since, since) as { hour: string; avg_magnitude: number | null; avg_exhaustion: number | null; direction: string | null }[];
+  `).all(since, since) as { hour: string; avg_magnitude: number | null; direction: string | null }[];
 }
 
 export function getBestPutDvHourly(since: string) {
@@ -292,6 +291,79 @@ export function getBestCallDvHourly(since: string) {
     GROUP BY hour
     ORDER BY hour ASC
   `).all(since) as { hour: string; value: number | null }[];
+}
+
+export function getOptionsSpreadHourly(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG((ask_price - bid_price) / mark_price) as value
+    FROM options_snapshots
+    WHERE timestamp > ?
+      AND ask_price > 0 AND bid_price > 0 AND mark_price > 0
+      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+    GROUP BY hour
+    ORDER BY hour ASC
+  `).all(since) as { hour: string; value: number | null }[];
+}
+
+export function getOptionsDepthHourly(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(ask_amount + bid_amount) as value
+    FROM options_snapshots
+    WHERE timestamp > ?
+      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+    GROUP BY hour
+    ORDER BY hour ASC
+  `).all(since) as { hour: string; value: number | null }[];
+}
+
+export function getOpenInterestHourly(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           SUM(open_interest) as value
+    FROM options_snapshots
+    WHERE timestamp > ? AND open_interest IS NOT NULL AND open_interest > 0
+    GROUP BY hour
+    ORDER BY hour ASC
+  `).all(since) as { hour: string; value: number | null }[];
+}
+
+export function getImpliedVolHourly(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(implied_vol) as value
+    FROM options_snapshots
+    WHERE timestamp > ? AND implied_vol IS NOT NULL
+      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+    GROUP BY hour
+    ORDER BY hour ASC
+  `).all(since) as { hour: string; value: number | null }[];
+}
+
+export function getOptionsMarketQuality(since: string) {
+  const d = getDb();
+  return d.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(CASE WHEN ask_price > 0 AND bid_price > 0 AND mark_price > 0
+                    AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+               THEN (ask_price - bid_price) / mark_price END) as spread,
+           AVG(CASE WHEN (delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12)
+               THEN ask_amount + bid_amount END) as depth,
+           SUM(CASE WHEN open_interest IS NOT NULL AND open_interest > 0
+               THEN open_interest END) as oi,
+           AVG(CASE WHEN implied_vol IS NOT NULL
+                    AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+               THEN implied_vol END) as iv
+    FROM options_snapshots
+    WHERE timestamp > ?
+    GROUP BY hour
+    ORDER BY hour ASC
+  `).all(since) as { hour: string; spread: number | null; depth: number | null; oi: number | null; iv: number | null }[];
 }
 
 export function getBotBudget() {

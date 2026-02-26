@@ -3,6 +3,10 @@ import {
   getOnchainHourly,
   getBestPutDvHourly,
   getBestCallDvHourly,
+  getOptionsSpreadHourly,
+  getOptionsDepthHourly,
+  getOpenInterestHourly,
+  getImpliedVolHourly,
 } from './db';
 
 export interface SeriesConfig {
@@ -49,18 +53,6 @@ const SERIES: SeriesConfig[] = [
     },
   },
   {
-    name: 'exhaustion_score',
-    description: 'Market exhaustion score (0=fresh, 1=fully exhausted)',
-    category: 'liquidity',
-    extract: (since) => {
-      const rows = getOnchainHourly(since);
-      return rows.map((r) => ({
-        hour: r.hour,
-        value: r.avg_exhaustion,
-      }));
-    },
-  },
-  {
     name: 'best_put_dv',
     description: 'Best PUT delta-value score (higher = cheaper protection)',
     category: 'options',
@@ -71,6 +63,30 @@ const SERIES: SeriesConfig[] = [
     description: 'Best CALL delta-value score (higher = richer premium to sell)',
     category: 'options',
     extract: (since) => getBestCallDvHourly(since),
+  },
+  {
+    name: 'options_spread',
+    description: 'Avg bid-ask spread as % of mark price (higher = worse liquidity)',
+    category: 'options',
+    extract: (since) => getOptionsSpreadHourly(since),
+  },
+  {
+    name: 'options_depth',
+    description: 'Avg order book depth (ask_amount + bid_amount) in ETH',
+    category: 'options',
+    extract: (since) => getOptionsDepthHourly(since),
+  },
+  {
+    name: 'open_interest',
+    description: 'Total open interest across tracked instruments',
+    category: 'options',
+    extract: (since) => getOpenInterestHourly(since),
+  },
+  {
+    name: 'implied_vol',
+    description: 'Avg implied volatility within trading delta range',
+    category: 'options',
+    extract: (since) => getImpliedVolHourly(since),
   },
 ];
 

@@ -9,6 +9,7 @@ import {
   getOptionsDistribution,
   getAvgCallPremium7d,
   getOnchainWithRawData,
+  getOptionsMarketQuality,
 } from './db';
 import { buildCorrelationAnalysis } from './correlation';
 
@@ -99,10 +100,24 @@ export function buildMarketSnapshot() {
           return rows.length > 0 ? rows[0].avg_premium : null;
         } catch { return null; }
       })(),
+      market_quality: (() => {
+        try {
+          const since1h = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+          const rows = getOptionsMarketQuality(since1h);
+          if (rows.length === 0) return null;
+          const last = rows[rows.length - 1];
+          return {
+            spread_pct: last.spread != null ? +(last.spread * 100).toFixed(2) : null,
+            depth_eth: last.depth != null ? +last.depth.toFixed(2) : null,
+            open_interest: last.oi != null ? Math.round(last.oi) : null,
+            implied_vol_pct: last.iv != null ? +(last.iv * 100).toFixed(1) : null,
+          };
+        } catch { return null; }
+      })(),
     },
 
     onchain_metrics: {
-      _description: 'On-chain data from last 24h. liquidity_flow_direction is "inflow"|"outflow"|"neutral", magnitude 0-1, confidence 0-1. exhaustion_score 0-1 (1=fully exhausted). exhaustion_alert_level is "low"|"medium"|"high". pool_breakdown shows per-DEX liquidity from latest raw_data.',
+      _description: 'On-chain data from last 24h. liquidity_flow_direction is "inflow"|"outflow"|"neutral", magnitude 0-1, confidence 0-1. pool_breakdown shows per-DEX liquidity from latest raw_data.',
       data_points: onchain.length,
       latest: onchain.length > 0 ? onchain[0] : null,
       history: onchain,
@@ -128,7 +143,7 @@ export function buildMarketSnapshot() {
     },
 
     strategy_signals: {
-      _description: 'Strategy signals from last 7 days. signal_type describes the signal (e.g. "momentum_shift", "exhaustion_alert"). details is a JSON string with signal-specific data. acted_on=1 means the bot traded on this signal.',
+      _description: 'Strategy signals from last 7 days. signal_type describes the signal (e.g. "momentum_shift"). details is a JSON string with signal-specific data. acted_on=1 means the bot traded on this signal.',
       count: signals.length,
       signals: signals,
     },
