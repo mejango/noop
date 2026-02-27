@@ -749,76 +749,6 @@ export default function OverviewPage() {
         </Card>
       </div>
 
-      {/* Positions Table */}
-      {account.positions.length > 0 && (() => {
-        const posCols: { key: string; label: string; align: 'left' | 'right' }[] = [
-          { key: 'instrument_name', label: 'Instrument', align: 'left' },
-          { key: 'amount', label: 'Amount', align: 'right' },
-          { key: 'average_price', label: 'Avg Cost', align: 'right' },
-          { key: 'mark_price', label: 'Mark', align: 'right' },
-          { key: 'mark_value', label: 'Mkt Value', align: 'right' },
-          { key: 'unrealized_pnl', label: 'UPnL', align: 'right' },
-          { key: 'pnlPct', label: 'UPnL%', align: 'right' },
-        ];
-        const sorted = [...account.positions]
-          .map(p => ({ ...p, pnlPct: (p.average_price * Math.abs(p.amount)) > 0 ? (p.unrealized_pnl / (p.average_price * Math.abs(p.amount))) * 100 : 0 }))
-          .sort((a, b) => {
-            const k = posSort.key as keyof typeof a;
-            const av = a[k], bv = b[k];
-            const cmp = typeof av === 'string' ? (av as string).localeCompare(bv as string) : (av as number) - (bv as number);
-            return posSort.asc ? cmp : -cmp;
-          });
-        const toggleSort = (key: string) => setPosSort(prev => prev.key === key ? { key, asc: !prev.asc } : { key, asc: key === 'instrument_name' });
-        return (
-        <Card title="Positions" subtitle={`${account.positions.length} open`}>
-          <div className="overflow-auto max-h-[300px]">
-            <table className="w-full text-xs md:text-sm">
-              <thead className="sticky top-0 bg-[#111] z-10">
-                <tr className="text-xs text-gray-500 border-b border-white/5">
-                  {posCols.map(col => (
-                    <th
-                      key={col.key}
-                      className={`${col.align === 'left' ? 'text-left' : 'text-right'} py-2 px-2 font-medium cursor-pointer select-none hover:text-gray-300`}
-                      onClick={() => toggleSort(col.key)}
-                    >
-                      {col.label}{posSort.key === col.key ? (posSort.asc ? ' \u25B2' : ' \u25BC') : ''}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((p) => {
-                  const pnlColor = p.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400';
-                  return (
-                    <tr key={p.instrument_name} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                      <td className="py-1.5 px-2 text-white font-medium whitespace-nowrap">{p.instrument_name}</td>
-                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{p.amount.toFixed(4)}</td>
-                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatUSD(p.average_price)}</td>
-                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{formatUSD(p.mark_price)}</td>
-                      <td className="py-1.5 px-2 text-right tabular-nums text-white">{formatUSD(p.mark_value)}</td>
-                      <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{formatUSD(p.unrealized_pnl)}</td>
-                      <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{p.pnlPct.toFixed(1)}%</td>
-                    </tr>
-                  );
-                })}
-                <tr className="border-t border-white/10 font-medium">
-                  <td className="py-1.5 px-2 text-gray-400">Total</td>
-                  <td colSpan={3} />
-                  <td className="py-1.5 px-2 text-right tabular-nums text-white">
-                    {formatUSD(account.positions.reduce((s, p) => s + p.mark_value, 0))}
-                  </td>
-                  <td className={`py-1.5 px-2 text-right tabular-nums ${account.positions.reduce((s, p) => s + p.unrealized_pnl, 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {formatUSD(account.positions.reduce((s, p) => s + p.unrealized_pnl, 0))}
-                  </td>
-                  <td />
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </Card>
-        );
-      })()}
-
       {/* Time Range Selector */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-1 overflow-x-auto hide-scrollbar">
@@ -1579,6 +1509,76 @@ export default function OverviewPage() {
           </div>
         </Card>
       )}
+
+      {/* Positions Table */}
+      {account.positions.length > 0 && (() => {
+        const posCols: { key: string; label: string; align: 'left' | 'right' }[] = [
+          { key: 'instrument_name', label: 'Instrument', align: 'left' },
+          { key: 'amount', label: 'Amount', align: 'right' },
+          { key: 'average_price', label: 'Avg Cost', align: 'right' },
+          { key: 'mark_price', label: 'Mark', align: 'right' },
+          { key: 'mark_value', label: 'Mkt Value', align: 'right' },
+          { key: 'unrealized_pnl', label: 'UPnL', align: 'right' },
+          { key: 'pnlPct', label: 'UPnL%', align: 'right' },
+        ];
+        const sorted = [...account.positions]
+          .map(p => ({ ...p, pnlPct: (p.average_price * Math.abs(p.amount)) > 0 ? (p.unrealized_pnl / (p.average_price * Math.abs(p.amount))) * 100 : 0 }))
+          .sort((a, b) => {
+            const k = posSort.key as keyof typeof a;
+            const av = a[k], bv = b[k];
+            const cmp = typeof av === 'string' ? (av as string).localeCompare(bv as string) : (av as number) - (bv as number);
+            return posSort.asc ? cmp : -cmp;
+          });
+        const toggleSort = (key: string) => setPosSort(prev => prev.key === key ? { key, asc: !prev.asc } : { key, asc: key === 'instrument_name' });
+        return (
+        <Card title="Positions" subtitle={`${account.positions.length} open`}>
+          <div className="overflow-auto max-h-[300px]">
+            <table className="w-full text-xs md:text-sm">
+              <thead className="sticky top-0 bg-[#111] z-10">
+                <tr className="text-xs text-gray-500 border-b border-white/5">
+                  {posCols.map(col => (
+                    <th
+                      key={col.key}
+                      className={`${col.align === 'left' ? 'text-left' : 'text-right'} py-2 px-2 font-medium cursor-pointer select-none hover:text-gray-300`}
+                      onClick={() => toggleSort(col.key)}
+                    >
+                      {col.label}{posSort.key === col.key ? (posSort.asc ? ' \u25B2' : ' \u25BC') : ''}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((p) => {
+                  const pnlColor = p.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400';
+                  return (
+                    <tr key={p.instrument_name} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                      <td className="py-1.5 px-2 text-white font-medium whitespace-nowrap">{p.instrument_name}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{p.amount.toFixed(4)}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatUSD(p.average_price)}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{formatUSD(p.mark_price)}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-white">{formatUSD(p.mark_value)}</td>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{formatUSD(p.unrealized_pnl)}</td>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{p.pnlPct.toFixed(1)}%</td>
+                    </tr>
+                  );
+                })}
+                <tr className="border-t border-white/10 font-medium">
+                  <td className="py-1.5 px-2 text-gray-400">Total</td>
+                  <td colSpan={3} />
+                  <td className="py-1.5 px-2 text-right tabular-nums text-white">
+                    {formatUSD(account.positions.reduce((s, p) => s + p.mark_value, 0))}
+                  </td>
+                  <td className={`py-1.5 px-2 text-right tabular-nums ${account.positions.reduce((s, p) => s + p.unrealized_pnl, 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {formatUSD(account.positions.reduce((s, p) => s + p.unrealized_pnl, 0))}
+                  </td>
+                  <td />
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </Card>
+        );
+      })()}
 
       {/* Tick Log Table */}
       <Card>
