@@ -15,8 +15,8 @@ const config: Config = {
         "juice-dark": "#1a1a1a",
       },
       fontFamily: {
-        sans: ["var(--font-jetbrains)", "Menlo", "monospace"],
-        mono: ["var(--font-jetbrains)", "Menlo", "monospace"],
+        sans: ["var(--font-space-mono)", "Menlo", "monospace"],
+        mono: ["var(--font-space-mono)", "Menlo", "monospace"],
       },
     },
   },
