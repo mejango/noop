@@ -2,7 +2,6 @@ import { privateKeyToAccount } from 'viem/accounts';
 import fs from 'fs';
 import path from 'path';
 
-const DERIVE_ACCOUNT_ADDRESS = '0xD87890df93bf74173b51077e5c6cD12121d87903';
 const SUBACCOUNT_ID = 25923;
 const BASE_URL = 'https://api.lyra.finance';
 const CACHE_TTL = 30_000; // 30s
@@ -28,7 +27,7 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
   const timestamp = Date.now();
   const signature = await account.signMessage({ message: timestamp.toString() });
   return {
-    'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+    'X-LyraWallet': account.address,
     'X-LyraTimestamp': timestamp.toString(),
     'X-LyraSignature': signature,
     'Content-Type': 'application/json',
