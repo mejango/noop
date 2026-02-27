@@ -6,9 +6,11 @@ import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, momentumColor, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import Card from '@/components/Card';
+import { Bot, User } from 'lucide-react';
 import {
   ComposedChart, Line, Bar, Scatter, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
+  ReferenceDot,
 } from 'recharts';
 
 /** Hook: hover shows tooltip, click pins it, next click anywhere unpins */
@@ -150,6 +152,49 @@ interface TickSummary {
   summary: string;
 }
 
+interface LyraPosition {
+  instrument_name: string;
+  instrument_type: string;
+  amount: number;
+  average_price: number;
+  mark_price: number;
+  mark_value: number;
+  unrealized_pnl: number;
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+  index_price: number;
+  liquidation_price: number | null;
+}
+
+interface LyraTrade {
+  trade_id: string;
+  instrument_name: string;
+  direction: string;
+  trade_amount: number;
+  trade_price: number;
+  trade_fee: number;
+  timestamp: number;
+  index_price: number;
+  realized_pnl: number;
+  is_bot: boolean;
+}
+
+interface LyraCollateral {
+  asset_name: string;
+  amount: number;
+  mark_price: number;
+  mark_value: number;
+  unrealized_pnl: number;
+}
+
+interface AccountData {
+  collaterals: LyraCollateral[];
+  positions: LyraPosition[];
+  trades: LyraTrade[];
+}
+
 interface TickData {
   price: number;
   medium_momentum: { main: string; derivative: string | null } | string;
@@ -189,6 +234,7 @@ const emptyStats: Stats = {
 };
 
 const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [] };
+const emptyAccount: AccountData = { collaterals: [], positions: [], trades: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d', '90d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 0 };
@@ -258,6 +304,7 @@ export default function OverviewPage() {
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart, 90_000);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
+  const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
   const isHourly = chart.tier !== 'raw';
   const pinPrice = usePinnableTooltip();
   const pinLiquidity = usePinnableTooltip();
@@ -581,6 +628,12 @@ export default function OverviewPage() {
     };
   }, [liquidityData, callHeatmap, putHeatmap, putMQ, callMQ, xDomain]);
 
+  // Filter trades to visible chart range
+  const visibleTrades = useMemo(() => {
+    const [lo, hi] = xDomain;
+    return account.trades.filter(t => t.timestamp >= lo && t.timestamp <= hi);
+  }, [account.trades, xDomain]);
+
   return (
     <div className="space-y-6">
       {/* Left: Range + Best Options | Right: Momentum */}
@@ -695,6 +748,56 @@ export default function OverviewPage() {
         </Card>
       </div>
 
+      {/* Positions Table */}
+      {account.positions.length > 0 && (
+        <Card title="Positions" subtitle={`${account.positions.length} open`}>
+          <div className="overflow-auto max-h-[300px]">
+            <table className="w-full text-xs md:text-sm">
+              <thead className="sticky top-0 bg-[#111] z-10">
+                <tr className="text-xs text-gray-500 border-b border-white/5">
+                  <th className="text-left py-2 px-2 font-medium">Instrument</th>
+                  <th className="text-right py-2 px-2 font-medium">Amount</th>
+                  <th className="text-right py-2 px-2 font-medium">Avg Cost</th>
+                  <th className="text-right py-2 px-2 font-medium">Mark</th>
+                  <th className="text-right py-2 px-2 font-medium">Mkt Value</th>
+                  <th className="text-right py-2 px-2 font-medium">UPnL</th>
+                  <th className="text-right py-2 px-2 font-medium">UPnL%</th>
+                </tr>
+              </thead>
+              <tbody>
+                {account.positions.map((p) => {
+                  const costBasis = p.average_price * Math.abs(p.amount);
+                  const pnlPct = costBasis > 0 ? (p.unrealized_pnl / costBasis) * 100 : 0;
+                  const pnlColor = p.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400';
+                  return (
+                    <tr key={p.instrument_name} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                      <td className="py-1.5 px-2 text-white font-medium whitespace-nowrap">{p.instrument_name}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{p.amount.toFixed(4)}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-400">{formatUSD(p.average_price)}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{formatUSD(p.mark_price)}</td>
+                      <td className="py-1.5 px-2 text-right tabular-nums text-white">{formatUSD(p.mark_value)}</td>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{formatUSD(p.unrealized_pnl)}</td>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{pnlPct.toFixed(1)}%</td>
+                    </tr>
+                  );
+                })}
+                <tr className="border-t border-white/10 font-medium">
+                  <td className="py-1.5 px-2 text-gray-400">Total</td>
+                  <td colSpan={3} />
+                  <td className="py-1.5 px-2 text-right tabular-nums text-white">
+                    {formatUSD(account.positions.reduce((s, p) => s + p.mark_value, 0))}
+                  </td>
+                  <td className={`py-1.5 px-2 text-right tabular-nums ${account.positions.reduce((s, p) => s + p.unrealized_pnl, 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {formatUSD(account.positions.reduce((s, p) => s + p.unrealized_pnl, 0))}
+                  </td>
+                  <td />
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
       {/* Time Range Selector */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-1 overflow-x-auto hide-scrollbar">
@@ -717,6 +820,7 @@ export default function OverviewPage() {
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: '#ffffff', opacity: 0.5 }} /> ETH L</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
+          {account.trades.length > 0 && <span className="flex items-center gap-1"><span className="inline-block" style={{ width: 0, height: 0, borderLeft: '4px solid transparent', borderRight: '4px solid transparent', borderBottom: `6px solid ${chartColors.trade}` }} /> Trade</span>}
         </div>
       </div>
 
@@ -817,6 +921,32 @@ export default function OverviewPage() {
               {/* PUT/CALL value overlays */}
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
+
+              {/* Trade star markers */}
+              {visibleTrades.map((t) => (
+                <ReferenceDot
+                  key={t.trade_id}
+                  x={t.timestamp}
+                  y={t.index_price}
+                  yAxisId="price"
+                  r={5}
+                  fill={t.is_bot ? chartColors.trade : 'none'}
+                  stroke={chartColors.trade}
+                  strokeWidth={1.5}
+                  shape={({ cx, cy }: { cx?: number; cy?: number }) => {
+                    if (!cx || !cy) return <></>;
+                    const isBuy = t.direction === 'buy';
+                    const size = 6;
+                    // Star / triangle marker
+                    if (isBuy) {
+                      // Upward triangle
+                      return <polygon points={`${cx},${cy - size} ${cx - size},${cy + size * 0.6} ${cx + size},${cy + size * 0.6}`} fill={t.is_bot ? chartColors.trade : 'none'} stroke={chartColors.trade} strokeWidth={1.5} />;
+                    }
+                    // Downward triangle
+                    return <polygon points={`${cx},${cy + size} ${cx - size},${cy - size * 0.6} ${cx + size},${cy - size * 0.6}`} fill={t.is_bot ? chartColors.trade : 'none'} stroke={chartColors.trade} strokeWidth={1.5} />;
+                  }}
+                />
+              ))}
             </ComposedChart>
           </ResponsiveContainer>
           </div>
@@ -1388,6 +1518,45 @@ export default function OverviewPage() {
         <div className="text-xs text-gray-500 text-center py-2">
           Instrument-level heatmaps hidden at this resolution. Zoom to 24h or less for detail.
         </div>
+      )}
+
+      {/* Recent Trades */}
+      {account.trades.length > 0 && (
+        <Card title="Recent Trades" subtitle={`${account.trades.length} trades (30d)`}>
+          <div className="overflow-auto max-h-[300px]">
+            <table className="w-full text-xs md:text-sm">
+              <thead className="sticky top-0 bg-[#111] z-10">
+                <tr className="text-xs text-gray-500 border-b border-white/5">
+                  <th className="text-left py-2 px-2 font-medium">Time</th>
+                  <th className="text-left py-2 px-2 font-medium">Instrument</th>
+                  <th className="text-center py-2 px-2 font-medium">Direction</th>
+                  <th className="text-right py-2 px-2 font-medium">Amount</th>
+                  <th className="text-right py-2 px-2 font-medium">Price</th>
+                  <th className="text-right py-2 px-2 font-medium">Fee</th>
+                  <th className="text-center py-2 px-2 font-medium">Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {account.trades.slice(0, 20).map((t) => (
+                  <tr key={t.trade_id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                    <td className="py-1.5 px-2 text-gray-400 whitespace-nowrap">{new Date(t.timestamp).toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-white whitespace-nowrap">{t.instrument_name}</td>
+                    <td className={`py-1.5 px-2 text-center ${t.direction === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>{t.direction.toUpperCase()}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{t.trade_amount.toFixed(4)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{formatUSD(t.trade_price)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">{formatUSD(t.trade_fee)}</td>
+                    <td className="py-1.5 px-2 text-center">
+                      {t.is_bot
+                        ? <Bot className="inline w-3.5 h-3.5 text-cyan-400" />
+                        : <User className="inline w-3.5 h-3.5 text-gray-400" />
+                      }
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
       )}
 
       {/* Tick Log Table */}

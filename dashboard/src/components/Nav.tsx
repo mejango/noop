@@ -22,6 +22,15 @@ interface NavStats {
   budget: Budget;
 }
 
+interface Collateral {
+  asset_name: string;
+  amount: number;
+}
+
+interface AccountData {
+  collaterals: Collateral[];
+}
+
 const emptyBudget: Budget = {
   putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0,
   callTotalBudget: 0, callSpent: 0, callRemaining: 0, callDaysLeft: 0, cycleDays: 10,
@@ -31,9 +40,15 @@ const emptyStats: NavStats = {
   last_price: 0, last_price_time: '', lyra_spot: null, budget: emptyBudget,
 };
 
+const emptyAccount: AccountData = { collaterals: [] };
+
 export default function Nav() {
   const { data: stats } = usePolling<NavStats>('/api/stats', emptyStats);
+  const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
   const b = stats.budget || emptyBudget;
+
+  const usdc = account.collaterals.find(c => c.asset_name === 'USDC');
+  const eth = account.collaterals.find(c => c.asset_name === 'ETH');
 
   return (
     <nav className="border-b border-white/10 bg-juice-dark/80 backdrop-blur-md py-3">
@@ -48,6 +63,16 @@ export default function Nav() {
             )}
           </span>
           <span className="text-gray-500 text-xs hidden sm:inline">{timeAgo(stats.last_price_time)}</span>
+          {(usdc || eth) && (
+            <>
+              <span className="text-gray-600">|</span>
+              <span className="tabular-nums">
+                {usdc && <><span className="text-gray-400 hidden sm:inline">USDC </span><span className="text-white">{Number(usdc.amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></>}
+                {usdc && eth && <span className="text-gray-600 mx-1">|</span>}
+                {eth && <><span className="text-gray-400 hidden sm:inline">ETH </span><span className="text-white">{Number(eth.amount).toLocaleString('en-US', { minimumFractionDigits: 4, maximumFractionDigits: 4 })}</span></>}
+              </span>
+            </>
+          )}
           <span className="text-gray-600 hidden md:inline">|</span>
           <span className="text-gray-400 hidden md:inline">PUT <span className="text-white">{formatUSD(b.putRemaining)}</span>/<span className="text-gray-500">{formatUSD(b.putTotalBudget)}</span></span>
           <span className="text-gray-400 hidden md:inline">CALL <span className="text-white">{formatUSD(b.callRemaining)}</span>/<span className="text-gray-500">{formatUSD(b.callTotalBudget)}</span></span>

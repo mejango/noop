@@ -285,6 +285,13 @@ function prepareAll(d: Database.Database) {
       ORDER BY hour ASC
     `),
 
+    getLocalTrades: d.prepare(`
+      SELECT instrument_name, direction, amount, price, timestamp
+      FROM trades
+      WHERE timestamp > ?
+      ORDER BY timestamp DESC
+    `),
+
     getBotState: d.prepare('SELECT * FROM bot_state WHERE id = 1'),
 
     // ─── Hourly Rollup Queries ──────────────────────────────────────────
@@ -513,6 +520,16 @@ export function getLiquidityHourly_rollup(since: string) {
   }
 
   return Array.from(byHour.values()).filter(r => Object.keys(r).length > 1);
+}
+
+export function getLocalTrades(since: string) {
+  try {
+    return getStmts().getLocalTrades.all(since) as {
+      instrument_name: string; direction: string; amount: number; price: number; timestamp: string;
+    }[];
+  } catch {
+    return []; // table may not exist yet
+  }
 }
 
 export function getBotBudget() {

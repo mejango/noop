@@ -18,7 +18,8 @@
     "react-dom": "^18",
     "react-markdown": "^10.1.0",
     "recharts": "^3.7.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "viem": "^2.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
