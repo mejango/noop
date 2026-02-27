@@ -1890,6 +1890,80 @@ const generateJournalEntries = async (tickSummary, botData) => {
     const sampledPrices = sample(recentPrices, 48);
     const sampledOnchain = sample(recentOnchain, 24);
 
+    // Compute put value vs price divergence analysis
+    const putPriceDivergence = (() => {
+      try {
+        // Parse all ticks to get time series of put values and prices
+        const parsed = recentTicks
+          .map(t => { try { return { timestamp: t.timestamp, ...JSON.parse(t.summary) }; } catch { return null; } })
+          .filter(t => t && t.price && t.current_best_put != null)
+          .reverse(); // chronological order
+        if (parsed.length < 6) return null;
+
+        // Compute rolling changes over windows
+        const windows = [6, 12, 24]; // tick windows (~30min, ~1h, ~2h at 5min ticks)
+        const divergences = [];
+        for (const w of windows) {
+          if (parsed.length < w + 1) continue;
+          const recent = parsed.slice(-w);
+          const prior = parsed.slice(-(w * 2), -w);
+          if (prior.length < 3) continue;
+
+          const recentAvgPut = recent.reduce((s, t) => s + t.current_best_put, 0) / recent.length;
+          const priorAvgPut = prior.reduce((s, t) => s + t.current_best_put, 0) / prior.length;
+          const recentAvgPrice = recent.reduce((s, t) => s + t.price, 0) / recent.length;
+          const priorAvgPrice = prior.reduce((s, t) => s + t.price, 0) / prior.length;
+
+          const putChangePct = priorAvgPut > 0 ? ((recentAvgPut - priorAvgPut) / priorAvgPut) * 100 : 0;
+          const priceChangePct = priorAvgPrice > 0 ? ((recentAvgPrice - priorAvgPrice) / priorAvgPrice) * 100 : 0;
+
+          divergences.push({
+            window_ticks: w,
+            approx_hours: (w * 5 / 60).toFixed(1),
+            put_value_change_pct: +putChangePct.toFixed(2),
+            price_change_pct: +priceChangePct.toFixed(2),
+            divergence: +(putChangePct - priceChangePct).toFixed(2),
+            signal: putChangePct > 5 && priceChangePct > -1 ? 'PUT_SPIKE_PRICE_FLAT' :
+                    putChangePct > 5 && priceChangePct < -1 ? 'PUT_SPIKE_PRICE_DROPPING' :
+                    putChangePct < -5 && priceChangePct > -1 ? 'PUT_CHEAP_PRICE_STABLE' : 'NEUTRAL',
+          });
+        }
+
+        // Find historical spike-then-drop episodes from 7d price data
+        const episodes = [];
+        const allTicks = recentTicks
+          .map(t => { try { return { timestamp: t.timestamp, ...JSON.parse(t.summary) }; } catch { return null; } })
+          .filter(t => t && t.price && t.current_best_put != null)
+          .reverse();
+        // Scan for put spikes (>10% jump over 6 ticks) followed by price drops within 24 ticks
+        for (let i = 6; i < allTicks.length - 12; i++) {
+          const prevPut = allTicks.slice(i - 6, i).reduce((s, t) => s + t.current_best_put, 0) / 6;
+          const currPut = allTicks[i].current_best_put;
+          if (prevPut > 0 && ((currPut - prevPut) / prevPut) > 0.10) {
+            // Put spiked — check if price dropped within next 24 ticks
+            const priceAtSpike = allTicks[i].price;
+            const futureWindow = allTicks.slice(i + 1, i + 25);
+            const minFuturePrice = Math.min(...futureWindow.map(t => t.price));
+            const priceDropPct = ((minFuturePrice - priceAtSpike) / priceAtSpike) * 100;
+            if (priceDropPct < -0.5) {
+              episodes.push({
+                spike_time: allTicks[i].timestamp,
+                put_spike_pct: +(((currPut - prevPut) / prevPut) * 100).toFixed(1),
+                subsequent_price_drop_pct: +priceDropPct.toFixed(2),
+                lag_ticks_to_min: futureWindow.indexOf(futureWindow.find(t => t.price === minFuturePrice)) + 1,
+              });
+            }
+          }
+        }
+
+        return {
+          current_divergences: divergences,
+          historical_spike_then_drop_episodes: episodes.slice(-5), // last 5
+          interpretation: 'PUT_SPIKE_PRICE_FLAT = puts getting expensive while price stable (market pricing risk before spot moves). PUT_CHEAP_PRICE_STABLE = cheap protection opportunity.',
+        };
+      } catch { return null; }
+    })();
+
     // Build snapshot
     const snapshot = {
       current_tick: tickSummary,
@@ -1939,11 +2013,12 @@ const generateJournalEntries = async (tickSummary, botData) => {
         } catch { return null; }
       })(),
       cross_correlations: correlations,
+      put_price_divergence: putPriceDivergence,
     };
 
     const systemPrompt = `You are the Spitznagel Bot — a tail-risk hedging advisor operating on ETH options with Universa-style principles. You maintain an analytical journal tracking market observations, hypotheses, and regime assessments.
 
-Analyze the provided daily snapshot across three time scales:
+Analyze the provided snapshot across three time scales:
 
 **Short-term (hours):** Price action, short momentum shifts, spike events, intraday patterns.
 **Medium-term (days):** Trend direction changes, momentum regime shifts, onchain flow patterns, protection cost trends.
@@ -1957,6 +2032,13 @@ Output 2-5 journal entries using these tags:
 <journal type="regime_note">Market state assessments and regime classifications</journal>
 
 IMPORTANT: Start every journal entry with a single bold TLDR line summarizing the key takeaway in plain language (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow the TLDR with the detailed analysis.
+
+## Put Value / Price Divergence
+The snapshot includes a put_price_divergence section that detects when put option values move independently of spot price:
+- **current_divergences**: Put value vs price changes over multiple windows. A PUT_SPIKE_PRICE_FLAT signal means the options market is pricing in downside risk before spot moves — puts are getting expensive while price holds. PUT_CHEAP_PRICE_STABLE means cheap protection is available.
+- **historical_spike_then_drop_episodes**: Past instances where a put value spike preceded a price drop, with timing data. Use these to calibrate how predictive put spikes are for this market.
+
+This is critical for the Spitznagel strategy: we want to buy puts when they're CHEAP (before the market prices in risk), not after a spike. If put spikes reliably lead price drops, the bot should be accumulating protection during PUT_CHEAP_PRICE_STABLE windows.
 
 Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).`;
 
