@@ -188,7 +188,7 @@ const emptyStats: Stats = {
 };
 
 const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [] };
-const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d'] as const;
+const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d', '90d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 0 };
 const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 0 };
@@ -257,7 +257,7 @@ export default function OverviewPage() {
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart, 90_000);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
-  const isHourly = chart.tier === 'hourly';
+  const isHourly = chart.tier !== 'raw';
   const pinPrice = usePinnableTooltip();
   const pinLiquidity = usePinnableTooltip();
   const pinPut = usePinnableTooltip();
@@ -1376,10 +1376,10 @@ export default function OverviewPage() {
         </Card>
       )}
 
-      {/* Hourly tier info note */}
+      {/* Downsampled tier info note */}
       {isHourly && (
         <div className="text-xs text-gray-500 text-center py-2">
-          Instrument-level heatmaps hidden at hourly resolution. Zoom to 6h or less for detail.
+          Instrument-level heatmaps hidden at this resolution. Zoom to 24h or less for detail.
         </div>
       )}
 
