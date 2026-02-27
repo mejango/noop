@@ -188,7 +188,7 @@ const CALL_DELTA_RANGE = [0.04, 0.12]; // Positive delta for calls
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Minimum profit percentage for automatic call buyback
 
 // Journal auto-generation
-const JOURNAL_INTERVAL_MS = 24 * 60 * 60 * 1000; // Once per day
+const JOURNAL_INTERVAL_MS = 8 * 60 * 60 * 1000; // Every 8 hours
 let lastJournalGeneration = 0;
 
 // Common bot state structure
