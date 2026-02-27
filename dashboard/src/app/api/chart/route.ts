@@ -35,7 +35,7 @@ function downsample<T extends Record<string, any>>(
     buckets.get(bucket)!.push(row);
   }
   const result: T[] = [];
-  for (const [bucket, group] of buckets) {
+  Array.from(buckets.entries()).forEach(([bucket, group]) => {
     const out = { ...group[group.length - 1], [tsKey]: new Date(bucket).toISOString() } as T;
     for (const key of numericKeys) {
       const vals = group.map(r => r[key]).filter(v => v != null && !isNaN(v));
@@ -47,7 +47,7 @@ function downsample<T extends Record<string, any>>(
       (out as Record<string, unknown>)[key] = group[group.length - 1][key];
     }
     result.push(out);
-  }
+  });
   return result;
 }
 
@@ -63,19 +63,18 @@ function downsampleLiquidity(rows: Record<string, any>[], bucketMs: number): Rec
     buckets.get(bucket)!.push(row);
   }
   const result: typeof rows = [];
-  for (const [bucket, group] of buckets) {
+  Array.from(buckets.entries()).forEach(([bucket, group]) => {
     const out: Record<string, unknown> = { timestamp: new Date(bucket).toISOString() };
-    // Collect all numeric keys from the group and average them
     const allKeys = new Set<string>();
     for (const r of group) for (const k of Object.keys(r)) if (k !== 'timestamp') allKeys.add(k);
-    for (const key of allKeys) {
+    Array.from(allKeys).forEach(key => {
       const vals = group.map(r => r[key]).filter(v => v != null && typeof v === 'number' && !isNaN(v));
       if (vals.length > 0) {
         out[key] = vals.reduce((a: number, b: number) => a + b, 0) / vals.length;
       }
-    }
+    });
     result.push(out);
-  }
+  });
   return result;
 }
 
@@ -112,7 +111,7 @@ export function GET(request: NextRequest) {
       );
       const dsOptions = downsample(
         options as Record<string, unknown>[],
-        bucketMs, 'timestamp', ['best_put_value', 'best_call_value'],
+        bucketMs, 'timestamp', ['best_put_value', 'best_call_value', 'lyra_spot'],
       );
       const dsLiquidity = downsampleLiquidity(
         liquidity as Record<string, unknown>[],

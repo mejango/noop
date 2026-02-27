@@ -39,6 +39,12 @@ function prepareAll(d: Database.Database) {
       FROM spot_prices ORDER BY timestamp DESC LIMIT 1
     `),
 
+    getLyraSpot: d.prepare(`
+      SELECT index_price as lyra_spot FROM options_snapshots
+      WHERE index_price IS NOT NULL
+      ORDER BY timestamp DESC LIMIT 1
+    `),
+
     getSpotPrices: d.prepare(`
       SELECT * FROM spot_prices
       WHERE timestamp > ?
@@ -62,7 +68,8 @@ function prepareAll(d: Database.Database) {
           THEN ask_delta_value END) as best_put_value,
         MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
           AND delta >= 0.04 AND delta <= 0.12
-          THEN bid_delta_value END) as best_call_value
+          THEN bid_delta_value END) as best_call_value,
+        MAX(index_price) as lyra_spot
       FROM options_snapshots
       WHERE timestamp > ?
       GROUP BY timestamp
@@ -304,6 +311,10 @@ function prepareAll(d: Database.Database) {
 
 export function getStats() {
   return getStmts().getStats.get();
+}
+
+export function getLyraSpot() {
+  return getStmts().getLyraSpot.get() as { lyra_spot: number } | undefined;
 }
 
 export function getSpotPrices(since: string, limit = 2000) {

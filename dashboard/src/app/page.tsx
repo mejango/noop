@@ -79,6 +79,7 @@ interface OptionsPoint {
   timestamp: string;
   best_put_value: number | null;
   best_call_value: number | null;
+  lyra_spot: number | null;
 }
 
 interface LiquidityPoint {
@@ -291,6 +292,7 @@ export default function OverviewPage() {
     type Row = {
       ts: number;
       price?: number;
+      lyraSpot?: number | null;
       momentum?: string;
       shortMomentum?: string;
       mediumDerivative?: string;
@@ -371,6 +373,7 @@ export default function OverviewPage() {
       const idx = snapToNearest(new Date(o.timestamp).getTime());
       rows[idx].bestPut = o.best_put_value;
       rows[idx].bestCall = o.best_call_value;
+      if (o.lyra_spot != null && o.lyra_spot > 0) rows[idx].lyraSpot = o.lyra_spot;
       // Attach option details from heatmap data
       const putSnap = bestPutByTs.get(o.timestamp);
       if (putSnap) rows[idx].bestPutDetail = makeDetail(putSnap, true);
@@ -711,6 +714,7 @@ export default function OverviewPage() {
         </div>
         <div className="flex gap-3 text-xs text-gray-500">
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: '#ffffff', opacity: 0.5 }} /> LYRA</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
         </div>
@@ -765,6 +769,7 @@ export default function OverviewPage() {
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
                       <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
+                      {row.lyraSpot != null && <div className="text-sm text-white/50">Lyra: {formatUSD(row.lyraSpot)}</div>}
                       <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}{pd ? <span className="text-xs text-gray-400 ml-2">Ask ${Number(pd.price).toFixed(4)}</span> : null}</div>
                       {pd && (
                         <div className="text-xs text-gray-500 pl-2 mb-0.5">
@@ -807,6 +812,8 @@ export default function OverviewPage() {
 
               {/* ETH price line */}
               <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls isAnimationActive={false} />
+              {/* Lyra spot price line */}
+              <Line yAxisId="price" type="monotone" dataKey="lyraSpot" stroke="#ffffff" strokeOpacity={0.4} dot={false} strokeWidth={1} connectNulls isAnimationActive={false} />
               {/* PUT/CALL value overlays */}
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />

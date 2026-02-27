@@ -18,6 +18,7 @@ interface Budget {
 interface NavStats {
   last_price: number;
   last_price_time: string;
+  lyra_spot: number | null;
   budget: Budget;
 }
 
@@ -27,7 +28,7 @@ const emptyBudget: Budget = {
 };
 
 const emptyStats: NavStats = {
-  last_price: 0, last_price_time: '', budget: emptyBudget,
+  last_price: 0, last_price_time: '', lyra_spot: null, budget: emptyBudget,
 };
 
 export default function Nav() {
@@ -39,7 +40,12 @@ export default function Nav() {
       <div className="max-w-7xl mx-auto px-3 md:px-6 flex items-center justify-between gap-3">
         <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
         <div className="flex items-center gap-2 md:gap-4 text-xs md:text-sm flex-wrap justify-end">
-          <span className="text-juice-orange font-semibold">ETH {formatUSD(stats.last_price)}</span>
+          <span>
+            <span className="text-juice-orange font-semibold">ETH {formatUSD(stats.last_price)}</span>
+            {stats.lyra_spot != null && stats.lyra_spot > 0 && (
+              <span className="text-white text-xs ml-1.5">Lyra {formatUSD(stats.lyra_spot)}</span>
+            )}
+          </span>
           <span className="text-gray-500 text-xs hidden sm:inline">{timeAgo(stats.last_price_time)}</span>
           <span className="text-gray-600 hidden md:inline">|</span>
           <span className="text-gray-400 hidden md:inline">PUT <span className="text-white">{formatUSD(b.putRemaining)}</span>/<span className="text-gray-500">{formatUSD(b.putTotalBudget)}</span></span>
