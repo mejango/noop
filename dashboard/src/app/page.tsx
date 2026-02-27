@@ -1471,45 +1471,6 @@ export default function OverviewPage() {
         </div>
       )}
 
-      {/* Recent Trades */}
-      {account.trades.length > 0 && (
-        <Card title="Recent Trades" subtitle={`${account.trades.length} trades (30d)`}>
-          <div className="overflow-auto max-h-[300px]">
-            <table className="w-full text-xs md:text-sm">
-              <thead className="sticky top-0 bg-[#111] z-10">
-                <tr className="text-xs text-gray-500 border-b border-white/5">
-                  <th className="text-left py-2 px-2 font-medium">Time</th>
-                  <th className="text-left py-2 px-2 font-medium">Instrument</th>
-                  <th className="text-center py-2 px-2 font-medium">Direction</th>
-                  <th className="text-right py-2 px-2 font-medium">Amount</th>
-                  <th className="text-right py-2 px-2 font-medium">Price</th>
-                  <th className="text-right py-2 px-2 font-medium">Fee</th>
-                  <th className="text-center py-2 px-2 font-medium">Source</th>
-                </tr>
-              </thead>
-              <tbody>
-                {account.trades.slice(0, 20).map((t) => (
-                  <tr key={t.trade_id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
-                    <td className="py-1.5 px-2 text-gray-400 whitespace-nowrap">{new Date(t.timestamp).toLocaleString()}</td>
-                    <td className="py-1.5 px-2 text-white whitespace-nowrap">{t.instrument_name}</td>
-                    <td className={`py-1.5 px-2 text-center ${t.direction === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>{t.direction.toUpperCase()}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{t.trade_amount.toFixed(4)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{formatUSD(t.trade_price)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">{formatUSD(t.trade_fee)}</td>
-                    <td className="py-1.5 px-2 text-center">
-                      {t.is_bot
-                        ? <Bot className="inline w-3.5 h-3.5 text-cyan-400" />
-                        : <User className="inline w-3.5 h-3.5 text-gray-400" />
-                      }
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
-      )}
-
       {/* Positions Table */}
       {account.positions.length > 0 && (() => {
         const posCols: { key: string; label: string; align: 'left' | 'right' }[] = [
@@ -1579,6 +1540,45 @@ export default function OverviewPage() {
         </Card>
         );
       })()}
+
+      {/* Recent Trades */}
+      {account.trades.length > 0 && (
+        <Card title="Recent Trades" subtitle={`${account.trades.length} trades (30d)`}>
+          <div className="overflow-auto max-h-[300px]">
+            <table className="w-full text-xs md:text-sm">
+              <thead className="sticky top-0 bg-[#111] z-10">
+                <tr className="text-xs text-gray-500 border-b border-white/5">
+                  <th className="text-left py-2 px-2 font-medium">Time</th>
+                  <th className="text-left py-2 px-2 font-medium">Instrument</th>
+                  <th className="text-center py-2 px-2 font-medium">Direction</th>
+                  <th className="text-right py-2 px-2 font-medium">Amount</th>
+                  <th className="text-right py-2 px-2 font-medium">Price</th>
+                  <th className="text-right py-2 px-2 font-medium">Fee</th>
+                  <th className="text-center py-2 px-2 font-medium">Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                {account.trades.slice(0, 20).map((t) => (
+                  <tr key={t.trade_id} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
+                    <td className="py-1.5 px-2 text-gray-400 whitespace-nowrap">{new Date(t.timestamp).toLocaleString()}</td>
+                    <td className="py-1.5 px-2 text-white whitespace-nowrap">{t.instrument_name}</td>
+                    <td className={`py-1.5 px-2 text-center ${t.direction === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>{t.direction.toUpperCase()}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{t.trade_amount.toFixed(4)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{formatUSD(t.trade_price)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">{formatUSD(t.trade_fee)}</td>
+                    <td className="py-1.5 px-2 text-center">
+                      {t.is_bot
+                        ? <Bot className="inline w-3.5 h-3.5 text-cyan-400" />
+                        : <User className="inline w-3.5 h-3.5 text-gray-400" />
+                      }
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
 
       {/* Tick Log Table */}
       <Card>
