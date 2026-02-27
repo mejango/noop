@@ -6,7 +6,7 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-const HOURLY_RANGES = new Set(['24h', '3d', '6.2d', '7d', '30d', 'all']);
+const HOURLY_RANGES = new Set(['3d', '6.2d', '7d', '30d', 'all']);
 
 export function GET(request: NextRequest) {
   try {
