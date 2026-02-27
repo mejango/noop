@@ -2,6 +2,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import fs from 'fs';
 import path from 'path';
 
+const DERIVE_WALLET = '0xD87890df93bf74173b51077e5c6cD12121d87903';
 const SUBACCOUNT_ID = 25923;
 const BASE_URL = 'https://api.lyra.finance';
 const CACHE_TTL = 30_000; // 30s
@@ -27,10 +28,11 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
   const timestamp = Date.now();
   const signature = await account.signMessage({ message: timestamp.toString() });
   return {
-    'X-LyraWallet': account.address,
+    'X-LyraWallet': DERIVE_WALLET,
     'X-LyraTimestamp': timestamp.toString(),
     'X-LyraSignature': signature,
     'Content-Type': 'application/json',
+    'User-Agent': 'noop-dashboard/1.0',
   };
 }
 
