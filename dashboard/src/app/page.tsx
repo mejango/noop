@@ -713,8 +713,8 @@ export default function OverviewPage() {
           ))}
         </div>
         <div className="flex gap-3 text-xs text-gray-500">
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: '#ffffff', opacity: 0.5 }} /> LYRA</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH CG</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: '#ffffff', opacity: 0.5 }} /> ETH L</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
         </div>
@@ -768,8 +768,8 @@ export default function OverviewPage() {
                   return pinPrice.wrap(
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
-                      <div className="text-sm" style={{ color: chartColors.primary }}>ETH: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
-                      {row.lyraSpot != null && <div className="text-sm text-white/50">Lyra: {formatUSD(row.lyraSpot)}</div>}
+                      <div className="text-sm" style={{ color: chartColors.primary }}>ETH CG: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
+                      {row.lyraSpot != null && <div className="text-sm text-white/50">ETH L: {formatUSD(row.lyraSpot)}</div>}
                       <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}{pd ? <span className="text-xs text-gray-400 ml-2">Ask ${Number(pd.price).toFixed(4)}</span> : null}</div>
                       {pd && (
                         <div className="text-xs text-gray-500 pl-2 mb-0.5">

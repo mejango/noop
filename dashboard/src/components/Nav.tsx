@@ -41,9 +41,9 @@ export default function Nav() {
         <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
         <div className="flex items-center gap-2 md:gap-4 text-xs md:text-sm flex-wrap justify-end">
           <span>
-            <span className="text-juice-orange font-semibold">ETH {formatUSD(stats.last_price)}</span>
+            <span className="text-juice-orange font-semibold">ETH CG {formatUSD(stats.last_price)}</span>
             {stats.lyra_spot != null && stats.lyra_spot > 0 && (
-              <span className="text-white text-xs ml-1.5">Lyra {formatUSD(stats.lyra_spot)}</span>
+              <span className="text-white text-xs ml-1.5">ETH L {formatUSD(stats.lyra_spot)}</span>
             )}
           </span>
           <span className="text-gray-500 text-xs hidden sm:inline">{timeAgo(stats.last_price_time)}</span>
