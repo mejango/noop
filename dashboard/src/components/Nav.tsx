@@ -1,7 +1,7 @@
 'use client';
 
-import { usePolling } from '@/lib/hooks';
-import { formatUSD, timeAgo } from '@/lib/format';
+import { usePolling, useLiveTimeAgo, useCountdown } from '@/lib/hooks';
+import { formatUSD } from '@/lib/format';
 
 interface Budget {
   putTotalBudget: number;
@@ -43,9 +43,12 @@ const emptyStats: NavStats = {
 const emptyAccount: AccountData = { collaterals: [] };
 
 export default function Nav() {
-  const { data: stats } = usePolling<NavStats>('/api/stats', emptyStats);
+  const STATS_INTERVAL = 60_000;
+  const { data: stats, fetchTick } = usePolling<NavStats>('/api/stats', emptyStats, STATS_INTERVAL);
   const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
   const b = stats.budget || emptyBudget;
+  const liveAgo = useLiveTimeAgo(stats.last_price_time);
+  const nextTick = useCountdown(STATS_INTERVAL, [fetchTick]);
 
   const usdc = account.collaterals.find(c => c.asset_name === 'USDC');
   const eth = account.collaterals.find(c => c.asset_name === 'ETH');
@@ -62,7 +65,10 @@ export default function Nav() {
               <><span className="text-gray-500 mx-0.5">/</span><span className="text-white">{formatUSD(stats.lyra_spot)}</span></>
             )}
           </span>
-          <span className="text-gray-500 text-xs hidden sm:inline">{timeAgo(stats.last_price_time)}</span>
+          <span className="text-gray-500 text-xs hidden sm:inline leading-tight">
+            <span className="block">{liveAgo}</span>
+            <span className="block text-gray-600" style={{ fontSize: '0.65rem' }}>next tick {nextTick}</span>
+          </span>
           {(usdc || eth) && (
             <>
               <span className="text-gray-600">|</span>
