@@ -156,6 +156,8 @@ You have a persistent journal of observations and hypotheses from past conversat
 When you form a notable conclusion, wrap it in a journal tag:
 <journal type="observation|hypothesis|regime_note">Your conclusion here</journal>
 
+IMPORTANT: Start every journal entry with a single bold TLDR line summarizing the key takeaway in plain language (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow the TLDR with the detailed analysis.
+
 Guidelines for journal entries:
 - **Observations**: Factual patterns you've identified (e.g., "liquidity outflows have preceded price drops by ~3h over the past week")
 - **Hypotheses**: Testable predictions grounded in data (e.g., "sustained outflows suggest a reversal within 24-48h — will track")

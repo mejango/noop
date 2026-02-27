@@ -1178,7 +1178,7 @@ export default function OverviewPage() {
                 }}
               />
               {/* Band showing bot's active put delta range: 0.02–0.12 (abs) */}
-              <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.12} stroke="#FFA032" strokeOpacity={0.15} />
+              <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.12} stroke="#FFA032" strokeOpacity={0.15} ifOverflow="extendDomain" />
               <Scatter
                 data={filteredPutHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1303,7 +1303,7 @@ export default function OverviewPage() {
                   );
                 }}
               />
-              <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.08} stroke="#FFA032" strokeOpacity={0.1} />
+              <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.08} stroke="#FFA032" strokeOpacity={0.1} ifOverflow="extendDomain" />
               <Scatter
                 data={filteredPutMQ}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any

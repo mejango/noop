@@ -1956,6 +1956,8 @@ Output 2-5 journal entries using these tags:
 <journal type="hypothesis">Testable predictions grounded in data</journal>
 <journal type="regime_note">Market state assessments and regime classifications</journal>
 
+IMPORTANT: Start every journal entry with a single bold TLDR line summarizing the key takeaway in plain language (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow the TLDR with the detailed analysis.
+
 Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).`;
 
     const userMessage = `Here is today's daily snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nAnalyze across short, medium, and long time scales. Review previous journal entries and build on, revise, or contradict them as warranted.`;
