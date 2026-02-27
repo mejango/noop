@@ -306,7 +306,6 @@ export default function OverviewPage() {
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart, 90_000);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
   const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
-  const isHourly = chart.tier !== 'raw';
   const pinPrice = usePinnableTooltip();
   const pinLiquidity = usePinnableTooltip();
   const pinPut = usePinnableTooltip();
@@ -474,7 +473,6 @@ export default function OverviewPage() {
 
   // Heatmap data: split by option type, calculate % OTM and normalize premium
   const { callHeatmap, putHeatmap } = useMemo(() => {
-    if (isHourly) return { callHeatmap: [], putHeatmap: [] };
     const calls: HeatmapDot[] = [];
     const puts: HeatmapDot[] = [];
 
@@ -576,11 +574,10 @@ export default function OverviewPage() {
     normalize(puts);
 
     return { callHeatmap: calls, putHeatmap: puts };
-  }, [chart.optionsHeatmap, merged, isHourly]);
+  }, [chart.optionsHeatmap, merged]);
 
   // Market quality dots: filter heatmap dots to bot's delta range and normalize spread/depth
   const { putMQ, callMQ } = useMemo(() => {
-    if (isHourly) return { putMQ: [], callMQ: [] };
     const buildMQ = (dots: HeatmapDot[]): MQDot[] => {
       // Only include dots with spread data and within bot's delta range
       const eligible = dots.filter(d =>
@@ -607,7 +604,7 @@ export default function OverviewPage() {
       }));
     };
     return { putMQ: buildMQ(putHeatmap), callMQ: buildMQ(callHeatmap) };
-  }, [putHeatmap, callHeatmap, isHourly]);
+  }, [putHeatmap, callHeatmap]);
 
   // Shared X-axis domain from main chart's time range
   const xDomain = useMemo(() =>
@@ -732,7 +729,7 @@ export default function OverviewPage() {
         <Card title="Momentum" className="sm:col-span-2 flex flex-col overflow-hidden">
           <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
             <div className="flex items-center gap-3 min-w-0">
-              <span className="text-xs text-gray-500 w-20 shrink-0">Medium term</span>
+              <span className="text-xs text-gray-500 whitespace-nowrap shrink-0">Medium term</span>
               <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
                 {stats.medium_momentum || 'neutral'}
               </span>
@@ -925,7 +922,7 @@ export default function OverviewPage() {
             if (pinned) { setPinned(null); } else { setPinned({ idx: i, x: e.clientX, y: e.clientY }); }
           };
 
-          const yAxisWidth = mobile ? 35 : 55;
+          const yAxisWidth = mobile ? 45 : 70;
           const leftPad = margins.left + yAxisWidth;
 
           return (
@@ -1000,12 +997,11 @@ export default function OverviewPage() {
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: '#555' }} /> neutral</span>
             </div>
           </div>
-          <div style={{ marginLeft: margins.left + (mobile ? 45 : 70) - 44, marginRight: margins.right }}>
+          <div>
             <MomentumTooltipBar data={momentumData} />
             {/* Time axis */}
-            <div className="flex items-center gap-1">
-              <span className="w-10 shrink-0" />
-              <div className="flex justify-between flex-1 mt-1">
+            <div style={{ paddingLeft: margins.left + (mobile ? 45 : 70), paddingRight: margins.right }}>
+              <div className="flex justify-between mt-1">
                 {(() => {
                   const tickCount = mobile ? 4 : 6;
                   const len = momentumData.length;
@@ -1462,13 +1458,6 @@ export default function OverviewPage() {
           </ResponsiveContainer>
           </div>
         </Card>
-      )}
-
-      {/* Downsampled tier info note */}
-      {isHourly && (
-        <div className="text-xs text-gray-500 text-center py-2">
-          Instrument-level heatmaps hidden at this resolution. Zoom to 24h or less for detail.
-        </div>
       )}
 
       {/* Positions Table */}
