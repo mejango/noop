@@ -12,19 +12,20 @@ import {
   getMarketQualitySummary,
 } from './db';
 import { buildCorrelationAnalysis } from './correlation';
+import { getPositions, getCollaterals } from './lyra';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _cache: { data: any; ts: number } | null = null;
 const TTL = 60_000;
 
-export function buildMarketSnapshot() {
+export async function buildMarketSnapshot() {
   if (_cache && Date.now() - _cache.ts < TTL) return _cache.data;
-  const result = _buildUncached();
+  const result = await _buildUncached();
   _cache = { data: result, ts: Date.now() };
   return result;
 }
 
-function _buildUncached() {
+async function _buildUncached() {
   const now = new Date();
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -50,6 +51,15 @@ function _buildUncached() {
       latestTickParsed = JSON.parse(ticks[0].summary as string);
     } catch { /* ignore malformed JSON */ }
   }
+
+  // Fetch Lyra account data (positions + collaterals)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let positions: any[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let collaterals: any[] = [];
+  try {
+    [positions, collaterals] = await Promise.all([getPositions(), getCollaterals()]);
+  } catch { /* Lyra API unavailable — continue without account data */ }
 
   return {
     _meta: {
@@ -191,6 +201,30 @@ function _buildUncached() {
         return { pairs: [], leading_indicators: [], series_descriptions: {}, computed_at: now.toISOString() };
       }
     })(),
+
+    account: {
+      _description: 'Lyra/Derive account data. collaterals shows USDC and ETH balances. positions shows all open option positions with Greeks, mark values, and unrealized PnL.',
+      collaterals: collaterals.map((c: Record<string, unknown>) => ({
+        asset: c.asset_name,
+        amount: Number(c.amount ?? 0),
+        mark_price: Number(c.mark_price ?? 0),
+        value_usd: Number(c.mark_value ?? c.value ?? 0),
+      })),
+      positions: positions.map((p: Record<string, unknown>) => ({
+        instrument: p.instrument_name,
+        type: p.instrument_type,
+        amount: Number(p.amount ?? 0),
+        avg_price: Number(p.average_price ?? 0),
+        mark_price: Number(p.mark_price ?? 0),
+        mark_value: Number(p.mark_value ?? 0),
+        unrealized_pnl: Number(p.unrealized_pnl ?? 0),
+        delta: Number(p.delta ?? 0),
+        theta: Number(p.theta ?? 0),
+        index_price: Number(p.index_price ?? 0),
+      })),
+      total_position_value: positions.reduce((s: number, p: Record<string, unknown>) => s + Number(p.mark_value ?? 0), 0),
+      total_unrealized_pnl: positions.reduce((s: number, p: Record<string, unknown>) => s + Number(p.unrealized_pnl ?? 0), 0),
+    },
 
     ai_journal: {
       _description: 'AI analytical journal. Persistent observations and hypotheses from past conversations.',

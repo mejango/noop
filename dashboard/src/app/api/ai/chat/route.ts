@@ -112,10 +112,19 @@ You receive a full market snapshot with every message. Each section has a \`_des
 - Compare current best scores to the measurement window's range
 - If best scores are declining, the options market is getting more expensive (puts) or cheaper to sell (calls)
 
-### Open Positions & Trades
+### Account & Positions
+The snapshot includes live account data from Lyra/Derive under the \`account\` section:
+- **Collaterals**: USDC and ETH balances in the subaccount
+- **Positions**: All open option positions with amount, average cost, mark price, unrealized PnL, and Greeks (delta, theta)
+- **Totals**: Aggregate position value and unrealized PnL
+
+Evaluate:
 - Check strike distribution: are positions concentrated at one strike or diversified?
 - Check expiry distribution: rolling positions should maintain staggered expiries
 - Evaluate average cost: is the bot buying at reasonable prices or overpaying during vol spikes?
+- Monitor total unrealized PnL: large negative = bleed is running, expected. Large positive = convexity paying off, consider monetizing
+- Check net delta across all positions: should be meaningfully negative (net short exposure) for tail protection
+- Monitor collateral usage: sufficient USDC to support margin and future rolls?
 
 ### On-Chain Metrics
 - Liquidity flow direction and magnitude signal capital movement before price confirms it
@@ -225,7 +234,7 @@ export async function POST(request: Request) {
     const client = new Anthropic({ apiKey });
 
     // Build fresh snapshot for every request (data changes every 60s)
-    const snapshot = buildMarketSnapshot();
+    const snapshot = await buildMarketSnapshot();
     const snapshotBlock = `<market_snapshot>\n${JSON.stringify(snapshot, null, 2)}\n</market_snapshot>`;
 
     // Build messages array with snapshot context
