@@ -299,6 +299,7 @@ const MQDotShape = ({ cx, cy, payload }: any) => {
 
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('6h');
+  const [posSort, setPosSort] = useState<{ key: string; asc: boolean }>({ key: 'instrument_name', asc: true });
   const mobile = useIsMobile();
   const margins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
@@ -749,25 +750,44 @@ export default function OverviewPage() {
       </div>
 
       {/* Positions Table */}
-      {account.positions.length > 0 && (
+      {account.positions.length > 0 && (() => {
+        const posCols: { key: string; label: string; align: 'left' | 'right' }[] = [
+          { key: 'instrument_name', label: 'Instrument', align: 'left' },
+          { key: 'amount', label: 'Amount', align: 'right' },
+          { key: 'average_price', label: 'Avg Cost', align: 'right' },
+          { key: 'mark_price', label: 'Mark', align: 'right' },
+          { key: 'mark_value', label: 'Mkt Value', align: 'right' },
+          { key: 'unrealized_pnl', label: 'UPnL', align: 'right' },
+          { key: 'pnlPct', label: 'UPnL%', align: 'right' },
+        ];
+        const sorted = [...account.positions]
+          .map(p => ({ ...p, pnlPct: (p.average_price * Math.abs(p.amount)) > 0 ? (p.unrealized_pnl / (p.average_price * Math.abs(p.amount))) * 100 : 0 }))
+          .sort((a, b) => {
+            const k = posSort.key as keyof typeof a;
+            const av = a[k], bv = b[k];
+            const cmp = typeof av === 'string' ? (av as string).localeCompare(bv as string) : (av as number) - (bv as number);
+            return posSort.asc ? cmp : -cmp;
+          });
+        const toggleSort = (key: string) => setPosSort(prev => prev.key === key ? { key, asc: !prev.asc } : { key, asc: key === 'instrument_name' });
+        return (
         <Card title="Positions" subtitle={`${account.positions.length} open`}>
           <div className="overflow-auto max-h-[300px]">
             <table className="w-full text-xs md:text-sm">
               <thead className="sticky top-0 bg-[#111] z-10">
                 <tr className="text-xs text-gray-500 border-b border-white/5">
-                  <th className="text-left py-2 px-2 font-medium">Instrument</th>
-                  <th className="text-right py-2 px-2 font-medium">Amount</th>
-                  <th className="text-right py-2 px-2 font-medium">Avg Cost</th>
-                  <th className="text-right py-2 px-2 font-medium">Mark</th>
-                  <th className="text-right py-2 px-2 font-medium">Mkt Value</th>
-                  <th className="text-right py-2 px-2 font-medium">UPnL</th>
-                  <th className="text-right py-2 px-2 font-medium">UPnL%</th>
+                  {posCols.map(col => (
+                    <th
+                      key={col.key}
+                      className={`${col.align === 'left' ? 'text-left' : 'text-right'} py-2 px-2 font-medium cursor-pointer select-none hover:text-gray-300`}
+                      onClick={() => toggleSort(col.key)}
+                    >
+                      {col.label}{posSort.key === col.key ? (posSort.asc ? ' \u25B2' : ' \u25BC') : ''}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
-                {account.positions.map((p) => {
-                  const costBasis = p.average_price * Math.abs(p.amount);
-                  const pnlPct = costBasis > 0 ? (p.unrealized_pnl / costBasis) * 100 : 0;
+                {sorted.map((p) => {
                   const pnlColor = p.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-red-400';
                   return (
                     <tr key={p.instrument_name} className="border-b border-white/[0.03] hover:bg-white/[0.02]">
@@ -777,7 +797,7 @@ export default function OverviewPage() {
                       <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{formatUSD(p.mark_price)}</td>
                       <td className="py-1.5 px-2 text-right tabular-nums text-white">{formatUSD(p.mark_value)}</td>
                       <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{formatUSD(p.unrealized_pnl)}</td>
-                      <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{pnlPct.toFixed(1)}%</td>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{p.pnlPct.toFixed(1)}%</td>
                     </tr>
                   );
                 })}
@@ -796,7 +816,8 @@ export default function OverviewPage() {
             </table>
           </div>
         </Card>
-      )}
+        );
+      })()}
 
       {/* Time Range Selector */}
       <div className="flex flex-wrap items-center justify-between gap-2">
