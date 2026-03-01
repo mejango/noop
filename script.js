@@ -2026,10 +2026,10 @@ Analyze the provided snapshot across three time scales:
 
 Review your previous journal entries. Confirm patterns that held, revise those that didn't, and contradict past assessments when data warrants it.
 
-Output 2-5 journal entries using these tags:
+Output 3-5 journal entries using these tags. You MUST include at least one of EACH type — do not default to all observations:
 <journal type="observation">Factual patterns identified in the data</journal>
-<journal type="hypothesis">Testable predictions grounded in data</journal>
-<journal type="regime_note">Market state assessments and regime classifications</journal>
+<journal type="hypothesis">Testable predictions grounded in data — what you expect to happen and why</journal>
+<journal type="regime_note">Market state assessment — classify the current regime and note any transitions</journal>
 
 IMPORTANT: Start every journal entry with a single bold TLDR line summarizing the key takeaway in plain language (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow the TLDR with the detailed analysis.
 
@@ -2424,11 +2424,13 @@ const runBot = async () => {
         console.log('DB: tick write failed:', e.message);
       }
 
-      // Auto-generate journal entries once per day
+      // Auto-generate journal entries every 8 hours
       if (tickSummary && Date.now() - lastJournalGeneration >= JOURNAL_INTERVAL_MS && process.env.ANTHROPIC_API_KEY) {
-        lastJournalGeneration = Date.now();
-        generateJournalEntries(tickSummary, botData).catch(e => {
-          console.log('📓 Journal generation failed:', e.message);
+        generateJournalEntries(tickSummary, botData).then(() => {
+          lastJournalGeneration = Date.now();
+          console.log('📓 Journal generation succeeded, next in 8h');
+        }).catch(e => {
+          console.log('📓 Journal generation failed (will retry next tick):', e.message);
         });
       }
     }
