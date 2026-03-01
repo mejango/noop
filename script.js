@@ -2026,12 +2026,18 @@ Analyze the provided snapshot across three time scales:
 
 Review your previous journal entries. Confirm patterns that held, revise those that didn't, and contradict past assessments when data warrants it.
 
-Output 3-5 journal entries using these tags. You MUST include at least one of EACH type — do not default to all observations:
-<journal type="observation">Factual patterns identified in the data</journal>
-<journal type="hypothesis">Testable predictions grounded in data — what you expect to happen and why</journal>
-<journal type="regime_note">Market state assessment — classify the current regime and note any transitions</journal>
+Output exactly 3 journal entries — one of each type, in this order:
 
-IMPORTANT: Start every journal entry with a single bold TLDR line summarizing the key takeaway in plain language (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow the TLDR with the detailed analysis.
+1. First, a REGIME NOTE classifying the current market state:
+<journal type="regime_note">Classify the current regime (complacency, fear, transition, etc.) and whether conditions favor accumulating or holding protection.</journal>
+
+2. Then, a HYPOTHESIS with a testable prediction:
+<journal type="hypothesis">State what you expect to happen next based on the data, with a specific timeframe and falsification condition (e.g., "if X doesn't happen within Y hours, this hypothesis is wrong").</journal>
+
+3. Finally, an OBSERVATION documenting the most notable factual pattern:
+<journal type="observation">The single most important factual pattern in the current data.</journal>
+
+IMPORTANT: Start every journal entry with a single bold TLDR line (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow with detailed analysis.
 
 ## Put Value / Price Divergence
 The snapshot includes a put_price_divergence section that detects when put option values move independently of spot price:
@@ -2042,7 +2048,7 @@ This is critical for the Spitznagel strategy: we want to buy puts when they're C
 
 Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).`;
 
-    const userMessage = `Here is today's daily snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nAnalyze across short, medium, and long time scales. Review previous journal entries and build on, revise, or contradict them as warranted.`;
+    const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite exactly 3 journal entries: one regime_note, one hypothesis, one observation. Use the <journal type="..."> tags.`;
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
