@@ -2037,7 +2037,7 @@ Output exactly 3 journal entries — one of each type, in this order:
 3. Finally, an OBSERVATION documenting the most notable factual pattern:
 <journal type="observation">The single most important factual pattern in the current data.</journal>
 
-IMPORTANT: Start every journal entry with a single bold TLDR line (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow with detailed analysis.
+IMPORTANT: Start every journal entry with a single bold TLDR line (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow with detailed analysis. Keep each entry under 300 words — be dense and precise, not verbose. All 3 entries must fit within the response.
 
 ## Put Value / Price Divergence
 The snapshot includes a put_price_divergence section that detects when put option values move independently of spot price:
@@ -2052,7 +2052,7 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
-      max_tokens: 2048,
+      max_tokens: 4096,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
     }, {
@@ -2085,8 +2085,12 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
     }
 
     console.log(`📓 Journal: generated ${count} entries`);
+    if (count < 3) {
+      throw new Error(`Expected 3 journal entries but only extracted ${count}`);
+    }
   } catch (e) {
     console.log('📓 Journal generation failed:', e.message);
+    throw e;
   }
 };
 
