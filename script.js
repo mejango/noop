@@ -1859,6 +1859,165 @@ const executePutBuyOrder = async (option, reason, spotPrice) => {
     return true;
 };
 
+// ─── Hypothesis Review Cycle ──────────────────────────────────────────────────
+
+const reviewExpiredHypotheses = async () => {
+  const pending = db.getPendingHypotheses(3); // max 3 per tick
+  if (pending.length === 0) return;
+
+  console.log(`🔍 Reviewing ${pending.length} expired hypothesis(es)...`);
+
+  for (const hyp of pending) {
+    try {
+      // Gather actual market data from the hypothesis window
+      const createdAt = hyp.timestamp;
+      const deadline = hyp.prediction_deadline;
+      const priceData = db.getRecentSpotPrices(createdAt)
+        .filter(p => p.timestamp <= deadline)
+        .reverse(); // chronological
+
+      const ordersInWindow = db.getOrdersInWindow(createdAt, deadline);
+      const totalPnl = ordersInWindow.reduce((sum, o) => {
+        const val = o.total_value || 0;
+        return sum + (o.action === 'buy_put' ? -val : val);
+      }, 0);
+
+      const priceAtStart = priceData.length > 0 ? priceData[0].price : null;
+      const priceAtEnd = priceData.length > 0 ? priceData[priceData.length - 1].price : null;
+      const minPrice = priceData.length > 0 ? Math.min(...priceData.map(p => p.price)) : null;
+      const maxPrice = priceData.length > 0 ? Math.max(...priceData.map(p => p.price)) : null;
+
+      const reviewPrompt = `You are reviewing a past hypothesis for accuracy and risk quality.
+
+## Hypothesis (ID #${hyp.id})
+Created: ${createdAt}
+Deadline: ${deadline}
+Prediction: ${hyp.prediction_target} will go ${hyp.prediction_direction} ${hyp.prediction_value}
+Falsification: ${hyp.falsification_criteria}
+
+Content:
+${hyp.content}
+
+## What Actually Happened
+Price at hypothesis time: $${priceAtStart}
+Price at deadline: $${priceAtEnd}
+Price range during window: $${minPrice} - $${maxPrice}
+Data points: ${priceData.length}
+
+## Trades During Window
+${ordersInWindow.length > 0 ? ordersInWindow.map(o => `${o.timestamp}: ${o.action} ${o.instrument_name} amount=${o.filled_amount} price=${o.fill_price} value=$${o.total_value}`).join('\n') : 'No trades executed'}
+Total P&L attribution: $${totalPnl.toFixed(4)}
+
+## Scoring Instructions
+
+Score this hypothesis using Spitznagel-aligned categories. The goal is NOT prediction accuracy — it's whether the hypothesis identified an asymmetric opportunity.
+
+Categories:
+- confirmed_convex: Prediction correct AND position/opportunity was asymmetric (bounded downside, convex upside)
+- confirmed_linear: Prediction correct but the risk profile was symmetric
+- disproven_bounded: Prediction wrong BUT loss was small/bounded — the strategy worked as intended
+- disproven_costly: Prediction wrong AND the position was expensive (overpaid for insurance)
+- partially_confirmed: Direction right but timing/magnitude was off
+
+Output ONLY this JSON:
+{"status":"<category>","confidence":<0-1>,"verdict":"<2-3 sentence explanation focusing on the risk profile, not just whether the price moved correctly>"}`;
+
+      const response = await axios.post('https://api.anthropic.com/v1/messages', {
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+        max_tokens: 512,
+        messages: [{ role: 'user', content: reviewPrompt }],
+      }, {
+        headers: {
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        timeout: 30000,
+      });
+
+      const resultText = response.data?.content?.[0]?.text || '';
+      const jsonMatch = resultText.match(/\{[\s\S]*"status"[\s\S]*"verdict"[\s\S]*\}/);
+      if (jsonMatch) {
+        const result = JSON.parse(jsonMatch[0]);
+        db.updateHypothesisVerdict(hyp.id, {
+          status: result.status,
+          verdict: result.verdict,
+          confidence: result.confidence,
+          tradePnl: totalPnl,
+          tradeIds: ordersInWindow.map(o => o.id),
+        });
+        console.log(`📊 Hypothesis #${hyp.id}: ${result.status} (${(result.confidence * 100).toFixed(0)}%)`);
+      } else {
+        console.log(`📊 Hypothesis #${hyp.id}: failed to parse verdict`);
+      }
+    } catch (e) {
+      console.log(`📊 Hypothesis #${hyp.id} review failed:`, e.message);
+    }
+  }
+};
+
+const extractHypothesisLessons = async () => {
+  const reviewedCount = db.countReviewedSinceLastLesson();
+  if (reviewedCount < 10) return;
+
+  console.log(`🧠 Extracting lessons from ${reviewedCount} new hypothesis reviews...`);
+
+  const reviewed = db.getReviewedHypotheses(50);
+  const currentLessons = db.getActiveLessons();
+
+  const prompt = `You are analyzing hypothesis review outcomes to extract actionable lessons for a Spitznagel-style tail-risk hedging bot.
+
+## Reviewed Hypotheses (most recent first)
+${reviewed.map(h => `#${h.id} [${h.outcome_status}] (confidence: ${h.outcome_confidence}) - ${h.content.slice(0, 150)}... VERDICT: ${h.outcome_verdict}`).join('\n\n')}
+
+## Current Active Lessons
+${currentLessons.length > 0 ? currentLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count}, since: ${l.created_at})`).join('\n') : 'None yet'}
+
+## Instructions
+Analyze the pattern of outcomes. Key metric: convex posture rate = (confirmed_convex + disproven_bounded) / total.
+
+Extract 3-5 actionable lessons about:
+1. Which types of hypotheses produce the best risk profiles (high convex posture)
+2. Which types to avoid (high disproven_costly rate)
+3. What data signals are most predictive
+4. Timing patterns (are shorter or longer windows better?)
+
+For each existing lesson, say whether it still holds or should be archived.
+
+Output JSON:
+{"new_lessons":[{"lesson":"<text>","evidence_count":<number>}],"archive_ids":[<ids of lessons that no longer hold>]}`;
+
+  try {
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: prompt }],
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      timeout: 30000,
+    });
+
+    const text = response.data?.content?.[0]?.text || '';
+    const jsonMatch = text.match(/\{[\s\S]*"new_lessons"[\s\S]*\}/);
+    if (jsonMatch) {
+      const result = JSON.parse(jsonMatch[0]);
+      for (const lesson of (result.new_lessons || [])) {
+        db.insertLesson(lesson.lesson, lesson.evidence_count || 0);
+      }
+      for (const id of (result.archive_ids || [])) {
+        db.archiveLesson(id);
+      }
+      console.log(`🧠 Extracted ${result.new_lessons?.length || 0} lessons, archived ${result.archive_ids?.length || 0}`);
+    }
+  } catch (e) {
+    console.log('🧠 Lesson extraction failed:', e.message);
+  }
+};
+
 // ─── Auto Journal Generation ─────────────────────────────────────────────────
 
 const generateJournalEntries = async (tickSummary, botData) => {
@@ -2016,6 +2175,39 @@ const generateJournalEntries = async (tickSummary, botData) => {
       put_price_divergence: putPriceDivergence,
     };
 
+    // Build hypothesis performance summary for prompt injection
+    let hypothesisPerformance = '';
+    try {
+      const hypStats = db.getHypothesisStats(30);
+      const lessons = db.getActiveLessons();
+      const recentVerdicts = db.getReviewedHypotheses(5);
+
+      if (hypStats && hypStats.total > 0) {
+        const reviewed = hypStats.total - (hypStats.pending || 0);
+        const convexPosture = reviewed > 0
+          ? (((hypStats.confirmed_convex || 0) + (hypStats.disproven_bounded || 0)) / reviewed * 100).toFixed(0)
+          : 'N/A';
+        const costlyRate = reviewed > 0
+          ? ((hypStats.disproven_costly || 0) / reviewed * 100).toFixed(0)
+          : 'N/A';
+
+        hypothesisPerformance = `\n\n=== HYPOTHESIS PERFORMANCE (last 30 days) ===
+Total hypotheses: ${hypStats.total} (${reviewed} reviewed, ${hypStats.pending || 0} pending)
+Convex posture rate: ${convexPosture}% (confirmed_convex + disproven_bounded) / reviewed
+Costly miss rate: ${costlyRate}% (disproven_costly / reviewed)
+Breakdown: ${hypStats.confirmed_convex || 0} convex wins, ${hypStats.confirmed_linear || 0} linear wins, ${hypStats.disproven_bounded || 0} bounded losses (OK), ${hypStats.disproven_costly || 0} costly losses (BAD), ${hypStats.partially_confirmed || 0} partial
+
+Recent verdicts:
+${recentVerdicts.map(v => `#${v.id} [${v.outcome_status}]: ${v.outcome_verdict || 'no verdict text'}`).join('\n')}
+
+${lessons.length > 0 ? `Active lessons:\n${lessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}` : ''}
+
+IMPORTANT: Double down on hypothesis types with high convex posture rates. Avoid types with high costly miss rates. Each hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity?`;
+      }
+    } catch (e) {
+      console.log('📓 Failed to build hypothesis performance summary:', e.message);
+    }
+
     const systemPrompt = `You are the Spitznagel Bot — a tail-risk hedging advisor operating on ETH options with Universa-style principles. You maintain an analytical journal tracking market observations, hypotheses, and regime assessments.
 
 Analyze the provided snapshot across three time scales:
@@ -2032,7 +2224,19 @@ Output exactly 3 journal entries — one of each type, in this order:
 <journal type="regime_note">Classify the current regime (complacency, fear, transition, etc.) and whether conditions favor accumulating or holding protection.</journal>
 
 2. Then, a HYPOTHESIS with a testable prediction:
-<journal type="hypothesis">State what you expect to happen next based on the data, with a specific timeframe and falsification condition (e.g., "if X doesn't happen within Y hours, this hypothesis is wrong").</journal>
+<journal type="hypothesis">State what you expect to happen next based on the data, with a specific timeframe and falsification condition (e.g., "if X doesn't happen within Y hours, this hypothesis is wrong").
+
+IMPORTANT: After your hypothesis prose, include a structured metadata block:
+<hypothesis_meta>{"target":"ETH spot","direction":"below|above|within_range","value":2000.00,"deadline":"2026-03-04T01:39:00Z","falsification":"If price doesn't breach $2000 within 18h"}</hypothesis_meta>
+
+The metadata must have:
+- target: what you're predicting about (e.g. "ETH spot", "put cost", "liquidity flow")
+- direction: "above", "below", or "within_range"
+- value: the numeric threshold
+- deadline: ISO timestamp for when to check
+- falsification: plain text summary of what would disprove it
+
+Every hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity?</journal>
 
 3. Finally, an OBSERVATION documenting the most notable factual pattern:
 <journal type="observation">The single most important factual pattern in the current data.</journal>
@@ -2046,7 +2250,7 @@ The snapshot includes a put_price_divergence section that detects when put optio
 
 This is critical for the Spitznagel strategy: we want to buy puts when they're CHEAP (before the market prices in risk), not after a spike. If put spikes reliably lead price drops, the bot should be accumulating protection during PUT_CHEAP_PRICE_STABLE windows.
 
-Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).`;
+Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).${hypothesisPerformance}`;
 
     const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite exactly 3 journal entries: one regime_note, one hypothesis, one observation. Use the <journal type="..."> tags.`;
 
@@ -2066,22 +2270,40 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
 
     const text = response.data?.content?.[0]?.text || '';
 
-    // Extract journal entries (same pattern as chat route)
+    // Extract journal entries
     const regex = /<journal\s+type="(observation|hypothesis|regime_note)">([\s\S]*?)<\/journal>/g;
+    const metaRegex = /<hypothesis_meta>([\s\S]*?)<\/hypothesis_meta>/;
     const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol'];
     let match;
     let count = 0;
 
     while ((match = regex.exec(text)) !== null) {
       const entryType = match[1];
-      const content = match[2].trim();
-      if (content) {
-        const referenced = seriesNames.filter(s =>
-          content.toLowerCase().includes(s.replace(/_/g, ' ')) || content.includes(s)
-        );
+      let content = match[2].trim();
+      if (!content) continue;
+
+      const referenced = seriesNames.filter(s =>
+        content.toLowerCase().includes(s.replace(/_/g, ' ')) || content.includes(s)
+      );
+
+      if (entryType === 'hypothesis') {
+        // Extract structured metadata
+        const metaMatch = content.match(metaRegex);
+        let meta = null;
+        if (metaMatch) {
+          try {
+            meta = JSON.parse(metaMatch[1].trim());
+          } catch (e) {
+            console.log('📓 Failed to parse hypothesis_meta JSON:', e.message);
+          }
+          // Strip meta tag from displayed content
+          content = content.replace(metaRegex, '').trim();
+        }
+        db.insertJournalEntryFull(entryType, content, referenced.length > 0 ? referenced : null, meta);
+      } else {
         db.insertJournalEntry(entryType, content, referenced.length > 0 ? referenced : null);
-        count++;
       }
+      count++;
     }
 
     console.log(`📓 Journal: generated ${count} entries`);
@@ -2441,6 +2663,20 @@ const runBot = async () => {
           console.log('📓 Journal generation succeeded, next in 8h');
         }).catch(e => {
           console.log('📓 Journal generation failed (will retry next tick):', e.message);
+        });
+      }
+
+      // Review expired hypotheses each tick
+      if (process.env.ANTHROPIC_API_KEY) {
+        reviewExpiredHypotheses().catch(e => {
+          console.log('📊 Hypothesis review failed:', e.message);
+        });
+      }
+
+      // Extract lessons after hypothesis reviews
+      if (process.env.ANTHROPIC_API_KEY) {
+        extractHypothesisLessons().catch(e => {
+          console.log('🧠 Lesson extraction failed:', e.message);
         });
       }
     }
