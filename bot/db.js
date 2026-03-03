@@ -163,6 +163,30 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_orders_timestamp ON orders(timestamp);
 `);
 
+// Hypothesis tracking columns (idempotent)
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN prediction_target TEXT'); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN prediction_direction TEXT'); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN prediction_value REAL'); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN prediction_deadline TEXT'); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN falsification_criteria TEXT'); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN outcome_status TEXT DEFAULT \'pending\''); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN outcome_verdict TEXT'); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN outcome_confidence REAL'); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN outcome_reviewed_at TEXT'); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN trade_pnl_attribution REAL'); } catch {}
+try { db.exec('ALTER TABLE ai_journal ADD COLUMN trades_in_window TEXT'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS hypothesis_lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lesson TEXT NOT NULL,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    archived_at TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1
+  );
+`);
+
 // ─── Prepared Statements ──────────────────────────────────────────────────────
 
 const stmts = {
@@ -284,6 +308,96 @@ const stmts = {
     FROM ai_journal
     ORDER BY timestamp DESC
     LIMIT @limit
+  `),
+
+  insertJournalEntryFull: db.prepare(`
+    INSERT INTO ai_journal (timestamp, entry_type, content, series_referenced,
+      prediction_target, prediction_direction, prediction_value, prediction_deadline, falsification_criteria)
+    VALUES (@timestamp, @entry_type, @content, @series_referenced,
+      @prediction_target, @prediction_direction, @prediction_value, @prediction_deadline, @falsification_criteria)
+  `),
+
+  getPendingHypotheses: db.prepare(`
+    SELECT id, timestamp, content, prediction_target, prediction_direction,
+      prediction_value, prediction_deadline, falsification_criteria
+    FROM ai_journal
+    WHERE entry_type = 'hypothesis'
+      AND outcome_status = 'pending'
+      AND prediction_deadline IS NOT NULL
+      AND prediction_deadline < @now
+    ORDER BY prediction_deadline ASC
+    LIMIT @limit
+  `),
+
+  updateHypothesisVerdict: db.prepare(`
+    UPDATE ai_journal SET
+      outcome_status = @outcome_status,
+      outcome_verdict = @outcome_verdict,
+      outcome_confidence = @outcome_confidence,
+      outcome_reviewed_at = @outcome_reviewed_at,
+      trade_pnl_attribution = @trade_pnl_attribution,
+      trades_in_window = @trades_in_window
+    WHERE id = @id
+  `),
+
+  getReviewedHypotheses: db.prepare(`
+    SELECT id, timestamp, content, prediction_target, prediction_direction,
+      prediction_value, outcome_status, outcome_verdict, outcome_confidence,
+      trade_pnl_attribution, outcome_reviewed_at
+    FROM ai_journal
+    WHERE entry_type = 'hypothesis'
+      AND outcome_status != 'pending'
+    ORDER BY outcome_reviewed_at DESC
+    LIMIT @limit
+  `),
+
+  getHypothesisStats: db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(CASE WHEN outcome_status = 'confirmed_convex' THEN 1 ELSE 0 END) as confirmed_convex,
+      SUM(CASE WHEN outcome_status = 'confirmed_linear' THEN 1 ELSE 0 END) as confirmed_linear,
+      SUM(CASE WHEN outcome_status = 'disproven_bounded' THEN 1 ELSE 0 END) as disproven_bounded,
+      SUM(CASE WHEN outcome_status = 'disproven_costly' THEN 1 ELSE 0 END) as disproven_costly,
+      SUM(CASE WHEN outcome_status = 'partially_confirmed' THEN 1 ELSE 0 END) as partially_confirmed,
+      SUM(CASE WHEN outcome_status = 'pending' THEN 1 ELSE 0 END) as pending
+    FROM ai_journal
+    WHERE entry_type = 'hypothesis'
+      AND timestamp > @since
+  `),
+
+  getOrdersInWindow: db.prepare(`
+    SELECT id, timestamp, action, instrument_name, filled_amount, fill_price,
+      total_value, spot_price, success
+    FROM orders
+    WHERE timestamp BETWEEN @start AND @end
+      AND success = 1
+    ORDER BY timestamp ASC
+  `),
+
+  insertLesson: db.prepare(`
+    INSERT INTO hypothesis_lessons (lesson, evidence_count)
+    VALUES (@lesson, @evidence_count)
+  `),
+
+  getActiveLessons: db.prepare(`
+    SELECT id, lesson, evidence_count, created_at
+    FROM hypothesis_lessons
+    WHERE is_active = 1
+    ORDER BY created_at DESC
+  `),
+
+  archiveLesson: db.prepare(`
+    UPDATE hypothesis_lessons SET is_active = 0, archived_at = datetime('now')
+    WHERE id = @id
+  `),
+
+  countReviewedSinceLastLesson: db.prepare(`
+    SELECT COUNT(*) as count
+    FROM ai_journal
+    WHERE entry_type = 'hypothesis'
+      AND outcome_status != 'pending'
+      AND outcome_reviewed_at > COALESCE(
+        (SELECT MAX(created_at) FROM hypothesis_lessons), '1970-01-01')
   `),
 
   getOptionsDistribution: db.prepare(`
@@ -675,6 +789,65 @@ const insertJournalEntry = (entryType, content, seriesReferenced = null) => {
 
 const getRecentJournalEntries = (limit = 20) => stmts.getRecentJournalEntries.all({ limit });
 
+const insertJournalEntryFull = (entryType, content, seriesReferenced = null, meta = null) => {
+  stmts.insertJournalEntryFull.run({
+    timestamp: new Date().toISOString(),
+    entry_type: entryType,
+    content,
+    series_referenced: seriesReferenced ? JSON.stringify(seriesReferenced) : null,
+    prediction_target: meta?.target || null,
+    prediction_direction: meta?.direction || null,
+    prediction_value: meta?.value != null ? Number(meta.value) : null,
+    prediction_deadline: meta?.deadline || null,
+    falsification_criteria: meta?.falsification || null,
+  });
+};
+
+const getPendingHypotheses = (limit = 3) => {
+  return stmts.getPendingHypotheses.all({ now: new Date().toISOString(), limit });
+};
+
+const updateHypothesisVerdict = (id, verdict) => {
+  stmts.updateHypothesisVerdict.run({
+    id,
+    outcome_status: verdict.status,
+    outcome_verdict: verdict.verdict,
+    outcome_confidence: verdict.confidence,
+    outcome_reviewed_at: new Date().toISOString(),
+    trade_pnl_attribution: verdict.tradePnl != null ? verdict.tradePnl : null,
+    trades_in_window: verdict.tradeIds ? JSON.stringify(verdict.tradeIds) : null,
+  });
+};
+
+const getReviewedHypotheses = (limit = 30) => {
+  return stmts.getReviewedHypotheses.all({ limit });
+};
+
+const getHypothesisStats = (sinceDays = 30) => {
+  const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
+  return stmts.getHypothesisStats.get({ since });
+};
+
+const getOrdersInWindow = (start, end) => {
+  return stmts.getOrdersInWindow.all({ start, end });
+};
+
+const insertLesson = (lesson, evidenceCount) => {
+  stmts.insertLesson.run({ lesson, evidence_count: evidenceCount });
+};
+
+const getActiveLessons = () => {
+  return stmts.getActiveLessons.all();
+};
+
+const archiveLesson = (id) => {
+  stmts.archiveLesson.run({ id });
+};
+
+const countReviewedSinceLastLesson = () => {
+  return stmts.countReviewedSinceLastLesson.get()?.count || 0;
+};
+
 // ─── Bot State Helpers ────────────────────────────────────────────────────────
 
 const saveBotState = (botData) => {
@@ -761,6 +934,16 @@ module.exports = {
   getRecentOrders,
   insertJournalEntry,
   getRecentJournalEntries,
+  insertJournalEntryFull,
+  getPendingHypotheses,
+  updateHypothesisVerdict,
+  getReviewedHypotheses,
+  getHypothesisStats,
+  getOrdersInWindow,
+  insertLesson,
+  getActiveLessons,
+  archiveLesson,
+  countReviewedSinceLastLesson,
   saveBotState,
   loadBotState,
   loadPriceHistoryFromDb,
