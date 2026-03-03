@@ -16,6 +16,12 @@ interface JournalEntry {
   content: string;
   series_referenced: string | null;
   created_at: string;
+  prediction_deadline: string | null;
+  outcome_status: string | null;
+  outcome_verdict: string | null;
+  outcome_confidence: number | null;
+  trade_pnl_attribution: number | null;
+  trades_in_window: string | null;
 }
 
 function stripJournalTags(text: string): string {
@@ -38,6 +44,23 @@ const TYPE_STYLES: Record<string, { label: string; color: string }> = {
   regime_note: { label: 'Regime', color: 'bg-purple-500/20 text-purple-400' },
 };
 
+const VERDICT_STYLES: Record<string, { label: string; color: string }> = {
+  confirmed_convex: { label: 'Convex Win', color: 'bg-green-500/20 text-green-400' },
+  confirmed_linear: { label: 'Linear Win', color: 'bg-blue-500/20 text-blue-400' },
+  partially_confirmed: { label: 'Partial', color: 'bg-blue-500/20 text-blue-400' },
+  disproven_bounded: { label: 'Bounded Loss', color: 'bg-gray-500/20 text-gray-400' },
+  disproven_costly: { label: 'Costly Miss', color: 'bg-red-500/20 text-red-400' },
+};
+
+function timeUntil(ts: string): string {
+  const diff = new Date(ts).getTime() - Date.now();
+  if (diff <= 0) return 'reviewing...';
+  const hrs = Math.floor(diff / 3600000);
+  const mins = Math.floor((diff % 3600000) / 60000);
+  if (hrs > 0) return `verdict in ${hrs}h ${mins}m`;
+  return `verdict in ${mins}m`;
+}
+
 const STARTERS = [
   'How is the tail-hedge portfolio positioned right now?',
   'Is the bot pacing its budget well this cycle?',
@@ -53,6 +76,15 @@ export default function AdvisorDrawer() {
   const [streaming, setStreaming] = useState(false);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([]);
   const [journalLoading, setJournalLoading] = useState(false);
+  const [analyticsTab, setAnalyticsTab] = useState(false);
+  const [hypStats, setHypStats] = useState<{
+    total: number; reviewed: number; pending: number;
+    confirmed_convex: number; confirmed_linear: number;
+    disproven_bounded: number; disproven_costly: number;
+    partially_confirmed: number;
+    convexPostureRate: number; costlyRate: number;
+  } | null>(null);
+  const [lessons, setLessons] = useState<{ id: number; lesson: string; evidence_count: number; created_at: string }[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -74,11 +106,34 @@ export default function AdvisorDrawer() {
     setJournalLoading(false);
   }, []);
 
+  const fetchAnalytics = useCallback(async () => {
+    try {
+      const [statsRes, lessonsRes] = await Promise.all([
+        fetch('/api/ai/hypothesis-stats'),
+        fetch('/api/ai/hypothesis-lessons'),
+      ]);
+      if (statsRes.ok) {
+        const data = await statsRes.json();
+        setHypStats(data.stats);
+      }
+      if (lessonsRes.ok) {
+        const data = await lessonsRes.json();
+        setLessons(data.lessons || []);
+      }
+    } catch { /* silent */ }
+  }, []);
+
   useEffect(() => {
     if (open && tab === 'journal') {
       fetchJournal();
     }
   }, [open, tab, fetchJournal]);
+
+  useEffect(() => {
+    if (open && tab === 'journal' && analyticsTab) {
+      fetchAnalytics();
+    }
+  }, [open, tab, analyticsTab, fetchAnalytics]);
 
   useEffect(() => {
     if (open && tab === 'chat' && inputRef.current) {
@@ -233,40 +288,160 @@ export default function AdvisorDrawer() {
         {/* Journal View */}
         {tab === 'journal' && (
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-            {journalLoading && (
-              <p className="text-gray-500 text-xs">Loading journal...</p>
-            )}
-            {!journalLoading && journalEntries.length === 0 && (
-              <div className="pt-4">
-                <p className="text-gray-500 text-xs">No journal entries yet. Chat with the bot to generate observations, hypotheses, and regime notes.</p>
-              </div>
-            )}
-            {journalEntries.map((entry) => {
-              const style = TYPE_STYLES[entry.entry_type] || { label: entry.entry_type.toUpperCase(), color: 'bg-white/10 text-gray-400' };
-              return (
-                <div key={entry.id} className="border border-white/5 px-3 py-2.5 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5">
-                      <span className={`text-[10px] font-bold px-1.5 py-0.5 ${style.color}`}>
-                        {style.label}
-                      </span>
-                      <span className="text-[10px] text-gray-500 font-mono">#{entry.id}</span>
+            {/* Sub-toggle: Entries / Analytics */}
+            <div className="flex gap-1 border-b border-white/5 pb-2">
+              <button
+                onClick={() => setAnalyticsTab(false)}
+                className={`text-[11px] px-2.5 py-1 transition-colors ${
+                  !analyticsTab ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                Entries
+              </button>
+              <button
+                onClick={() => setAnalyticsTab(true)}
+                className={`text-[11px] px-2.5 py-1 transition-colors ${
+                  analyticsTab ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                Analytics
+              </button>
+            </div>
+
+            {/* Analytics View */}
+            {analyticsTab && (
+              <div className="space-y-4">
+                {!hypStats ? (
+                  <p className="text-gray-500 text-xs">Loading analytics...</p>
+                ) : (
+                  <>
+                    {/* Convex Posture Rate */}
+                    <div className="text-center py-3">
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Convex Posture Rate</p>
+                      <p className="text-3xl font-bold text-juice-orange">
+                        {(hypStats.convexPostureRate * 100).toFixed(0)}%
+                      </p>
+                      <p className="text-[10px] text-gray-600 mt-1">
+                        {hypStats.reviewed} reviewed / {hypStats.total} total ({hypStats.pending} pending)
+                      </p>
                     </div>
-                    <span className="text-[10px] text-gray-600">{timeAgo(entry.timestamp)}</span>
-                  </div>
-                  <div className="prose prose-invert prose-xs max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h2]:text-sm [&_h2]:font-bold [&_h2]:text-white [&_h2]:mt-3 [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:font-bold [&_h3]:text-white [&_h3]:mt-2 [&_h3]:mb-1 [&_p]:text-xs [&_p]:leading-relaxed [&_p]:my-1 [&_strong]:text-white [&_ul]:text-xs [&_ul]:my-1 [&_ul]:pl-4 [&_ol]:text-xs [&_ol]:my-1 [&_ol]:pl-4 [&_li]:my-0.5 [&_hr]:border-white/10 [&_hr]:my-2 [&_code]:text-juice-orange [&_code]:text-[11px] [&_code]:bg-white/5 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_table]:w-full [&_table]:text-xs [&_table]:my-2 [&_table]:border-collapse [&_th]:text-left [&_th]:text-gray-400 [&_th]:font-medium [&_th]:border-b [&_th]:border-white/10 [&_th]:px-2 [&_th]:py-1 [&_td]:text-gray-300 [&_td]:border-b [&_td]:border-white/5 [&_td]:px-2 [&_td]:py-1">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.content}</ReactMarkdown>
-                  </div>
-                  {entry.series_referenced && (
-                    <div className="flex gap-1 flex-wrap">
-                      {(JSON.parse(entry.series_referenced) as string[]).map((s) => (
-                        <span key={s} className="text-[10px] text-gray-600 bg-white/5 px-1.5 py-0.5">{s}</span>
+
+                    {/* Outcome Breakdown */}
+                    <div className="space-y-2">
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wider">Outcome Breakdown</p>
+                      {[
+                        { key: 'confirmed_convex', label: 'Convex Win', count: hypStats.confirmed_convex, dot: 'bg-green-400' },
+                        { key: 'confirmed_linear', label: 'Linear Win', count: hypStats.confirmed_linear, dot: 'bg-blue-400' },
+                        { key: 'partially_confirmed', label: 'Partial', count: hypStats.partially_confirmed, dot: 'bg-blue-300' },
+                        { key: 'disproven_bounded', label: 'Bounded Loss', count: hypStats.disproven_bounded, dot: 'bg-gray-400' },
+                        { key: 'disproven_costly', label: 'Costly Miss', count: hypStats.disproven_costly, dot: 'bg-red-400' },
+                      ].map((row) => (
+                        <div key={row.key} className="flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full ${row.dot} shrink-0`} />
+                          <span className="text-xs text-gray-400 flex-1">{row.label}</span>
+                          <span className="text-xs text-gray-300 font-mono">{row.count}</span>
+                          <div className="w-20 h-1.5 bg-white/5 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full ${row.dot} rounded-full`}
+                              style={{ width: hypStats.reviewed > 0 ? `${(row.count / hypStats.reviewed) * 100}%` : '0%' }}
+                            />
+                          </div>
+                        </div>
                       ))}
                     </div>
-                  )}
-                </div>
-              );
-            })}
+
+                    {/* Costly Miss Warning */}
+                    {hypStats.costlyRate > 0.2 && (
+                      <div className="bg-red-500/10 border border-red-500/20 px-3 py-2">
+                        <p className="text-xs text-red-400 font-bold">High Costly Miss Rate</p>
+                        <p className="text-[11px] text-red-400/70 mt-0.5">
+                          {(hypStats.costlyRate * 100).toFixed(0)}% of reviewed hypotheses resulted in costly misses.
+                          Consider tightening entry criteria.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Active Lessons */}
+                    {lessons.length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wider">Active Lessons</p>
+                        {lessons.map((l) => (
+                          <div key={l.id} className="border border-white/5 px-3 py-2">
+                            <p className="text-xs text-gray-300">{l.lesson}</p>
+                            <p className="text-[10px] text-gray-600 mt-1">
+                              {l.evidence_count} evidence point{l.evidence_count !== 1 ? 's' : ''} &middot; {timeAgo(l.created_at)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* Entries View */}
+            {!analyticsTab && (
+              <>
+                {journalLoading && (
+                  <p className="text-gray-500 text-xs">Loading journal...</p>
+                )}
+                {!journalLoading && journalEntries.length === 0 && (
+                  <div className="pt-4">
+                    <p className="text-gray-500 text-xs">No journal entries yet. Chat with the bot to generate observations, hypotheses, and regime notes.</p>
+                  </div>
+                )}
+                {journalEntries.map((entry) => {
+                  const style = TYPE_STYLES[entry.entry_type] || { label: entry.entry_type.toUpperCase(), color: 'bg-white/10 text-gray-400' };
+                  return (
+                    <div key={entry.id} className="border border-white/5 px-3 py-2.5 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-[10px] font-bold px-1.5 py-0.5 ${style.color}`}>
+                            {style.label}
+                          </span>
+                          <span className="text-[10px] text-gray-500 font-mono">#{entry.id}</span>
+                          {entry.entry_type === 'hypothesis' && entry.outcome_status && entry.outcome_status !== 'pending' && (
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 ${VERDICT_STYLES[entry.outcome_status]?.color || 'bg-white/10 text-gray-400'}`}>
+                              {VERDICT_STYLES[entry.outcome_status]?.label || entry.outcome_status}
+                            </span>
+                          )}
+                          {entry.entry_type === 'hypothesis' && (!entry.outcome_status || entry.outcome_status === 'pending') && entry.prediction_deadline && (
+                            <span className="text-[10px] text-gray-500 italic">
+                              {timeUntil(entry.prediction_deadline)}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[10px] text-gray-600">{timeAgo(entry.timestamp)}</span>
+                      </div>
+                      <div className="prose prose-invert prose-xs max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h2]:text-sm [&_h2]:font-bold [&_h2]:text-white [&_h2]:mt-3 [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:font-bold [&_h3]:text-white [&_h3]:mt-2 [&_h3]:mb-1 [&_p]:text-xs [&_p]:leading-relaxed [&_p]:my-1 [&_strong]:text-white [&_ul]:text-xs [&_ul]:my-1 [&_ul]:pl-4 [&_ol]:text-xs [&_ol]:my-1 [&_ol]:pl-4 [&_li]:my-0.5 [&_hr]:border-white/10 [&_hr]:my-2 [&_code]:text-juice-orange [&_code]:text-[11px] [&_code]:bg-white/5 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_table]:w-full [&_table]:text-xs [&_table]:my-2 [&_table]:border-collapse [&_th]:text-left [&_th]:text-gray-400 [&_th]:font-medium [&_th]:border-b [&_th]:border-white/10 [&_th]:px-2 [&_th]:py-1 [&_td]:text-gray-300 [&_td]:border-b [&_td]:border-white/5 [&_td]:px-2 [&_td]:py-1">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.content}</ReactMarkdown>
+                      </div>
+                      {entry.entry_type === 'hypothesis' && entry.outcome_verdict && (
+                        <details className="text-xs text-gray-400 border-t border-white/5 pt-1.5 mt-1.5">
+                          <summary className="cursor-pointer hover:text-gray-300 transition-colors">
+                            Verdict ({entry.outcome_confidence ? (entry.outcome_confidence * 100).toFixed(0) : '?'}% confidence)
+                            {entry.trade_pnl_attribution != null && (
+                              <span className={entry.trade_pnl_attribution >= 0 ? 'text-green-400 ml-2' : 'text-red-400 ml-2'}>
+                                P&amp;L: {entry.trade_pnl_attribution >= 0 ? '+' : ''}{entry.trade_pnl_attribution.toFixed(4)}
+                              </span>
+                            )}
+                          </summary>
+                          <p className="mt-1 text-gray-500 leading-relaxed">{entry.outcome_verdict}</p>
+                        </details>
+                      )}
+                      {entry.series_referenced && (
+                        <div className="flex gap-1 flex-wrap">
+                          {(JSON.parse(entry.series_referenced) as string[]).map((s) => (
+                            <span key={s} className="text-[10px] text-gray-600 bg-white/5 px-1.5 py-0.5">{s}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </>
+            )}
           </div>
         )}
 
