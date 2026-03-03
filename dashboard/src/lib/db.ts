@@ -179,11 +179,34 @@ function prepareAll(d: Database.Database) {
     `),
 
     getJournalEntries: d.prepare(`
-      SELECT id, timestamp, entry_type, content, series_referenced, created_at
+      SELECT id, timestamp, entry_type, content, series_referenced, created_at,
+        prediction_deadline, outcome_status, outcome_verdict, outcome_confidence,
+        trade_pnl_attribution, trades_in_window
       FROM ai_journal
       WHERE timestamp > ?
       ORDER BY timestamp DESC
       LIMIT ?
+    `),
+
+    getHypothesisStats: d.prepare(`
+      SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN outcome_status = 'confirmed_convex' THEN 1 ELSE 0 END) as confirmed_convex,
+        SUM(CASE WHEN outcome_status = 'confirmed_linear' THEN 1 ELSE 0 END) as confirmed_linear,
+        SUM(CASE WHEN outcome_status = 'disproven_bounded' THEN 1 ELSE 0 END) as disproven_bounded,
+        SUM(CASE WHEN outcome_status = 'disproven_costly' THEN 1 ELSE 0 END) as disproven_costly,
+        SUM(CASE WHEN outcome_status = 'partially_confirmed' THEN 1 ELSE 0 END) as partially_confirmed,
+        SUM(CASE WHEN outcome_status = 'pending' THEN 1 ELSE 0 END) as pending
+      FROM ai_journal
+      WHERE entry_type = 'hypothesis'
+        AND timestamp > ?
+    `),
+
+    getActiveLessons: d.prepare(`
+      SELECT id, lesson, evidence_count, created_at
+      FROM hypothesis_lessons
+      WHERE is_active = 1
+      ORDER BY created_at DESC
     `),
 
     // ─── Hourly Series for Correlation Engine ─────────────────────────────
@@ -450,6 +473,28 @@ export function getJournalEntries(since: string, limit = 20) {
     return getStmts().getJournalEntries.all(since, limit);
   } catch {
     return []; // table may not exist yet
+  }
+}
+
+export function getHypothesisStats(since: string) {
+  try {
+    return getStmts().getHypothesisStats.get(since) as {
+      total: number; confirmed_convex: number; confirmed_linear: number;
+      disproven_bounded: number; disproven_costly: number;
+      partially_confirmed: number; pending: number;
+    } | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function getActiveLessons() {
+  try {
+    return getStmts().getActiveLessons.all() as {
+      id: number; lesson: string; evidence_count: number; created_at: string;
+    }[];
+  } catch {
+    return [];
   }
 }
 
