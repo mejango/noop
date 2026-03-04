@@ -1133,14 +1133,18 @@ const getSpotPrice = async () => {
       const response = await axios.get(`${COINGECKO_API}/simple/price?ids=ethereum&vs_currencies=usd`);
       return response.data.ethereum.usd;
     } catch (error) {
-      const is429 = error.response?.status === 429;
+      const status = error.response?.status;
+      const retryAfter = error.response?.headers?.['retry-after'];
+      const rateLimitRemaining = error.response?.headers?.['x-ratelimit-remaining'];
+      const rateLimitReset = error.response?.headers?.['x-ratelimit-reset'];
+      const is429 = status === 429;
       if (is429 && attempt < maxRetries) {
-        const delay = (attempt + 1) * 5000; // 5s, 10s, 15s
-        console.log(`⏳ Spot price rate-limited (429), retrying in ${delay / 1000}s... (${attempt + 1}/${maxRetries})`);
+        const delay = retryAfter ? Number(retryAfter) * 1000 : (attempt + 1) * 5000;
+        console.log(`⏳ CoinGecko 429 rate-limited | retry-after: ${retryAfter || 'none'} | remaining: ${rateLimitRemaining ?? 'N/A'} | reset: ${rateLimitReset ?? 'N/A'} | waiting ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
         await new Promise(r => setTimeout(r, delay));
         continue;
       }
-      console.error('Error fetching spot price:', error.message);
+      console.error(`Error fetching spot price: ${error.message} | status: ${status || 'N/A'} | retry-after: ${retryAfter || 'none'} | ratelimit-remaining: ${rateLimitRemaining ?? 'N/A'}`);
       return null;
     }
   }
@@ -1161,7 +1165,8 @@ const fetchTickersByExpiry = async (expiryDate) => {
     }
     return response.data.result.tickers;
   } catch (error) {
-    console.error(`Error fetching tickers for expiry ${expiryDate}:`, error.message);
+    const status = error.response?.status;
+    console.error(`Error fetching tickers for expiry ${expiryDate}: ${error.message} | status: ${status || 'N/A'}${status === 429 ? ' (RATE LIMITED)' : ''}`);
     return {};
   }
 };
@@ -1327,7 +1332,8 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     console.log(`Order placed successfully:`, response.data);
     return response.data;
   } catch (error) {
-    console.error(`Error placing limit order for ${name}:`, error.message);
+    const status = error.response?.status;
+    console.error(`Error placing limit order for ${name}: ${error.message} | status: ${status || 'N/A'}${status === 429 ? ' (RATE LIMITED)' : ''}`);
     return null;
   }
 };
@@ -1382,7 +1388,8 @@ const fetchAndFilterInstruments = async (spotPrice) => {
      
     return { instruments, putCandidates, callCandidates };
   } catch (error) {
-    console.error('Error fetching instruments:', error);
+    const status = error.response?.status;
+    console.error(`Error fetching instruments: ${error.message} | status: ${status || 'N/A'}${status === 429 ? ' (RATE LIMITED)' : ''}`);
     return { putCandidates: [], callCandidates: [] };
   }
 };
