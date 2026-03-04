@@ -1125,15 +1125,24 @@ const determineCheckInterval = (mediumTermMomentum, shortTermMomentum) => {
   return DYNAMIC_INTERVALS.normal;
 };
 
-// Get current spot price from CoinGecko
+// Get current spot price from CoinGecko (retries on 429)
 const getSpotPrice = async () => {
-  try {
-    const response = await axios.get(`${COINGECKO_API}/simple/price?ids=ethereum&vs_currencies=usd`);
-    const spotPrice = response.data.ethereum.usd;
-    return spotPrice;
-  } catch (error) {
-    console.error('Error fetching spot price:', error.message);
-    return null;
+  const maxRetries = 3;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await axios.get(`${COINGECKO_API}/simple/price?ids=ethereum&vs_currencies=usd`);
+      return response.data.ethereum.usd;
+    } catch (error) {
+      const is429 = error.response?.status === 429;
+      if (is429 && attempt < maxRetries) {
+        const delay = (attempt + 1) * 5000; // 5s, 10s, 15s
+        console.log(`⏳ Spot price rate-limited (429), retrying in ${delay / 1000}s... (${attempt + 1}/${maxRetries})`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      console.error('Error fetching spot price:', error.message);
+      return null;
+    }
   }
 };
 
@@ -2326,17 +2335,76 @@ const runBot = async () => {
   console.log('─'.repeat(60));
   console.log(`🥱 NO OPERATION RUN`);
 
-  // Get spot price and update momentum
-  const spotPrice = await getSpotPrice();
+  // Get spot price — try CoinGecko first
+  let spotPrice = await getSpotPrice();
 
   // Shared timestamp for all DB writes this tick
   const tickTimestamp = new Date().toISOString();
 
   let onchainAnalysis = null;
 
+  // Fetch instruments once and filter for both strategies
+  let instruments = [];
+  let putCandidates = [];
+  let callCandidates = [];
+
+  try {
+    const fetchResult = await fetchAndFilterInstruments(spotPrice);
+    instruments = fetchResult.instruments || [];
+    putCandidates = fetchResult.putCandidates || [];
+    callCandidates = fetchResult.callCandidates || [];
+  } catch (error) {
+    console.error('❌ Error fetching instruments:', error.message);
+    console.log('⚠️ Continuing with empty instrument lists to prevent script exit');
+  }
+
+  // Analyze past 6.2 days of options data once for both strategies
+  const historicalData = analyzePastOptionsData(6.2);
+  console.log(`👴🏼 Historical analysis (${historicalData.totalDataPoints} total data points from past 6.2 days):`);
+  console.log(`   📊 Filtered data points (excluding upward momentum): ${historicalData.filteredDataPoints}`);
+  console.log(`   🚫 Excluded upward momentum periods: ${historicalData.excludedUpwardPeriods}`);
+  console.log(`   Best PUT score (filtered): ${historicalData.bestPutScore.toFixed(6)}`);
+  console.log(`   Best CALL score (filtered): ${historicalData.bestCallScore.toFixed(6)}`);
+  console.log(`   3-day high: $${botData.shortTermMomentum?.threeDayHigh?.toFixed(2) || 'N/A'}`);
+  console.log(`   3-day low: $${botData.shortTermMomentum?.threeDayLow?.toFixed(2) || 'N/A'}`);
+  console.log(`   7-day high: $${botData.shortTermMomentum?.sevenDayHigh?.toFixed(2) || 'N/A'}`);
+  console.log(`   7-day low: $${botData.shortTermMomentum?.sevenDayLow?.toFixed(2) || 'N/A'}`);
+
+    // Batch-fetch AMM tickers per unique expiry (get_tickers returns AMM prices)
+    const allCandidates = [...putCandidates, ...callCandidates];
+    console.log(`🔍 Fetching AMM tickers for ${allCandidates.length} total candidates (${putCandidates.length} PUT + ${callCandidates.length} CALL)...`);
+
+    // Extract unique expiry dates from instrument names (e.g. "ETH-20260424-1400-P" → "20260424")
+    const expiryDates = [...new Set(allCandidates.map(i => i.instrument_name.split('-')[1]))];
+    console.log(`📅 Unique expiry dates: ${expiryDates.join(', ')} (${expiryDates.length} batch calls)`);
+
+    // Fetch tickers for all expiries in parallel
+    const tickerResults = await Promise.all(
+      expiryDates.map(expiry => fetchTickersByExpiry(expiry))
+    );
+
+    // Merge all ticker maps into one keyed by instrument_name
+    const tickerMap = {};
+    for (const tickers of tickerResults) {
+      for (const [name, data] of Object.entries(tickers)) {
+        tickerMap[name] = data;
+      }
+    }
+    console.log(`📊 Ticker map contains ${Object.keys(tickerMap).length} instruments`);
+
+  // Fallback: if CoinGecko failed, extract spot from Lyra index price
+  if (!spotPrice && Object.keys(tickerMap).length > 0) {
+    const firstTicker = Object.values(tickerMap)[0];
+    const lyraIndex = Number(firstTicker.I);
+    if (lyraIndex > 0) {
+      spotPrice = lyraIndex;
+      console.log(`🔄 Using Lyra index price as spot fallback: $${spotPrice.toFixed(2)}`);
+    }
+  }
+
   if (spotPrice) {
     // Display run header
-    console.log(`ETH: $${spotPrice?.toFixed(2) || 'N/A'} | ${new Date().toLocaleString()}`);
+    console.log(`ETH: $${spotPrice.toFixed(2)} | ${new Date().toLocaleString()}`);
 
     // Load 7-day price history from SQLite, append current tick (not yet inserted)
     let priceHistory = [];
@@ -2364,7 +2432,7 @@ const runBot = async () => {
       error: 'analysis_failed',
       timestamp: new Date().toISOString()
     };
-    
+
     try {
       // Run onchain analysis functions with individual error handling
       const dexLiquidityResult = await analyzeDEXLiquidity(spotPrice).catch(err => ({ error: err.message, timestamp: new Date().toISOString() }));
@@ -2376,7 +2444,7 @@ const runBot = async () => {
         momentumData: momentumResult,
         timestamp: new Date().toISOString()
       };
-      
+
       // SQLite: persist onchain data
       if (db) {
         try {
@@ -2384,7 +2452,7 @@ const runBot = async () => {
         }
         catch (e) { console.log('DB: onchain write failed:', e.message); }
       }
-      
+
       // Display key findings with error handling
       console.log('⛓ Onchain Analysis Summary:');
       try {
@@ -2405,7 +2473,7 @@ const runBot = async () => {
                   console.log(`• ${pool.token0?.symbol || 'Unknown'}/${pool.token1?.symbol || 'Unknown'}: ${poolLiquidityUSD} TVL`);
                 });
               }
-              
+
               // Show top 3 Uniswap V4 pools
               if (dexName === 'uniswap_v4' && dexData.poolDetails && dexData.poolDetails.length > 0) {
                 console.log(`🦄 Uniswap V4 Pools:`);
@@ -2419,35 +2487,35 @@ const runBot = async () => {
               }
             }
           });
-          
+
           // Display liquidity analysis summary
           console.log(`💦 Liquidity Analysis Summary:`);
           let totalLiquidity = 0;
           let totalPools = 0;
-          
+
           Object.entries(onchainAnalysis.dexLiquidity.dexes).forEach(([dexName, dexData]) => {
             if (dexData.totalLiquidity && !dexData.error) {
               totalLiquidity += dexData.totalLiquidity || 0;
               totalPools += dexData.pools || 0;
             }
           });
-          
+
           // Display liquidity flow information
           if (onchainAnalysis.dexLiquidity.flowAnalysis) {
             const flow = onchainAnalysis.dexLiquidity.flowAnalysis;
             if (flow.direction !== 'unknown') {
-              const directionEmoji = flow.direction === 'inflow' ? '📈' : 
+              const directionEmoji = flow.direction === 'inflow' ? '📈' :
                                    flow.direction === 'outflow' ? '📉' : '➡️';
               const magnitudePercent = (flow.magnitude * 100).toFixed(1);
               const confidencePercent = (flow.confidence * 100).toFixed(0);
               const currentTotal = flow.currentTotal ? `${flow.currentTotal.toFixed(2)} ETH` : 'N/A';
               console.log(`Liquidity Flow: ${directionEmoji} ${flow.direction.toUpperCase()} (${magnitudePercent}%, confidence: ${confidencePercent}%) - Total: ${currentTotal}`);
-              
+
               // Show multi-timeframe breakdown
               if (flow.timeframes) {
                 Object.entries(flow.timeframes).forEach(([timeframe, tf]) => {
                   if (tf.direction !== 'unknown') {
-                    const tfEmoji = tf.direction === 'inflow' ? '📈' : 
+                    const tfEmoji = tf.direction === 'inflow' ? '📈' :
                                    tf.direction === 'outflow' ? '📉' : '➡️';
                     const changePercent = (tf.change * 100).toFixed(2);
                     const flowDescription = tf.direction === 'inflow' ? 'liquidity entering' :
@@ -2460,11 +2528,11 @@ const runBot = async () => {
             }
           }
         }
-        
+
       } catch (err) {
         console.log('⚠️ Failed to display analysis summary:', err.message);
       }
-      
+
     } catch (error) {
       console.log('⚠️ Onchain analysis failed completely:', error.message);
       onchainAnalysis = {
@@ -2473,58 +2541,11 @@ const runBot = async () => {
         spotPrice: spotPrice
       };
     }
-    
+
     console.log('─'.repeat(60));
+  } else {
+    console.log('⚠️ No spot price available (CoinGecko + Lyra fallback both failed)');
   }
-
-  // Fetch instruments once and filter for both strategies
-  let instruments = [];
-  let putCandidates = [];
-  let callCandidates = [];
-  
-  try {
-    const fetchResult = await fetchAndFilterInstruments(spotPrice);
-    instruments = fetchResult.instruments || [];
-    putCandidates = fetchResult.putCandidates || [];
-    callCandidates = fetchResult.callCandidates || [];
-  } catch (error) {
-    console.error('❌ Error fetching instruments:', error.message);
-    console.log('⚠️ Continuing with empty instrument lists to prevent script exit');
-  }
-  
-  // Analyze past 6.2 days of options data once for both strategies
-  const historicalData = analyzePastOptionsData(6.2);
-  console.log(`👴🏼 Historical analysis (${historicalData.totalDataPoints} total data points from past 6.2 days):`);
-  console.log(`   📊 Filtered data points (excluding upward momentum): ${historicalData.filteredDataPoints}`);
-  console.log(`   🚫 Excluded upward momentum periods: ${historicalData.excludedUpwardPeriods}`);
-  console.log(`   Best PUT score (filtered): ${historicalData.bestPutScore.toFixed(6)}`);
-  console.log(`   Best CALL score (filtered): ${historicalData.bestCallScore.toFixed(6)}`);
-  console.log(`   3-day high: $${botData.shortTermMomentum?.threeDayHigh?.toFixed(2) || 'N/A'}`);
-  console.log(`   3-day low: $${botData.shortTermMomentum?.threeDayLow?.toFixed(2) || 'N/A'}`);
-  console.log(`   7-day high: $${botData.shortTermMomentum?.sevenDayHigh?.toFixed(2) || 'N/A'}`);
-  console.log(`   7-day low: $${botData.shortTermMomentum?.sevenDayLow?.toFixed(2) || 'N/A'}`);
-    
-    // Batch-fetch AMM tickers per unique expiry (get_tickers returns AMM prices)
-    const allCandidates = [...putCandidates, ...callCandidates];
-    console.log(`🔍 Fetching AMM tickers for ${allCandidates.length} total candidates (${putCandidates.length} PUT + ${callCandidates.length} CALL)...`);
-
-    // Extract unique expiry dates from instrument names (e.g. "ETH-20260424-1400-P" → "20260424")
-    const expiryDates = [...new Set(allCandidates.map(i => i.instrument_name.split('-')[1]))];
-    console.log(`📅 Unique expiry dates: ${expiryDates.join(', ')} (${expiryDates.length} batch calls)`);
-
-    // Fetch tickers for all expiries in parallel
-    const tickerResults = await Promise.all(
-      expiryDates.map(expiry => fetchTickersByExpiry(expiry))
-    );
-
-    // Merge all ticker maps into one keyed by instrument_name
-    const tickerMap = {};
-    for (const tickers of tickerResults) {
-      for (const [name, data] of Object.entries(tickers)) {
-        tickerMap[name] = data;
-      }
-    }
-    console.log(`📊 Ticker map contains ${Object.keys(tickerMap).length} instruments`);
 
     // Enrich candidates from the ticker map
     const putOptionsWithDetails = [];
