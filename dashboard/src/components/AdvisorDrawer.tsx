@@ -497,11 +497,18 @@ export default function AdvisorDrawer() {
               <textarea
                 ref={inputRef}
                 value={input}
-                onChange={e => setInput(e.target.value)}
+                onChange={e => {
+                  setInput(e.target.value);
+                  // Auto-resize: reset then grow to content, capped at 38vh
+                  const el = e.target;
+                  el.style.height = 'auto';
+                  el.style.height = Math.min(el.scrollHeight, window.innerHeight * 0.38) + 'px';
+                }}
                 onKeyDown={handleKeyDown}
                 placeholder="Ask the bot..."
                 rows={1}
-                className="flex-1 bg-white/5 border border-white/10 text-white text-sm px-3 py-2 resize-none focus:outline-none focus:border-juice-orange/50 placeholder-gray-600"
+                className="flex-1 bg-white/5 border border-white/10 text-white text-sm px-3 py-2 resize-none focus:outline-none focus:border-juice-orange/50 placeholder-gray-600 overflow-y-auto"
+                style={{ maxHeight: '38vh' }}
               />
               <button
                 onClick={() => sendMessage(input)}
