@@ -1431,7 +1431,7 @@ export default function OverviewPage() {
                     {/* Median reference line */}
                     {skewMedian != null && (
                       <ReferenceLine y={skewMedian} stroke="#555" strokeDasharray="4 4"
-                        label={{ value: `median ${skewMedian.toFixed(1)}%`, position: 'right', fill: '#666', fontSize: 10 }}
+                        label={{ value: `median ${skewMedian.toFixed(1)}%`, position: 'insideTopRight', fill: '#666', fontSize: 10 }}
                       />
                     )}
                     <Line
