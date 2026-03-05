@@ -1857,8 +1857,8 @@ export default function OverviewPage() {
           .map(p => ({
             ...p,
             pnlPct: (p.average_price * Math.abs(p.amount)) > 0 ? (p.unrealized_pnl / (p.average_price * Math.abs(p.amount))) * 100 : 0,
-            thetaPerContract: p.theta * p.index_price,
-            thetaPerDay: p.theta * Math.abs(p.amount) * p.index_price,
+            thetaPerDay: p.theta * p.index_price,
+            thetaPerContract: Math.abs(p.amount) > 0 ? (p.theta / Math.abs(p.amount)) * p.index_price : 0,
           }))
           .sort((a, b) => {
             const k = posSort.key as keyof typeof a;
