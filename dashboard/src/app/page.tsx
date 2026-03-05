@@ -1898,7 +1898,7 @@ export default function OverviewPage() {
                       <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{p.pnlPct.toFixed(1)}%</td>
                       <td className={`py-1.5 px-2 text-right tabular-nums ${p.thetaPerDay >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         {p.thetaPerDay >= 0 ? '+' : ''}{formatUSD(p.thetaPerDay)}
-                        <span className="text-gray-500 text-[10px] ml-1">({p.thetaPerContract >= 0 ? '+' : ''}{formatUSD(p.thetaPerContract)}/ct)</span>
+                        <span className="text-gray-500 text-[10px] ml-1">({p.thetaPerContract >= 0 ? '+' : ''}{formatUSD(p.thetaPerContract)} per)</span>
                       </td>
                     </tr>
                   );
