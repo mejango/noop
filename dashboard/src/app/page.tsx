@@ -1363,7 +1363,12 @@ export default function OverviewPage() {
                 )}
                 {latestSkew != null && (
                   <span className={`px-1.5 py-0.5 rounded ${latestSkew > 3 ? 'bg-amber-900/40 text-amber-400' : latestSkew < 0 ? 'bg-blue-900/40 text-blue-400' : 'bg-gray-800 text-gray-400'}`}>
-                    Skew {latestSkew.toFixed(1)}% {latestSkew > 3 ? '(fear)' : latestSkew < 0 ? '(greed)' : ''}
+                    Skew {latestSkew.toFixed(1)}%{latestSkew > 3 ? ' (fear)' : latestSkew < 0 ? ' (greed)' : ''}
+                  </span>
+                )}
+                {skewMedian != null && (
+                  <span className="px-1.5 py-0.5 rounded bg-gray-800/60 text-gray-500">
+                    median {skewMedian.toFixed(1)}%
                   </span>
                 )}
                 {oiChangePct != null && (
