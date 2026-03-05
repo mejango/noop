@@ -318,11 +318,11 @@ const putColorBright: [number, number, number] = [255, 160, 50]; // bright orang
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
   if (!cx || !cy || !payload) return null;
-  const g = payload.globalIntensity ?? 0; // global percentile rank → color
+  const t = payload.intensity ?? 0; // per-instrument band-normalized brightness
   const fill = type === 'call'
-    ? lerpColor(callColorDim, callColorBright, g)
-    : lerpColor(putColorDim, putColorBright, g);
-  return <circle cx={cx} cy={cy} r={3.5} fill={fill} fillOpacity={0.5 + g * 0.45} />;
+    ? lerpColor(callColorDim, callColorBright, t)
+    : lerpColor(putColorDim, putColorBright, t);
+  return <circle cx={cx} cy={cy} r={3.5} fill={fill} fillOpacity={0.5 + t * 0.45} />;
 };
 
 // Market quality dot: color = spread quality (tighter=brighter), size = depth
