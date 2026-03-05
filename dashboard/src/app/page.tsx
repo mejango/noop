@@ -134,7 +134,8 @@ interface HeatmapDot {
   bid: number | null;
   ask: number | null;
   dte: number | null;
-  intensity: number; // 0-1 normalized
+  intensity: number; // 0-1 per-band normalized (brightness)
+  globalIntensity: number; // 0-1 global normalized (dot size)
   spreadPct: number | null; // (ask - bid) / mark as %
   iv: number | null; // implied vol as %
   depth: number | null; // ask_amount + bid_amount
@@ -303,11 +304,13 @@ const putColorBright: [number, number, number] = [255, 160, 50]; // bright orang
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
   if (!cx || !cy || !payload) return null;
-  const t = payload.intensity ?? 0;
+  const t = payload.intensity ?? 0; // per-band brightness
+  const g = payload.globalIntensity ?? 0; // global value rank → size
   const fill = type === 'call'
     ? lerpColor(callColorDim, callColorBright, t)
     : lerpColor(putColorDim, putColorBright, t);
-  return <circle cx={cx} cy={cy} r={3.5} fill={fill} fillOpacity={0.75 + t * 0.25} />;
+  const r = 2.5 + g * 3.5; // 2.5px (worst) → 6px (best) globally
+  return <circle cx={cx} cy={cy} r={r} fill={fill} fillOpacity={0.7 + t * 0.3} />;
 };
 
 // Market quality dot: color = spread quality (tighter=brighter), size = depth
@@ -563,7 +566,8 @@ export default function OverviewPage() {
         bid: snap.bid_price,
         ask: snap.ask_price,
         dte,
-        intensity: 0, // normalized below
+        intensity: 0, // per-band normalized below
+        globalIntensity: 0, // global normalized below
         spreadPct,
         iv,
         depth,
@@ -598,6 +602,20 @@ export default function OverviewPage() {
     };
     normalize(calls);
     normalize(puts);
+
+    // Global normalization: size reflects value rank across ALL instruments
+    const normalizeGlobal = (dots: HeatmapDot[]) => {
+      if (dots.length === 0) return;
+      const values = dots.map(d => d.value ?? 0);
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const range = max - min || 1;
+      for (const d of dots) {
+        d.globalIntensity = Math.sqrt(((d.value ?? 0) - min) / range); // sqrt for better spread
+      }
+    };
+    normalizeGlobal(calls);
+    normalizeGlobal(puts);
 
     return { callHeatmap: calls, putHeatmap: puts };
   }, [chart.optionsHeatmap, merged]);
