@@ -189,7 +189,6 @@ const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Minimum profit percentage for autom
 
 // Journal auto-generation
 const JOURNAL_INTERVAL_MS = 8 * 60 * 60 * 1000; // Every 8 hours
-let lastJournalGeneration = 0;
 
 // Common bot state structure
 const createBotData = () => {
@@ -209,6 +208,10 @@ let botData = {
     callCycleStart: null,
     callNetSold: 0,
     callUnspentSellLimit: 0,
+
+    // Timing (persisted to survive restarts)
+    lastCheck: 0,
+    lastJournalGeneration: 0,
   };
 
   return botData;
@@ -251,6 +254,8 @@ const loadData = () => {
       botData.callCycleStart = state.call_cycle_start;
       botData.callNetSold = state.call_net_sold;
       botData.callUnspentSellLimit = state.call_unspent_sell_limit;
+      botData.lastCheck = state.last_check || 0;
+      botData.lastJournalGeneration = state.last_journal_generation || 0;
       console.log(`✅ Loaded cycle state from SQLite`);
     }
   } catch (e) {
@@ -2828,9 +2833,10 @@ const runBot = async () => {
       }
 
       // Auto-generate journal entries every 8 hours
-      if (tickSummary && Date.now() - lastJournalGeneration >= JOURNAL_INTERVAL_MS && process.env.ANTHROPIC_API_KEY) {
+      if (tickSummary && Date.now() - botData.lastJournalGeneration >= JOURNAL_INTERVAL_MS && process.env.ANTHROPIC_API_KEY) {
         generateJournalEntries(tickSummary, botData).then(() => {
-          lastJournalGeneration = Date.now();
+          botData.lastJournalGeneration = Date.now();
+          persistCycleState();
           console.log('📓 Journal generation succeeded, next in 8h');
         }).catch(e => {
           console.log('📓 Journal generation failed (will retry next tick):', e.message);
@@ -2853,6 +2859,7 @@ const runBot = async () => {
     }
 
   botData.lastCheck = now;
+  persistCycleState();
 
   // Schedule next run
   setTimeout(runBotWithWatchdog, checkInterval);
@@ -2945,4 +2952,13 @@ console.log(`Every ${PERIOD / (1000 * 60 * 60 * 24)} days, buy $${PUT_BUYING_BAS
 console.log('='.repeat(70));
 console.log(' ');
 loadData();
-runBotWithWatchdog(); 
+
+// Defer first run if the bot ran recently (prevents premature runs on redeploy)
+const timeSinceLastCheck = Date.now() - botData.lastCheck;
+if (botData.lastCheck > 0 && timeSinceLastCheck < DYNAMIC_INTERVALS.normal) {
+  const delay = DYNAMIC_INTERVALS.normal - timeSinceLastCheck;
+  console.log(`⏳ Last run was ${Math.round(timeSinceLastCheck / 1000)}s ago — deferring first run by ${Math.round(delay / 1000)}s`);
+  setTimeout(runBotWithWatchdog, delay);
+} else {
+  runBotWithWatchdog();
+}
