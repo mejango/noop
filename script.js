@@ -2437,6 +2437,89 @@ const runBot = async () => {
     }
     console.log(`📊 Ticker map contains ${Object.keys(tickerMap).length} instruments`);
 
+    // ─── OI Collection: fetch ALL expiry tickers for put/call ratio ────────
+    if (db && instruments.length > 0) {
+      try {
+        // Extract ALL unique expiry dates from the full instruments array
+        const allExpiryDates = [...new Set(instruments.map(i => i.instrument_name.split('-')[1]))];
+        // Find expiries not already fetched in tickerMap
+        const missingExpiries = allExpiryDates.filter(exp => !expiryDates.includes(exp));
+        console.log(`📊 OI: ${allExpiryDates.length} total expiries, ${missingExpiries.length} need fetching`);
+
+        // Fetch tickers for missing expiries
+        let extraTickerResults = [];
+        if (missingExpiries.length > 0) {
+          extraTickerResults = await Promise.all(
+            missingExpiries.map(expiry => fetchTickersByExpiry(expiry))
+          );
+        }
+
+        // Build full ticker map for OI (merge existing + new)
+        const oiTickerMap = { ...tickerMap };
+        for (const tickers of extraTickerResults) {
+          for (const [name, data] of Object.entries(tickers)) {
+            oiTickerMap[name] = data;
+          }
+        }
+
+        // Aggregate OI by put/call and near/far (<30 DTE vs 30+ DTE)
+        const now = Date.now();
+        const NEAR_THRESHOLD_MS = 30 * 24 * 60 * 60 * 1000;
+        let putOI = 0, callOI = 0;
+        let nearPutOI = 0, nearCallOI = 0;
+        let farPutOI = 0, farCallOI = 0;
+        let counted = 0;
+
+        for (const [name, ticker] of Object.entries(oiTickerMap)) {
+          const oi = Number(ticker.stats?.oi) || 0;
+          if (oi <= 0) continue;
+
+          const isPut = name.endsWith('-P');
+          const isCall = name.endsWith('-C');
+          if (!isPut && !isCall) continue;
+
+          // Parse expiry from instrument name: ETH-20260424-1400-P
+          const parts = name.split('-');
+          const expiryStr = parts[1]; // "20260424"
+          const expiryDate = new Date(
+            `${expiryStr.slice(0, 4)}-${expiryStr.slice(4, 6)}-${expiryStr.slice(6, 8)}T08:00:00Z`
+          );
+          const isNear = (expiryDate.getTime() - now) < NEAR_THRESHOLD_MS;
+
+          if (isPut) {
+            putOI += oi;
+            if (isNear) nearPutOI += oi; else farPutOI += oi;
+          } else {
+            callOI += oi;
+            if (isNear) nearCallOI += oi; else farCallOI += oi;
+          }
+          counted++;
+        }
+
+        const totalOI = putOI + callOI;
+        const pcRatio = callOI > 0 ? putOI / callOI : null;
+
+        db.insertOISnapshot({
+          timestamp: tickTimestamp,
+          put_oi: putOI,
+          call_oi: callOI,
+          near_put_oi: nearPutOI,
+          near_call_oi: nearCallOI,
+          far_put_oi: farPutOI,
+          far_call_oi: farCallOI,
+          total_oi: totalOI,
+          pc_ratio: pcRatio,
+          expiry_count: allExpiryDates.length,
+        });
+
+        const nearOI = nearPutOI + nearCallOI;
+        const farOI = farPutOI + farCallOI;
+        console.log(`📊 OI: P/C ${pcRatio?.toFixed(3) || 'N/A'} | total ${totalOI.toFixed(0)} (${counted} instruments) | near ${nearOI.toFixed(0)} / far ${farOI.toFixed(0)}`);
+      } catch (e) {
+        console.log(`⚠️ OI collection failed: ${e.message}`);
+      }
+    }
+
   // Fallback: if CoinGecko failed, extract spot from Lyra index price
   if (!spotPrice && Object.keys(tickerMap).length > 0) {
     const firstTicker = Object.values(tickerMap)[0];

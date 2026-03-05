@@ -231,10 +231,24 @@ interface OIPoint {
   total_oi: number;
 }
 
+interface OISnapshotPoint {
+  timestamp: string;
+  put_oi: number;
+  call_oi: number;
+  near_put_oi: number;
+  near_call_oi: number;
+  far_put_oi: number;
+  far_call_oi: number;
+  total_oi: number;
+  pc_ratio: number | null;
+  expiry_count: number;
+}
+
 interface SentimentData {
   fundingRates: FundingPoint[];
   optionsSkew: SkewPoint[];
   aggregateOI: OIPoint[];
+  oiSnapshots?: OISnapshotPoint[];
 }
 
 interface ChartData {
@@ -259,7 +273,7 @@ const emptyStats: Stats = {
   budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [], sentiment: { fundingRates: [], optionsSkew: [], aggregateOI: [] } };
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [], sentiment: { fundingRates: [], optionsSkew: [], aggregateOI: [], oiSnapshots: [] } };
 const emptyAccount: AccountData = { collaterals: [], positions: [], trades: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d', '90d'] as const;
 
@@ -690,7 +704,7 @@ export default function OverviewPage() {
     };
 
     // Collect all timestamps into a unified timeline
-    const tsMap = new Map<number, { ts: number; fundingRate?: number; skew?: number; totalOI?: number }>();
+    const tsMap = new Map<number, { ts: number; fundingRate?: number; skew?: number; totalOI?: number; pcRatio?: number; putOI?: number; callOI?: number; nearOI?: number; farOI?: number }>();
 
     for (const f of sentiment.fundingRates) {
       const ts = new Date(f.timestamp).getTime();
@@ -708,21 +722,38 @@ export default function OverviewPage() {
       tsMap.set(ts, entry);
     }
 
-    for (const o of sentiment.aggregateOI) {
-      const ts = new Date(o.timestamp).getTime();
-      const entry = tsMap.get(ts) || { ts };
-      entry.totalOI = o.total_oi;
-      tsMap.set(ts, entry);
+    // Prefer oi_snapshots (full-market) over aggregateOI (partial)
+    const hasOISnapshots = sentiment.oiSnapshots && sentiment.oiSnapshots.length > 0;
+
+    if (hasOISnapshots) {
+      for (const o of sentiment.oiSnapshots!) {
+        const ts = new Date(o.timestamp).getTime();
+        const entry = tsMap.get(ts) || { ts };
+        entry.totalOI = o.total_oi;
+        entry.pcRatio = o.pc_ratio ?? undefined;
+        entry.putOI = o.put_oi;
+        entry.callOI = o.call_oi;
+        entry.nearOI = o.near_put_oi + o.near_call_oi;
+        entry.farOI = o.far_put_oi + o.far_call_oi;
+        tsMap.set(ts, entry);
+      }
+    } else {
+      for (const o of sentiment.aggregateOI) {
+        const ts = new Date(o.timestamp).getTime();
+        const entry = tsMap.get(ts) || { ts };
+        entry.totalOI = o.total_oi;
+        tsMap.set(ts, entry);
+      }
     }
 
     const raw = Array.from(tsMap.values()).sort((a, b) => a.ts - b.ts);
 
-    // Apply rolling median to skew and OI (window=7 for smooth curves)
+    // Apply rolling median to skew and pcRatio (window=7 for smooth curves)
     const smoothedSkew = rollingMedian(raw.map(d => d.skew), 7);
-    const smoothedOI = rollingMedian(raw.map(d => d.totalOI), 5);
+    const smoothedPCRatio = rollingMedian(raw.map(d => d.pcRatio), 5);
     for (let i = 0; i < raw.length; i++) {
       if (smoothedSkew[i] != null) raw[i].skew = smoothedSkew[i];
-      if (smoothedOI[i] != null) raw[i].totalOI = smoothedOI[i];
+      if (smoothedPCRatio[i] != null) raw[i].pcRatio = smoothedPCRatio[i];
     }
 
     return raw;
@@ -1322,7 +1353,8 @@ export default function OverviewPage() {
       {filteredSentiment.length > 0 && (() => {
         const hasFunding = filteredSentiment.some(d => d.fundingRate != null);
         const hasSkew = filteredSentiment.some(d => d.skew != null);
-        const hasOI = filteredSentiment.some(d => d.totalOI != null);
+        const hasPCRatio = filteredSentiment.some(d => d.pcRatio != null);
+        const hasOI = hasPCRatio || filteredSentiment.some(d => d.totalOI != null);
         if (!hasSkew && !hasOI && !hasFunding) return null;
 
         // Compute skew stats for context annotation
@@ -1330,14 +1362,14 @@ export default function OverviewPage() {
         const skewMedian = skewVals.length > 0 ? (() => { const s = [...skewVals].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; })() : null;
         const latestSkew = [...filteredSentiment].reverse().find(d => d.skew != null)?.skew;
 
-        // Compute OI change for context badge
-        const oiVals = filteredSentiment.filter(d => d.totalOI != null);
-        const oiFirst = oiVals.length > 1 ? oiVals[0].totalOI! : null;
-        const oiLast = oiVals.length > 1 ? oiVals[oiVals.length - 1].totalOI! : null;
-        const oiChangePct = oiFirst && oiLast && oiFirst > 0 ? ((oiLast - oiFirst) / oiFirst * 100) : null;
+        // Latest P/C ratio for badge
+        const latestPCRatio = [...filteredSentiment].reverse().find(d => d.pcRatio != null)?.pcRatio;
 
         // Latest funding
         const latestFunding = [...filteredSentiment].reverse().find(d => d.fundingRate != null)?.fundingRate;
+
+        // Format OI numbers compactly
+        const fmtOI = (v: number) => v >= 1000 ? `${(v / 1000).toFixed(1)}K` : v.toFixed(0);
 
         // Shared tooltip
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1360,9 +1392,23 @@ export default function OverviewPage() {
                   <span className="text-gray-500 ml-1">{row.skew > 2 ? 'fear' : row.skew < -1 ? 'greed' : 'neutral'}</span>
                 </div>
               )}
+              {row.pcRatio != null && (
+                <div className="text-xs" style={{ color: '#ec4899' }}>
+                  P/C Ratio: {row.pcRatio.toFixed(3)}
+                  <span className="text-gray-500 ml-1">{row.pcRatio > 1.0 ? 'bearish' : row.pcRatio < 0.7 ? 'bullish' : 'neutral'}</span>
+                </div>
+              )}
               {row.totalOI != null && (
                 <div className="text-xs text-gray-400">
-                  OI: {row.totalOI >= 1000 ? `${(row.totalOI / 1000).toFixed(1)}K` : row.totalOI.toFixed(0)} contracts
+                  OI: {fmtOI(row.totalOI)}
+                  {row.putOI != null && row.callOI != null && (
+                    <span className="text-gray-500 ml-1">(P: {fmtOI(row.putOI)} / C: {fmtOI(row.callOI)})</span>
+                  )}
+                </div>
+              )}
+              {row.nearOI != null && row.farOI != null && (
+                <div className="text-xs text-gray-500">
+                  Near {'<'}30d: {fmtOI(row.nearOI)} | Far: {fmtOI(row.farOI)}
                 </div>
               )}
             </div>
@@ -1389,9 +1435,9 @@ export default function OverviewPage() {
                     median {skewMedian.toFixed(1)}%
                   </span>
                 )}
-                {oiChangePct != null && (
-                  <span className={`px-1.5 py-0.5 rounded ${oiChangePct > 0 ? 'bg-emerald-900/40 text-emerald-400' : 'bg-red-900/40 text-red-400'}`}>
-                    OI {oiChangePct > 0 ? '+' : ''}{oiChangePct.toFixed(1)}%
+                {latestPCRatio != null && (
+                  <span className={`px-1.5 py-0.5 rounded ${latestPCRatio > 1.0 ? 'bg-red-900/40 text-red-400' : latestPCRatio < 0.7 ? 'bg-emerald-900/40 text-emerald-400' : 'bg-gray-800 text-gray-400'}`}>
+                    P/C {latestPCRatio.toFixed(2)}
                   </span>
                 )}
               </div>
@@ -1472,8 +1518,46 @@ export default function OverviewPage() {
               </div>
             )}
 
-            {/* Open Interest sub-chart */}
-            {hasOI && (
+            {/* Put/Call OI Ratio sub-chart (replaces flat Aggregate OI) */}
+            {hasPCRatio && (
+              <div>
+                <div className="text-[10px] text-gray-500 mb-0.5 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full inline-block" style={{ background: '#ec4899' }} />
+                  Put/Call OI Ratio
+                  <span className="text-gray-600 ml-auto">{'<'}0.7 bullish | {'>'}1.0 bearish</span>
+                </div>
+                <ResponsiveContainer width="100%" height={80}>
+                  <ComposedChart data={filteredSentiment} margin={margins}>
+                    <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} {...chartAxis} />
+                    <YAxis
+                      {...chartAxis}
+                      tickFormatter={(v: number) => v.toFixed(2)}
+                      width={55}
+                      domain={['auto', 'auto']}
+                    />
+                    {/* Bullish zone (below 0.7) */}
+                    <ReferenceArea y1={0} y2={0.7} fill="#4ade80" fillOpacity={0.06} />
+                    {/* Bearish zone (above 1.0) */}
+                    <ReferenceArea y1={1.0} y2={2.0} fill="#f87171" fillOpacity={0.06} />
+                    <ReferenceLine y={0.7} stroke="#4ade80" strokeDasharray="4 4" strokeOpacity={0.4} />
+                    <ReferenceLine y={1.0} stroke="#f87171" strokeDasharray="4 4" strokeOpacity={0.4} />
+                    <Line
+                      type="monotone"
+                      dataKey="pcRatio"
+                      stroke="#ec4899"
+                      strokeWidth={1.5}
+                      dot={false}
+                      connectNulls
+                      isAnimationActive={false}
+                    />
+                    <Tooltip {...chartTooltip} {...pinSentiment.tooltipActive} content={sentimentTooltip} />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            {/* Fallback: Aggregate Open Interest (when no oi_snapshots data) */}
+            {!hasPCRatio && hasOI && (
               <div>
                 <div className="text-[10px] text-gray-500 mb-0.5 flex items-center gap-1.5">
                   <span className="w-2 h-2 rounded-full inline-block" style={{ background: '#6b7280' }} />

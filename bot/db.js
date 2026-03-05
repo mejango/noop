@@ -204,6 +204,17 @@ db.exec(`
     count INTEGER,
     PRIMARY KEY (hour, exchange, symbol)
   );
+
+  CREATE TABLE IF NOT EXISTS oi_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    put_oi REAL, call_oi REAL,
+    near_put_oi REAL, near_call_oi REAL,
+    far_put_oi REAL, far_call_oi REAL,
+    total_oi REAL, pc_ratio REAL,
+    expiry_count INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_oi_snapshots_timestamp ON oi_snapshots(timestamp);
 `);
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
@@ -591,6 +602,13 @@ const stmts = {
     GROUP BY hour ORDER BY hour ASC
   `),
 
+  insertOISnapshot: db.prepare(`
+    INSERT INTO oi_snapshots (timestamp, put_oi, call_oi, near_put_oi, near_call_oi,
+      far_put_oi, far_call_oi, total_oi, pc_ratio, expiry_count)
+    VALUES (@timestamp, @put_oi, @call_oi, @near_put_oi, @near_call_oi,
+      @far_put_oi, @far_call_oi, @total_oi, @pc_ratio, @expiry_count)
+  `),
+
   // 7-day average premium for call selling elevation check
   getAvgCallPremium7d: db.prepare(`
     SELECT AVG(bid_price) as avg_premium
@@ -821,6 +839,21 @@ const getAvgCallPremium7d = () => {
   return stmts.getAvgCallPremium7d.get({ since });
 };
 
+const insertOISnapshot = (data) => {
+  stmts.insertOISnapshot.run({
+    timestamp: data.timestamp || new Date().toISOString(),
+    put_oi: data.put_oi || 0,
+    call_oi: data.call_oi || 0,
+    near_put_oi: data.near_put_oi || 0,
+    near_call_oi: data.near_call_oi || 0,
+    far_put_oi: data.far_put_oi || 0,
+    far_call_oi: data.far_call_oi || 0,
+    total_oi: data.total_oi || 0,
+    pc_ratio: data.pc_ratio || null,
+    expiry_count: data.expiry_count || 0,
+  });
+};
+
 const insertFundingRates = (rates) => {
   const insert = db.transaction((items) => {
     for (const item of items) {
@@ -1025,6 +1058,7 @@ module.exports = {
   loadBotState,
   loadPriceHistoryFromDb,
   migrateFromJson,
+  insertOISnapshot,
   insertFundingRates,
   getFundingRatesHourly,
   close,

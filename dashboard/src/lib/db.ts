@@ -348,6 +348,14 @@ function prepareAll(d: Database.Database) {
       ORDER BY timestamp ASC
     `),
 
+    getOISnapshots: d.prepare(`
+      SELECT timestamp, put_oi, call_oi, near_put_oi, near_call_oi,
+        far_put_oi, far_call_oi, total_oi, pc_ratio, expiry_count
+      FROM oi_snapshots
+      WHERE timestamp > ?
+      ORDER BY timestamp ASC
+    `),
+
     getLocalTrades: d.prepare(`
       SELECT instrument_name, direction, amount, price, timestamp
       FROM trades
@@ -642,6 +650,18 @@ export function getAggregateOI(since: string) {
   try {
     return getStmts().getAggregateOI.all(since) as {
       timestamp: string; total_oi: number;
+    }[];
+  } catch { return []; }
+}
+
+export function getOISnapshots(since: string) {
+  try {
+    return getStmts().getOISnapshots.all(since) as {
+      timestamp: string; put_oi: number; call_oi: number;
+      near_put_oi: number; near_call_oi: number;
+      far_put_oi: number; far_call_oi: number;
+      total_oi: number; pc_ratio: number | null;
+      expiry_count: number;
     }[];
   } catch { return []; }
 }

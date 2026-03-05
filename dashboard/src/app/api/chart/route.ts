@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap,
-  getFundingRates, getOptionsSkew, getAggregateOI,
+  getFundingRates, getOptionsSkew, getAggregateOI, getOISnapshots,
 } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
@@ -109,8 +109,9 @@ export function GET(request: NextRequest) {
     const fundingRates = getFundingRates(since);
     const optionsSkew = getOptionsSkew(since);
     const aggregateOI = getAggregateOI(since);
+    const oiSnapshots = getOISnapshots(since);
 
-    const sentiment = { fundingRates, optionsSkew, aggregateOI };
+    const sentiment = { fundingRates, optionsSkew, aggregateOI, oiSnapshots };
 
     if (bucketMs > 0) {
       const dsPrices = downsample(
@@ -137,10 +138,16 @@ export function GET(request: NextRequest) {
         aggregateOI as Record<string, unknown>[],
         bucketMs, 'timestamp', ['total_oi'],
       );
+      const dsOISnapshots = downsample(
+        oiSnapshots as Record<string, unknown>[],
+        bucketMs, 'timestamp',
+        ['put_oi', 'call_oi', 'near_put_oi', 'near_call_oi', 'far_put_oi', 'far_call_oi', 'total_oi', 'pc_ratio'],
+        ['expiry_count'],
+      );
       return NextResponse.json({
         prices: dsPrices, options: dsOptions, liquidity: dsLiquidity,
         bestScores, optionsHeatmap,
-        sentiment: { fundingRates: dsFunding, optionsSkew: dsSkew, aggregateOI: dsOI },
+        sentiment: { fundingRates: dsFunding, optionsSkew: dsSkew, aggregateOI: dsOI, oiSnapshots: dsOISnapshots },
         tier: 'downsampled',
       });
     }
