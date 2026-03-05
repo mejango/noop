@@ -7,6 +7,43 @@ import remarkGfm from 'remark-gfm';
 interface Message {
   role: 'user' | 'assistant';
   content: string;
+  timestamp: number;
+}
+
+interface Chat {
+  id: string;
+  title: string;
+  messages: Message[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+const STORAGE_KEY = 'advisor-chats';
+
+function loadChats(): Chat[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveChats(chats: Chat[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(chats));
+  } catch { /* quota exceeded — silent */ }
+}
+
+function chatTimeAgo(ts: number): string {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
 }
 
 interface JournalEntry {
@@ -71,7 +108,8 @@ const STARTERS = [
 export default function AdvisorDrawer() {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<'chat' | 'journal'>('chat');
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([]);
@@ -87,6 +125,62 @@ export default function AdvisorDrawer() {
   const [lessons, setLessons] = useState<{ id: number; lesson: string; evidence_count: number; created_at: string }[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Load chats from localStorage on mount
+  useEffect(() => {
+    const saved = loadChats();
+    if (saved.length > 0) {
+      setChats(saved);
+      setActiveChatId(saved[0].id); // most recent first
+    }
+  }, []);
+
+  // Save chats to localStorage whenever they change
+  const chatsRef = useRef(chats);
+  chatsRef.current = chats;
+  const saveChatsDebounced = useCallback((updated: Chat[]) => {
+    saveChats(updated);
+  }, []);
+
+  // Derived: active chat's messages
+  const activeChat = chats.find(c => c.id === activeChatId) ?? null;
+  const messages = activeChat?.messages ?? [];
+
+  const updateActiveChat = useCallback((updater: (chat: Chat) => Chat) => {
+    setChats(prev => {
+      const updated = prev.map(c => c.id === activeChatId ? updater(c) : c);
+      saveChatsDebounced(updated);
+      return updated;
+    });
+  }, [activeChatId, saveChatsDebounced]);
+
+  const createNewChat = useCallback(() => {
+    const newChat: Chat = {
+      id: crypto.randomUUID(),
+      title: 'New chat',
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setChats(prev => {
+      const updated = [newChat, ...prev];
+      saveChatsDebounced(updated);
+      return updated;
+    });
+    setActiveChatId(newChat.id);
+    return newChat.id;
+  }, [saveChatsDebounced]);
+
+  const deleteChat = useCallback((chatId: string) => {
+    setChats(prev => {
+      const updated = prev.filter(c => c.id !== chatId);
+      saveChatsDebounced(updated);
+      if (activeChatId === chatId) {
+        setActiveChatId(updated.length > 0 ? updated[0].id : null);
+      }
+      return updated;
+    });
+  }, [activeChatId, saveChatsDebounced]);
 
   const scrollToBottom = useCallback(() => {
     if (scrollRef.current) {
@@ -144,17 +238,37 @@ export default function AdvisorDrawer() {
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || streaming) return;
 
-    const userMsg: Message = { role: 'user', content: text.trim() };
-    const history = [...messages, userMsg];
-    setMessages(history);
+    // Ensure we have an active chat
+    let chatId = activeChatId;
+    if (!chatId) {
+      chatId = createNewChat();
+    }
+
+    const now = Date.now();
+    const userMsg: Message = { role: 'user', content: text.trim(), timestamp: now };
+    const isFirstMessage = (chatsRef.current.find(c => c.id === chatId)?.messages.length ?? 0) === 0;
+
+    // Add user message + empty assistant placeholder to active chat
+    setChats(prev => {
+      const updated = prev.map(c => {
+        if (c.id !== chatId) return c;
+        return {
+          ...c,
+          title: isFirstMessage ? text.trim().slice(0, 50) : c.title,
+          messages: [...c.messages, userMsg, { role: 'assistant' as const, content: '', timestamp: now }],
+          updatedAt: now,
+        };
+      });
+      saveChatsDebounced(updated);
+      return updated;
+    });
+
     setInput('');
     setStreaming(true);
-
-    // Add empty assistant message to stream into
-    setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
-
-    // Scroll to show the user's message, then let them read at their own pace
     setTimeout(scrollToBottom, 50);
+
+    // History = messages before this user message (from current chats ref)
+    const priorMessages = chatsRef.current.find(c => c.id === chatId)?.messages ?? [];
 
     try {
       const res = await fetch('/api/ai/chat', {
@@ -162,18 +276,21 @@ export default function AdvisorDrawer() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: text.trim(),
-          history: messages, // prior messages (before this user msg)
+          timestamp: now,
+          history: priorMessages.map(m => ({ role: m.role, content: m.content, timestamp: m.timestamp })),
         }),
       });
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Request failed' }));
-        setMessages(prev => {
-          const updated = [...prev];
-          updated[updated.length - 1] = {
-            role: 'assistant',
-            content: `Error: ${err.error || res.statusText}`,
-          };
+        setChats(prev => {
+          const updated = prev.map(c => {
+            if (c.id !== chatId) return c;
+            const msgs = [...c.messages];
+            msgs[msgs.length - 1] = { role: 'assistant', content: `Error: ${err.error || res.statusText}`, timestamp: Date.now() };
+            return { ...c, messages: msgs };
+          });
+          saveChatsDebounced(updated);
           return updated;
         });
         setStreaming(false);
@@ -190,26 +307,41 @@ export default function AdvisorDrawer() {
         const { done, value } = await reader.read();
         if (done) break;
         accumulated += decoder.decode(value, { stream: true });
-        const text = accumulated;
-        setMessages(prev => {
-          const updated = [...prev];
-          updated[updated.length - 1] = { role: 'assistant', content: text };
-          return updated;
-        });
+        const streamedText = accumulated;
+        setChats(prev =>
+          prev.map(c => {
+            if (c.id !== chatId) return c;
+            const msgs = [...c.messages];
+            msgs[msgs.length - 1] = { role: 'assistant', content: streamedText, timestamp: msgs[msgs.length - 1].timestamp };
+            return { ...c, messages: msgs };
+          })
+        );
       }
+
+      // Final save after stream completes
+      setChats(prev => {
+        const updated = prev.map(c => {
+          if (c.id !== chatId) return c;
+          return { ...c, updatedAt: Date.now() };
+        });
+        saveChatsDebounced(updated);
+        return updated;
+      });
     } catch (err) {
-      setMessages(prev => {
-        const updated = [...prev];
-        updated[updated.length - 1] = {
-          role: 'assistant',
-          content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`,
-        };
+      setChats(prev => {
+        const updated = prev.map(c => {
+          if (c.id !== chatId) return c;
+          const msgs = [...c.messages];
+          msgs[msgs.length - 1] = { role: 'assistant', content: `Error: ${err instanceof Error ? err.message : 'Unknown error'}`, timestamp: Date.now() };
+          return { ...c, messages: msgs };
+        });
+        saveChatsDebounced(updated);
         return updated;
       });
     } finally {
       setStreaming(false);
     }
-  }, [messages, streaming, scrollToBottom]);
+  }, [activeChatId, createNewChat, streaming, scrollToBottom, saveChatsDebounced]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -252,13 +384,10 @@ export default function AdvisorDrawer() {
           <div className="flex items-center justify-between">
             <span className="text-sm font-bold text-juice-orange tracking-wide">SPITZNAGEL BOT</span>
             <button
-              onClick={() => {
-                setMessages([]);
-                setInput('');
-              }}
+              onClick={createNewChat}
               className="text-xs text-gray-500 hover:text-white transition-colors"
             >
-              Clear
+              + New Chat
             </button>
           </div>
           <div className="flex gap-1 mt-2">
@@ -283,6 +412,31 @@ export default function AdvisorDrawer() {
               Journal{journalEntries.length > 0 ? ` (${journalEntries.length})` : ''}
             </button>
           </div>
+          {/* Chat list chips */}
+          {tab === 'chat' && chats.length > 0 && (
+            <div className="flex gap-1.5 mt-2 overflow-x-auto scrollbar-none pb-0.5">
+              {chats.map(chat => (
+                <button
+                  key={chat.id}
+                  onClick={() => setActiveChatId(chat.id)}
+                  className={`group flex items-center gap-1 shrink-0 text-[11px] px-2 py-1 transition-colors ${
+                    chat.id === activeChatId
+                      ? 'bg-juice-orange/20 text-juice-orange border border-juice-orange/30'
+                      : 'bg-white/5 text-gray-400 hover:text-white border border-white/5 hover:border-white/20'
+                  }`}
+                >
+                  <span className="truncate max-w-[120px]">{chat.title}</span>
+                  <span className="text-[9px] text-gray-600 shrink-0">{chatTimeAgo(chat.updatedAt)}</span>
+                  <span
+                    onClick={(e) => { e.stopPropagation(); deleteChat(chat.id); }}
+                    className="text-gray-600 hover:text-red-400 ml-0.5 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer shrink-0"
+                  >
+                    ×
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Journal View */}

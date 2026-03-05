@@ -235,13 +235,22 @@ function extractAndStoreJournal(text: string) {
 interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
+  timestamp?: number;
+}
+
+function formatTimestamp(ts: number): string {
+  return new Date(ts).toLocaleString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric',
+    hour: 'numeric', minute: '2-digit', hour12: true,
+  });
 }
 
 export async function POST(request: Request) {
   try {
-    const { message, history } = (await request.json()) as {
+    const { message, history, timestamp: msgTimestamp } = (await request.json()) as {
       message: string;
       history?: ChatMessage[];
+      timestamp?: number;
     };
 
     if (!message || typeof message !== 'string') {
@@ -271,20 +280,26 @@ export async function POST(request: Request) {
 
     if (history && Array.isArray(history)) {
       for (const msg of history) {
-        messages.push({ role: msg.role, content: msg.content });
+        const content = msg.timestamp && msg.role === 'user'
+          ? `[sent: ${formatTimestamp(msg.timestamp)}]\n${msg.content}`
+          : msg.content;
+        messages.push({ role: msg.role, content });
       }
     }
 
     // Current user message with snapshot injected
+    const now = new Date().toISOString();
     messages.push({
       role: 'user',
-      content: `${snapshotBlock}\n\n${message}`,
+      content: `${snapshotBlock}\n\n[sent: ${formatTimestamp(msgTimestamp || Date.now())}]\n${message}`,
     });
+
+    const timeContext = `\n\nThe current time is ${now}. User messages include [sent: ...] timestamps. Pay attention to time gaps between messages — the user may return hours or days later. When they reference a prior conversation point, note what has changed in the market data since then.`;
 
     const stream = client.messages.stream({
       model,
       max_tokens: 2048,
-      system: SYSTEM_PROMPT,
+      system: SYSTEM_PROMPT + timeContext,
       messages,
     });
 
