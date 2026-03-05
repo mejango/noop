@@ -147,14 +147,6 @@ export default function AdvisorDrawer() {
   const activeChat = chats.find(c => c.id === activeChatId) ?? null;
   const messages = activeChat?.messages ?? [];
 
-  const _updateActiveChat = useCallback((updater: (chat: Chat) => Chat) => {
-    setChats(prev => {
-      const updated = prev.map(c => c.id === activeChatId ? updater(c) : c);
-      saveChatsDebounced(updated);
-      return updated;
-    });
-  }, [activeChatId, saveChatsDebounced]);
-
   const createNewChat = useCallback(() => {
     const newChat: Chat = {
       id: crypto.randomUUID(),
