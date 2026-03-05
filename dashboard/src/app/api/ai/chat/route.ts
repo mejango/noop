@@ -201,6 +201,9 @@ When you form a notable conclusion, wrap it in a journal tag using ONE of these 
 <journal type="observation">Factual pattern you identified</journal>
 <journal type="hypothesis">Testable prediction grounded in data</journal>
 <journal type="regime_note">Market state assessment</journal>
+<journal type="suggestion">Specific actionable trade recommendation</journal>
+
+- **suggestion**: Specific actionable trade recommendation. Only when there's a clear, time-sensitive opportunity. Most conversations need no suggestion.
 
 IMPORTANT: Start every journal entry with a single bold TLDR line summarizing the key takeaway in plain language (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow the TLDR with the detailed analysis.
 
@@ -214,7 +217,7 @@ Ground everything in the data. The correlations tell you WHAT is related. Your j
 Journal entries are extracted and stored automatically. They will appear in future conversations so you can track evolving patterns.`;
 
 function extractAndStoreJournal(text: string) {
-  const regex = /<journal\s+type="(observation|hypothesis|regime_note)">([\s\S]*?)<\/journal>/g;
+  const regex = /<journal\s+type="(observation|hypothesis|regime_note|suggestion)">([\s\S]*?)<\/journal>/g;
   let match;
   while ((match = regex.exec(text)) !== null) {
     const entryType = match[1];
