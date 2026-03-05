@@ -1150,6 +1150,27 @@ const getSpotPrice = async () => {
   }
 };
 
+// Fetch ETH funding rates from Binance (public, no auth)
+const BINANCE_FAPI = 'https://fapi.binance.com';
+const fetchFundingRates = async () => {
+  try {
+    const response = await axios.get(`${BINANCE_FAPI}/fapi/v1/fundingRate`, {
+      params: { symbol: 'ETHUSDT', limit: 10 },
+      timeout: 5000,
+    });
+    if (!Array.isArray(response.data) || response.data.length === 0) return [];
+    return response.data.map(r => ({
+      timestamp: new Date(r.fundingTime).toISOString(),
+      exchange: 'binance',
+      symbol: r.symbol,
+      rate: Number(r.fundingRate),
+    }));
+  } catch (error) {
+    console.log(`⚠️ Funding rate fetch failed: ${error.message}`);
+    return [];
+  }
+};
+
 // Fetch option details
 // Fetch all tickers for a given expiry date (batch call — returns AMM prices)
 const fetchTickersByExpiry = async (expiryDate) => {
@@ -2049,6 +2070,7 @@ const generateJournalEntries = async (tickSummary, botData) => {
     const recentSignals = db.getRecentSignals(since7d, 20);
     const optionsDistribution = db.getOptionsDistribution(since24h);
     const avgCallPremium = db.getAvgCallPremium7d();
+    const recentOrders = db.getRecentOrders(since7d, 20);
 
     const { buildCorrelationAnalysis } = require('./bot/correlation');
     let correlations = null;
@@ -2189,6 +2211,20 @@ const generateJournalEntries = async (tickSummary, botData) => {
       })(),
       cross_correlations: correlations,
       put_price_divergence: putPriceDivergence,
+      recent_orders: recentOrders.map(o => ({
+        timestamp: o.timestamp,
+        action: o.action,
+        success: !!o.success,
+        instrument_name: o.instrument_name,
+        strike: o.strike,
+        expiry: o.expiry,
+        delta: o.delta,
+        fill_price: o.fill_price,
+        filled_amount: o.filled_amount,
+        total_value: o.total_value,
+        spot_price: o.spot_price,
+        reason: o.reason,
+      })),
     };
 
     // Build hypothesis performance summary for prompt injection
@@ -2231,6 +2267,8 @@ Analyze the provided snapshot across three time scales:
 **Short-term (hours):** Price action, short momentum shifts, spike events, intraday patterns.
 **Medium-term (days):** Trend direction changes, momentum regime shifts, onchain flow patterns, protection cost trends.
 **Long-term (week+):** Structural patterns, correlation shifts, regime transitions, compounding geometry.
+
+**Recent trades:** The snapshot includes recent_orders — actual put buys and call sells executed by the bot. Reference these in your analysis: evaluate whether each trade's timing was good or bad given subsequent price action, whether the strike/delta chosen was appropriate, and whether the premium paid (puts) or collected (calls) represented fair value. This feedback helps calibrate future entries.
 
 Review your previous journal entries. Confirm patterns that held, revise those that didn't, and contradict past assessments when data warrants it.
 
@@ -2458,6 +2496,18 @@ const runBot = async () => {
           db.insertOnchainData(onchainAnalysis);
         }
         catch (e) { console.log('DB: onchain write failed:', e.message); }
+      }
+
+      // Fetch and persist funding rates
+      if (db) {
+        try {
+          const fundingRates = await fetchFundingRates();
+          if (fundingRates.length > 0) {
+            db.insertFundingRates(fundingRates);
+            const latest = fundingRates[fundingRates.length - 1];
+            console.log(`📈 Funding rate: ${(latest.rate * 100).toFixed(4)}% (${latest.exchange} ${latest.symbol})`);
+          }
+        } catch (e) { console.log('DB: funding rate write failed:', e.message); }
       }
 
       // Display key findings with error handling

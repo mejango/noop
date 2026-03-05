@@ -10,6 +10,10 @@ import {
   getAvgCallPremium7d,
   getLatestOnchainRawData,
   getMarketQualitySummary,
+  getFundingRateLatest,
+  getFundingRateAvg24h,
+  getOptionsSkew,
+  getAggregateOI,
 } from './db';
 import { buildCorrelationAnalysis } from './correlation';
 import { getPositions, getCollaterals } from './lyra';
@@ -225,6 +229,65 @@ async function _buildUncached() {
       total_position_value: positions.reduce((s: number, p: Record<string, unknown>) => s + Number(p.mark_value ?? 0), 0),
       total_unrealized_pnl: positions.reduce((s: number, p: Record<string, unknown>) => s + Number(p.unrealized_pnl ?? 0), 0),
     },
+
+    market_sentiment: (() => {
+      try {
+        const fundingLatest = getFundingRateLatest();
+        const fundingAvg = getFundingRateAvg24h();
+        const skewRows = getOptionsSkew(since24h);
+        const oiRows = getAggregateOI(since24h);
+
+        // Compute current skew from latest snapshot
+        const latestSkew = skewRows.length > 0 ? skewRows[skewRows.length - 1] : null;
+        const currentSkew = latestSkew && latestSkew.avg_put_iv != null && latestSkew.avg_call_iv != null
+          ? +(((latestSkew.avg_put_iv - latestSkew.avg_call_iv) * 100).toFixed(2))
+          : null;
+        const avgSkew24h = skewRows.length > 0
+          ? +(skewRows.filter(r => r.avg_put_iv != null && r.avg_call_iv != null)
+              .reduce((s, r) => s + (r.avg_put_iv! - r.avg_call_iv!), 0) / skewRows.filter(r => r.avg_put_iv != null && r.avg_call_iv != null).length * 100).toFixed(2)
+          : null;
+
+        // Compute OI change
+        const currentOI = oiRows.length > 0 ? oiRows[oiRows.length - 1].total_oi : null;
+        const firstOI = oiRows.length > 1 ? oiRows[0].total_oi : null;
+        const oiChange24hPct = currentOI && firstOI && firstOI > 0
+          ? +(((currentOI - firstOI) / firstOI) * 100).toFixed(1)
+          : null;
+
+        // Funding trend
+        let fundingTrend: string | null = null;
+        if (fundingLatest && fundingAvg != null) {
+          fundingTrend = fundingLatest.rate > fundingAvg ? 'rising' : fundingLatest.rate < fundingAvg ? 'declining' : 'stable';
+        }
+
+        // Skew direction
+        let skewDirection: string | null = null;
+        if (currentSkew != null && avgSkew24h != null) {
+          skewDirection = currentSkew > avgSkew24h ? 'widening' : currentSkew < avgSkew24h ? 'narrowing' : 'stable';
+        }
+
+        return {
+          _description: 'Market sentiment indicators. funding_rate from Binance perps (positive=longs pay shorts, negative=shorts pay longs). options_skew = avg put IV minus avg call IV in pct points (positive=fear/downside demand). aggregate_oi = total options open interest. These signals reveal leveraged positioning and market fear/greed.',
+          funding_rate: {
+            current: fundingLatest?.rate ?? null,
+            avg_24h: fundingAvg,
+            trend: fundingTrend,
+            last_updated: fundingLatest?.timestamp ?? null,
+          },
+          options_skew: {
+            current_pct: currentSkew,
+            avg_24h_pct: avgSkew24h,
+            direction: skewDirection,
+          },
+          aggregate_oi: {
+            current: currentOI,
+            change_24h_pct: oiChange24hPct,
+          },
+        };
+      } catch {
+        return { _description: 'Market sentiment (unavailable)', error: 'computation failed' };
+      }
+    })(),
 
     ai_journal: {
       _description: 'AI analytical journal. Persistent observations and hypotheses from past conversations.',

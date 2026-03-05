@@ -124,6 +124,17 @@ const SERIES_DEFS = [
     description: 'Avg implied volatility within trading delta range',
     extract: (db, since) => db.getImpliedVolHourly(since),
   },
+  {
+    name: 'funding_rate',
+    description: 'Binance ETH perps funding rate (positive=longs pay, negative=shorts pay)',
+    extract: (db, since) => {
+      if (!db.getFundingRatesHourly) return [];
+      return db.getFundingRatesHourly(since).map(r => ({
+        hour: r.hour,
+        value: r.avg_rate != null ? r.avg_rate * 100 : null, // convert to percentage
+      }));
+    },
+  },
 ];
 
 function extractAllSeries(db, days) {

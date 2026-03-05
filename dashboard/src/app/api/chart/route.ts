@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap,
+  getFundingRates, getOptionsSkew, getAggregateOI,
 } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
@@ -102,7 +103,14 @@ export function GET(request: NextRequest) {
     const prices = getSpotPrices(since, rowLimit);
     const options = getBestOptionsOverTime(since);
     const liquidity = getLiquidityOverTime(since);
-    const optionsHeatmap = bucketMs === 0 ? getOptionsHeatmap(since) : [];
+    const optionsHeatmap = getOptionsHeatmap(since);
+
+    // Sentiment data
+    const fundingRates = getFundingRates(since);
+    const optionsSkew = getOptionsSkew(since);
+    const aggregateOI = getAggregateOI(since);
+
+    const sentiment = { fundingRates, optionsSkew, aggregateOI };
 
     if (bucketMs > 0) {
       const dsPrices = downsample(
@@ -117,10 +125,27 @@ export function GET(request: NextRequest) {
         liquidity as Record<string, unknown>[],
         bucketMs,
       );
-      return NextResponse.json({ prices: dsPrices, options: dsOptions, liquidity: dsLiquidity, bestScores, optionsHeatmap, tier: 'downsampled' });
+      const dsFunding = downsample(
+        fundingRates as Record<string, unknown>[],
+        bucketMs, 'timestamp', ['rate'],
+      );
+      const dsSkew = downsample(
+        optionsSkew as Record<string, unknown>[],
+        bucketMs, 'timestamp', ['avg_put_iv', 'avg_call_iv'],
+      );
+      const dsOI = downsample(
+        aggregateOI as Record<string, unknown>[],
+        bucketMs, 'timestamp', ['total_oi'],
+      );
+      return NextResponse.json({
+        prices: dsPrices, options: dsOptions, liquidity: dsLiquidity,
+        bestScores, optionsHeatmap,
+        sentiment: { fundingRates: dsFunding, optionsSkew: dsSkew, aggregateOI: dsOI },
+        tier: 'downsampled',
+      });
     }
 
-    return NextResponse.json({ prices, options, liquidity, bestScores, optionsHeatmap, tier: 'raw' });
+    return NextResponse.json({ prices, options, liquidity, bestScores, optionsHeatmap, sentiment, tier: 'raw' });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });

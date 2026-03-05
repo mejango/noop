@@ -7,6 +7,7 @@ import {
   getOptionsDepthHourly,
   getOpenInterestHourly,
   getImpliedVolHourly,
+  getFundingRates,
 } from './db';
 
 export interface SeriesConfig {
@@ -87,6 +88,26 @@ const SERIES: SeriesConfig[] = [
     description: 'Avg implied volatility within trading delta range',
     category: 'options',
     extract: (since) => getImpliedVolHourly(since),
+  },
+  {
+    name: 'funding_rate',
+    description: 'Binance ETH perps funding rate (positive=longs pay, negative=shorts pay)',
+    category: 'macro',
+    extract: (since) => {
+      const rows = getFundingRates(since);
+      // Aggregate to hourly
+      const hourMap = new Map<string, { sum: number; count: number }>();
+      for (const r of rows) {
+        const hour = r.timestamp.slice(0, 13) + ':00:00Z';
+        const entry = hourMap.get(hour) || { sum: 0, count: 0 };
+        entry.sum += r.rate * 100; // percentage
+        entry.count++;
+        hourMap.set(hour, entry);
+      }
+      return Array.from(hourMap.entries())
+        .map(([hour, { sum, count }]) => ({ hour, value: sum / count }))
+        .sort((a, b) => a.hour.localeCompare(b.hour));
+    },
   },
 ];
 

@@ -159,6 +159,33 @@ How to interpret:
 
 Focus on correlations that affect: cost of protection (put pricing), crash probability (flow reversals), or portfolio geometry (spot-options relationship).
 
+## Market Sentiment Indicators
+The snapshot includes a market_sentiment section with:
+
+### Funding Rate (Binance ETH perps)
+Periodic payments between long and short traders on perpetual futures. Published every 8 hours.
+- **Positive funding** = longs pay shorts. Market is overleveraged long. Rallies built on leverage are fragile.
+- **Negative funding** = shorts pay longs. Market is overleveraged short or rally is spot-driven. This is generally bullish — means the move up is not fueled by speculative leverage.
+- **Negative funding during a rally** = notable signal. Shorts are paying to maintain positions against the trend. Potential short squeeze fuel.
+- **Extreme positive funding** (>0.03%) = crowded long trade. Prime conditions for a leveraged unwind — exactly the crash scenario our puts are positioned for.
+
+### Options Skew (Put IV minus Call IV)
+- **Positive skew** = put IV > call IV = market demands downside protection = fear
+- **Negative skew** = call IV > put IV = market bidding upside = greed/complacency
+- **Skew widening** = fear increasing. Puts are getting more expensive relative to calls. NOT the time to buy protection.
+- **Skew narrowing/negative** = complacency. Protection is cheap. This is when the strategy accumulates puts.
+
+### Aggregate Open Interest
+- **OI rising + price rising** = new money entering directionally (conviction rally)
+- **OI rising + price flat** = positioning buildup, potential breakout
+- **OI falling + price falling** = longs liquidating (de-leveraging)
+- **OI falling + price rising** = short covering rally (potentially unsustainable)
+
+### Cross-signal interpretations for our strategy:
+- **Negative funding + narrowing skew + stable OI** = ideal accumulation window. Protection is cheap, market isn't panicking, and perps positioning suggests the rally has room.
+- **Extreme positive funding + widening skew + rising OI** = market is fragile. Our puts have maximum convexity potential here, but they're also most expensive. Maintain existing positions, don't chase.
+- **Funding going negative after a rally** (the "Byzantine General" signal) = bullish for the underlying, but alerts us that protection may get cheaper soon as complacency builds.
+
 ## Put Value / Price Divergence
 Watch for divergences between put option values and spot price:
 - **Put spike + price flat**: Options market pricing in downside risk before spot moves. Puts are getting expensive — NOT the time to buy.
@@ -195,7 +222,7 @@ function extractAndStoreJournal(text: string) {
     if (content) {
       try {
         // Extract series names referenced in the content
-        const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol'];
+        const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol', 'funding_rate', 'options_skew'];
         const referenced = seriesNames.filter((s) => content.toLowerCase().includes(s.replace(/_/g, ' ')) || content.includes(s));
         insertJournalEntry(entryType, content, referenced.length > 0 ? referenced : null);
       } catch {

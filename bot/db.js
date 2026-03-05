@@ -185,6 +185,25 @@ db.exec(`
     archived_at TEXT,
     is_active INTEGER NOT NULL DEFAULT 1
   );
+
+  CREATE TABLE IF NOT EXISTS funding_rates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    rate REAL NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_funding_rates_timestamp ON funding_rates(timestamp);
+  CREATE INDEX IF NOT EXISTS idx_funding_rates_ts_sym ON funding_rates(timestamp, symbol);
+
+  CREATE TABLE IF NOT EXISTS funding_rates_hourly (
+    hour TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    avg_rate REAL,
+    count INTEGER,
+    PRIMARY KEY (hour, exchange, symbol)
+  );
 `);
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
@@ -546,6 +565,32 @@ const stmts = {
       direction = @direction
   `),
 
+  // Funding rates
+  insertFundingRate: db.prepare(`
+    INSERT INTO funding_rates (timestamp, exchange, symbol, rate)
+    VALUES (@timestamp, @exchange, @symbol, @rate)
+  `),
+
+  getLatestFundingTimestamp: db.prepare(`
+    SELECT MAX(timestamp) as latest FROM funding_rates WHERE exchange = @exchange AND symbol = @symbol
+  `),
+
+  upsertFundingRateHourly: db.prepare(`
+    INSERT INTO funding_rates_hourly (hour, exchange, symbol, avg_rate, count)
+    VALUES (@hour, @exchange, @symbol, @rate, 1)
+    ON CONFLICT(hour, exchange, symbol) DO UPDATE SET
+      avg_rate = (funding_rates_hourly.avg_rate * funding_rates_hourly.count + @rate) / (funding_rates_hourly.count + 1),
+      count = funding_rates_hourly.count + 1
+  `),
+
+  getFundingRatesHourly: db.prepare(`
+    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
+           AVG(rate) as avg_rate
+    FROM funding_rates
+    WHERE timestamp > @since AND symbol = @symbol
+    GROUP BY hour ORDER BY hour ASC
+  `),
+
   // 7-day average premium for call selling elevation check
   getAvgCallPremium7d: db.prepare(`
     SELECT AVG(bid_price) as avg_premium
@@ -776,6 +821,38 @@ const getAvgCallPremium7d = () => {
   return stmts.getAvgCallPremium7d.get({ since });
 };
 
+const insertFundingRates = (rates) => {
+  const insert = db.transaction((items) => {
+    for (const item of items) {
+      // Deduplicate: check if we already have this exact timestamp
+      const latest = stmts.getLatestFundingTimestamp.get({ exchange: item.exchange, symbol: item.symbol });
+      if (latest?.latest && new Date(item.timestamp) <= new Date(latest.latest)) continue;
+
+      stmts.insertFundingRate.run({
+        timestamp: item.timestamp,
+        exchange: item.exchange,
+        symbol: item.symbol,
+        rate: item.rate,
+      });
+
+      // Hourly rollup
+      try {
+        stmts.upsertFundingRateHourly.run({
+          hour: toHourKey(item.timestamp),
+          exchange: item.exchange,
+          symbol: item.symbol,
+          rate: item.rate,
+        });
+      } catch (e) { /* rollup failure should not block raw insert */ }
+    }
+  });
+  insert(rates);
+};
+
+const getFundingRatesHourly = (since, symbol = 'ETHUSDT') => {
+  return stmts.getFundingRatesHourly.all({ since, symbol });
+};
+
 // ─── AI Journal Helpers ──────────────────────────────────────────────────────
 
 const insertJournalEntry = (entryType, content, seriesReferenced = null) => {
@@ -948,5 +1025,7 @@ module.exports = {
   loadBotState,
   loadPriceHistoryFromDb,
   migrateFromJson,
+  insertFundingRates,
+  getFundingRatesHourly,
   close,
 };

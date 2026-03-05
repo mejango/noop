@@ -308,6 +308,46 @@ function prepareAll(d: Database.Database) {
       ORDER BY hour ASC
     `),
 
+    // ─── Market Sentiment Queries ───────────────────────────────────────
+    getFundingRates: d.prepare(`
+      SELECT timestamp, exchange, symbol, rate
+      FROM funding_rates
+      WHERE timestamp > ? AND symbol = ?
+      ORDER BY timestamp ASC
+    `),
+
+    getFundingRatesLatest: d.prepare(`
+      SELECT rate, timestamp FROM funding_rates
+      WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1
+    `),
+
+    getFundingRateAvg24h: d.prepare(`
+      SELECT AVG(rate) as avg_rate FROM funding_rates
+      WHERE symbol = ? AND timestamp > ?
+    `),
+
+    getOptionsSkew: d.prepare(`
+      SELECT timestamp,
+        AVG(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
+          AND ABS(delta) BETWEEN 0.02 AND 0.12
+          THEN implied_vol END) as avg_put_iv,
+        AVG(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
+          AND ABS(delta) BETWEEN 0.04 AND 0.12
+          THEN implied_vol END) as avg_call_iv
+      FROM options_snapshots
+      WHERE timestamp > ? AND implied_vol IS NOT NULL
+      GROUP BY timestamp
+      ORDER BY timestamp ASC
+    `),
+
+    getAggregateOI: d.prepare(`
+      SELECT timestamp, SUM(open_interest) as total_oi
+      FROM options_snapshots
+      WHERE timestamp > ? AND open_interest IS NOT NULL AND open_interest > 0
+      GROUP BY timestamp
+      ORDER BY timestamp ASC
+    `),
+
     getLocalTrades: d.prepare(`
       SELECT instrument_name, direction, amount, price, timestamp
       FROM trades
@@ -565,6 +605,45 @@ export function getLiquidityHourly_rollup(since: string) {
   }
 
   return Array.from(byHour.values()).filter(r => Object.keys(r).length > 1);
+}
+
+// ─── Market Sentiment ───────────────────────────────────────────────────────
+
+export function getFundingRates(since: string, symbol = 'ETHUSDT') {
+  try {
+    return getStmts().getFundingRates.all(since, symbol) as {
+      timestamp: string; exchange: string; symbol: string; rate: number;
+    }[];
+  } catch { return []; }
+}
+
+export function getFundingRateLatest(symbol = 'ETHUSDT') {
+  try {
+    return getStmts().getFundingRatesLatest.get(symbol) as { rate: number; timestamp: string } | undefined;
+  } catch { return undefined; }
+}
+
+export function getFundingRateAvg24h(symbol = 'ETHUSDT') {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    return (getStmts().getFundingRateAvg24h.get(symbol, since) as { avg_rate: number | null })?.avg_rate ?? null;
+  } catch { return null; }
+}
+
+export function getOptionsSkew(since: string) {
+  try {
+    return getStmts().getOptionsSkew.all(since) as {
+      timestamp: string; avg_put_iv: number | null; avg_call_iv: number | null;
+    }[];
+  } catch { return []; }
+}
+
+export function getAggregateOI(since: string) {
+  try {
+    return getStmts().getAggregateOI.all(since) as {
+      timestamp: string; total_oi: number;
+    }[];
+  } catch { return []; }
 }
 
 export function getLocalTrades(since: string) {

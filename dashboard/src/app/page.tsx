@@ -212,12 +212,37 @@ interface TickData {
   next_check_minutes: number;
 }
 
+interface FundingPoint {
+  timestamp: string;
+  rate: number;
+  exchange?: string;
+  symbol?: string;
+}
+
+interface SkewPoint {
+  timestamp: string;
+  avg_put_iv: number | null;
+  avg_call_iv: number | null;
+}
+
+interface OIPoint {
+  timestamp: string;
+  total_oi: number;
+}
+
+interface SentimentData {
+  fundingRates: FundingPoint[];
+  optionsSkew: SkewPoint[];
+  aggregateOI: OIPoint[];
+}
+
 interface ChartData {
   prices: SpotPrice[];
   options: OptionsPoint[];
   liquidity: LiquidityPoint[];
   bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
+  sentiment?: SentimentData;
   tier?: string;
 }
 
@@ -233,7 +258,7 @@ const emptyStats: Stats = {
   budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [] };
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [], sentiment: { fundingRates: [], optionsSkew: [], aggregateOI: [] } };
 const emptyAccount: AccountData = { collaterals: [], positions: [], trades: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d', '90d'] as const;
 
@@ -312,6 +337,7 @@ export default function OverviewPage() {
   const pinCall = usePinnableTooltip();
   const pinPutMQ = usePinnableTooltip();
   const pinCallMQ = usePinnableTooltip();
+  const pinSentiment = usePinnableTooltip();
 
   // Parse latest tick for current option values
   const latestTick = useMemo<TickData | null>(() => {
@@ -625,6 +651,46 @@ export default function OverviewPage() {
       filteredCallMQ: callMQ.filter(d => d.ts >= lo && d.ts <= hi),
     };
   }, [liquidityData, callHeatmap, putHeatmap, putMQ, callMQ, xDomain]);
+
+  // Build sentiment chart data: merge funding rates, options skew, and OI on shared timestamps
+  const sentimentData = useMemo(() => {
+    const sentiment = chart.sentiment;
+    if (!sentiment) return [];
+
+    // Collect all timestamps into a unified timeline
+    const tsMap = new Map<number, { ts: number; fundingRate?: number; skew?: number; totalOI?: number }>();
+
+    for (const f of sentiment.fundingRates) {
+      const ts = new Date(f.timestamp).getTime();
+      const entry = tsMap.get(ts) || { ts };
+      entry.fundingRate = f.rate * 100; // convert to percentage
+      tsMap.set(ts, entry);
+    }
+
+    for (const s of sentiment.optionsSkew) {
+      const ts = new Date(s.timestamp).getTime();
+      const entry = tsMap.get(ts) || { ts };
+      if (s.avg_put_iv != null && s.avg_call_iv != null) {
+        entry.skew = (s.avg_put_iv - s.avg_call_iv) * 100; // difference in pct points
+      }
+      tsMap.set(ts, entry);
+    }
+
+    for (const o of sentiment.aggregateOI) {
+      const ts = new Date(o.timestamp).getTime();
+      const entry = tsMap.get(ts) || { ts };
+      entry.totalOI = o.total_oi;
+      tsMap.set(ts, entry);
+    }
+
+    return Array.from(tsMap.values()).sort((a, b) => a.ts - b.ts);
+  }, [chart.sentiment]);
+
+  // Filter sentiment to visible time range
+  const filteredSentiment = useMemo(() => {
+    const [lo, hi] = xDomain;
+    return sentimentData.filter(d => d.ts >= lo && d.ts <= hi);
+  }, [sentimentData, xDomain]);
 
   // Filter trades to visible chart range
   const visibleTrades = useMemo(() => {
@@ -1203,6 +1269,129 @@ export default function OverviewPage() {
                 {hasVolume && volDexes.map((name, i) => (
                   <Bar key={`${name}_vol`} yAxisId="vol" dataKey={`${name}_volNorm`} fill={getColor(name, i)} fillOpacity={0.5} stroke="none" isAnimationActive={false} />
                 ))}
+              </ComposedChart>
+            </ResponsiveContainer>
+            </div>
+          </Card>
+        );
+      })()}
+
+      {/* Market Sentiment (Funding Rate, Options Skew, OI) */}
+      {filteredSentiment.length > 0 && (() => {
+        const hasFunding = filteredSentiment.some(d => d.fundingRate != null);
+        const hasSkew = filteredSentiment.some(d => d.skew != null);
+        const hasOI = filteredSentiment.some(d => d.totalOI != null);
+        if (!hasFunding && !hasSkew && !hasOI) return null;
+
+        return (
+          <Card>
+            <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+              <span className="text-xs font-medium text-gray-400">Market Sentiment</span>
+              <div className="flex gap-3 text-xs text-gray-500">
+                {hasFunding && <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: '#f59e0b' }} /> Funding Rate</span>}
+                {hasSkew && <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: '#8b5cf6' }} /> IV Skew</span>}
+                {hasOI && <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: '#6b7280' }} /> OI</span>}
+              </div>
+            </div>
+            <div {...pinSentiment.containerProps}>
+            <ResponsiveContainer width="100%" height={200}>
+              <ComposedChart data={filteredSentiment} margin={margins}>
+                <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} {...chartAxis} />
+
+                {/* Left axis: rates/skew (percentage) */}
+                <YAxis
+                  yAxisId="pct"
+                  {...chartAxis}
+                  tickFormatter={(v: number) => `${v.toFixed(3)}%`}
+                  width={55}
+                />
+
+                {/* Right axis: OI (absolute) */}
+                {hasOI && (
+                  <YAxis
+                    yAxisId="oi"
+                    orientation="right"
+                    {...chartAxis}
+                    tickFormatter={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(0)}K` : String(v)}
+                    width={45}
+                  />
+                )}
+
+                {/* Zero line */}
+                <ReferenceLine yAxisId="pct" y={0} stroke="#444" strokeDasharray="3 3" />
+
+                {hasFunding && (
+                  <Line
+                    yAxisId="pct"
+                    type="stepAfter"
+                    dataKey="fundingRate"
+                    stroke="#f59e0b"
+                    strokeWidth={2}
+                    dot={false}
+                    connectNulls
+                    isAnimationActive={false}
+                  />
+                )}
+
+                {hasSkew && (
+                  <Line
+                    yAxisId="pct"
+                    type="monotone"
+                    dataKey="skew"
+                    stroke="#8b5cf6"
+                    strokeWidth={1.5}
+                    dot={false}
+                    connectNulls
+                    isAnimationActive={false}
+                  />
+                )}
+
+                {hasOI && (
+                  <Line
+                    yAxisId="oi"
+                    type="monotone"
+                    dataKey="totalOI"
+                    stroke="#6b7280"
+                    strokeWidth={1}
+                    dot={false}
+                    connectNulls
+                    isAnimationActive={false}
+                    strokeDasharray="4 2"
+                  />
+                )}
+
+                <Tooltip
+                  {...chartTooltip}
+                  {...pinSentiment.tooltipActive}
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  content={({ active, payload, label }: any) => {
+                    if (!active || !payload?.length) return pinSentiment.wrap(null);
+                    const row = payload[0]?.payload;
+                    if (!row) return pinSentiment.wrap(null);
+                    return pinSentiment.wrap(
+                      <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
+                        <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
+                        {row.fundingRate != null && (
+                          <div className="text-xs" style={{ color: row.fundingRate >= 0 ? '#4ade80' : '#f87171' }}>
+                            Funding: {row.fundingRate >= 0 ? '+' : ''}{row.fundingRate.toFixed(4)}%
+                            <span className="text-gray-500 ml-1">({row.fundingRate >= 0 ? 'longs pay' : 'shorts pay'})</span>
+                          </div>
+                        )}
+                        {row.skew != null && (
+                          <div className="text-xs" style={{ color: '#8b5cf6' }}>
+                            IV Skew: {row.skew >= 0 ? '+' : ''}{row.skew.toFixed(2)}%
+                            <span className="text-gray-500 ml-1">({row.skew > 0 ? 'put premium' : 'call premium'})</span>
+                          </div>
+                        )}
+                        {row.totalOI != null && (
+                          <div className="text-xs text-gray-400">
+                            Open Interest: {row.totalOI >= 1000 ? `${(row.totalOI / 1000).toFixed(1)}K` : row.totalOI.toFixed(0)}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }}
+                />
               </ComposedChart>
             </ResponsiveContainer>
             </div>
