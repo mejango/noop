@@ -323,7 +323,7 @@ const HeatmapDotShape = ({ cx, cy, payload, type }: any) => {
   const fill = type === 'call'
     ? lerpColor(callColorDim, callColorBright, t)
     : lerpColor(putColorDim, putColorBright, t);
-  const r = 2.5 + g * 3.5; // 2.5px (worst) → 6px (best) globally
+  const r = 2 + g * 5; // 2px (worst) → 7px (best) globally
   return <circle cx={cx} cy={cy} r={r} fill={fill} fillOpacity={0.7 + t * 0.3} />;
 };
 
@@ -617,15 +617,15 @@ export default function OverviewPage() {
     normalize(calls);
     normalize(puts);
 
-    // Global normalization: size reflects value rank across ALL instruments
+    // Global normalization: size reflects percentile rank across ALL instruments
     const normalizeGlobal = (dots: HeatmapDot[]) => {
       if (dots.length === 0) return;
-      const values = dots.map(d => d.value ?? 0);
-      const min = Math.min(...values);
-      const max = Math.max(...values);
-      const range = max - min || 1;
-      for (const d of dots) {
-        d.globalIntensity = Math.sqrt(((d.value ?? 0) - min) / range); // sqrt for better spread
+      // Sort by value, assign rank-based intensity for even dot size distribution
+      const indices = dots.map((_, i) => i);
+      indices.sort((a, b) => (dots[a].value ?? 0) - (dots[b].value ?? 0));
+      const n = indices.length - 1 || 1;
+      for (let rank = 0; rank < indices.length; rank++) {
+        dots[indices[rank]].globalIntensity = rank / n;
       }
     };
     normalizeGlobal(calls);
