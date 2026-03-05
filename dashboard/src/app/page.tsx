@@ -1851,9 +1851,14 @@ export default function OverviewPage() {
           { key: 'mark_value', label: 'Mkt Value', align: 'right' },
           { key: 'unrealized_pnl', label: 'UPnL', align: 'right' },
           { key: 'pnlPct', label: 'UPnL%', align: 'right' },
+          { key: 'thetaPerDay', label: '$/day', align: 'right' },
         ];
         const sorted = [...account.positions]
-          .map(p => ({ ...p, pnlPct: (p.average_price * Math.abs(p.amount)) > 0 ? (p.unrealized_pnl / (p.average_price * Math.abs(p.amount))) * 100 : 0 }))
+          .map(p => ({
+            ...p,
+            pnlPct: (p.average_price * Math.abs(p.amount)) > 0 ? (p.unrealized_pnl / (p.average_price * Math.abs(p.amount))) * 100 : 0,
+            thetaPerDay: p.theta * Math.abs(p.amount) * p.index_price,
+          }))
           .sort((a, b) => {
             const k = posSort.key as keyof typeof a;
             const av = a[k], bv = b[k];
@@ -1890,6 +1895,7 @@ export default function OverviewPage() {
                       <td className="py-1.5 px-2 text-right tabular-nums text-white">{formatUSD(p.mark_value)}</td>
                       <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{formatUSD(p.unrealized_pnl)}</td>
                       <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{p.pnlPct.toFixed(1)}%</td>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${p.thetaPerDay >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{p.thetaPerDay >= 0 ? '+' : ''}{formatUSD(p.thetaPerDay)}</td>
                     </tr>
                   );
                 })}
@@ -1903,6 +1909,10 @@ export default function OverviewPage() {
                     {formatUSD(account.positions.reduce((s, p) => s + p.unrealized_pnl, 0))}
                   </td>
                   <td />
+                  {(() => {
+                    const totalTheta = sorted.reduce((s, p) => s + p.thetaPerDay, 0);
+                    return <td className={`py-1.5 px-2 text-right tabular-nums ${totalTheta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{totalTheta >= 0 ? '+' : ''}{formatUSD(totalTheta)}</td>;
+                  })()}
                 </tr>
               </tbody>
             </table>
