@@ -181,7 +181,7 @@ const PUT_EXPIRATION_RANGE = [50, 90];
 const PUT_DELTA_RANGE = [-0.12, -0.02]; // Negative delta for puts
 
 // Trading parameters - CALLS  
-const CALL_EXPIRATION_RANGE = [5, 9];
+const CALL_EXPIRATION_RANGE = [3, 14];
 const CALL_DELTA_RANGE = [0.04, 0.12]; // Positive delta for calls
 
 // Call buyback thresholds
