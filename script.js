@@ -2376,8 +2376,8 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
     }
 
     console.log(`📓 Journal: generated ${count} entries`);
-    if (count < 3) {
-      throw new Error(`Expected at least 3 journal entries but only extracted ${count}`);
+    if (count < 4) {
+      console.log(`⚠️ Expected 4 journal entries but only extracted ${count}`);
     }
   } catch (e) {
     console.log('📓 Journal generation failed:', e.message);
