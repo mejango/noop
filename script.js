@@ -2535,13 +2535,17 @@ const runBot = async () => {
       }
     }
 
-  // Fallback: if CoinGecko failed, extract spot from Lyra index price
-  if (!spotPrice && Object.keys(tickerMap).length > 0) {
+  // Prefer Lyra index price over CoinGecko (more timely, matches options pricing)
+  if (Object.keys(tickerMap).length > 0) {
     const firstTicker = Object.values(tickerMap)[0];
     const lyraIndex = Number(firstTicker.I);
     if (lyraIndex > 0) {
+      if (spotPrice) {
+        console.log(`🔄 Upgrading spot from CoinGecko $${spotPrice.toFixed(2)} → Lyra index $${lyraIndex.toFixed(2)} (Δ${(lyraIndex - spotPrice).toFixed(2)})`);
+      } else {
+        console.log(`🔄 Using Lyra index price as spot: $${lyraIndex.toFixed(2)}`);
+      }
       spotPrice = lyraIndex;
-      console.log(`🔄 Using Lyra index price as spot fallback: $${spotPrice.toFixed(2)}`);
     }
   }
 
