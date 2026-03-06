@@ -116,6 +116,7 @@ export default function AdvisorDrawer() {
   const [journalEntries, setJournalEntries] = useState<JournalEntry[]>([]);
   const [journalLoading, setJournalLoading] = useState(false);
   const [analyticsTab, setAnalyticsTab] = useState(false);
+  const [journalFilter, setJournalFilter] = useState<string | null>(null);
   const [hypStats, setHypStats] = useState<{
     total: number; reviewed: number; pending: number;
     confirmed_convex: number; confirmed_linear: number;
@@ -530,6 +531,28 @@ export default function AdvisorDrawer() {
             {/* Entries View */}
             {!analyticsTab && (
               <>
+                {/* Type filter */}
+                <div className="flex gap-1 flex-wrap">
+                  <button
+                    onClick={() => setJournalFilter(null)}
+                    className={`text-[10px] px-2 py-0.5 transition-colors ${
+                      journalFilter === null ? 'bg-white/15 text-white' : 'bg-white/5 text-gray-500 hover:text-gray-300'
+                    }`}
+                  >
+                    All
+                  </button>
+                  {Object.entries(TYPE_STYLES).map(([key, style]) => (
+                    <button
+                      key={key}
+                      onClick={() => setJournalFilter(journalFilter === key ? null : key)}
+                      className={`text-[10px] px-2 py-0.5 transition-colors ${
+                        journalFilter === key ? style.color : 'bg-white/5 text-gray-500 hover:text-gray-300'
+                      }`}
+                    >
+                      {style.label}
+                    </button>
+                  ))}
+                </div>
                 {journalLoading && (
                   <p className="text-gray-500 text-xs">Loading journal...</p>
                 )}
@@ -538,7 +561,7 @@ export default function AdvisorDrawer() {
                     <p className="text-gray-500 text-xs">No journal entries yet. Chat with the bot to generate observations, hypotheses, and regime notes.</p>
                   </div>
                 )}
-                {journalEntries.map((entry) => {
+                {journalEntries.filter(e => !journalFilter || e.entry_type === journalFilter).map((entry) => {
                   const style = TYPE_STYLES[entry.entry_type] || { label: entry.entry_type.toUpperCase(), color: 'bg-white/10 text-gray-400' };
                   return (
                     <div key={entry.id} className="border border-white/5 px-3 py-2.5 space-y-1.5">
