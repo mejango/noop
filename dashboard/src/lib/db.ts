@@ -5,7 +5,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
 
 // Bot constants (must match script.js)
-const PUT_BUYING_BASE_FUNDING_LIMIT = 0;
+const PUT_BUYING_BASE_FUNDING_LIMIT = 2000;
 const CALL_SELLING_BASE_FUNDING_LIMIT = 0;
 const PERIOD_MS = 10 * 1000 * 60 * 60 * 24; // 10 days
 const MEASUREMENT_WINDOW_DAYS = 6.2;
