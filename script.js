@@ -2957,10 +2957,11 @@ console.log('='.repeat(70));
 console.log(' ');
 loadData();
 
-// Defer first run if the bot ran recently (prevents premature runs on redeploy)
+// Defer first run briefly if the bot ran very recently (prevents duplicate runs on rapid redeploy)
+const REDEPLOY_GUARD_MS = 60 * 1000; // 60s
 const timeSinceLastCheck = Date.now() - botData.lastCheck;
-if (botData.lastCheck > 0 && timeSinceLastCheck < DYNAMIC_INTERVALS.normal) {
-  const delay = DYNAMIC_INTERVALS.normal - timeSinceLastCheck;
+if (botData.lastCheck > 0 && timeSinceLastCheck < REDEPLOY_GUARD_MS) {
+  const delay = REDEPLOY_GUARD_MS - timeSinceLastCheck;
   console.log(`⏳ Last run was ${Math.round(timeSinceLastCheck / 1000)}s ago — deferring first run by ${Math.round(delay / 1000)}s`);
   setTimeout(runBotWithWatchdog, delay);
 } else {
