@@ -1365,6 +1365,43 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
   }
 };
 
+// Fetch current open positions from Derive
+const fetchPositions = async () => {
+  try {
+    const wallet = createWallet();
+    const timestamp = Date.now();
+    const signature = await signMessage(wallet, timestamp);
+    const response = await axios.post('https://api.lyra.finance/private/get_positions', {
+      subaccount_id: SUBACCOUNT_ID,
+    }, {
+      headers: {
+        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(),
+        'X-LyraSignature': signature,
+      },
+      timeout: 10000,
+    });
+    const positions = response.data?.result || [];
+    return positions
+      .filter(p => Math.abs(Number(p.amount)) > 0)
+      .map(p => ({
+        instrument_name: p.instrument_name,
+        direction: Number(p.amount) > 0 ? 'long' : 'short',
+        amount: Math.abs(Number(p.amount)),
+        avg_entry_price: Number(p.average_price) || null,
+        mark_price: Number(p.mark_price) || null,
+        index_price: Number(p.index_price) || null,
+        unrealized_pnl: Number(p.unrealized_pnl) || null,
+        theta: Number(p.greeks?.theta) || null,
+        delta: Number(p.greeks?.delta) || null,
+        vega: Number(p.greeks?.vega) || null,
+      }));
+  } catch (e) {
+    console.log('📋 Failed to fetch positions:', e.message);
+    return [];
+  }
+};
+
 // Fetch all instruments once and filter for both strategies
 const fetchAndFilterInstruments = async (spotPrice) => {
   try {
@@ -2082,6 +2119,9 @@ const generateJournalEntries = async (tickSummary, botData) => {
     let correlations = null;
     try { correlations = buildCorrelationAnalysis(db); } catch { /* graceful fallback */ }
 
+    // Fetch live positions from Derive
+    const currentPositions = await fetchPositions();
+
     // Sample arrays to keep prompt compact (~4K tokens of data)
     const sample = (arr, target) => {
       if (!arr || arr.length <= target) return arr || [];
@@ -2231,6 +2271,7 @@ const generateJournalEntries = async (tickSummary, botData) => {
         spot_price: o.spot_price,
         reason: o.reason,
       })),
+      current_positions: currentPositions,
     };
 
     // Build hypothesis performance summary for prompt injection
@@ -2276,6 +2317,8 @@ Analyze the provided snapshot across three time scales:
 
 **Recent trades:** The snapshot includes recent_orders — actual put buys and call sells executed by the bot. Reference these in your analysis: evaluate whether each trade's timing was good or bad given subsequent price action, whether the strike/delta chosen was appropriate, and whether the premium paid (puts) or collected (calls) represented fair value. This feedback helps calibrate future entries.
 
+**Current positions:** The snapshot includes current_positions — live open positions with mark price, unrealized P&L, greeks (theta, delta, vega), and entry price. Use these to assess whether any position should be closed, rolled, or held.
+
 Review your previous journal entries. Confirm patterns that held, revise those that didn't, and contradict past assessments when data warrants it.
 
 Output exactly 3 journal entries — one of each type, in this order:
@@ -2301,14 +2344,20 @@ Every hypothesis MUST identify what makes the opportunity asymmetric — why is 
 3. Finally, an OBSERVATION documenting the most notable factual pattern:
 <journal type="observation">The single most important factual pattern in the current data.</journal>
 
-4. A SUGGESTION — either a specific, time-sensitive trade worth considering now, or an explicit "nothing to do" if no action is warranted:
-   - Cheap convexity window (low IV + stable price → buy puts)
-   - Positions need rolling (approaching expiry, steep theta)
-   - Premium harvest opportunity (sell calls in high IV, low breach risk)
-   - Protection harvest (crash already happened, puts gained value → sell to lock in gains before mean reversion)
-   - Nothing to do — doing nothing IS the strategy most of the time. Say so explicitly and why.
+4. A SUGGESTION — either a specific, time-sensitive trade worth considering now, or an explicit "nothing to do" if no action is warranted.
 
-<journal type="suggestion">Specific action (instrument, direction, size rationale, and why NOW) — or explain why doing nothing is the right move.</journal>
+**You MUST evaluate current_positions first.** For each held position, assess:
+   - Is theta decay eating into value? Should we roll to a later expiry?
+   - Has the position gained value from a crash? Should we sell to lock in gains before mean reversion?
+   - Is the position approaching expiry with little time value left?
+
+Then consider new trades:
+   - Cheap convexity window (low IV + stable price → buy puts)
+   - Premium harvest opportunity (sell calls in high IV, low breach risk)
+
+If no action is warranted, say so explicitly — but still reference each held position and why holding is correct.
+
+<journal type="suggestion">Evaluate every held position by name. Then recommend action or explain why doing nothing is right.</journal>
 
 IMPORTANT: Start every journal entry with a single bold TLDR line (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow with detailed analysis. Keep each entry under 300 words — be dense and precise, not verbose. All 3 entries must fit within the response.
 
