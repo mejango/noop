@@ -52,6 +52,24 @@ function downsample<T extends Record<string, any>>(
   return result;
 }
 
+// Downsample heatmap: keep one snapshot per instrument per time bucket (the last one)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function downsampleHeatmap(rows: Record<string, any>[], bucketMs: number): Record<string, any>[] {
+  if (rows.length === 0 || bucketMs <= 0) return rows;
+  const seen = new Set<string>();
+  const result: typeof rows = [];
+  for (const row of rows) {
+    const t = new Date(row.timestamp).getTime();
+    const bucket = Math.floor(t / bucketMs) * bucketMs;
+    const key = `${bucket}|${row.instrument_name}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push({ ...row, timestamp: new Date(bucket).toISOString() });
+    }
+  }
+  return result;
+}
+
 // Downsample liquidity rows (dynamic keys per dex)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function downsampleLiquidity(rows: Record<string, any>[], bucketMs: number): Record<string, any>[] {
@@ -144,9 +162,13 @@ export function GET(request: NextRequest) {
         ['put_oi', 'call_oi', 'near_put_oi', 'near_call_oi', 'far_put_oi', 'far_call_oi', 'total_oi', 'pc_ratio'],
         ['expiry_count'],
       );
+      const dsHeatmap = downsampleHeatmap(
+        optionsHeatmap as Record<string, unknown>[],
+        bucketMs,
+      );
       return NextResponse.json({
         prices: dsPrices, options: dsOptions, liquidity: dsLiquidity,
-        bestScores, optionsHeatmap,
+        bestScores, optionsHeatmap: dsHeatmap,
         sentiment: { fundingRates: dsFunding, optionsSkew: dsSkew, aggregateOI: dsOI, oiSnapshots: dsOISnapshots },
         tier: 'downsampled',
       });
