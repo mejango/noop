@@ -1,13 +1,16 @@
 import Database from 'better-sqlite3';
 import path from 'path';
+import fs from 'fs';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
 
-// Bot constants (must match script.js)
-const PUT_BUYING_BASE_FUNDING_LIMIT = 2000;
-const CALL_SELLING_BASE_FUNDING_LIMIT = 0;
-const PERIOD_MS = 10 * 1000 * 60 * 60 * 24; // 10 days
+// Bot constants (single source of truth: bot/config.json)
+const CONFIG_PATH = process.env.BOT_CONFIG_PATH || path.join(process.cwd(), '..', 'bot', 'config.json');
+const BOT_CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+const PUT_BUYING_BASE_FUNDING_LIMIT = BOT_CONFIG.PUT_BUYING_BASE_FUNDING_LIMIT;
+const CALL_SELLING_BASE_FUNDING_LIMIT = BOT_CONFIG.CALL_SELLING_BASE_FUNDING_LIMIT;
+const PERIOD_MS = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 const MEASUREMENT_WINDOW_DAYS = 6.2;
 
 let db: Database.Database | null = null;

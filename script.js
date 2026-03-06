@@ -141,9 +141,10 @@ const ACTION_TYPEHASH = '0x4d7a9f27c403ff9c0f19bce61d76d82f9aa29f8d6d4b0c5474607
 const TRADE_MODULE_ADDRESS = '0xB8D20c2B7a1Ad2EE33Bc50eF10876eD3035b5e7b';
 const DOMAIN_SEPARATOR = '0xd96e5f90797da7ec8dc4e276260c7f3f87fedf68775fbe1ef116e996fc60441b';
 
-// Common trading parameters
-const PUT_BUYING_BASE_FUNDING_LIMIT = 2000;
-const CALL_SELLING_BASE_FUNDING_LIMIT = 0;
+// Common trading parameters (single source of truth: bot/config.json)
+const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'config.json'), 'utf-8'));
+const PUT_BUYING_BASE_FUNDING_LIMIT = BOT_CONFIG.PUT_BUYING_BASE_FUNDING_LIMIT;
+const CALL_SELLING_BASE_FUNDING_LIMIT = BOT_CONFIG.CALL_SELLING_BASE_FUNDING_LIMIT;
 const SUBACCOUNT_ID = 25923;
 
 // ETH contract addresses for analysis
@@ -174,7 +175,7 @@ const DYNAMIC_INTERVALS = {
 // Configuration
 const BOT_DATA_PATH = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'bot_data.json') : './bot_data.json';
 
-const PERIOD = 10 * 1000 * 60 * 60 * 24;
+const PERIOD = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 
 // Trading parameters - PUTS
 const PUT_EXPIRATION_RANGE = [50, 90];

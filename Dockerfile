@@ -33,6 +33,7 @@ COPY start.sh ./
 RUN chmod +x start.sh
 
 ENV DATA_DIR=/data
+ENV BOT_CONFIG_PATH=/app/bot/config.json
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
