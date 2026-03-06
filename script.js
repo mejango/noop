@@ -2300,15 +2300,14 @@ Every hypothesis MUST identify what makes the opportunity asymmetric — why is 
 3. Finally, an OBSERVATION documenting the most notable factual pattern:
 <journal type="observation">The single most important factual pattern in the current data.</journal>
 
-4. Optionally, a SUGGESTION — only if there is a specific, time-sensitive trade worth considering now:
+4. A SUGGESTION — either a specific, time-sensitive trade worth considering now, or an explicit "nothing to do" if no action is warranted:
    - Cheap convexity window (low IV + stable price → buy puts)
    - Positions need rolling (approaching expiry, steep theta)
    - Premium harvest opportunity (sell calls in high IV, low breach risk)
    - Protection harvest (crash already happened, puts gained value → sell to lock in gains before mean reversion)
+   - Nothing to do — doing nothing IS the strategy most of the time. Say so explicitly and why.
 
-If no action is warranted — which is most of the time — do NOT include a suggestion tag.
-
-<journal type="suggestion">Specific action: instrument, direction, size rationale, and why NOW.</journal>
+<journal type="suggestion">Specific action (instrument, direction, size rationale, and why NOW) — or explain why doing nothing is the right move.</journal>
 
 IMPORTANT: Start every journal entry with a single bold TLDR line (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow with detailed analysis. Keep each entry under 300 words — be dense and precise, not verbose. All 3 entries must fit within the response.
 
@@ -2321,7 +2320,7 @@ This is critical for the Spitznagel strategy: we want to buy puts when they're C
 
 Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).${hypothesisPerformance}`;
 
-    const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite 3 required journal entries (regime_note, hypothesis, observation) + 1 optional suggestion if there's a specific actionable trade right now. Use the <journal type="..."> tags.`;
+    const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite exactly 4 journal entries: one regime_note, one hypothesis, one observation, one suggestion. Use the <journal type="..."> tags.`;
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
@@ -2376,8 +2375,8 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
     }
 
     console.log(`📓 Journal: generated ${count} entries`);
-    if (count < 3) {
-      throw new Error(`Expected 3 journal entries but only extracted ${count}`);
+    if (count < 4) {
+      throw new Error(`Expected 4 journal entries but only extracted ${count}`);
     }
   } catch (e) {
     console.log('📓 Journal generation failed:', e.message);
