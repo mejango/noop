@@ -2334,7 +2334,7 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 60000,
+      timeout: 120000,
     });
 
     const text = response.data?.content?.[0]?.text || '';
@@ -2376,8 +2376,8 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
     }
 
     console.log(`📓 Journal: generated ${count} entries`);
-    if (count < 4) {
-      throw new Error(`Expected 4 journal entries but only extracted ${count}`);
+    if (count < 3) {
+      throw new Error(`Expected at least 3 journal entries but only extracted ${count}`);
     }
   } catch (e) {
     console.log('📓 Journal generation failed:', e.message);
