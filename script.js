@@ -2222,14 +2222,22 @@ const generateJournalEntries = async (tickSummary, botData) => {
         medium_momentum: p.medium_momentum_main || null,
         short_momentum: p.short_momentum_main || null,
       })),
-      budget: {
-        putTotal: PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit,
-        putSpent: botData.putNetBought,
-        putRemaining: Math.max(0, PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought),
-        callTotal: CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit,
-        callSpent: botData.callNetSold,
-        callRemaining: Math.max(0, CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold),
-      },
+      budget: (() => {
+        const now = Date.now();
+        const putDaysLeft = botData.putCycleStart ? Math.max(0, (PERIOD - (now - botData.putCycleStart)) / (1000 * 60 * 60 * 24)) : BOT_CONFIG.PERIOD_DAYS;
+        const callDaysLeft = botData.callCycleStart ? Math.max(0, (PERIOD - (now - botData.callCycleStart)) / (1000 * 60 * 60 * 24)) : BOT_CONFIG.PERIOD_DAYS;
+        return {
+          cycleDays: BOT_CONFIG.PERIOD_DAYS,
+          putTotal: PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit,
+          putSpent: botData.putNetBought,
+          putRemaining: Math.max(0, PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought),
+          putDaysLeft: +putDaysLeft.toFixed(1),
+          callTotal: CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit,
+          callSpent: botData.callNetSold,
+          callRemaining: Math.max(0, CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold),
+          callDaysLeft: +callDaysLeft.toFixed(1),
+        };
+      })(),
       previous_journal: previousJournal,
       signals_7d: recentSignals.map(s => ({
         timestamp: s.timestamp,
