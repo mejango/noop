@@ -1381,7 +1381,8 @@ const fetchPositions = async () => {
       },
       timeout: 10000,
     });
-    const positions = response.data?.result || [];
+    const raw = response.data?.result;
+    const positions = Array.isArray(raw) ? raw : (raw?.positions || []);
     return positions
       .filter(p => Math.abs(Number(p.amount)) > 0)
       .map(p => ({
@@ -2222,10 +2223,12 @@ const generateJournalEntries = async (tickSummary, botData) => {
         short_momentum: p.short_momentum_main || null,
       })),
       budget: {
-        putNetBought: botData.putNetBought,
-        putUnspentBuyLimit: botData.putUnspentBuyLimit,
-        callNetSold: botData.callNetSold,
-        callUnspentSellLimit: botData.callUnspentSellLimit,
+        putTotal: PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit,
+        putSpent: botData.putNetBought,
+        putRemaining: Math.max(0, PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought),
+        callTotal: CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit,
+        callSpent: botData.callNetSold,
+        callRemaining: Math.max(0, CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold),
       },
       previous_journal: previousJournal,
       signals_7d: recentSignals.map(s => ({
