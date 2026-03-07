@@ -608,6 +608,58 @@ const stmts = {
     GROUP BY hour ORDER BY hour ASC
   `),
 
+  // Market sentiment queries (funding, skew, OI, quality)
+  getFundingRateLatest: db.prepare(`
+    SELECT rate, timestamp FROM funding_rates
+    WHERE symbol = @symbol ORDER BY timestamp DESC LIMIT 1
+  `),
+
+  getFundingRateAvg24h: db.prepare(`
+    SELECT AVG(rate) as avg_rate FROM funding_rates
+    WHERE symbol = @symbol AND timestamp > @since
+  `),
+
+  getOptionsSkew: db.prepare(`
+    SELECT timestamp,
+      AVG(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
+        AND ABS(delta) BETWEEN 0.02 AND 0.12
+        THEN implied_vol END) as avg_put_iv,
+      AVG(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
+        AND ABS(delta) BETWEEN 0.04 AND 0.12
+        THEN implied_vol END) as avg_call_iv
+    FROM options_snapshots
+    WHERE timestamp > @since AND implied_vol IS NOT NULL
+    GROUP BY timestamp
+    ORDER BY timestamp ASC
+  `),
+
+  getAggregateOI: db.prepare(`
+    SELECT timestamp, SUM(open_interest) as total_oi
+    FROM options_snapshots
+    WHERE timestamp > @since AND open_interest IS NOT NULL AND open_interest > 0
+    GROUP BY timestamp
+    ORDER BY timestamp ASC
+  `),
+
+  getMarketQualitySummary: db.prepare(`
+    SELECT
+      option_type,
+      COUNT(*) as count,
+      AVG(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as avg_spread,
+      MIN(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as min_spread,
+      MAX(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as max_spread,
+      AVG(implied_vol) as avg_iv,
+      AVG(ask_amount + bid_amount) as avg_depth,
+      SUM(ask_amount + bid_amount) as total_depth
+    FROM options_snapshots
+    WHERE timestamp = (SELECT MAX(timestamp) FROM options_snapshots WHERE timestamp > @since)
+      AND mark_price > 0
+      AND ask_price > 0
+      AND bid_price > 0
+      AND ABS(delta) BETWEEN 0.02 AND 0.12
+    GROUP BY option_type
+  `),
+
   insertOISnapshot: db.prepare(`
     INSERT INTO oi_snapshots (timestamp, put_oi, call_oi, near_put_oi, near_call_oi,
       far_put_oi, far_call_oi, total_oi, pc_ratio, expiry_count)
@@ -892,6 +944,29 @@ const getFundingRatesHourly = (since, symbol = 'ETHUSDT') => {
   return stmts.getFundingRatesHourly.all({ since, symbol });
 };
 
+const getFundingRateLatest = (symbol = 'ETHUSDT') => {
+  try { return stmts.getFundingRateLatest.get({ symbol }); } catch { return null; }
+};
+
+const getFundingRateAvg24h = (symbol = 'ETHUSDT') => {
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    return stmts.getFundingRateAvg24h.get({ symbol, since })?.avg_rate ?? null;
+  } catch { return null; }
+};
+
+const getOptionsSkew = (since) => {
+  try { return stmts.getOptionsSkew.all({ since }); } catch { return []; }
+};
+
+const getAggregateOI = (since) => {
+  try { return stmts.getAggregateOI.all({ since }); } catch { return []; }
+};
+
+const getMarketQualitySummary = (since) => {
+  try { return stmts.getMarketQualitySummary.all({ since }); } catch { return []; }
+};
+
 // ─── AI Journal Helpers ──────────────────────────────────────────────────────
 
 const insertJournalEntry = (entryType, content, seriesReferenced = null) => {
@@ -1069,5 +1144,10 @@ module.exports = {
   insertOISnapshot,
   insertFundingRates,
   getFundingRatesHourly,
+  getFundingRateLatest,
+  getFundingRateAvg24h,
+  getOptionsSkew,
+  getAggregateOI,
+  getMarketQualitySummary,
   close,
 };

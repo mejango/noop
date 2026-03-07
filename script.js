@@ -1403,6 +1403,36 @@ const fetchPositions = async () => {
   }
 };
 
+// Fetch collaterals (USDC/ETH balances) from Derive
+const fetchCollaterals = async () => {
+  try {
+    const wallet = createWallet();
+    const timestamp = Date.now();
+    const signature = await signMessage(wallet, timestamp);
+    const response = await axios.post('https://api.lyra.finance/private/get_collaterals', {
+      subaccount_id: SUBACCOUNT_ID,
+    }, {
+      headers: {
+        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(),
+        'X-LyraSignature': signature,
+      },
+      timeout: 10000,
+    });
+    const raw = response.data?.result;
+    const collaterals = Array.isArray(raw) ? raw : (raw?.collaterals || []);
+    return collaterals.map(c => ({
+      asset: c.asset_name,
+      amount: Number(c.amount ?? 0),
+      mark_price: Number(c.mark_price ?? 0),
+      value_usd: Number(c.mark_value ?? c.value ?? 0),
+    }));
+  } catch (e) {
+    console.log('📋 Failed to fetch collaterals:', e.message);
+    return [];
+  }
+};
+
 // Fetch all instruments once and filter for both strategies
 const fetchAndFilterInstruments = async (spotPrice) => {
   try {
@@ -2120,8 +2150,18 @@ const generateJournalEntries = async (tickSummary, botData) => {
     let correlations = null;
     try { correlations = buildCorrelationAnalysis(db); } catch { /* graceful fallback */ }
 
-    // Fetch live positions from Derive
-    const currentPositions = await fetchPositions();
+    // Fetch live account data from Derive
+    const [currentPositions, currentCollaterals] = await Promise.all([
+      fetchPositions(),
+      fetchCollaterals(),
+    ]);
+
+    // Market sentiment data
+    const fundingLatest = db.getFundingRateLatest();
+    const fundingAvg24h = db.getFundingRateAvg24h();
+    const optionsSkew = db.getOptionsSkew(since24h);
+    const aggregateOI = db.getAggregateOI(since24h);
+    const marketQuality = db.getMarketQualitySummary(since24h);
 
     // Sample arrays to keep prompt compact (~4K tokens of data)
     const sample = (arr, target) => {
@@ -2248,6 +2288,22 @@ const generateJournalEntries = async (tickSummary, botData) => {
       options_market: {
         distribution: optionsDistribution,
         avg_call_premium_7d: avgCallPremium?.avg_premium ?? null,
+        market_quality: (() => {
+          try {
+            if (!marketQuality.length) return null;
+            const byType = {};
+            for (const r of marketQuality) {
+              const key = r.option_type === 'P' ? 'put' : 'call';
+              byType[key] = {
+                instruments_in_range: r.count,
+                avg_spread_pct: r.avg_spread != null ? +(r.avg_spread * 100).toFixed(2) : null,
+                avg_implied_vol_pct: r.avg_iv != null ? +(r.avg_iv * 100).toFixed(1) : null,
+                avg_depth: r.avg_depth != null ? +r.avg_depth.toFixed(2) : null,
+              };
+            }
+            return byType;
+          } catch { return null; }
+        })(),
       },
       pool_breakdown: (() => {
         try {
@@ -2283,6 +2339,38 @@ const generateJournalEntries = async (tickSummary, botData) => {
         reason: o.reason,
       })),
       current_positions: currentPositions,
+      account: {
+        collaterals: currentCollaterals,
+      },
+      market_sentiment: (() => {
+        try {
+          const latestSkew = optionsSkew.length > 0 ? optionsSkew[optionsSkew.length - 1] : null;
+          const currentSkew = latestSkew && latestSkew.avg_put_iv != null && latestSkew.avg_call_iv != null
+            ? +((latestSkew.avg_put_iv - latestSkew.avg_call_iv) * 100).toFixed(2)
+            : null;
+          const currentOI = aggregateOI.length > 0 ? aggregateOI[aggregateOI.length - 1].total_oi : null;
+          const firstOI = aggregateOI.length > 1 ? aggregateOI[0].total_oi : null;
+          const oiChange24hPct = currentOI && firstOI && firstOI > 0
+            ? +(((currentOI - firstOI) / firstOI) * 100).toFixed(1)
+            : null;
+          let fundingTrend = null;
+          if (fundingLatest && fundingAvg24h != null) {
+            fundingTrend = fundingLatest.rate > fundingAvg24h ? 'rising' : fundingLatest.rate < fundingAvg24h ? 'declining' : 'stable';
+          }
+          return {
+            funding_rate: {
+              current: fundingLatest?.rate ?? null,
+              avg_24h: fundingAvg24h,
+              trend: fundingTrend,
+            },
+            options_skew_pct: currentSkew,
+            aggregate_oi: {
+              current: currentOI,
+              change_24h_pct: oiChange24hPct,
+            },
+          };
+        } catch { return null; }
+      })(),
     };
 
     // Build hypothesis performance summary for prompt injection
