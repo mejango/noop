@@ -983,15 +983,7 @@ export default function OverviewPage() {
               />
               <Legend content={() => null} />
 
-              {/* 7d high/low reference lines */}
-              {stats.seven_day_high > 0 && (
-                <ReferenceLine yAxisId="price" y={stats.seven_day_high} stroke={chartColors.refHigh} strokeDasharray="3 3" strokeOpacity={0.4} />
-              )}
-              {stats.seven_day_low > 0 && stats.seven_day_low < Infinity && (
-                <ReferenceLine yAxisId="price" y={stats.seven_day_low} stroke={chartColors.refLow} strokeDasharray="3 3" strokeOpacity={0.4} />
-              )}
-
-              {/* Best score reference lines (dotted) */}
+              {/* Best historical PUT/CALL score reference lines (6.2d window) */}
               {chart.bestScores.bestPutScore > 0 && (
                 <ReferenceLine yAxisId="putVal" y={chart.bestScores.bestPutScore} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.5} />
               )}
