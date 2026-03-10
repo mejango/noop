@@ -61,6 +61,8 @@ function prepareAll(d: Database.Database) {
         mark_price, implied_vol, ask_amount, bid_amount
       FROM options_snapshots
       WHERE timestamp > ?
+        AND delta IS NOT NULL
+        AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
       ORDER BY timestamp ASC
     `),
 
@@ -88,8 +90,12 @@ function prepareAll(d: Database.Database) {
 
     getBestScoresAgg: d.prepare(`
       SELECT
-        MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
-        MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_score
+        MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
+          AND delta <= -0.02 AND delta >= -0.12
+          THEN ask_delta_value END) as best_put_score,
+        MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
+          AND delta >= 0.04 AND delta <= 0.12
+          THEN bid_delta_value END) as best_call_score
       FROM options_snapshots
       WHERE timestamp > ?
     `),
@@ -136,13 +142,19 @@ function prepareAll(d: Database.Database) {
         AVG(ask_price - bid_price) as avg_spread, AVG(mark_price) as avg_mark,
         MIN(strike) as min_strike, MAX(strike) as max_strike,
         AVG(ask_delta_value) as avg_ask_dv, AVG(bid_delta_value) as avg_bid_dv
-      FROM options_snapshots WHERE timestamp > ? GROUP BY option_type
+      FROM options_snapshots
+      WHERE timestamp > ?
+        AND delta IS NOT NULL
+        AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+      GROUP BY option_type
     `),
 
     getAvgCallPremium7d: d.prepare(`
       SELECT AVG(bid_price) as avg_premium
       FROM options_snapshots
-      WHERE option_type = 'call' AND timestamp > ? AND bid_price > 0
+      WHERE (option_type = 'C' OR instrument_name LIKE '%-C')
+        AND timestamp > ? AND bid_price > 0
+        AND delta >= 0.04 AND delta <= 0.12
     `),
 
     getLatestOnchainRawData: d.prepare(`

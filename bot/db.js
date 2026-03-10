@@ -443,7 +443,11 @@ const stmts = {
       AVG(ask_price - bid_price) as avg_spread, AVG(mark_price) as avg_mark,
       MIN(strike) as min_strike, MAX(strike) as max_strike,
       AVG(ask_delta_value) as avg_ask_dv, AVG(bid_delta_value) as avg_bid_dv
-    FROM options_snapshots WHERE timestamp > @since GROUP BY option_type
+    FROM options_snapshots
+    WHERE timestamp > @since
+      AND delta IS NOT NULL
+      AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
+    GROUP BY option_type
   `),
 
   // Hourly aggregations for correlation engine
@@ -671,9 +675,10 @@ const stmts = {
   getAvgCallPremium7d: db.prepare(`
     SELECT AVG(bid_price) as avg_premium
     FROM options_snapshots
-    WHERE option_type = 'call'
+    WHERE (option_type = 'C' OR instrument_name LIKE '%-C')
       AND timestamp > @since
       AND bid_price > 0
+      AND delta >= 0.04 AND delta <= 0.12
   `),
 };
 
