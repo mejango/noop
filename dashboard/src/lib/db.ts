@@ -61,8 +61,6 @@ function prepareAll(d: Database.Database) {
         mark_price, implied_vol, ask_amount, bid_amount
       FROM options_snapshots
       WHERE timestamp > ?
-        AND delta IS NOT NULL
-        AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
       ORDER BY timestamp ASC
     `),
 
@@ -90,12 +88,8 @@ function prepareAll(d: Database.Database) {
 
     getBestScoresAgg: d.prepare(`
       SELECT
-        MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
-          AND delta <= -0.02 AND delta >= -0.12
-          THEN ask_delta_value END) as best_put_score,
-        MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
-          AND delta >= 0.04 AND delta <= 0.12
-          THEN bid_delta_value END) as best_call_score
+        MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
+        MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_score
       FROM options_snapshots
       WHERE timestamp > ?
     `),
@@ -142,19 +136,13 @@ function prepareAll(d: Database.Database) {
         AVG(ask_price - bid_price) as avg_spread, AVG(mark_price) as avg_mark,
         MIN(strike) as min_strike, MAX(strike) as max_strike,
         AVG(ask_delta_value) as avg_ask_dv, AVG(bid_delta_value) as avg_bid_dv
-      FROM options_snapshots
-      WHERE timestamp > ?
-        AND delta IS NOT NULL
-        AND ((delta <= -0.02 AND delta >= -0.12) OR (delta >= 0.04 AND delta <= 0.12))
-      GROUP BY option_type
+      FROM options_snapshots WHERE timestamp > ? GROUP BY option_type
     `),
 
     getAvgCallPremium7d: d.prepare(`
       SELECT AVG(bid_price) as avg_premium
       FROM options_snapshots
-      WHERE (option_type = 'C' OR instrument_name LIKE '%-C')
-        AND timestamp > ? AND bid_price > 0
-        AND delta >= 0.04 AND delta <= 0.12
+      WHERE option_type = 'call' AND timestamp > ? AND bid_price > 0
     `),
 
     getLatestOnchainRawData: d.prepare(`
@@ -342,16 +330,10 @@ function prepareAll(d: Database.Database) {
     `),
 
     getOptionsSkew: d.prepare(`
-      SELECT timestamp,
-        AVG(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
-          AND ABS(delta) BETWEEN 0.02 AND 0.12
-          THEN implied_vol END) as avg_put_iv,
-        AVG(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
-          AND ABS(delta) BETWEEN 0.04 AND 0.12
-          THEN implied_vol END) as avg_call_iv
-      FROM options_snapshots
-      WHERE timestamp > ? AND implied_vol IS NOT NULL
-      GROUP BY timestamp
+      SELECT timestamp, avg_put_iv, avg_call_iv
+      FROM oi_snapshots
+      WHERE timestamp > ?
+        AND (avg_put_iv IS NOT NULL OR avg_call_iv IS NOT NULL)
       ORDER BY timestamp ASC
     `),
 
@@ -365,7 +347,8 @@ function prepareAll(d: Database.Database) {
 
     getOISnapshots: d.prepare(`
       SELECT timestamp, put_oi, call_oi, near_put_oi, near_call_oi,
-        far_put_oi, far_call_oi, total_oi, pc_ratio, expiry_count
+        far_put_oi, far_call_oi, total_oi, pc_ratio, expiry_count,
+        avg_put_iv, avg_call_iv
       FROM oi_snapshots
       WHERE timestamp > ?
       ORDER BY timestamp ASC

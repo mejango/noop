@@ -2633,34 +2633,55 @@ const runBot = async () => {
         let farPutOI = 0, farCallOI = 0;
         let counted = 0;
 
+        // Collect OI + IV skew from full ticker map in a single pass
+        let putIvSum = 0, putIvCount = 0;
+        let callIvSum = 0, callIvCount = 0;
+
         for (const [name, ticker] of Object.entries(oiTickerMap)) {
           const oi = Number(ticker.stats?.oi) || 0;
-          if (oi <= 0) continue;
-
           const isPut = name.endsWith('-P');
           const isCall = name.endsWith('-C');
           if (!isPut && !isCall) continue;
 
-          // Parse expiry from instrument name: ETH-20260424-1400-P
-          const parts = name.split('-');
-          const expiryStr = parts[1]; // "20260424"
-          const expiryDate = new Date(
-            `${expiryStr.slice(0, 4)}-${expiryStr.slice(4, 6)}-${expiryStr.slice(6, 8)}T08:00:00Z`
-          );
-          const isNear = (expiryDate.getTime() - now) < NEAR_THRESHOLD_MS;
+          // OI aggregation
+          if (oi > 0) {
+            // Parse expiry from instrument name: ETH-20260424-1400-P
+            const parts = name.split('-');
+            const expiryStr = parts[1]; // "20260424"
+            const expiryDate = new Date(
+              `${expiryStr.slice(0, 4)}-${expiryStr.slice(4, 6)}-${expiryStr.slice(6, 8)}T08:00:00Z`
+            );
+            const isNear = (expiryDate.getTime() - now) < NEAR_THRESHOLD_MS;
 
-          if (isPut) {
-            putOI += oi;
-            if (isNear) nearPutOI += oi; else farPutOI += oi;
-          } else {
-            callOI += oi;
-            if (isNear) nearCallOI += oi; else farCallOI += oi;
+            if (isPut) {
+              putOI += oi;
+              if (isNear) nearPutOI += oi; else farPutOI += oi;
+            } else {
+              callOI += oi;
+              if (isNear) nearCallOI += oi; else farCallOI += oi;
+            }
+            counted++;
           }
-          counted++;
+
+          // IV skew: collect implied vol for instruments in bot's delta range
+          const delta = Number(ticker.option_pricing?.d);
+          const iv = Number(ticker.option_pricing?.i);
+          if (!delta || !iv || iv <= 0) continue;
+          const absDelta = Math.abs(delta);
+
+          if (isPut && absDelta >= 0.02 && absDelta <= 0.12) {
+            putIvSum += iv;
+            putIvCount++;
+          } else if (isCall && absDelta >= 0.04 && absDelta <= 0.12) {
+            callIvSum += iv;
+            callIvCount++;
+          }
         }
 
         const totalOI = putOI + callOI;
         const pcRatio = callOI > 0 ? putOI / callOI : null;
+        const avgPutIv = putIvCount > 0 ? putIvSum / putIvCount : null;
+        const avgCallIv = callIvCount > 0 ? callIvSum / callIvCount : null;
 
         db.insertOISnapshot({
           timestamp: tickTimestamp,
@@ -2673,42 +2694,14 @@ const runBot = async () => {
           total_oi: totalOI,
           pc_ratio: pcRatio,
           expiry_count: allExpiryDates.length,
+          avg_put_iv: avgPutIv,
+          avg_call_iv: avgCallIv,
         });
 
         const nearOI = nearPutOI + nearCallOI;
         const farOI = farPutOI + farCallOI;
-        console.log(`📊 OI: P/C ${pcRatio?.toFixed(3) || 'N/A'} | total ${totalOI.toFixed(0)} (${counted} instruments) | near ${nearOI.toFixed(0)} / far ${farOI.toFixed(0)}`);
-
-        // Snapshot ALL instruments for IV skew (not just trading candidates)
-        try {
-          const instrumentMap = {};
-          for (const inst of instruments) {
-            instrumentMap[inst.instrument_name] = inst;
-          }
-          const fullMarketOptions = [];
-          for (const [name, ticker] of Object.entries(oiTickerMap)) {
-            const inst = instrumentMap[name];
-            const enriched = enrichCandidateFromTicker(inst || { instrument_name: name, option_details: {} }, ticker, spotPrice);
-            if (enriched) {
-              // Fill option_details from instrument name if not available from instrument object
-              if (!enriched.option_details?.option_type) {
-                const parts = name.split('-');
-                enriched.option_details = {
-                  strike: parts[2] ? parseFloat(parts[2]) : null,
-                  expiry: null,
-                  option_type: name.endsWith('-P') ? 'P' : name.endsWith('-C') ? 'C' : null,
-                };
-              }
-              fullMarketOptions.push(enriched);
-            }
-          }
-          if (fullMarketOptions.length > 0) {
-            db.insertOptionsSnapshotBatch(fullMarketOptions, tickTimestamp);
-            console.log(`📊 Options snapshot: ${fullMarketOptions.length} instruments (full market)`);
-          }
-        } catch (e) {
-          console.log(`⚠️ Full-market options snapshot failed: ${e.message}`);
-        }
+        const skewPct = avgPutIv != null && avgCallIv != null ? ((avgPutIv - avgCallIv) * 100).toFixed(1) : 'N/A';
+        console.log(`📊 OI: P/C ${pcRatio?.toFixed(3) || 'N/A'} | total ${totalOI.toFixed(0)} (${counted} instruments) | near ${nearOI.toFixed(0)} / far ${farOI.toFixed(0)} | skew ${skewPct}%`);
       } catch (e) {
         console.log(`⚠️ OI collection failed: ${e.message}`);
       }
@@ -2948,7 +2941,15 @@ const runBot = async () => {
       ? processedCallOptions.reduce((best, o) => (o.details?.bidDeltaValue || 0) > (best.details?.bidDeltaValue || 0) ? o : best)
       : null;
 
-    // Options snapshots now written in the OI collection block above (full market, not just candidates)
+    // SQLite: persist options snapshots (candidates only — heatmap/chart data)
+    if (db) {
+      try {
+        const allOptions = [...(putOptionsWithDetails || []), ...(callOptionsWithDetails || [])];
+        if (allOptions.length > 0) {
+          db.insertOptionsSnapshotBatch(allOptions, tickTimestamp);
+        }
+      } catch (e) { console.log('DB: options snapshot write failed:', e.message); }
+    }
 
     console.log('='.repeat(60));
     console.log(' ');
