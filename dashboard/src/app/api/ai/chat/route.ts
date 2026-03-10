@@ -118,6 +118,8 @@ The snapshot includes live account data from Lyra/Derive under the \`account\` s
 - **Positions**: All open option positions with amount, average cost, mark price, unrealized PnL, and Greeks (delta, theta)
 - **Totals**: Aggregate position value and unrealized PnL
 
+**Position data is for \`suggestion\` journal entries ONLY.** When writing observation, hypothesis, or regime_note entries, analyze the market — not our book. Position-specific analysis (strikes, PnL, Greeks, mark trajectories) belongs exclusively in suggestion entries.
+
 Evaluate:
 - Check strike distribution: are positions concentrated at one strike or diversified?
 - Check expiry distribution: rolling positions should maintain staggered expiries
@@ -208,9 +210,12 @@ When you form a notable conclusion, wrap it in a journal tag using ONE of these 
 IMPORTANT: Start every journal entry with a single bold TLDR line summarizing the key takeaway in plain language (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow the TLDR with the detailed analysis.
 
 Use the RIGHT type for each entry — don't default to observation for everything:
-- **observation**: Factual patterns you've identified (e.g., "liquidity outflows have preceded price drops by ~3h over the past week")
-- **hypothesis**: Testable predictions grounded in data (e.g., "sustained outflows suggest a reversal within 24-48h — will track")
-- **regime_note**: Market state assessments (e.g., "entering complacency regime — low IV, sustained upward momentum, cheap protection available")
+- **observation**: Factual patterns you've identified (e.g., "liquidity outflows have preceded price drops by ~3h over the past week"). MUST NOT reference your positions — observations are about the market, not our book.
+- **hypothesis**: Testable predictions grounded in data (e.g., "sustained outflows suggest a reversal within 24-48h — will track"). MUST NOT reference your positions.
+- **regime_note**: Market state assessments (e.g., "entering complacency regime — low IV, sustained upward momentum, cheap protection available"). MUST NOT reference your positions.
+- **suggestion**: The ONLY journal type that may reference positions, unrealized PnL, mark prices, or Greeks from the account section. Use for actionable trade recommendations.
+
+CRITICAL: Only \`suggestion\` entries may mention positions, trades, PnL, or account data. All other entry types (observation, hypothesis, regime_note) must focus exclusively on market data, not our positions.
 
 Ground everything in the data. The correlations tell you WHAT is related. Your journal tracks WHY you think it matters and WHAT you expect to happen. Spitznagel's framework is the lens: does this pattern affect the cost of protection, the probability of a crash, or the geometry of compounding?
 
