@@ -2416,17 +2416,17 @@ Analyze the provided snapshot across three time scales:
 
 **Recent trades:** The snapshot includes recent_orders — actual put buys and call sells executed by the bot. Reference these in your analysis: evaluate whether each trade's timing was good or bad given subsequent price action, whether the strike/delta chosen was appropriate, and whether the premium paid (puts) or collected (calls) represented fair value. This feedback helps calibrate future entries.
 
-**Current positions:** The snapshot includes current_positions — live open positions with mark price, unrealized P&L, greeks (theta, delta, vega), and entry price. Use these to assess whether any position should be closed, rolled, or held.
+**IMPORTANT — Position data is for SUGGESTION only:** The snapshot includes current_positions and account collaterals. These are ONLY for the SUGGESTION entry. The regime_note, hypothesis, and observation entries must focus EXCLUSIVELY on market conditions, price action, flows, and external signals — do NOT mention specific positions, P&L, greeks, or trading actions in those entries.
 
 Review your previous journal entries. Confirm patterns that held, revise those that didn't, and contradict past assessments when data warrants it.
 
 Output exactly 3 journal entries — one of each type, in this order:
 
-1. First, a REGIME NOTE classifying the current market state:
-<journal type="regime_note">Classify the current regime (complacency, fear, transition, etc.) and whether conditions favor accumulating or holding protection.</journal>
+1. First, a REGIME NOTE classifying the current market state (MARKET CONDITIONS ONLY — no positions or P&L):
+<journal type="regime_note">Classify the current regime (complacency, fear, transition, etc.) and whether conditions favor accumulating or holding protection. Focus on price action, momentum, flows, volatility, and market structure — NOT on any specific positions.</journal>
 
-2. Then, a HYPOTHESIS with a testable prediction:
-<journal type="hypothesis">State what you expect to happen next based on the data, with a specific timeframe and falsification condition (e.g., "if X doesn't happen within Y hours, this hypothesis is wrong").
+2. Then, a HYPOTHESIS with a testable prediction about MARKET CONDITIONS (not positions):
+<journal type="hypothesis">State what you expect to happen next based on market data, with a specific timeframe and falsification condition (e.g., "if X doesn't happen within Y hours, this hypothesis is wrong"). Predict market movements, not position outcomes.
 
 IMPORTANT: After your hypothesis prose, include a structured metadata block:
 <hypothesis_meta>{"target":"ETH spot","direction":"below|above|within_range","value":2000.00,"deadline":"2026-03-04T01:39:00Z","falsification":"If price doesn't breach $2000 within 18h"}</hypothesis_meta>
@@ -2440,8 +2440,8 @@ The metadata must have:
 
 Every hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity?</journal>
 
-3. Finally, an OBSERVATION documenting the most notable factual pattern:
-<journal type="observation">The single most important factual pattern in the current data.</journal>
+3. Finally, an OBSERVATION documenting the most notable factual pattern in MARKET DATA (not positions):
+<journal type="observation">The single most important factual pattern in the current market data — price action, flows, volatility, or structural signals. Do NOT discuss positions or P&L here.</journal>
 
 4. A SUGGESTION — either a specific, time-sensitive trade worth considering now, or an explicit "nothing to do" if no action is warranted.
 
