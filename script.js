@@ -2678,6 +2678,37 @@ const runBot = async () => {
         const nearOI = nearPutOI + nearCallOI;
         const farOI = farPutOI + farCallOI;
         console.log(`📊 OI: P/C ${pcRatio?.toFixed(3) || 'N/A'} | total ${totalOI.toFixed(0)} (${counted} instruments) | near ${nearOI.toFixed(0)} / far ${farOI.toFixed(0)}`);
+
+        // Snapshot ALL instruments for IV skew (not just trading candidates)
+        try {
+          const instrumentMap = {};
+          for (const inst of instruments) {
+            instrumentMap[inst.instrument_name] = inst;
+          }
+          const fullMarketOptions = [];
+          for (const [name, ticker] of Object.entries(oiTickerMap)) {
+            const inst = instrumentMap[name];
+            const enriched = enrichCandidateFromTicker(inst || { instrument_name: name, option_details: {} }, ticker, spotPrice);
+            if (enriched) {
+              // Fill option_details from instrument name if not available from instrument object
+              if (!enriched.option_details?.option_type) {
+                const parts = name.split('-');
+                enriched.option_details = {
+                  strike: parts[2] ? parseFloat(parts[2]) : null,
+                  expiry: null,
+                  option_type: name.endsWith('-P') ? 'P' : name.endsWith('-C') ? 'C' : null,
+                };
+              }
+              fullMarketOptions.push(enriched);
+            }
+          }
+          if (fullMarketOptions.length > 0) {
+            db.insertOptionsSnapshotBatch(fullMarketOptions, tickTimestamp);
+            console.log(`📊 Options snapshot: ${fullMarketOptions.length} instruments (full market)`);
+          }
+        } catch (e) {
+          console.log(`⚠️ Full-market options snapshot failed: ${e.message}`);
+        }
       } catch (e) {
         console.log(`⚠️ OI collection failed: ${e.message}`);
       }
@@ -2917,15 +2948,7 @@ const runBot = async () => {
       ? processedCallOptions.reduce((best, o) => (o.details?.bidDeltaValue || 0) > (best.details?.bidDeltaValue || 0) ? o : best)
       : null;
 
-    // SQLite: persist options snapshots
-    if (db) {
-      try {
-        const allOptions = [...(putOptionsWithDetails || []), ...(callOptionsWithDetails || [])];
-        if (allOptions.length > 0) {
-          db.insertOptionsSnapshotBatch(allOptions, tickTimestamp);
-        }
-      } catch (e) { console.log('DB: options snapshot write failed:', e.message); }
-    }
+    // Options snapshots now written in the OI collection block above (full market, not just candidates)
 
     console.log('='.repeat(60));
     console.log(' ');
