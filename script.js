@@ -1972,9 +1972,13 @@ const executePutBuyOrder = async (option, reason, spotPrice) => {
 
 // ─── Hypothesis Review Cycle ──────────────────────────────────────────────────
 
+let _reviewInFlight = false;
 const reviewExpiredHypotheses = async () => {
-  const pending = db.getPendingHypotheses(3); // max 3 per tick
-  if (pending.length === 0) return;
+  if (_reviewInFlight) return;
+  _reviewInFlight = true;
+  try {
+    const pending = db.getPendingHypotheses(3); // max 3 per tick
+    if (pending.length === 0) return;
 
   console.log(`🔍 Reviewing ${pending.length} expired hypothesis(es)...`);
 
@@ -2065,6 +2069,7 @@ Output ONLY this JSON:
       console.log(`📊 Hypothesis #${hyp.id} review failed:`, e.message);
     }
   }
+  } finally { _reviewInFlight = false; }
 };
 
 const extractHypothesisLessons = async () => {
@@ -3016,6 +3021,8 @@ const runBot = async () => {
         persistCycleState();
         generateJournalEntries(tickSummary, botData).then(() => {
           console.log('📓 Journal generation succeeded, next in 8h');
+          // Extract lessons after successful journal generation (not every tick)
+          return extractHypothesisLessons();
         }).catch(e => {
           // Roll back so it retries next tick
           botData.lastJournalGeneration = prevJournalTs;
@@ -3024,17 +3031,10 @@ const runBot = async () => {
         });
       }
 
-      // Review expired hypotheses each tick
+      // Review expired hypotheses each tick (max 3, guarded against overlap)
       if (process.env.ANTHROPIC_API_KEY) {
         reviewExpiredHypotheses().catch(e => {
           console.log('📊 Hypothesis review failed:', e.message);
-        });
-      }
-
-      // Extract lessons after hypothesis reviews
-      if (process.env.ANTHROPIC_API_KEY) {
-        extractHypothesisLessons().catch(e => {
-          console.log('🧠 Lesson extraction failed:', e.message);
         });
       }
     }
