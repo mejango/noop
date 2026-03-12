@@ -67,12 +67,10 @@ async function _buildUncached() {
 
   return {
     _meta: {
-      _description: 'Snapshot metadata. generated_at is ISO-8601 UTC.',
       generated_at: now.toISOString(),
     },
 
     price: {
-      _description: 'Latest ETH spot price and range data. price is USD. Highs/lows are rolling windows.',
       current: stats.last_price ?? null,
       last_updated: stats.last_price_time ?? null,
       three_day_high: stats.three_day_high ?? null,
@@ -82,7 +80,6 @@ async function _buildUncached() {
     },
 
     momentum: {
-      _description: 'Momentum indicators. main is "upward"|"downward"|"neutral". derivative indicates acceleration (+) or deceleration (-).',
       short: {
         main: stats.short_momentum ?? null,
         derivative: stats.short_derivative ?? null,
@@ -94,7 +91,7 @@ async function _buildUncached() {
     },
 
     budget: {
-      _description: 'Bot trading budget for the current cycle. All values in USD. cycleDays is the full cycle length (10d). daysLeft is time remaining. spent is cumulative this cycle.',
+      _description: 'Budget in USD. cycleDays=10d.',
       put: {
         total: budget.putTotalBudget,
         spent: budget.putSpent,
@@ -111,7 +108,7 @@ async function _buildUncached() {
     },
 
     options_market: {
-      _description: 'Best options scores over the measurement window. Higher delta-value = better risk/reward. distribution shows put/call aggregate stats from last 24h. avg_call_premium_7d is rolling 7d average call bid price. market_quality shows spread, IV, and depth for instruments within the bot delta range (0.02-0.12 abs delta).',
+      _description: 'market_quality covers instruments within 0.02-0.12 abs delta.',
       best_put_score: bestScores.bestPutScore,
       best_call_score: bestScores.bestCallScore,
       window_days: bestScores.windowDays,
@@ -150,7 +147,7 @@ async function _buildUncached() {
     },
 
     onchain_metrics: {
-      _description: 'On-chain data from last 24h. liquidity_flow_direction is "inflow"|"outflow"|"neutral", magnitude 0-1, confidence 0-1. pool_breakdown shows per-DEX liquidity from latest raw_data.',
+      _description: 'liquidity_flow_direction: inflow|outflow|neutral, magnitude/confidence 0-1.',
       data_points: onchain.length,
       latest: onchain.length > 0 ? onchain[0] : null,
       history: onchain,
@@ -186,13 +183,12 @@ async function _buildUncached() {
     },
 
     strategy_signals: {
-      _description: 'Strategy signals from last 7 days. signal_type describes the signal (e.g. "momentum_shift"). details is a JSON string with signal-specific data. acted_on=1 means the bot traded on this signal.',
+      _description: 'acted_on=1 means bot traded on signal.',
       count: signals.length,
       signals: signals,
     },
 
     bot_ticks: {
-      _description: 'Recent bot tick summaries (last 5). Each tick is a periodic evaluation cycle. summary contains JSON with the bot decision details.',
       count: ticks.length,
       latest_parsed: latestTickParsed,
       ticks: ticks,
@@ -207,7 +203,7 @@ async function _buildUncached() {
     })(),
 
     account: {
-      _description: 'Lyra/Derive account data. collaterals shows USDC and ETH balances. positions shows all open option positions with Greeks, mark values, and unrealized PnL.',
+      _description: 'Positions include Greeks and unrealized PnL.',
       collaterals: collaterals.map((c: Record<string, unknown>) => ({
         asset: c.asset_name,
         amount: Number(c.amount ?? 0),
@@ -267,7 +263,7 @@ async function _buildUncached() {
         }
 
         return {
-          _description: 'Market sentiment indicators. funding_rate from Binance perps (positive=longs pay shorts, negative=shorts pay longs). options_skew = avg put IV minus avg call IV in pct points (positive=fear/downside demand). aggregate_oi = total options open interest. These signals reveal leveraged positioning and market fear/greed.',
+          _description: 'funding_rate from Binance perps. options_skew = put IV - call IV in pct points. positive skew = downside fear.',
           funding_rate: {
             current: fundingLatest?.rate ?? null,
             avg_24h: fundingAvg,
