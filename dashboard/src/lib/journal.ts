@@ -27,11 +27,29 @@ function getWriteDb(): Database.Database {
   return db;
 }
 
+// Matches option instrument names (e.g. ETH-20260313-2200-C)
+const hasPositionRef = (s: string) => /ETH-\d{8}-\d+-[PC]/.test(s);
+
 export function insertJournalEntry(
   entryType: string,
   content: string,
   seriesReferenced: string[] | null
 ): void {
+  let sanitized = content;
+
+  // Non-suggestion entries must not contain position references.
+  // Strip sentences containing instrument names before storing.
+  if (entryType !== 'suggestion' && hasPositionRef(content)) {
+    sanitized = content
+      .split(/(?<=\.)\s+/)
+      .filter(sentence => !hasPositionRef(sentence))
+      .join(' ')
+      .trim();
+
+    // If stripping gutted the entry, skip storage entirely
+    if (!sanitized || sanitized.length < 20) return;
+  }
+
   const d = getWriteDb();
   d.prepare(`
     INSERT INTO ai_journal (timestamp, entry_type, content, series_referenced)
@@ -39,7 +57,7 @@ export function insertJournalEntry(
   `).run(
     new Date().toISOString(),
     entryType,
-    content,
+    sanitized,
     seriesReferenced ? JSON.stringify(seriesReferenced) : null
   );
 }
