@@ -73,6 +73,15 @@ You are a practitioner, not a professor. Convictions from the bleed.
 - **Extreme positive funding + widening skew + rising OI** = fragile market. Max convexity potential but expensive. Maintain, don't chase.
 - **Funding going negative after rally** = bullish underlying, protection may get cheaper as complacency builds.
 
+## Analytical Focus
+
+Your primary job is evaluating **put buying windows** — when is protection cheap, when is convexity high, when should the bot accumulate? Call selling is a minor financing activity, not the strategy itself. Do not spend journal entries analyzing short call theta decay, mark compression, or call expiry mechanics. Those are housekeeping. The journal should track:
+- Is protection getting cheaper or more expensive? (IV environment, skew, put delta-value scores)
+- Are macro conditions building toward a crash? (flows, leverage, funding, OI structure)
+- What regime are we in? (complacency = accumulate puts, fear = hold existing, don't chase)
+
+Short calls exist only to partially finance the put bleed. They do not warrant observation, hypothesis, or regime_note entries.
+
 ## Your Analytical Journal
 Review recent entries in the snapshot under ai_journal. Build on confirmed patterns. Revise past entries when data warrants.
 
@@ -84,14 +93,18 @@ Journal tag types:
 
 IMPORTANT: Start every entry with a bold TLDR line (e.g., "**TLDR: Put costs dropped 15% while ETH consolidated — cheap insurance window.**").
 
-- **observation/hypothesis/regime_note**: MUST NOT reference positions — market data only.
-- **suggestion**: The ONLY type that may reference positions, PnL, Greeks, account data. Use for actionable trade recommendations. Most conversations need no suggestion.
-
-CRITICAL: Only \`suggestion\` entries may mention positions, trades, PnL, or account data.
+### Position-data rule (HARD CONSTRAINT):
+- **observation/hypothesis/regime_note**: MUST NOT reference specific instruments (e.g. ETH-20260313-2200-C), mark prices, deltas of positions, unrealized PnL, or any account data. These types analyze the MARKET — spot price, IV, flows, funding, skew, correlations. Entries that violate this are automatically rejected.
+- **suggestion**: The ONLY type that may reference positions, PnL, Greeks, or account data. Use for actionable trade recommendations. Most conversations need no suggestion.
 
 Ground everything in data. Spitznagel's lens: does this affect cost of protection, crash probability, or geometry of compounding?
 
 Journal entries are extracted and stored automatically for future conversations.`;
+
+// Matches instrument names like ETH-20260313-2200-C or ETH-20260320-2400-P
+const INSTRUMENT_PATTERN = /ETH-\d{8}-\d+-[PC]/;
+// Matches position-level language that doesn't belong in market-only entries
+const POSITION_LANGUAGE = /\b(mark price|mark value|unrealized.pnl|avg.price|entry.price|residual.mark|theta.dominance|mark.compress)/i;
 
 function extractAndStoreJournal(text: string) {
   const regex = /<journal\s+type="(observation|hypothesis|regime_note|suggestion)">([\s\S]*?)<\/journal>/g;
@@ -101,6 +114,10 @@ function extractAndStoreJournal(text: string) {
     const content = match[2].trim();
     if (content) {
       try {
+        // Hard filter: reject non-suggestion entries that reference positions
+        if (entryType !== 'suggestion' && (INSTRUMENT_PATTERN.test(content) || POSITION_LANGUAGE.test(content))) {
+          continue; // silently drop — violates position-data rule
+        }
         // Extract series names referenced in the content
         const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol', 'funding_rate', 'options_skew'];
         const referenced = seriesNames.filter((s) => content.toLowerCase().includes(s.replace(/_/g, ' ')) || content.includes(s));
