@@ -3010,11 +3010,16 @@ const runBot = async () => {
 
       // Auto-generate journal entries every 8 hours
       if (tickSummary && Date.now() - botData.lastJournalGeneration >= JOURNAL_INTERVAL_MS && process.env.ANTHROPIC_API_KEY) {
+        // Set timestamp immediately to prevent overlapping ticks from re-triggering
+        const prevJournalTs = botData.lastJournalGeneration;
+        botData.lastJournalGeneration = Date.now();
+        persistCycleState();
         generateJournalEntries(tickSummary, botData).then(() => {
-          botData.lastJournalGeneration = Date.now();
-          persistCycleState();
           console.log('📓 Journal generation succeeded, next in 8h');
         }).catch(e => {
+          // Roll back so it retries next tick
+          botData.lastJournalGeneration = prevJournalTs;
+          persistCycleState();
           console.log('📓 Journal generation failed (will retry next tick):', e.message);
         });
       }
