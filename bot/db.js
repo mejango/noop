@@ -905,6 +905,8 @@ const insertOISnapshot = (data) => {
     total_oi: data.total_oi || 0,
     pc_ratio: data.pc_ratio || null,
     expiry_count: data.expiry_count || 0,
+    avg_put_iv: data.avg_put_iv ?? null,
+    avg_call_iv: data.avg_call_iv ?? null,
   });
 };
 
