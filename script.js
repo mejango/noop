@@ -2025,17 +2025,19 @@ Total P&L attribution: $${totalPnl.toFixed(4)}
 
 ## Scoring Instructions
 
-Score this hypothesis using Spitznagel-aligned categories. The goal is NOT prediction accuracy — it's whether the hypothesis identified an asymmetric opportunity.
+Score this hypothesis using Spitznagel-aligned categories. The goal is NOT prediction accuracy — it's whether the hypothesis identified a genuine mispricing in protection cost and whether acting on it would have been asymmetric.
 
 Categories:
-- confirmed_convex: Prediction correct AND position/opportunity was asymmetric (bounded downside, convex upside)
-- confirmed_linear: Prediction correct but the risk profile was symmetric
-- disproven_bounded: Prediction wrong BUT loss was small/bounded — the strategy worked as intended
-- disproven_costly: Prediction wrong AND the position was expensive (overpaid for insurance)
+- confirmed_convex: Hypothesis identified a genuine mispricing in protection cost, and acting on it would have been asymmetric (bought cheap insurance before it got expensive)
+- confirmed_linear: Hypothesis was directionally right but didn't identify convexity — the opportunity was symmetric, not asymmetric
+- disproven_bounded: Hypothesis was wrong but the implied action (buying cheap puts) had bounded cost — THIS IS FINE, this IS the strategy. Cheap insurance that expires worthless is the expected outcome.
+- disproven_costly: Hypothesis led to buying expensive protection (chasing high IV) or missing a cheaper window — overpaid for insurance
 - partially_confirmed: Direction right but timing/magnitude was off
 
+IMPORTANT: Most hypotheses SHOULD be disproven_bounded. That means the insurance was cheap and the bleed was small. A high disproven_bounded rate is GOOD — it means the bot is buying cheap protection consistently.
+
 Output ONLY this JSON:
-{"status":"<category>","confidence":<0-1>,"verdict":"<2-3 sentence explanation focusing on the risk profile, not just whether the price moved correctly>"}`;
+{"status":"<category>","confidence":<0-1>,"verdict":"<2-3 sentence explanation focusing on whether protection was cheap/expensive and the bleed cost, not just whether the price moved correctly>"}`;
 
       const response = await axios.post('https://api.anthropic.com/v1/messages', {
         model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
@@ -2093,10 +2095,10 @@ ${currentLessons.length > 0 ? currentLessons.map(l => `- ${l.lesson} (evidence: 
 Analyze the pattern of outcomes. Key metric: convex posture rate = (confirmed_convex + disproven_bounded) / total.
 
 Extract 3-5 actionable lessons about:
-1. Which types of hypotheses produce the best risk profiles (high convex posture)
-2. Which types to avoid (high disproven_costly rate)
-3. What data signals are most predictive
-4. Timing patterns (are shorter or longer windows better?)
+1. Which conditions reliably produce cheap protection windows (low IV, compressed skew, stable price)?
+2. Which signals preceded put price spikes (meaning we should have bought before)?
+3. What's the average bleed rate on disproven_bounded hypotheses (lower = better insurance buying)?
+4. Which hypothesis types to avoid (high disproven_costly rate — chasing expensive protection)
 
 For each existing lesson, say whether it still holds or should be archived.
 
@@ -2405,7 +2407,7 @@ ${recentVerdicts.map(v => `#${v.id} [${v.outcome_status}]: ${v.outcome_verdict |
 
 ${lessons.length > 0 ? `Active lessons:\n${lessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}` : ''}
 
-IMPORTANT: Double down on hypothesis types with high convex posture rates. Avoid types with high costly miss rates. Each hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity?`;
+IMPORTANT: A high disproven_bounded rate means the bot is buying cheap insurance that expires worthless — that IS the strategy working. Focus on reducing disproven_costly rate (buying expensive protection), not on increasing prediction accuracy. The best hypothesis identifies when protection is cheap, not where price goes. Each hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity?`;
       }
     } catch (e) {
       console.log('📓 Failed to build hypothesis performance summary:', e.message);
@@ -2440,40 +2442,43 @@ Review your previous journal entries. Confirm patterns that held, revise those t
 Output exactly 3 journal entries — one of each type, in this order:
 
 1. First, a REGIME NOTE classifying the current market state (MARKET CONDITIONS ONLY — no positions or P&L):
-<journal type="regime_note">Classify the current regime (complacency, fear, transition, etc.) and whether conditions favor accumulating or holding protection. Focus on price action, momentum, flows, volatility, and market structure — NOT on any specific positions.</journal>
+<journal type="regime_note">How cheap is protection right now relative to the tail risk it covers? Classify the current regime (complacency, fear, transition, etc.) and assess protection pricing. During complacency, the answer is almost always "accumulate" — puts are cheap precisely when nobody wants them. Focus on IV levels, put skew, term structure, and realized vs implied vol — NOT on any specific positions.</journal>
 
-2. Then, a HYPOTHESIS with a testable prediction about MARKET CONDITIONS (not positions):
-<journal type="hypothesis">State what you expect to happen next based on market data, with a specific timeframe and falsification condition (e.g., "if X doesn't happen within Y hours, this hypothesis is wrong"). Predict market movements, not position outcomes.
+2. Then, a HYPOTHESIS about PROTECTION PRICING CONDITIONS (not price predictions):
+<journal type="hypothesis">Identify when protection is mispriced — when puts are cheap or expensive relative to the tail risk they cover. Frame hypotheses around protection cost trajectories, not where price goes. Example: "Put skew is compressing while realized vol picks up — protection will get more expensive within 24h, making now a cheap window."
 
 IMPORTANT: After your hypothesis prose, include a structured metadata block:
-<hypothesis_meta>{"target":"ETH spot","direction":"below|above|within_range","value":2000.00,"deadline":"2026-03-04T01:39:00Z","falsification":"If price doesn't breach $2000 within 18h"}</hypothesis_meta>
+<hypothesis_meta>{"target":"put cost","direction":"cheaper|expensive|above|below","value":0.15,"deadline":"2026-03-04T01:39:00Z","falsification":"If 30-day put IV doesn't rise above 60% within 24h"}</hypothesis_meta>
 
 The metadata must have:
-- target: what you're predicting about (e.g. "ETH spot", "put cost", "liquidity flow")
-- direction: "above", "below", or "within_range"
+- target: what you're assessing (e.g. "put cost", "put skew", "IV term structure", "ETH spot")
+- direction: "cheaper", "expensive", "above", or "below" — prefer protection-cost directions over price directions
 - value: the numeric threshold
 - deadline: ISO timestamp for when to check
 - falsification: plain text summary of what would disprove it
 
-Every hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity?</journal>
+Every hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity? The best hypothesis identifies when protection is cheap, not where price goes.</journal>
 
 3. Finally, an OBSERVATION documenting the most notable factual pattern in MARKET DATA (not positions):
 <journal type="observation">The single most important factual pattern in the current market data — price action, flows, volatility, or structural signals. Do NOT discuss positions or P&L here.</journal>
 
 4. A SUGGESTION — either a specific, time-sensitive trade worth considering now, or an explicit "nothing to do" if no action is warranted.
 
-**You MUST evaluate current_positions first.** For each held position, assess:
-   - Is theta decay eating into value? Should we roll to a later expiry?
-   - Has the position gained value from a crash? Should we sell to lock in gains before mean reversion?
-   - Is the position approaching expiry with little time value left?
+**You MUST evaluate current_positions as insurance coverage first.** For each held position, assess:
+   - Is our downside protection sufficient for current tail risk levels?
+   - Should we roll to maintain coverage at a later expiry (not "sell to lock in gains")?
+   - Is the bleed rate (theta decay) acceptable relative to portfolio value being protected?
+   - Is the position approaching expiry and needs to be rolled to maintain continuous coverage?
+
+The bleed is the strategy. Never recommend closing protection just because it became profitable — a profitable put means the insurance is working. Only close to roll into better coverage.
 
 Then consider new trades (PUT BUYING is the priority):
    - Cheap convexity window (low IV + stable price → buy puts) — THIS IS THE MAIN JOB
    - Premium harvest opportunity (sell calls in high IV, low breach risk) — secondary, financing only
 
-If no action is warranted, say so explicitly — but still reference each held position and why holding is correct.
+If no action is warranted, say so explicitly — but still reference each held position and why maintaining coverage is correct.
 
-<journal type="suggestion">Evaluate every held position by name. Then recommend action or explain why doing nothing is right.</journal>
+<journal type="suggestion">Evaluate every held position as insurance coverage. Then recommend action or explain why maintaining current coverage is right.</journal>
 
 IMPORTANT: Start every journal entry with a single bold TLDR line (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow with detailed analysis. Keep each entry under 300 words — be dense and precise, not verbose. All 3 entries must fit within the response.
 
