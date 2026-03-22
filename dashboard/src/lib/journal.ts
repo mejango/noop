@@ -37,9 +37,9 @@ export function insertJournalEntry(
 ): void {
   let sanitized = content;
 
-  // Non-suggestion entries must not contain position references.
+  // Entries must not contain position references.
   // Strip sentences containing instrument names before storing.
-  if (entryType !== 'suggestion' && hasPositionRef(content)) {
+  if (hasPositionRef(content)) {
     sanitized = content
       .split(/(?<=\.)\s+/)
       .filter(sentence => !hasPositionRef(sentence))

@@ -2417,7 +2417,7 @@ IMPORTANT: A high disproven_bounded rate means the bot is buying cheap insurance
 
 **STRATEGIC FOCUS — PUT BUYING IS THE MISSION:** Your primary analytical job is evaluating OTM PUT BUYING WINDOWS — when is protection cheap, when is convexity high, when should the bot accumulate puts? Call selling is a minor financing activity that exists only to offset put bleed. It is NOT the strategy itself.
 
-DO NOT spend observation, hypothesis, or regime_note entries analyzing short call theta decay, call mark compression, call expiry mechanics, call delta risk, or premium harvest optimization. Call position management may ONLY appear in the suggestion entry — never in observation, hypothesis, or regime_note.
+DO NOT spend observation, hypothesis, or regime_note entries analyzing short call theta decay, call mark compression, call expiry mechanics, call delta risk, or premium harvest optimization.
 
 The journal (observation, hypothesis, regime_note) should track:
 - Is OTM put protection getting cheaper or more expensive? (IV environment, skew, put delta-value scores)
@@ -2435,11 +2435,11 @@ Analyze the provided snapshot across three time scales:
 
 **Recent trades:** The snapshot includes recent_orders — actual put buys and call sells executed by the bot. Prioritize evaluating PUT trades: was the timing good, was the strike/delta appropriate, did we get good value on protection? Call sell evaluation is secondary — only note if premium collected was notably good or bad.
 
-**IMPORTANT — Position data is for SUGGESTION only:** The snapshot includes current_positions and account collaterals. These are ONLY for the SUGGESTION entry. The regime_note, hypothesis, and observation entries must focus EXCLUSIVELY on market conditions, price action, flows, and external signals — do NOT mention specific positions, P&L, greeks, or trading actions in those entries.
+**IMPORTANT — No position data in journal entries:** The regime_note, hypothesis, and observation entries must focus EXCLUSIVELY on market conditions, price action, flows, and external signals — do NOT mention specific positions, P&L, greeks, or trading actions in journal entries.
 
 Review your previous journal entries. Confirm patterns that held, revise those that didn't, and contradict past assessments when data warrants it.
 
-Output exactly 3 journal entries — one of each type, in this order:
+Output exactly 3 journal entries — one of each type, in this order (do NOT include a suggestion entry):
 
 1. First, a REGIME NOTE classifying the current market state (MARKET CONDITIONS ONLY — no positions or P&L):
 <journal type="regime_note">How cheap is protection right now relative to the tail risk it covers? Classify the current regime (complacency, fear, transition, etc.) and assess protection pricing. During complacency, the answer is almost always "accumulate" — puts are cheap precisely when nobody wants them. Focus on IV levels, put skew, term structure, and realized vs implied vol — NOT on any specific positions.</journal>
@@ -2462,24 +2462,6 @@ Every hypothesis MUST identify what makes the opportunity asymmetric — why is 
 3. Finally, an OBSERVATION documenting the most notable factual pattern in MARKET DATA (not positions):
 <journal type="observation">The single most important factual pattern in the current market data — price action, flows, volatility, or structural signals. Do NOT discuss positions or P&L here.</journal>
 
-4. A SUGGESTION — either a specific, time-sensitive trade worth considering now, or an explicit "nothing to do" if no action is warranted.
-
-**You MUST evaluate current_positions as insurance coverage first.** For each held position, assess:
-   - Is our downside protection sufficient for current tail risk levels?
-   - Should we roll to maintain coverage at a later expiry (not "sell to lock in gains")?
-   - Is the bleed rate (theta decay) acceptable relative to portfolio value being protected?
-   - Is the position approaching expiry and needs to be rolled to maintain continuous coverage?
-
-The bleed is the strategy. Never recommend closing protection just because it became profitable — a profitable put means the insurance is working. Only close to roll into better coverage.
-
-Then consider new trades (PUT BUYING is the priority):
-   - Cheap convexity window (low IV + stable price → buy puts) — THIS IS THE MAIN JOB
-   - Premium harvest opportunity (sell calls in high IV, low breach risk) — secondary, financing only
-
-If no action is warranted, say so explicitly — but still reference each held position and why maintaining coverage is correct.
-
-<journal type="suggestion">Evaluate every held position as insurance coverage. Then recommend action or explain why maintaining current coverage is right.</journal>
-
 IMPORTANT: Start every journal entry with a single bold TLDR line (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow with detailed analysis. Keep each entry under 300 words — be dense and precise, not verbose. All 3 entries must fit within the response.
 
 ## Put Value / Price Divergence
@@ -2491,7 +2473,7 @@ This is critical for the Spitznagel strategy: we want to buy puts when they're C
 
 Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).${hypothesisPerformance}`;
 
-    const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite exactly 4 journal entries: one regime_note, one hypothesis, one observation, one suggestion. Use the <journal type="..."> tags.`;
+    const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite exactly 3 journal entries: one regime_note, one hypothesis, one observation. Use the <journal type="..."> tags. Do NOT write a suggestion entry.`;
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
@@ -2510,7 +2492,7 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
     const text = response.data?.content?.[0]?.text || '';
 
     // Extract journal entries
-    const regex = /<journal\s+type="(observation|hypothesis|regime_note|suggestion)">([\s\S]*?)<\/journal>/g;
+    const regex = /<journal\s+type="(observation|hypothesis|regime_note)">([\s\S]*?)<\/journal>/g;
     const metaRegex = /<hypothesis_meta>([\s\S]*?)<\/hypothesis_meta>/;
     const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol'];
     let match;

@@ -286,14 +286,14 @@ async function _buildUncached() {
     })(),
 
     ai_journal: {
-      _description: 'AI analytical journal. Persistent observations and hypotheses from past conversations. IMPORTANT: Only suggestion entries should reference positions. If older observation/hypothesis/regime_note entries mention positions, that was a bug — do NOT continue that pattern.',
+      _description: 'AI analytical journal. Persistent observations and hypotheses from past conversations. No entries should reference positions — they analyze the MARKET only.',
       recent_entries: (() => {
         const entries = getJournalEntries(since30d, 20) as { id: number; entry_type: string; content: string; [k: string]: unknown }[];
-        // Redact position references from non-suggestion entries to prevent feedback loops
+        // Redact position references to prevent feedback loops
         const positionPattern = /ETH-\d{8}-\d+-[PC]/;
         return entries.map(e => {
-          if (e.entry_type !== 'suggestion' && positionPattern.test(e.content)) {
-            return { ...e, content: '[redacted — contained position data that should only appear in suggestion entries]' };
+          if (positionPattern.test(e.content)) {
+            return { ...e, content: '[redacted — contained position data]' };
           }
           return e;
         });

@@ -89,13 +89,11 @@ Journal tag types:
 <journal type="observation">Factual pattern you identified</journal>
 <journal type="hypothesis">Testable prediction grounded in data</journal>
 <journal type="regime_note">Market state assessment</journal>
-<journal type="suggestion">Specific actionable trade recommendation</journal>
 
 IMPORTANT: Start every entry with a bold TLDR line (e.g., "**TLDR: Put costs dropped 15% while ETH consolidated — cheap insurance window.**").
 
 ### Position-data rule (HARD CONSTRAINT):
-- **observation/hypothesis/regime_note**: MUST NOT reference specific instruments (e.g. ETH-20260313-2200-C), mark prices, deltas of positions, unrealized PnL, or any account data. These types analyze the MARKET — spot price, IV, flows, funding, skew, correlations. Entries that violate this are automatically rejected.
-- **suggestion**: The ONLY type that may reference positions, PnL, Greeks, or account data. Use for actionable trade recommendations. Most conversations need no suggestion.
+- Journal entries MUST NOT reference specific instruments (e.g. ETH-20260313-2200-C), mark prices, deltas of positions, unrealized PnL, or any account data. They analyze the MARKET — spot price, IV, flows, funding, skew, correlations. Entries that violate this are automatically rejected.
 
 Ground everything in data. Spitznagel's lens: does this affect cost of protection, crash probability, or geometry of compounding?
 
@@ -107,15 +105,15 @@ const INSTRUMENT_PATTERN = /ETH-\d{8}-\d+-[PC]/;
 const POSITION_LANGUAGE = /\b(mark price|mark value|unrealized.pnl|avg.price|entry.price|residual.mark|theta.dominance|mark.compress)/i;
 
 function extractAndStoreJournal(text: string) {
-  const regex = /<journal\s+type="(observation|hypothesis|regime_note|suggestion)">([\s\S]*?)<\/journal>/g;
+  const regex = /<journal\s+type="(observation|hypothesis|regime_note)">([\s\S]*?)<\/journal>/g;
   let match;
   while ((match = regex.exec(text)) !== null) {
     const entryType = match[1];
     const content = match[2].trim();
     if (content) {
       try {
-        // Hard filter: reject non-suggestion entries that reference positions
-        if (entryType !== 'suggestion' && (INSTRUMENT_PATTERN.test(content) || POSITION_LANGUAGE.test(content))) {
+        // Hard filter: reject entries that reference positions
+        if (INSTRUMENT_PATTERN.test(content) || POSITION_LANGUAGE.test(content)) {
           continue; // silently drop — violates position-data rule
         }
         // Extract series names referenced in the content
