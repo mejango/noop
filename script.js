@@ -64,12 +64,12 @@
  *     – 2 min: accelerated (short-term downward only)
  *     – 5 min: normal
  *
- * Budgeting & Risk:
- * -----------------
- *   • Separate budgets for puts ($1200) and calls ($1200)
- *   • Budgets tracked by actual filled amounts from order responses
- *   • Buyback/sellback updates subtract/add correctly from committed budget
- *   • Sizing capped by budget and book liquidity; amount quantized to venue step
+ * Sizing & Risk:
+ * --------------
+ *   • ETH-collateralized: puts bought on leverage, long puts offset ETH in margin engine
+ *   • Put buying has arithmetic budget discipline (3.33% of portfolio/yr in 15d cycles)
+ *   • Margin state (initial/maintenance/liquidation) fetched from Derive's get_subaccount API
+ *   • Sizing capped by both margin health AND put budget discipline; amount quantized to venue step
  *
  * Execution:
  * ----------
@@ -125,6 +125,7 @@ const API_URL = {
   GET_OPEN_ORDERS: 'https://api.lyra.finance/private/get_open_orders',
   CANCEL_ORDER: 'https://api.lyra.finance/private/cancel',
   GET_ORDER: 'https://api.lyra.finance/private/get_order',
+  GET_SUBACCOUNT: 'https://api.lyra.finance/private/get_subaccount',
 }
 
 // CoinGecko API for spot price
@@ -146,10 +147,13 @@ const DOMAIN_SEPARATOR = '0xd96e5f90797da7ec8dc4e276260c7f3f87fedf68775fbe1ef116
 
 // Common trading parameters (single source of truth: bot/config.json)
 const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'config.json'), 'utf-8'));
-const PUT_BUYING_BASE_FUNDING_LIMIT = process.env.DRY_RUN === '1'
-  ? Number(process.env.DRY_RUN_PUT_BUDGET || 2000)
-  : BOT_CONFIG.PUT_BUYING_BASE_FUNDING_LIMIT;
-// Call selling has no fixed budget — sized by ETH collateral + risk-adjusted leverage
+// Arithmetic discipline: spend 3.33% of portfolio value per year on puts,
+// allocated in PERIOD_DAYS windows. Budget recalculated at each cycle start.
+// Formula: portfolioValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
+const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
+// Call exposure discipline: never exceed 40% of ETH holdings in short calls.
+// This is a hard cap — enforced in monitoring before queuing sell_call actions.
+const CALL_EXPOSURE_CAP_PCT = BOT_CONFIG.CALL_EXPOSURE_CAP_PCT || 0.40;
 const SUBACCOUNT_ID = 25923;
 
 // ETH contract addresses for analysis
@@ -204,19 +208,17 @@ let botData = {
     shortTermMomentum: { main: 'neutral', derivative: null },
     lastSpotPrice: null,
     lastSpotPriceTimestamp: null,
-    
-    // Put strategy data
-    putCycleStart: null,
-    putNetBought: 0,
-    putUnspentBuyLimit: 0,
 
-    // Call strategy data
-    callCycleStart: null,
-    callNetSold: 0,
-    callUnspentSellLimit: 0,
+    // Account balance (refreshed each tick for call exposure cap)
+    ethBalance: 0,
+
+    // Put budget discipline (arithmetic cost commitment per cycle)
+    putCycleStart: null,
+    putBudgetForCycle: 0,      // USD budget for current cycle (set dynamically at cycle start)
+    putNetBought: 0,           // USD spent on puts this cycle
+    putUnspentBuyLimit: 0,     // rollover from previous cycles
 
     // Timing (persisted to survive restarts)
-    lastCheck: 0,
     lastJournalGeneration: 0,
 
     // Advisory tracking
@@ -241,6 +243,34 @@ const persistCycleState = () => {
   if (!db) return;
   try { db.saveBotState(botData); }
   catch (e) { console.error('Failed to persist cycle state:', e.message); }
+};
+
+// Recalculate put budget at cycle boundaries.
+// Budget = portfolioValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
+// Called each tick — resets cycle when PERIOD elapses.
+const maybeResetPutCycle = (portfolioValue) => {
+  const now = Date.now();
+  const cycleExpired = botData.putCycleStart && (now - botData.putCycleStart) >= PERIOD;
+  const noCycle = !botData.putCycleStart;
+
+  if (noCycle || cycleExpired) {
+    // Roll over unspent budget from previous cycle
+    if (cycleExpired) {
+      const prevRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
+      botData.putUnspentBuyLimit = prevRemaining;
+    }
+
+    // Calculate new cycle budget from current portfolio value
+    const cyclesPerYear = 365 / BOT_CONFIG.PERIOD_DAYS;
+    const newBudget = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
+
+    botData.putCycleStart = now;
+    botData.putBudgetForCycle = newBudget;
+    botData.putNetBought = 0;
+    persistCycleState();
+
+    console.log(`📋 Put cycle ${noCycle ? 'started' : 'reset'}: $${newBudget.toFixed(2)} budget (${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of $${portfolioValue.toFixed(0)} / ${cyclesPerYear.toFixed(1)} cycles/yr)${botData.putUnspentBuyLimit > 0 ? ` + $${botData.putUnspentBuyLimit.toFixed(2)} rollover` : ''}`);
+  }
 };
 
 const getAmountStep = (opt) =>
@@ -295,11 +325,11 @@ const loadData = () => {
       botData.putCycleStart = state.put_cycle_start;
       botData.putNetBought = state.put_net_bought;
       botData.putUnspentBuyLimit = state.put_unspent_buy_limit;
-      botData.callCycleStart = state.call_cycle_start;
-      botData.callNetSold = state.call_net_sold;
-      botData.callUnspentSellLimit = state.call_unspent_sell_limit;
+      botData.putBudgetForCycle = state.put_budget_for_cycle || 0;
       botData.lastCheck = state.last_check || 0;
       botData.lastJournalGeneration = state.last_journal_generation || 0;
+      botData.lastAdvisorySpotPrice = state.last_advisory_spot_price || null;
+      botData.lastAdvisoryTimestamp = state.last_advisory_timestamp || 0;
       console.log(`✅ Loaded cycle state from SQLite`);
     }
   } catch (e) {
@@ -1518,6 +1548,40 @@ const fetchCollaterals = async () => {
   }
 };
 
+// Fetch subaccount margin state from Derive (leverage, margin, liquidation)
+const fetchSubaccount = async () => {
+  try {
+    const wallet = createWallet();
+    const timestamp = Date.now();
+    const signature = await signMessage(wallet, timestamp);
+    const response = await axios.post(API_URL.GET_SUBACCOUNT, {
+      subaccount_id: SUBACCOUNT_ID,
+    }, {
+      headers: {
+        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(),
+        'X-LyraSignature': signature,
+      },
+      timeout: 10000,
+    });
+    const r = response.data?.result;
+    return {
+      initial_margin: Number(r?.initial_margin ?? 0),
+      maintenance_margin: Number(r?.maintenance_margin ?? 0),
+      subaccount_value: Number(r?.subaccount_value ?? 0),
+      positions_value: Number(r?.positions_value ?? 0),
+      collaterals_value: Number(r?.collaterals_value ?? 0),
+      collaterals_initial_margin: Number(r?.collaterals_initial_margin ?? 0),
+      collaterals_maintenance_margin: Number(r?.collaterals_maintenance_margin ?? 0),
+      open_orders_margin: Number(r?.open_orders_margin ?? 0),
+      is_under_liquidation: r?.is_under_liquidation || false,
+    };
+  } catch (e) {
+    console.log('📋 Failed to fetch subaccount:', e.message);
+    return null;
+  }
+};
+
 // Fetch all instruments once and filter for both strategies
 const fetchAndFilterInstruments = async (spotPrice) => {
   try {
@@ -2287,18 +2351,7 @@ const generateJournalEntries = async (tickSummary, botData) => {
         medium_momentum: p.medium_momentum_main || null,
         short_momentum: p.short_momentum_main || null,
       })),
-      budget: (() => {
-        const now = Date.now();
-        const putDaysLeft = botData.putCycleStart ? Math.max(0, (PERIOD - (now - botData.putCycleStart)) / (1000 * 60 * 60 * 24)) : BOT_CONFIG.PERIOD_DAYS;
-        return {
-          cycleDays: BOT_CONFIG.PERIOD_DAYS,
-          putTotal: PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit,
-          putSpent: botData.putNetBought,
-          putRemaining: Math.max(0, PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought),
-          putDaysLeft: +putDaysLeft.toFixed(1),
-          callSizing: 'collateral-based (no fixed budget)',
-        };
-      })(),
+      sizing_note: 'All position sizing is margin-aware — advisory sets budget_limit per rule based on account margin health',
       previous_journal: previousJournal,
       signals_7d: recentSignals.map(s => ({
         timestamp: s.timestamp,
@@ -2709,9 +2762,22 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
           if (elapsed < 3600000) continue; // 1 hour cooldown
         }
 
-        // Budget check (puts only — calls are collateral-sized by advisory)
-        const putRemaining = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
-        if (rule.action === 'buy_put' && putRemaining <= 10) continue;
+        // Put budget discipline: skip if cycle budget exhausted
+        if (rule.action === 'buy_put' && botData.putBudgetForCycle > 0) {
+          const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
+          if (putRemaining <= 10) continue;
+        }
+
+        // Call exposure cap: skip if short call exposure >= 40% of ETH holdings
+        if (rule.action === 'sell_call' && botData.ethBalance > 0) {
+          const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
+          const currentExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
+          const maxExposure = CALL_EXPOSURE_CAP_PCT * botData.ethBalance;
+          if (currentExposure >= maxExposure) {
+            console.log(`📋 Call cap reached: ${currentExposure.toFixed(2)} >= ${maxExposure.toFixed(2)} (${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ${botData.ethBalance.toFixed(2)} ETH)`);
+            continue;
+          }
+        }
 
         // Dedup: skip if already pending or confirmed
         if (db.hasPendingActionForRule(rule.id)) continue;
@@ -2817,16 +2883,26 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
           continue;
         }
 
-        // Calculate amount based on budget (puts) or rule limit (calls) and book liquidity
+        // Calculate amount: min of rule budget_limit, put cycle budget remaining, and book liquidity
         const price = optionType === 'P' ? best.askPrice : best.bidPrice;
         if (price <= 0) continue;
 
-        const maxBudget = rule.action === 'buy_put'
-          ? putRemaining / price
-          : (rule.budget_limit || Infinity) / price;
+        let maxByBudget = (rule.budget_limit || Infinity) / price;
+        // For puts: also cap by cycle budget discipline
+        if (rule.action === 'buy_put' && botData.putBudgetForCycle > 0) {
+          const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
+          maxByBudget = Math.min(maxByBudget, putRemaining / price);
+        }
+        // For calls: cap by remaining exposure headroom (40% of ETH - current short calls)
+        if (rule.action === 'sell_call' && botData.ethBalance > 0) {
+          const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
+          const currentExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
+          const callHeadroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * botData.ethBalance - currentExposure);
+          maxByBudget = Math.min(maxByBudget, callHeadroom);
+        }
         const bookLiq = optionType === 'P' ? best.askAmount : best.bidAmount;
         const step = best.amountStep || 0.01;
-        const raw = Math.min(maxBudget, bookLiq, 20);
+        const raw = Math.min(maxByBudget, bookLiq, 20);
         const qty = Math.floor(raw / step) * step;
         if (qty < step) continue;
 
@@ -2902,7 +2978,7 @@ const manageOpenOrders = async (tickerMap) => {
 
         const fillValue = filledAmt * fillPrice;
 
-        // Only account for budget if something was actually filled
+        // Track put budget discipline on fill
         if (filledAmt > 0) {
           const isPut = tracked.instrument_name?.endsWith('-P');
           if (isPut && tracked.direction === 'buy') botData.putNetBought += fillValue;
@@ -2962,17 +3038,6 @@ const manageOpenOrders = async (tickerMap) => {
       console.log(`🗑️ Cancelling ${order.instrument_name} order ${order.order_id}: ${reason}`);
       const result = await cancelOrder(order.order_id, order.instrument_name);
 
-      // If cancelled order had partial fills, account for budget
-      if (result && filled > 0) {
-        const avgPx = Number(order.average_price || order.limit_price || 0);
-        const fillValue = filled * avgPx;
-        const isPut = order.instrument_name?.endsWith('-P');
-        if (isPut && order.direction === 'buy') botData.putNetBought += fillValue;
-        else if (isPut && order.direction === 'sell') botData.putNetBought -= fillValue;
-        persistCycleState();
-        console.log(`📋 Accounted partial fill: $${fillValue.toFixed(2)} for cancelled ${order.instrument_name}`);
-      }
-
       // Update our tracking table
       db.updateRestingOrder(order.order_id, 'cancelled', filled);
     }
@@ -2982,12 +3047,11 @@ const manageOpenOrders = async (tickerMap) => {
 // ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
 
 const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc') => {
-  // DRY_RUN mode: simulate budget consumption (puts only) + log, but skip actual order
+  // DRY_RUN mode: track budget discipline but skip actual order
   if (process.env.DRY_RUN === '1') {
     const totalValue = amount * price;
     if (action === 'buy_put') botData.putNetBought += totalValue;
     else if (action === 'sell_put') botData.putNetBought -= totalValue;
-    // sell_call / buyback_call: no budget tracking — collateral-sized
     persistCycleState();
     if (db) db.insertOrder({
       action, success: true, reason: `DRY RUN: simulated ${action} (${orderType})`,
@@ -2996,7 +3060,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       filled_amount: amount, fill_price: price,
       total_value: totalValue, spot_price: spotPrice, raw_response: `{"dryRun":true,"orderType":"${orderType}"}`,
     });
-    console.log(`🔸 DRY RUN: ${action} ${amount} ${instrumentName} @ $${price} [${orderType}] (put budget: $${botData.putNetBought.toFixed(2)})`);
+    console.log(`🔸 DRY RUN: ${action} ${amount} ${instrumentName} @ $${price} [${orderType}] | $${totalValue.toFixed(2)} (put budget: $${botData.putNetBought.toFixed(2)})`);
     return { dryRun: true, action, instrumentName, amount, price, totalValue, orderType };
   }
 
@@ -3104,7 +3168,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     return { resting: true, orderId, action, instrumentName, amount, price, orderType };
   }
 
-  // Update budget tracking (puts only — calls are collateral-sized)
+  // Track put budget discipline (arithmetic cost commitment)
   if (action === 'buy_put') {
     botData.putNetBought += totalValue;
   } else if (action === 'sell_put') {
@@ -3140,11 +3204,24 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
 
   let confirmed = 0;
   for (const action of pending.slice(0, 2)) { // Max 2 per tick
+    // Fetch fresh margin state for each confirmation (margin changes between trades)
+    let marginState = null;
+    try { marginState = await fetchSubaccount(); } catch { /* ok */ }
+    const marginStr = marginState
+      ? `Margin: initial=$${marginState.initial_margin.toFixed(2)}, maintenance=$${marginState.maintenance_margin.toFixed(2)}, account_value=$${marginState.subaccount_value.toFixed(2)}${marginState.is_under_liquidation ? ' [UNDER LIQUIDATION]' : ''}`
+      : 'Margin: unavailable';
     try {
       // Auto-reject after 3 retries
       if (action.retries >= 3) {
         db.updatePendingAction(action.id, { status: 'rejected', confirmation_reasoning: 'Auto-rejected after 3 failed confirmation attempts' });
         console.log(`❌ Auto-rejected: ${action.action} ${action.instrument_name} (3 retries)`);
+        continue;
+      }
+
+      // Hard safety: reject new entries if under liquidation
+      if (marginState?.is_under_liquidation && (action.action === 'buy_put' || action.action === 'sell_call')) {
+        db.updatePendingAction(action.id, { status: 'rejected', confirmation_reasoning: 'Auto-rejected: account under liquidation' });
+        console.log(`🚨 Auto-rejected ${action.action} ${action.instrument_name}: account under liquidation`);
         continue;
       }
 
@@ -3177,6 +3254,7 @@ ${detailsStr}
 Rule reasoning: ${action.rule_reasoning || 'N/A'}
 Triggered because: ${action.trigger_details || 'N/A'}
 Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
+${marginStr}
 ${advisoryOrderPref ? `Advisory suggested order type: ${advisoryOrderPref}` : ''}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
 - "ioc" (immediate-or-cancel): fill now at market or cancel. Taker fee ~0.06%. Best when the price is great and you want it NOW.
@@ -3192,6 +3270,8 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 256,
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
+MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
+CALL DISCIPLINE: Short call exposure is hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each call trade should put skin in the game — meaningful size, not tiny nibbles. Reject call sells that are too small to matter.
 REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.`,
           messages: [{ role: 'user', content: confirmPrompt }],
         }, {
@@ -3212,7 +3292,7 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
       let codexVote = null;
       try {
         const codexText = await callOpenAI(
-          'You are a Taleb-style risk advisor. Confirm trades that are convex (bounded downside, unbounded upside). Reject trades that expose us to ruin or have symmetric payoffs. Be conservative — when in doubt, reject. REGIME AWARENESS: ETH crashes cascade fast. Selling profitable puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV may overpay alongside the crowd. Use the actual position characteristics, Greeks, and momentum to judge. No rigid rules — just awareness that crashes go deeper than expected and fear lingers longer than expected. Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }',
+          `You are a Taleb-style risk advisor. Confirm trades that are convex (bounded downside, unbounded upside). Reject trades that expose us to ruin or have symmetric payoffs. Be conservative — when in doubt, reject. MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin engine. Reject if initial_margin is too low or account is under liquidation. CALL DISCIPLINE: Short call exposure is hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each call trade should put skin in the game — meaningful size, not tiny trades. Reject call sells that are too small to matter. REGIME AWARENESS: ETH crashes cascade fast. Selling profitable puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV may overpay alongside the crowd. Use the actual position characteristics, Greeks, and momentum to judge. No rigid rules — just awareness that crashes go deeper than expected and fear lingers longer than expected. Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }`,
           confirmPrompt,
           { maxTokens: 256, timeout: 15000, model: 'gpt-4o-mini' }
         );
@@ -3386,7 +3466,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     }
   }
 
-  // Budget state (puts only — calls are collateral-sized, not budget-capped)
+  // Account health — margin + budget discipline
   const ethBalance = balances.find(b => b.asset_name === 'ETH')?.amount || 0;
   const usdcBalance = balances.find(b => b.asset_name === 'USDC')?.amount || 0;
   const shortCallPositions = positions.filter(p =>
@@ -3394,18 +3474,43 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
   );
   const totalCallExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
 
-  const budgetState = {
-    putBuyingBaseLimit: PUT_BUYING_BASE_FUNDING_LIMIT,
-    putUnspentBuyLimit: botData.putUnspentBuyLimit,
-    putNetBought: botData.putNetBought,
-    putRemainingBudget: PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought,
-    callSizing: {
-      ethCollateral: ethBalance,
-      usdcBalance,
-      shortCallExposure: totalCallExposure,
-      availableEthForCalls: Math.max(0, ethBalance - totalCallExposure),
-      note: 'Call selling is risk-adjusted against ETH collateral. No fixed budget. Size for moderate leverage with good risk-reward.',
+  let marginState = null;
+  try { marginState = await fetchSubaccount(); } catch { /* ok */ }
+
+  const putBudgetRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
+
+  const accountHealth = {
+    ethBalance,
+    usdcBalance,
+    shortCallExposure: totalCallExposure,
+    callExposureDiscipline: {
+      capPct: CALL_EXPOSURE_CAP_PCT,
+      maxExposure: +(CALL_EXPOSURE_CAP_PCT * ethBalance).toFixed(2),
+      currentExposure: +totalCallExposure.toFixed(2),
+      remaining: +Math.max(0, CALL_EXPOSURE_CAP_PCT * ethBalance - totalCallExposure).toFixed(2),
+      note: `Hard cap: ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each trade should be meaningful (~20%+ of cap). Current: ${totalCallExposure.toFixed(2)} / ${(CALL_EXPOSURE_CAP_PCT * ethBalance).toFixed(2)} ETH.`,
     },
+    margin: marginState ? {
+      initial_margin: marginState.initial_margin,
+      maintenance_margin: marginState.maintenance_margin,
+      subaccount_value: marginState.subaccount_value,
+      collaterals_value: marginState.collaterals_value,
+      open_orders_margin: marginState.open_orders_margin,
+      is_under_liquidation: marginState.is_under_liquidation,
+      margin_usage_pct: marginState.collaterals_value > 0
+        ? +((1 - marginState.initial_margin / marginState.collaterals_value) * 100).toFixed(1)
+        : null,
+    } : null,
+    putBudgetDiscipline: {
+      annualRate: PUT_ANNUAL_RATE,
+      budgetThisCycle: botData.putBudgetForCycle,
+      spent: botData.putNetBought,
+      remaining: putBudgetRemaining,
+      rollover: botData.putUnspentBuyLimit,
+      cycleDays: BOT_CONFIG.PERIOD_DAYS,
+      note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of portfolio value per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once.`,
+    },
+    note: 'Account is ETH-collateralized. Long puts offset ETH exposure in margin. Sizing must respect margin headroom, put budget discipline, AND call exposure cap.',
   };
 
   // Recent orders
@@ -3445,6 +3550,8 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     };
   };
 
+  // Score candidates with wide ranges — the advisory sees more of the market
+  // and can recommend tighter ranges in its rules if it wants
   const scoredPuts = [];
   const scoredCalls = [];
 
@@ -3457,14 +3564,14 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     const bidPrice = Number(ticker.b) || 0;
 
     if (parsed.optionType === 'P') {
-      // Filter: delta -0.08 to -0.02, DTE 45-75
-      if (delta >= -0.08 && delta <= -0.02 && parsed.dte >= 45 && parsed.dte <= 75 && askPrice > 0) {
+      // Wide filter: delta -0.15 to -0.01, DTE 14-120 (advisory decides what's interesting)
+      if (delta >= -0.15 && delta <= -0.01 && parsed.dte >= 14 && parsed.dte <= 120 && askPrice > 0) {
         const score = Math.abs(delta) / askPrice;
         scoredPuts.push({ name, delta, askPrice, bidPrice, dte: Math.round(parsed.dte), strike: parsed.strike, score });
       }
     } else if (parsed.optionType === 'C') {
-      // Filter: delta 0.02 to 0.10, DTE 7-21
-      if (delta >= 0.02 && delta <= 0.10 && parsed.dte >= 7 && parsed.dte <= 21 && bidPrice > 0) {
+      // Wide filter: delta 0.01 to 0.15, DTE 3-45 (advisory decides what's interesting)
+      if (delta >= 0.01 && delta <= 0.15 && parsed.dte >= 3 && parsed.dte <= 45 && bidPrice > 0) {
         const score = bidPrice / Math.abs(delta);
         scoredCalls.push({ name, delta, askPrice, bidPrice, dte: Math.round(parsed.dte), strike: parsed.strike, score });
       }
@@ -3473,8 +3580,8 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
 
   scoredPuts.sort((a, b) => b.score - a.score);
   scoredCalls.sort((a, b) => b.score - a.score);
-  const top5Puts = scoredPuts.slice(0, 5);
-  const top5Calls = scoredCalls.slice(0, 5);
+  const top5Puts = scoredPuts.slice(0, 8);
+  const top5Calls = scoredCalls.slice(0, 8);
 
   // ── Step 1: Primary Advisor (Claude Opus, Spitznagel temperament) ───────────
 
@@ -3488,6 +3595,15 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
 - Premium collection supplements, not replaces, insurance accumulation
 
 You advise a bot that accumulates OTM ETH puts (long insurance) and sells OTM ETH calls (premium harvesting).
+
+## Account Model
+The account is ETH-collateralized. Puts are bought on leverage against ETH. Derive's margin engine recognizes that long puts offset ETH exposure, so buying puts can improve margin health. USDC from call premiums pays down margin debt first; excess gets converted to ETH manually.
+
+There are TWO constraints on put buying:
+1. **Margin**: initial_margin must stay positive. maintenance_margin at zero = liquidation.
+2. **Budget discipline**: We commit to spending 3.33% of portfolio value per year on puts, allocated in 15-day budget windows. The budget for each cycle is calculated from current portfolio value at cycle start. Spend predictably across the cycle. Don't front-load. Don't impulse buy. If nothing is well-priced, let the budget roll over.
+
+For calls: **hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings** in total short call exposure. The bot enforces this — you can't exceed it. Within that cap, put skin in the game: each call trade should be meaningful (roughly 20%+ of the cap), not tiny nibbles. Size against margin headroom, ETH collateral, and remaining cap headroom.
 
 ## Market Regime Awareness
 ETH crashes tend to cascade — they accelerate, not slow down. Your decisions should reflect the shape of the moment.
@@ -3546,8 +3662,10 @@ Rules:
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price
 - For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct
 - For buyback_call exits: use conditions on unrealized_pnl_pct (e.g. gt 60) and/or dte
-- PUT budget_limit must respect remaining put budget
-- CALL selling has NO fixed budget — sized against ETH collateral. Set budget_limit reflecting moderate leverage (20-40% of available ETH, never >50%). Consider existing short call exposure.
+- budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
+- The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
+- Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending.
+- For calls: hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings in total short call exposure. The code enforces this cap. Size meaningfully — each trade should put skin in the game (~20%+ of the cap), not tiny positions. Consider existing short call exposure and margin headroom.
 - Entry rules should target the highest-scoring candidates when possible
 - Exit rules MUST reference specific instrument_name from current positions
 - If the market is unclear, it is ALWAYS correct to produce fewer rules or none
@@ -3574,16 +3692,16 @@ Positions: ${JSON.stringify(positions.map(p => ({
 
 Balances: ${JSON.stringify(balances, null, 1)}
 
-=== BUDGET STATE ===
-${JSON.stringify(budgetState, null, 2)}
+=== ACCOUNT HEALTH (margin-aware sizing) ===
+${JSON.stringify(accountHealth, null, 2)}
 
 === MARKET SENTIMENT ===
 ${JSON.stringify(sentiment, null, 2)}
 
-=== TOP 5 PUT CANDIDATES (by delta/ask ratio) ===
+=== TOP PUT CANDIDATES (by delta/ask ratio, wide scan) ===
 ${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte} | score=${p.score.toFixed(4)}`).join('\n') : 'No qualifying puts found'}
 
-=== TOP 5 CALL CANDIDATES (by bid/delta ratio) ===
+=== TOP CALL CANDIDATES (by bid/delta ratio, wide scan) ===
 ${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${c.delta.toFixed(4)} | bid=$${c.bidPrice.toFixed(2)} | DTE=${c.dte} | score=${c.score.toFixed(4)}`).join('\n') : 'No qualifying calls found'}
 
 === RECENT ORDERS (last 7d) ===
@@ -3662,6 +3780,7 @@ ${JSON.stringify(primaryAgenda)}
 
 ## Market Context
 Spot: $${spotPrice}, Positions: ${JSON.stringify(positions.slice(0, 5))}, Momentum: ${JSON.stringify(momentum)}
+Account: ETH-collateralized. ${marginState ? `Initial margin: $${marginState.initial_margin.toFixed(2)}, Maintenance: $${marginState.maintenance_margin.toFixed(2)}, Account value: $${marginState.subaccount_value.toFixed(2)}` : 'Margin data unavailable'}
 
 ## Your Task
 Critique the agenda. For each rule, ask:
@@ -3740,14 +3859,13 @@ ${JSON.stringify(secondOpinion, null, 2)}
 
 ## Rules for Synthesis:
 - VETOES are binding: if Taleb vetoes a rule, remove it
-- AMENDMENTS are suggestions: apply if they improve convexity without breaking budget discipline
-- The Spitznagel advisor's budget limits take precedence (arithmetic discipline)
+- AMENDMENTS are suggestions: apply if they improve convexity without breaking margin discipline
+- The Spitznagel advisor's sizing limits take precedence (arithmetic discipline)
 - Taleb's concerns about fat-tail exposure should be taken seriously
 - When advisors agree, high confidence. When they disagree, reduce priority or tighten conditions.
 
-=== KEY CONSTRAINTS ===
-- Put remaining budget: $${budgetState.putRemainingBudget.toFixed(2)}
-- Call sizing: ${budgetState.callSizing.availableEthForCalls.toFixed(4)} ETH available (${budgetState.callSizing.ethCollateral.toFixed(4)} total - ${budgetState.callSizing.shortCallExposure.toFixed(4)} exposed)
+=== ACCOUNT HEALTH ===
+${JSON.stringify(accountHealth, null, 2)}
 - Current positions: ${positions.length} open
 - Spot: $${spotPrice.toFixed(2)}
 
@@ -3758,9 +3876,8 @@ ${JSON.stringify(primaryAgenda, null, 2)}
 === SECOND OPINION ===
 Not available (OpenAI key not set or call failed). Validate and pass through the primary agenda.
 
-=== KEY CONSTRAINTS ===
-- Put remaining budget: $${budgetState.putRemainingBudget.toFixed(2)}
-- Call sizing: ${budgetState.callSizing.availableEthForCalls.toFixed(4)} ETH available (${budgetState.callSizing.ethCollateral.toFixed(4)} total - ${budgetState.callSizing.shortCallExposure.toFixed(4)} exposed)
+=== ACCOUNT HEALTH ===
+${JSON.stringify(accountHealth, null, 2)}
 - Current positions: ${positions.length} open
 - Spot: $${spotPrice.toFixed(2)}
 
@@ -3859,9 +3976,10 @@ Synthesize the final agenda now.`;
   const exitCount = finalAgenda.exit_rules?.length || 0;
   console.log(`📋 Advisory ${advisoryId}: complete — ${entryCount} entry rules, ${exitCount} exit rules`);
 
-  // Track advisory state for price-triggered re-advisory
+  // Track advisory state for price-triggered re-advisory (persisted to survive restarts)
   botData.lastAdvisorySpotPrice = spotPrice;
   botData.lastAdvisoryTimestamp = Date.now();
+  persistCycleState();
 
   return { advisoryId, agenda: finalAgenda, rulesCount: allRules.length };
   } finally {
@@ -4219,6 +4337,19 @@ const runBot = async () => {
 
     console.log(`📊 ${Object.keys(tickerMap).length} tickers | ${putCandidates.length} put + ${callCandidates.length} call candidates`);
 
+    // ── Put budget cycle management ───────────────────────────────
+    if (spotPrice) {
+      try {
+        let balances = [];
+        try { balances = await fetchCollaterals(); } catch { /* ok */ }
+        const ethBal = Number(balances.find(b => b.asset_name === 'ETH')?.amount || 0);
+        const usdcBal = Number(balances.find(b => b.asset_name === 'USDC')?.amount || 0);
+        botData.ethBalance = ethBal;
+        const portfolioValue = ethBal * spotPrice + usdcBal;
+        if (portfolioValue > 0) maybeResetPutCycle(portfolioValue);
+      } catch (e) { console.log('📋 Cycle check failed:', e.message); }
+    }
+
     // ── LLM-Driven Trading ─────────────────────────────────────────
     try {
       await manageOpenOrders(tickerMap);
@@ -4446,7 +4577,7 @@ console.log('='.repeat(70));
 console.log(`🥱 NO OPERATION`);
 console.log(' ');
 console.log("Welcome. Let's begin...");
-console.log(`Every ${PERIOD / (1000 * 60 * 60 * 24)} days, buy $${PUT_BUYING_BASE_FUNDING_LIMIT} worth of cheapest FOTM puts. Call selling sized by ETH collateral (no fixed budget).`);
+console.log(`ETH-collateralized. Put budget: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of portfolio/yr in ${BOT_CONFIG.PERIOD_DAYS}d cycles. Calls sized by margin.`);
 console.log('='.repeat(70));
 console.log(' ');
 loadData();

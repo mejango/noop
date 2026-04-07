@@ -420,6 +420,12 @@ function prepareAll(d: Database.Database) {
         (SELECT created_at FROM trading_rules WHERE is_active = 1 ORDER BY id ASC LIMIT 1) as advisory_created_at
     `),
 
+    getBudgetCycleState: d.prepare(`
+      SELECT put_cycle_start, put_net_bought, put_unspent_buy_limit,
+        put_budget_for_cycle, last_advisory_spot_price, last_advisory_timestamp
+      FROM bot_state WHERE id = 1
+    `),
+
     getLatestAdvisoryAssessment: d.prepare(`
       SELECT content, timestamp FROM ai_journal
       WHERE entry_type = 'advisory'
@@ -847,6 +853,19 @@ export function getLatestAdvisoryAssessment() {
   try {
     return getStmts().getLatestAdvisoryAssessment.get() as {
       content: string; timestamp: string;
+    } | undefined;
+  } catch { return undefined; }
+}
+
+export function getBudgetCycleState() {
+  try {
+    return getStmts().getBudgetCycleState.get() as {
+      put_cycle_start: number | null;
+      put_net_bought: number;
+      put_unspent_buy_limit: number;
+      put_budget_for_cycle: number;
+      last_advisory_spot_price: number | null;
+      last_advisory_timestamp: number;
     } | undefined;
   } catch { return undefined; }
 }

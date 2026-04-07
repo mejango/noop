@@ -2050,6 +2050,1353 @@ describe('extractJSON (balanced brace parser)', () => {
 });
 
 // ============================================================================
+// 29. Dynamic put budget calculation
+// ============================================================================
+
+describe('Dynamic put budget: formula', () => {
+  const PUT_ANNUAL_RATE = 0.0333;
+  const PERIOD_DAYS = 15;
+  const cyclesPerYear = 365 / PERIOD_DAYS;
+
+  test('$10,000 portfolio → correct per-cycle budget', () => {
+    const portfolioValue = 10000;
+    const budget = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
+    // 10000 * 0.0333 / 24.333 = ~13.69
+    assert.ok(budget > 13.0 && budget < 14.0, `Expected ~$13.69, got $${budget.toFixed(2)}`);
+  });
+
+  test('$100,000 portfolio → budget scales linearly', () => {
+    const small = 10000 * PUT_ANNUAL_RATE / cyclesPerYear;
+    const large = 100000 * PUT_ANNUAL_RATE / cyclesPerYear;
+    assert.ok(Math.abs(large / small - 10) < 0.01, 'Should be exactly 10x');
+  });
+
+  test('$0 portfolio → $0 budget', () => {
+    const budget = 0 * PUT_ANNUAL_RATE / cyclesPerYear;
+    assert.strictEqual(budget, 0);
+  });
+
+  test('annual spend = 3.33% of portfolio', () => {
+    const portfolioValue = 50000;
+    const perCycle = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
+    const annualSpend = perCycle * cyclesPerYear;
+    assert.ok(Math.abs(annualSpend - portfolioValue * PUT_ANNUAL_RATE) < 0.01,
+      `Annual spend $${annualSpend.toFixed(2)} should equal ${portfolioValue * PUT_ANNUAL_RATE}`);
+  });
+
+  test('24.33 cycles per year (365/15)', () => {
+    assert.ok(Math.abs(cyclesPerYear - 24.333) < 0.01, `Got ${cyclesPerYear}`);
+  });
+});
+
+// ============================================================================
+// 30. Put cycle management (maybeResetPutCycle logic)
+// ============================================================================
+
+describe('Dynamic put budget: cycle management', () => {
+  const PUT_ANNUAL_RATE = 0.0333;
+  const PERIOD_DAYS = 15;
+  const PERIOD_MS = PERIOD_DAYS * 24 * 60 * 60 * 1000;
+  const cyclesPerYear = 365 / PERIOD_DAYS;
+
+  // Simulate maybeResetPutCycle with a local botData
+  const maybeResetPutCycle = (botData, portfolioValue, now) => {
+    const cycleExpired = botData.putCycleStart && (now - botData.putCycleStart) >= PERIOD_MS;
+    const noCycle = !botData.putCycleStart;
+
+    if (noCycle || cycleExpired) {
+      if (cycleExpired) {
+        const prevRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
+        botData.putUnspentBuyLimit = prevRemaining;
+      }
+      const newBudget = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
+      botData.putCycleStart = now;
+      botData.putBudgetForCycle = newBudget;
+      botData.putNetBought = 0;
+      return true; // cycle was reset
+    }
+    return false; // no reset
+  };
+
+  test('first call with no cycle → starts new cycle', () => {
+    const bd = { putCycleStart: null, putBudgetForCycle: 0, putNetBought: 0, putUnspentBuyLimit: 0 };
+    const now = Date.now();
+    const reset = maybeResetPutCycle(bd, 10000, now);
+    assert.strictEqual(reset, true);
+    assert.strictEqual(bd.putCycleStart, now);
+    assert.ok(bd.putBudgetForCycle > 13 && bd.putBudgetForCycle < 14);
+    assert.strictEqual(bd.putNetBought, 0);
+  });
+
+  test('mid-cycle call → no reset', () => {
+    const now = Date.now();
+    const bd = { putCycleStart: now - 5 * 24 * 60 * 60 * 1000, putBudgetForCycle: 13.69, putNetBought: 5, putUnspentBuyLimit: 0 };
+    const reset = maybeResetPutCycle(bd, 10000, now);
+    assert.strictEqual(reset, false);
+    assert.strictEqual(bd.putNetBought, 5); // unchanged
+    assert.strictEqual(bd.putBudgetForCycle, 13.69); // unchanged
+  });
+
+  test('expired cycle → resets, rolls over unspent', () => {
+    const now = Date.now();
+    const bd = {
+      putCycleStart: now - PERIOD_MS - 1000, // just expired
+      putBudgetForCycle: 14.00,
+      putNetBought: 4.00,
+      putUnspentBuyLimit: 0,
+    };
+    const reset = maybeResetPutCycle(bd, 10000, now);
+    assert.strictEqual(reset, true);
+    // Unspent: 14.00 + 0 - 4.00 = 10.00 rolled over
+    assert.strictEqual(bd.putUnspentBuyLimit, 10.00);
+    assert.strictEqual(bd.putNetBought, 0); // reset for new cycle
+    assert.ok(bd.putBudgetForCycle > 13 && bd.putBudgetForCycle < 14); // recalculated
+  });
+
+  test('expired cycle with full spend → zero rollover', () => {
+    const now = Date.now();
+    const bd = {
+      putCycleStart: now - PERIOD_MS - 1000,
+      putBudgetForCycle: 14.00,
+      putNetBought: 14.00, // fully spent
+      putUnspentBuyLimit: 0,
+    };
+    const reset = maybeResetPutCycle(bd, 10000, now);
+    assert.strictEqual(reset, true);
+    assert.strictEqual(bd.putUnspentBuyLimit, 0); // nothing to roll over
+  });
+
+  test('expired cycle with overspend → zero rollover (no negative)', () => {
+    const now = Date.now();
+    const bd = {
+      putCycleStart: now - PERIOD_MS - 1000,
+      putBudgetForCycle: 14.00,
+      putNetBought: 20.00, // overspent
+      putUnspentBuyLimit: 0,
+    };
+    const reset = maybeResetPutCycle(bd, 10000, now);
+    assert.strictEqual(reset, true);
+    assert.strictEqual(bd.putUnspentBuyLimit, 0); // Math.max(0, ...) prevents negative
+  });
+
+  test('expired cycle with existing rollover → compound rollover', () => {
+    const now = Date.now();
+    const bd = {
+      putCycleStart: now - PERIOD_MS - 1000,
+      putBudgetForCycle: 14.00,
+      putNetBought: 4.00,
+      putUnspentBuyLimit: 5.00, // existing rollover from cycle before that
+    };
+    const reset = maybeResetPutCycle(bd, 10000, now);
+    assert.strictEqual(reset, true);
+    // prevRemaining = max(0, 14 + 5 - 4) = 15.00
+    assert.strictEqual(bd.putUnspentBuyLimit, 15.00);
+  });
+
+  test('budget scales with portfolio value at cycle reset', () => {
+    const now = Date.now();
+    const bd1 = { putCycleStart: null, putBudgetForCycle: 0, putNetBought: 0, putUnspentBuyLimit: 0 };
+    const bd2 = { putCycleStart: null, putBudgetForCycle: 0, putNetBought: 0, putUnspentBuyLimit: 0 };
+    maybeResetPutCycle(bd1, 10000, now);
+    maybeResetPutCycle(bd2, 50000, now);
+    assert.ok(Math.abs(bd2.putBudgetForCycle / bd1.putBudgetForCycle - 5) < 0.01,
+      'Budget should be 5x for 5x portfolio');
+  });
+});
+
+// ============================================================================
+// 31. Put budget discipline in entry rule evaluation
+// ============================================================================
+
+describe('Dynamic put budget: entry rule gating', () => {
+  test('buy_put with budget remaining → allowed', () => {
+    const budgetForCycle = 14.00;
+    const putNetBought = 2.00;
+    const putUnspentBuyLimit = 0;
+    const remaining = budgetForCycle + putUnspentBuyLimit - putNetBought;
+    assert.ok(remaining > 10, `Remaining $${remaining} should be > 10`);
+  });
+
+  test('buy_put with budget nearly exhausted → blocked', () => {
+    const budgetForCycle = 14.00;
+    const putNetBought = 12.00;
+    const putUnspentBuyLimit = 0;
+    const remaining = budgetForCycle + putUnspentBuyLimit - putNetBought;
+    assert.ok(remaining <= 10, `Remaining $${remaining} should be <= 10`);
+  });
+
+  test('buy_put with rollover extends budget', () => {
+    const budgetForCycle = 14.00;
+    const putNetBought = 12.00;
+    const putUnspentBuyLimit = 10.00; // rollover
+    const remaining = budgetForCycle + putUnspentBuyLimit - putNetBought;
+    assert.ok(remaining > 10, `Remaining $${remaining} with rollover should be > 10`);
+  });
+
+  test('sell_call is never gated by put budget', () => {
+    const action = 'sell_call';
+    const budgetForCycle = 0; // zero budget
+    // sell_call should not check put budget at all
+    const shouldCheckBudget = action === 'buy_put' && budgetForCycle > 0;
+    assert.strictEqual(shouldCheckBudget, false);
+  });
+
+  test('buy_put with zero budget config → no gating (budget disabled)', () => {
+    const action = 'buy_put';
+    const budgetForCycle = 0;
+    const shouldCheckBudget = action === 'buy_put' && budgetForCycle > 0;
+    assert.strictEqual(shouldCheckBudget, false, 'Zero budget = discipline disabled');
+  });
+});
+
+// ============================================================================
+// 32. Put budget: amount sizing capped by remaining budget
+// ============================================================================
+
+describe('Dynamic put budget: amount sizing cap', () => {
+  const PUT_ANNUAL_RATE = 0.0333;
+  const PERIOD_DAYS = 15;
+
+  test('amount capped by remaining budget', () => {
+    const budgetForCycle = 14.00;
+    const putNetBought = 10.00;
+    const putUnspentBuyLimit = 0;
+    const remaining = budgetForCycle + putUnspentBuyLimit - putNetBought; // $4
+    const price = 2.00;
+    const ruleBudgetLimit = 100; // advisory wants $100
+    const maxByRuleBudget = ruleBudgetLimit / price; // 50 contracts
+    const maxByPutBudget = remaining / price; // 2 contracts
+    const capped = Math.min(maxByRuleBudget, maxByPutBudget);
+    assert.strictEqual(capped, 2);
+  });
+
+  test('rule budget_limit more restrictive than remaining → uses rule limit', () => {
+    const budgetForCycle = 14.00;
+    const putNetBought = 0;
+    const putUnspentBuyLimit = 0;
+    const remaining = budgetForCycle + putUnspentBuyLimit - putNetBought; // $14
+    const price = 2.00;
+    const ruleBudgetLimit = 4; // advisory only wants $4
+    const maxByRuleBudget = ruleBudgetLimit / price; // 2 contracts
+    const maxByPutBudget = remaining / price; // 7 contracts
+    const capped = Math.min(maxByRuleBudget, maxByPutBudget);
+    assert.strictEqual(capped, 2);
+  });
+
+  test('call sizing ignores put budget entirely', () => {
+    const action = 'sell_call';
+    const price = 5.00;
+    const ruleBudgetLimit = 100;
+    let maxByBudget = ruleBudgetLimit / price;
+    // For puts only: cap by remaining. Calls skip this.
+    if (action === 'buy_put') {
+      const putRemaining = 0; // exhausted
+      maxByBudget = Math.min(maxByBudget, putRemaining / price);
+    }
+    assert.strictEqual(maxByBudget, 20); // 100/5, not capped
+  });
+});
+
+// ============================================================================
+// 33. Put budget tracking through execution
+// ============================================================================
+
+describe('Dynamic put budget: execution tracking', () => {
+  test('buy_put fill increases putNetBought', () => {
+    let putNetBought = 5;
+    const action = 'buy_put';
+    const totalValue = 3.50;
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 8.50);
+  });
+
+  test('sell_put fill decreases putNetBought (returns budget)', () => {
+    let putNetBought = 10;
+    const action = 'sell_put';
+    const totalValue = 4.00;
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 6.00);
+  });
+
+  test('sell_call does not affect putNetBought', () => {
+    let putNetBought = 10;
+    const action = 'sell_call';
+    const totalValue = 8.00;
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 10);
+  });
+
+  test('buyback_call does not affect putNetBought', () => {
+    let putNetBought = 10;
+    const action = 'buyback_call';
+    const totalValue = 8.00;
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 10);
+  });
+
+  test('resting put buy fill tracks budget on reconciliation', () => {
+    let putNetBought = 5;
+    const tracked = { instrument_name: 'ETH-20260501-1500-P', direction: 'buy' };
+    const filledAmt = 1.0;
+    const fillPrice = 3.00;
+    const fillValue = filledAmt * fillPrice;
+    const isPut = tracked.instrument_name.endsWith('-P');
+    if (filledAmt > 0) {
+      if (isPut && tracked.direction === 'buy') putNetBought += fillValue;
+      else if (isPut && tracked.direction === 'sell') putNetBought -= fillValue;
+    }
+    assert.strictEqual(putNetBought, 8.00);
+  });
+
+  test('resting call sell fill does not track budget', () => {
+    let putNetBought = 5;
+    const tracked = { instrument_name: 'ETH-20260501-2000-C', direction: 'sell' };
+    const filledAmt = 2.0;
+    const fillPrice = 4.00;
+    const fillValue = filledAmt * fillPrice;
+    const isPut = tracked.instrument_name.endsWith('-P');
+    if (filledAmt > 0) {
+      if (isPut && tracked.direction === 'buy') putNetBought += fillValue;
+      else if (isPut && tracked.direction === 'sell') putNetBought -= fillValue;
+    }
+    assert.strictEqual(putNetBought, 5); // unchanged
+  });
+
+  test('zero fill does not change budget', () => {
+    let putNetBought = 5;
+    const tracked = { instrument_name: 'ETH-20260501-1500-P', direction: 'buy' };
+    const filledAmt = 0;
+    const fillPrice = 3.00;
+    const fillValue = filledAmt * fillPrice;
+    const isPut = tracked.instrument_name.endsWith('-P');
+    if (filledAmt > 0) {
+      if (isPut && tracked.direction === 'buy') putNetBought += fillValue;
+      else if (isPut && tracked.direction === 'sell') putNetBought -= fillValue;
+    }
+    assert.strictEqual(putNetBought, 5); // unchanged
+  });
+});
+
+// ============================================================================
+// 34. fetchSubaccount response parsing
+// ============================================================================
+
+describe('fetchSubaccount response parsing', () => {
+  test('parses margin fields correctly', () => {
+    const r = {
+      initial_margin: '1234.56',
+      maintenance_margin: '987.65',
+      subaccount_value: '5000.00',
+      positions_value: '200.00',
+      collaterals_value: '4800.00',
+      collaterals_initial_margin: '1100.00',
+      collaterals_maintenance_margin: '900.00',
+      open_orders_margin: '50.00',
+      is_under_liquidation: false,
+    };
+    const parsed = {
+      initial_margin: Number(r?.initial_margin ?? 0),
+      maintenance_margin: Number(r?.maintenance_margin ?? 0),
+      subaccount_value: Number(r?.subaccount_value ?? 0),
+      positions_value: Number(r?.positions_value ?? 0),
+      collaterals_value: Number(r?.collaterals_value ?? 0),
+      collaterals_initial_margin: Number(r?.collaterals_initial_margin ?? 0),
+      collaterals_maintenance_margin: Number(r?.collaterals_maintenance_margin ?? 0),
+      open_orders_margin: Number(r?.open_orders_margin ?? 0),
+      is_under_liquidation: r?.is_under_liquidation || false,
+    };
+    assert.strictEqual(parsed.initial_margin, 1234.56);
+    assert.strictEqual(parsed.maintenance_margin, 987.65);
+    assert.strictEqual(parsed.subaccount_value, 5000);
+    assert.strictEqual(parsed.is_under_liquidation, false);
+  });
+
+  test('null response → all zeros', () => {
+    const r = null;
+    const parsed = {
+      initial_margin: Number(r?.initial_margin ?? 0),
+      maintenance_margin: Number(r?.maintenance_margin ?? 0),
+      subaccount_value: Number(r?.subaccount_value ?? 0),
+      is_under_liquidation: r?.is_under_liquidation || false,
+    };
+    assert.strictEqual(parsed.initial_margin, 0);
+    assert.strictEqual(parsed.maintenance_margin, 0);
+    assert.strictEqual(parsed.is_under_liquidation, false);
+  });
+
+  test('margin_usage_pct calculation', () => {
+    const collaterals_value = 5000;
+    const initial_margin = 3000;
+    const usage = +((1 - initial_margin / collaterals_value) * 100).toFixed(1);
+    assert.strictEqual(usage, 40.0); // 40% used
+  });
+
+  test('margin_usage_pct with zero collateral → null', () => {
+    const collaterals_value = 0;
+    const initial_margin = 0;
+    const usage = collaterals_value > 0
+      ? +((1 - initial_margin / collaterals_value) * 100).toFixed(1)
+      : null;
+    assert.strictEqual(usage, null);
+  });
+});
+
+// ============================================================================
+// 35. Liquidation safety gate
+// ============================================================================
+
+describe('Liquidation safety gate', () => {
+  test('under liquidation + buy_put → auto-rejected', () => {
+    const marginState = { is_under_liquidation: true };
+    const action = { action: 'buy_put', instrument_name: 'ETH-20260501-1500-P' };
+    const isEntry = action.action === 'buy_put' || action.action === 'sell_call';
+    const shouldReject = marginState?.is_under_liquidation && isEntry;
+    assert.strictEqual(shouldReject, true);
+  });
+
+  test('under liquidation + sell_call → auto-rejected', () => {
+    const marginState = { is_under_liquidation: true };
+    const action = { action: 'sell_call', instrument_name: 'ETH-20260501-2000-C' };
+    const isEntry = action.action === 'buy_put' || action.action === 'sell_call';
+    const shouldReject = marginState?.is_under_liquidation && isEntry;
+    assert.strictEqual(shouldReject, true);
+  });
+
+  test('under liquidation + sell_put (exit) → allowed', () => {
+    const marginState = { is_under_liquidation: true };
+    const action = { action: 'sell_put', instrument_name: 'ETH-20260501-1500-P' };
+    const isEntry = action.action === 'buy_put' || action.action === 'sell_call';
+    const shouldReject = marginState?.is_under_liquidation && isEntry;
+    assert.strictEqual(shouldReject, false);
+  });
+
+  test('under liquidation + buyback_call (exit) → allowed', () => {
+    const marginState = { is_under_liquidation: true };
+    const action = { action: 'buyback_call', instrument_name: 'ETH-20260501-2000-C' };
+    const isEntry = action.action === 'buy_put' || action.action === 'sell_call';
+    const shouldReject = marginState?.is_under_liquidation && isEntry;
+    assert.strictEqual(shouldReject, false);
+  });
+
+  test('not under liquidation → all actions allowed', () => {
+    const marginState = { is_under_liquidation: false };
+    for (const a of ['buy_put', 'sell_call', 'sell_put', 'buyback_call']) {
+      const isEntry = a === 'buy_put' || a === 'sell_call';
+      const shouldReject = marginState?.is_under_liquidation && isEntry;
+      assert.strictEqual(shouldReject, false, `${a} should not be rejected`);
+    }
+  });
+
+  test('null marginState → all actions allowed (graceful)', () => {
+    const marginState = null;
+    for (const a of ['buy_put', 'sell_call', 'sell_put', 'buyback_call']) {
+      const isEntry = a === 'buy_put' || a === 'sell_call';
+      const shouldReject = marginState?.is_under_liquidation && isEntry;
+      assert.ok(!shouldReject, `${a} should not be rejected when margin unavailable`);
+    }
+  });
+});
+
+// ============================================================================
+// 36. accountHealth structure for advisory
+// ============================================================================
+
+describe('accountHealth structure', () => {
+  test('includes all required fields for advisory', () => {
+    const accountHealth = {
+      ethBalance: 5.0,
+      usdcBalance: -200,
+      shortCallExposure: 1.5,
+      margin: {
+        initial_margin: 3000,
+        maintenance_margin: 2500,
+        subaccount_value: 8000,
+        collaterals_value: 7500,
+        open_orders_margin: 100,
+        is_under_liquidation: false,
+        margin_usage_pct: 60.0,
+      },
+      putBudgetDiscipline: {
+        annualRate: 0.0333,
+        budgetThisCycle: 13.69,
+        spent: 5.00,
+        remaining: 8.69,
+        rollover: 0,
+        cycleDays: 15,
+        note: 'test',
+      },
+      note: 'test',
+    };
+    // Verify structure exists
+    assert.ok(accountHealth.margin);
+    assert.ok(accountHealth.putBudgetDiscipline);
+    assert.strictEqual(accountHealth.margin.is_under_liquidation, false);
+    assert.strictEqual(accountHealth.putBudgetDiscipline.annualRate, 0.0333);
+    assert.strictEqual(accountHealth.putBudgetDiscipline.remaining, 8.69);
+    // Negative USDC = margin debt, which is expected with ETH collateral
+    assert.strictEqual(accountHealth.usdcBalance, -200);
+  });
+
+  test('margin null when API fails', () => {
+    const accountHealth = {
+      ethBalance: 5.0,
+      usdcBalance: 0,
+      shortCallExposure: 0,
+      margin: null,
+      putBudgetDiscipline: { budgetThisCycle: 13.69, spent: 0, remaining: 13.69 },
+    };
+    assert.strictEqual(accountHealth.margin, null);
+    // Advisory should still function without margin data
+    assert.ok(accountHealth.putBudgetDiscipline.budgetThisCycle > 0);
+  });
+});
+
+// ============================================================================
+// 37. Full schema: ETH holder → budget cycle → entry matching → execution → tracking
+// ============================================================================
+
+describe('Full schema: ETH collateral → budgeted put buying', () => {
+  // This tests the complete flow an ETH holder experiences:
+  // 1. Portfolio valued in ETH * spot
+  // 2. 15-day budget cycle allocates 3.33%/yr
+  // 3. Entry rules match options from the advisory
+  // 4. Budget gates and sizes the trade
+  // 5. Execution tracks putNetBought
+  // 6. Cycle resets with rollover
+
+  const PUT_ANNUAL_RATE = 0.0333;
+  const PERIOD_DAYS = 15;
+  const PERIOD = PERIOD_DAYS * 86400000;
+
+  // Simulate botData (mutable state across steps)
+  let botData;
+  const resetBotData = () => {
+    botData = {
+      putCycleStart: null,
+      putBudgetForCycle: 0,
+      putNetBought: 0,
+      putUnspentBuyLimit: 0,
+    };
+  };
+
+  // Copy of maybeResetPutCycle logic
+  const maybeResetPutCycle = (portfolioValue) => {
+    const now = Date.now();
+    const cycleExpired = botData.putCycleStart && (now - botData.putCycleStart) >= PERIOD;
+    const noCycle = !botData.putCycleStart;
+    if (noCycle || cycleExpired) {
+      if (cycleExpired) {
+        const prevRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
+        botData.putUnspentBuyLimit = prevRemaining;
+      }
+      const cyclesPerYear = 365 / PERIOD_DAYS;
+      const newBudget = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
+      botData.putCycleStart = now;
+      botData.putBudgetForCycle = newBudget;
+      botData.putNetBought = 0;
+    }
+  };
+
+  // Helper: simulate evaluateTradingRules entry logic for buy_put
+  const evaluateEntryRule = (rule, tickerMap, instruments, spotPrice) => {
+    let criteria;
+    try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { return null; }
+    if (!criteria || !criteria.option_type) return null;
+
+    // Budget gate
+    if (rule.action === 'buy_put' && botData.putBudgetForCycle > 0) {
+      const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
+      if (putRemaining <= 10) return null;
+    }
+
+    // Market conditions
+    if (criteria.market_conditions) {
+      const marketValues = { spot_price: spotPrice };
+      if (!evaluateConditions(criteria.market_conditions, 'all', marketValues)) return null;
+    }
+
+    // Scan candidates
+    let candidates = [];
+    for (const [instrName, ticker] of Object.entries(tickerMap)) {
+      const instrument = instruments.find(i => i.instrument_name === instrName);
+      if (!instrument) continue;
+      if (criteria.option_type && instrument.option_details?.option_type !== criteria.option_type) continue;
+
+      const expiry = parseExpiryFromInstrument(instrName);
+      if (!expiry) continue;
+      const dte = Math.max(0, (expiry.getTime() - Date.now()) / 86400000);
+      if (criteria.dte_range && (dte < criteria.dte_range[0] || dte > criteria.dte_range[1])) continue;
+
+      const delta = Number(ticker?.option_pricing?.d) || 0;
+      if (criteria.delta_range && (delta < criteria.delta_range[0] || delta > criteria.delta_range[1])) continue;
+
+      const strike = Number(instrument.option_details?.strike) || 0;
+      if (criteria.max_strike_pct && strike >= criteria.max_strike_pct * spotPrice) continue;
+
+      const askPrice = Number(ticker?.a) || 0;
+      if (criteria.max_cost != null && askPrice > criteria.max_cost) continue;
+
+      const absDelta = Math.abs(delta);
+      const score = askPrice > 0 ? absDelta / askPrice : 0;
+      if (criteria.min_score != null && score < criteria.min_score) continue;
+
+      candidates.push({ name: instrName, askPrice, askAmount: Number(ticker?.A) || 0, delta, dte, score, strike, amountStep: instrument.options?.amount_step || 0.01 });
+    }
+
+    if (candidates.length === 0) return null;
+    candidates.sort((a, b) => b.score - a.score);
+    const best = candidates[0];
+
+    // Size by budget
+    const price = best.askPrice;
+    if (price <= 0) return null;
+    let maxByBudget = (rule.budget_limit || Infinity) / price;
+    if (rule.action === 'buy_put' && botData.putBudgetForCycle > 0) {
+      const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
+      maxByBudget = Math.min(maxByBudget, putRemaining / price);
+    }
+    const bookLiq = best.askAmount;
+    const step = best.amountStep;
+    const raw = Math.min(maxByBudget, bookLiq, 20);
+    const qty = Math.floor(raw / step) * step;
+    if (qty < step) return null;
+
+    return { instrument: best.name, qty, price, score: best.score, totalValue: qty * price };
+  };
+
+  // Helper: simulate executeOrder budget tracking for buy_put
+  const trackPutBuy = (totalValue) => {
+    botData.putNetBought += totalValue;
+  };
+
+  // ── Test data: realistic options ──
+  // Future expiry ~60 days from now
+  const futureDate = new Date(Date.now() + 60 * 86400000);
+  const expiryStr = futureDate.toISOString().slice(0, 10).replace(/-/g, '');
+  const putInstrument = `ETH-${expiryStr}-1400-P`;
+
+  const instruments = [
+    { instrument_name: putInstrument, option_details: { option_type: 'P', strike: 1400, expiry: expiryStr }, options: { amount_step: 0.1 }, base_asset_address: '0x1', base_asset_sub_id: '1' },
+  ];
+  const tickerMap = {
+    [putInstrument]: { a: '5.50', A: '10', b: '4.80', B: '8', M: '5.15', option_pricing: { d: '-0.05', i: '0.65', t: '-0.03' } },
+  };
+
+  test('Step 1: ETH holder portfolio → cycle starts with correct budget', () => {
+    resetBotData();
+    const ethBalance = 5.0;
+    const spotPrice = 1800;
+    const portfolioValue = ethBalance * spotPrice; // $9,000
+    maybeResetPutCycle(portfolioValue);
+
+    const expectedBudget = 9000 * 0.0333 / (365 / 15); // ~$12.32
+    assert.ok(botData.putCycleStart > 0, 'Cycle should start');
+    assert.ok(Math.abs(botData.putBudgetForCycle - expectedBudget) < 0.01, `Budget $${botData.putBudgetForCycle.toFixed(2)} should be ~$${expectedBudget.toFixed(2)}`);
+    assert.strictEqual(botData.putNetBought, 0, 'No puts bought yet');
+  });
+
+  test('Step 2: Advisory rule matches a well-priced put', () => {
+    // Rule from advisory: buy OTM puts
+    const rule = {
+      action: 'buy_put',
+      criteria: {
+        option_type: 'P',
+        delta_range: [-0.08, -0.02],
+        dte_range: [45, 75],
+        max_strike_pct: 0.85,
+        min_score: 0.004,
+        max_cost: 15.00,
+      },
+      budget_limit: 50.00,
+    };
+
+    const result = evaluateEntryRule(rule, tickerMap, instruments, 1800);
+    assert.ok(result, 'Should find a candidate');
+    assert.strictEqual(result.instrument, putInstrument);
+    // Score = |delta| / askPrice = 0.05 / 5.50 ≈ 0.00909 (above min_score 0.004)
+    assert.ok(result.score > 0.004, `Score ${result.score} should exceed min_score`);
+    assert.strictEqual(result.price, 5.50);
+    assert.ok(result.qty > 0, 'Quantity should be positive');
+  });
+
+  test('Step 3: Quantity is capped by remaining budget', () => {
+    // Budget is ~$12.32, price is $5.50 per contract
+    // Max by budget = 12.32 / 5.50 ≈ 2.24 → quantized to 2.2 (step 0.1)
+    const rule = {
+      action: 'buy_put',
+      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004, max_cost: 15.00 },
+      budget_limit: 50.00,
+    };
+
+    const result = evaluateEntryRule(rule, tickerMap, instruments, 1800);
+    const maxByBudget = botData.putBudgetForCycle / 5.50; // ~2.24
+    assert.ok(result.qty <= Math.ceil(maxByBudget * 10) / 10, `Qty ${result.qty} should be capped by budget (~${maxByBudget.toFixed(1)} contracts)`);
+    assert.ok(result.totalValue <= botData.putBudgetForCycle + botData.putUnspentBuyLimit + 0.01, `Total $${result.totalValue.toFixed(2)} should not exceed budget $${botData.putBudgetForCycle.toFixed(2)}`);
+  });
+
+  test('Step 4: Execution decrements putNetBought', () => {
+    const rule = {
+      action: 'buy_put',
+      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004, max_cost: 15.00 },
+      budget_limit: 50.00,
+    };
+    const result = evaluateEntryRule(rule, tickerMap, instruments, 1800);
+    const prevBought = botData.putNetBought;
+    trackPutBuy(result.totalValue);
+    assert.strictEqual(botData.putNetBought, prevBought + result.totalValue);
+    assert.ok(botData.putNetBought > 0, 'putNetBought should increase');
+  });
+
+  test('Step 5: After buying, budget mostly exhausted → next buy blocked', () => {
+    // After Step 4, putNetBought ≈ $12.10, budget ≈ $12.32
+    // Remaining ≈ $0.22 which is <= $10 threshold
+    const remaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
+    assert.ok(remaining <= 10, `Remaining $${remaining.toFixed(2)} should be <= $10 (budget exhausted for this cycle)`);
+
+    const rule = {
+      action: 'buy_put',
+      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004, max_cost: 15.00 },
+      budget_limit: 50.00,
+    };
+    const result = evaluateEntryRule(rule, tickerMap, instruments, 1800);
+    assert.strictEqual(result, null, 'Should be blocked — budget exhausted');
+  });
+
+  test('Step 6: Cycle resets → fresh budget, unspent rolls over', () => {
+    const spent = botData.putNetBought;
+    const prevBudget = botData.putBudgetForCycle;
+    const unspent = Math.max(0, prevBudget + botData.putUnspentBuyLimit - spent);
+
+    // Simulate 15 days passing
+    botData.putCycleStart = Date.now() - PERIOD - 1;
+
+    // Portfolio value changed (ETH went up)
+    const newPortfolio = 5.0 * 2000; // $10,000
+    maybeResetPutCycle(newPortfolio);
+
+    const newBudget = 10000 * 0.0333 / (365 / 15); // ~$13.69
+    assert.ok(Math.abs(botData.putBudgetForCycle - newBudget) < 0.01, `New budget $${botData.putBudgetForCycle.toFixed(2)} should be ~$${newBudget.toFixed(2)}`);
+    assert.strictEqual(botData.putNetBought, 0, 'putNetBought resets to 0');
+    assert.ok(Math.abs(botData.putUnspentBuyLimit - unspent) < 0.01, `Rollover $${botData.putUnspentBuyLimit.toFixed(2)} should be ~$${unspent.toFixed(2)}`);
+  });
+
+  test('Step 7: Rollover + new budget → can buy again', () => {
+    const totalAvailable = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
+    assert.ok(totalAvailable > 10, `Total available $${totalAvailable.toFixed(2)} should be > $10`);
+
+    const rule = {
+      action: 'buy_put',
+      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004, max_cost: 15.00 },
+      budget_limit: 50.00,
+    };
+    const result = evaluateEntryRule(rule, tickerMap, instruments, 2000);
+    assert.ok(result, 'Should be able to buy after cycle reset with rollover');
+    assert.ok(result.qty > 0);
+  });
+});
+
+// ============================================================================
+// 38. Full schema: exit rule monitoring (sell_put to roll positions)
+// ============================================================================
+
+describe('Full schema: exit monitoring for put rolling', () => {
+  // The bot holds puts and needs to roll them ~3-4 weeks before expiry
+  // Exit rule triggers → pending action queued → eventually confirmed/executed
+
+  // Create a fresh in-memory DB for this test
+  const Database = require('better-sqlite3');
+  const exitDb = new Database(':memory:');
+  exitDb.pragma('journal_mode = WAL');
+  exitDb.exec(`
+    CREATE TABLE IF NOT EXISTS trading_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, rule_type TEXT NOT NULL, action TEXT NOT NULL,
+      instrument_name TEXT, criteria TEXT NOT NULL, budget_limit REAL,
+      priority TEXT DEFAULT 'medium', reasoning TEXT,
+      created_at TEXT DEFAULT (datetime('now')), is_active INTEGER DEFAULT 1,
+      advisory_id TEXT, preferred_order_type TEXT
+    );
+    CREATE TABLE IF NOT EXISTS pending_actions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, rule_id INTEGER REFERENCES trading_rules(id),
+      action TEXT NOT NULL, instrument_name TEXT NOT NULL, amount REAL, price REAL,
+      trigger_details TEXT, status TEXT DEFAULT 'pending', retries INTEGER DEFAULT 0,
+      triggered_at TEXT DEFAULT (datetime('now')), confirmation_reasoning TEXT,
+      confirmed_at TEXT, executed_at TEXT, execution_result TEXT
+    );
+  `);
+
+  const exitStmts = {
+    insertRule: exitDb.prepare(`INSERT INTO trading_rules (rule_type, action, instrument_name, criteria, priority, reasoning, advisory_id, is_active) VALUES (@rule_type, @action, @instrument_name, @criteria, @priority, @reasoning, @advisory_id, 1)`),
+    getExitRules: exitDb.prepare(`SELECT * FROM trading_rules WHERE is_active = 1 AND rule_type = 'exit'`),
+    insertPendingAction: exitDb.prepare(`INSERT INTO pending_actions (rule_id, action, instrument_name, amount, price, trigger_details) VALUES (@rule_id, @action, @instrument_name, @amount, @price, @trigger_details)`),
+    hasPendingForRule: exitDb.prepare(`SELECT COUNT(*) as count FROM pending_actions WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed')`),
+    getPending: exitDb.prepare(`SELECT * FROM pending_actions WHERE status = 'pending'`),
+  };
+
+  // Insert an exit rule: sell put when DTE <= 25 (roll window)
+  exitStmts.insertRule.run({
+    rule_type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260501-1500-P',
+    criteria: JSON.stringify({ conditions: [{ field: 'dte', op: 'lte', value: 25 }], condition_logic: 'all' }),
+    priority: 'high', reasoning: 'Roll window: sell before gamma decay', advisory_id: 'adv-test',
+  });
+
+  test('position outside roll window → no trigger', () => {
+    // DTE = 40 days — not in the roll window yet
+    const position = { instrument_name: 'ETH-20260501-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
+    const ticker = { M: '6.00', b: '5.50', option_pricing: { d: '-0.04', i: '0.60', t: '-0.02' } };
+    const spotPrice = 1800;
+
+    // Simulate: compute values and check DTE
+    const values = computeCurrentValues(position, ticker, spotPrice);
+    // Override DTE to simulate far-out position
+    values.dte = 40;
+
+    const rules = exitStmts.getExitRules.all();
+    let triggered = false;
+    for (const rule of rules) {
+      if (rule.instrument_name !== position.instrument_name) continue;
+      const criteria = JSON.parse(rule.criteria);
+      if (evaluateConditions(criteria.conditions, criteria.condition_logic, values)) {
+        triggered = true;
+      }
+    }
+    assert.strictEqual(triggered, false, 'DTE 40 should NOT trigger roll window (lte 25)');
+  });
+
+  test('position enters roll window → triggers pending action', () => {
+    const position = { instrument_name: 'ETH-20260501-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
+    const ticker = { M: '4.00', b: '3.50', option_pricing: { d: '-0.03', i: '0.55', t: '-0.04' } };
+    const spotPrice = 1800;
+
+    const values = computeCurrentValues(position, ticker, spotPrice);
+    values.dte = 22; // Inside roll window
+
+    const rules = exitStmts.getExitRules.all();
+    for (const rule of rules) {
+      if (rule.instrument_name !== position.instrument_name) continue;
+      const criteria = JSON.parse(rule.criteria);
+      if (evaluateConditions(criteria.conditions, criteria.condition_logic, values)) {
+        const hasPending = (exitStmts.hasPendingForRule.get({ rule_id: rule.id })?.count || 0) > 0;
+        if (!hasPending) {
+          exitStmts.insertPendingAction.run({
+            rule_id: rule.id, action: rule.action, instrument_name: rule.instrument_name,
+            amount: position.amount, price: Number(ticker.b),
+            trigger_details: JSON.stringify({ dte: values.dte, condition: 'dte <= 25' }),
+          });
+        }
+      }
+    }
+
+    const pending = exitStmts.getPending.all();
+    assert.strictEqual(pending.length, 1, 'Should have 1 pending action');
+    assert.strictEqual(pending[0].action, 'sell_put');
+    assert.strictEqual(pending[0].instrument_name, 'ETH-20260501-1500-P');
+    assert.strictEqual(pending[0].amount, 1.0);
+  });
+
+  test('dedup: same rule does not trigger twice', () => {
+    const values = { dte: 20, delta: -0.03, mark_price: 3.80, spot_price: 1800 };
+    const rules = exitStmts.getExitRules.all();
+    let newActions = 0;
+    for (const rule of rules) {
+      const criteria = JSON.parse(rule.criteria);
+      if (evaluateConditions(criteria.conditions, criteria.condition_logic, values)) {
+        const hasPending = (exitStmts.hasPendingForRule.get({ rule_id: rule.id })?.count || 0) > 0;
+        if (!hasPending) {
+          newActions++;
+        }
+      }
+    }
+    assert.strictEqual(newActions, 0, 'Should not create duplicate pending action');
+  });
+});
+
+// ============================================================================
+// 39. Full schema: confirmation voting logic
+// ============================================================================
+
+describe('Confirmation voting logic', () => {
+  // Tests the voting matrix: both confirm → execute, both reject → reject,
+  // split → reject (conservative), one fails → use the other
+
+  const resolveVote = (haikuVote, codexVote) => {
+    if (haikuVote && codexVote) {
+      return (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
+    } else if (haikuVote) {
+      return haikuVote.confirm ? 'confirmed' : 'rejected';
+    } else if (codexVote) {
+      return codexVote.confirm ? 'confirmed' : 'rejected';
+    }
+    return 'retry'; // Both failed
+  };
+
+  test('both confirm → confirmed', () => {
+    const result = resolveVote({ confirm: true, reasoning: 'good' }, { confirm: true, reasoning: 'convex' });
+    assert.strictEqual(result, 'confirmed');
+  });
+
+  test('both reject → rejected', () => {
+    const result = resolveVote({ confirm: false, reasoning: 'too expensive' }, { confirm: false, reasoning: 'symmetric payoff' });
+    assert.strictEqual(result, 'rejected');
+  });
+
+  test('split vote (haiku yes, codex no) → rejected (conservative)', () => {
+    const result = resolveVote({ confirm: true, reasoning: 'ok' }, { confirm: false, reasoning: 'ruin risk' });
+    assert.strictEqual(result, 'rejected');
+  });
+
+  test('split vote (haiku no, codex yes) → rejected (conservative)', () => {
+    const result = resolveVote({ confirm: false, reasoning: 'overpaying' }, { confirm: true, reasoning: 'convex' });
+    assert.strictEqual(result, 'rejected');
+  });
+
+  test('haiku fails, codex confirms → confirmed (single advisor fallback)', () => {
+    const result = resolveVote(null, { confirm: true, reasoning: 'looks good' });
+    assert.strictEqual(result, 'confirmed');
+  });
+
+  test('haiku confirms, codex fails → confirmed (single advisor fallback)', () => {
+    const result = resolveVote({ confirm: true, reasoning: 'disciplined' }, null);
+    assert.strictEqual(result, 'confirmed');
+  });
+
+  test('haiku fails, codex rejects → rejected', () => {
+    const result = resolveVote(null, { confirm: false, reasoning: 'no' });
+    assert.strictEqual(result, 'rejected');
+  });
+
+  test('both fail → retry', () => {
+    const result = resolveVote(null, null);
+    assert.strictEqual(result, 'retry');
+  });
+});
+
+// ============================================================================
+// 40. Full schema: cooldown prevents rapid-fire entries
+// ============================================================================
+
+describe('Entry cooldown logic', () => {
+  test('no prior execution → no cooldown', () => {
+    const lastExec = null;
+    const cooldownActive = lastExec && (Date.now() - new Date(lastExec).getTime()) < 3600000;
+    assert.strictEqual(!!cooldownActive, false);
+  });
+
+  test('execution 30 min ago → cooldown active', () => {
+    const lastExec = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const elapsed = Date.now() - new Date(lastExec).getTime();
+    const cooldownActive = elapsed < 3600000;
+    assert.strictEqual(cooldownActive, true, `Elapsed ${elapsed}ms should be < 1hr`);
+  });
+
+  test('execution 2 hours ago → cooldown expired', () => {
+    const lastExec = new Date(Date.now() - 2 * 3600000).toISOString();
+    const elapsed = Date.now() - new Date(lastExec).getTime();
+    const cooldownActive = elapsed < 3600000;
+    assert.strictEqual(cooldownActive, false, `Elapsed ${elapsed}ms should be >= 1hr`);
+  });
+
+  test('execution exactly 1 hour ago → cooldown expired (boundary)', () => {
+    const lastExec = new Date(Date.now() - 3600000).toISOString();
+    const elapsed = Date.now() - new Date(lastExec).getTime();
+    const cooldownActive = elapsed < 3600000;
+    assert.strictEqual(cooldownActive, false, 'Exactly 1 hour should not be in cooldown');
+  });
+});
+
+// ============================================================================
+// 41. Full schema: DRY_RUN budget tracking without real orders
+// ============================================================================
+
+describe('DRY_RUN mode budget tracking', () => {
+  test('buy_put in DRY_RUN tracks budget', () => {
+    const botState = { putNetBought: 0 };
+    const action = 'buy_put';
+    const amount = 2.0;
+    const price = 5.50;
+    const totalValue = amount * price; // $11.00
+
+    // Simulate DRY_RUN executeOrder logic
+    if (action === 'buy_put') botState.putNetBought += totalValue;
+    else if (action === 'sell_put') botState.putNetBought -= totalValue;
+
+    assert.strictEqual(botState.putNetBought, 11.00, 'DRY_RUN should still track put spending');
+  });
+
+  test('sell_put in DRY_RUN returns budget', () => {
+    const botState = { putNetBought: 11.00 };
+    const action = 'sell_put';
+    const amount = 1.0;
+    const price = 4.00;
+    const totalValue = amount * price;
+
+    if (action === 'buy_put') botState.putNetBought += totalValue;
+    else if (action === 'sell_put') botState.putNetBought -= totalValue;
+
+    assert.strictEqual(botState.putNetBought, 7.00, 'Selling a put should return budget');
+  });
+
+  test('sell_call in DRY_RUN does not affect put budget', () => {
+    const botState = { putNetBought: 5.00 };
+    const action = 'sell_call';
+    const totalValue = 3.00;
+
+    if (action === 'buy_put') botState.putNetBought += totalValue;
+    else if (action === 'sell_put') botState.putNetBought -= totalValue;
+
+    assert.strictEqual(botState.putNetBought, 5.00, 'Call sells should not affect put budget');
+  });
+});
+
+// ============================================================================
+// 42. Full schema: entry candidate filtering fidelity
+// ============================================================================
+
+describe('Entry candidate filtering: all criteria enforced', () => {
+  const PUT_ANNUAL_RATE = 0.0333;
+  const PERIOD_DAYS = 15;
+  const spotPrice = 1800;
+
+  // A set of options with varying characteristics
+  const futureDate = new Date(Date.now() + 60 * 86400000);
+  const expiryStr = futureDate.toISOString().slice(0, 10).replace(/-/g, '');
+
+  test('option_type filter: calls rejected for put rule', () => {
+    const instrument = { instrument_name: `ETH-${expiryStr}-2000-C`, option_details: { option_type: 'C', strike: 2000 } };
+    const criteria = { option_type: 'P' };
+    assert.notStrictEqual(instrument.option_details.option_type, criteria.option_type, 'Call should not match put rule');
+  });
+
+  test('delta out of range → rejected', () => {
+    const delta = -0.15; // Too high (range is -0.08 to -0.02)
+    const range = [-0.08, -0.02];
+    const inRange = delta >= range[0] && delta <= range[1];
+    assert.strictEqual(inRange, false, `Delta ${delta} should be out of range [${range}]`);
+  });
+
+  test('delta in range → accepted', () => {
+    const delta = -0.05;
+    const range = [-0.08, -0.02];
+    const inRange = delta >= range[0] && delta <= range[1];
+    assert.strictEqual(inRange, true, `Delta ${delta} should be in range [${range}]`);
+  });
+
+  test('DTE out of range → rejected', () => {
+    const dte = 30; // Too short (range is 45-75)
+    const range = [45, 75];
+    const inRange = dte >= range[0] && dte <= range[1];
+    assert.strictEqual(inRange, false, `DTE ${dte} should be out of range [${range}]`);
+  });
+
+  test('strike above max_strike_pct → rejected', () => {
+    const strike = 1600;
+    const maxStrikePct = 0.80;
+    const maxStrike = maxStrikePct * spotPrice; // 1440
+    assert.ok(strike >= maxStrike, `Strike $${strike} should be >= max $${maxStrike}`);
+  });
+
+  test('strike below max_strike_pct → accepted', () => {
+    const strike = 1400;
+    const maxStrikePct = 0.85;
+    const maxStrike = maxStrikePct * spotPrice; // 1530
+    assert.ok(strike < maxStrike, `Strike $${strike} should be < max $${maxStrike}`);
+  });
+
+  test('ask price above max_cost → rejected', () => {
+    const askPrice = 18.00;
+    const maxCost = 15.00;
+    assert.ok(askPrice > maxCost, `Ask $${askPrice} should exceed max_cost $${maxCost}`);
+  });
+
+  test('score below min_score → rejected', () => {
+    const delta = -0.03;
+    const askPrice = 12.00;
+    const score = Math.abs(delta) / askPrice; // 0.0025
+    const minScore = 0.004;
+    assert.ok(score < minScore, `Score ${score.toFixed(4)} should be below min_score ${minScore}`);
+  });
+
+  test('score above min_score → accepted', () => {
+    const delta = -0.05;
+    const askPrice = 5.50;
+    const score = Math.abs(delta) / askPrice; // 0.00909
+    const minScore = 0.004;
+    assert.ok(score >= minScore, `Score ${score.toFixed(4)} should be >= min_score ${minScore}`);
+  });
+
+  test('market_conditions: spot below threshold → rule skipped', () => {
+    const conditions = [{ field: 'spot_price', op: 'lt', value: 1500 }];
+    const values = { spot_price: 1800 };
+    assert.strictEqual(evaluateConditions(conditions, 'all', values), false, 'Spot $1800 is not < $1500');
+  });
+
+  test('market_conditions: spot above threshold → rule proceeds', () => {
+    const conditions = [{ field: 'spot_price', op: 'gt', value: 1500 }];
+    const values = { spot_price: 1800 };
+    assert.strictEqual(evaluateConditions(conditions, 'all', values), true, 'Spot $1800 is > $1500');
+  });
+});
+
+// ============================================================================
+// 43. Full schema: multi-cycle budget discipline over time
+// ============================================================================
+
+describe('Multi-cycle budget discipline simulation', () => {
+  const PUT_ANNUAL_RATE = 0.0333;
+  const PERIOD_DAYS = 15;
+  const PERIOD = PERIOD_DAYS * 86400000;
+
+  let sim;
+  const resetSim = () => {
+    sim = { putCycleStart: null, putBudgetForCycle: 0, putNetBought: 0, putUnspentBuyLimit: 0 };
+  };
+
+  const simReset = (portfolioValue, nowOverride) => {
+    const now = nowOverride || Date.now();
+    const cycleExpired = sim.putCycleStart && (now - sim.putCycleStart) >= PERIOD;
+    const noCycle = !sim.putCycleStart;
+    if (noCycle || cycleExpired) {
+      if (cycleExpired) {
+        const prevRemaining = Math.max(0, sim.putBudgetForCycle + sim.putUnspentBuyLimit - sim.putNetBought);
+        sim.putUnspentBuyLimit = prevRemaining;
+      }
+      const cyclesPerYear = 365 / PERIOD_DAYS;
+      sim.putBudgetForCycle = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
+      sim.putCycleStart = now;
+      sim.putNetBought = 0;
+    }
+  };
+
+  test('3 cycles, varying spend → annual total ≈ 3.33% of average portfolio', () => {
+    resetSim();
+    const t0 = Date.now();
+
+    // Cycle 1: $10,000 portfolio, spend 80%
+    simReset(10000, t0);
+    const budget1 = sim.putBudgetForCycle; // ~$13.69
+    sim.putNetBought = budget1 * 0.8;
+
+    // Cycle 2: $11,000 portfolio (ETH up), spend 60%
+    simReset(11000, t0 + PERIOD + 1);
+    const budget2 = sim.putBudgetForCycle; // ~$15.06
+    const rollover2 = sim.putUnspentBuyLimit; // ~$2.74 from cycle 1
+    sim.putNetBought = budget2 * 0.6;
+
+    // Cycle 3: $9,000 portfolio (ETH down), spend 100%
+    simReset(9000, t0 + 2 * PERIOD + 2);
+    const budget3 = sim.putBudgetForCycle; // ~$12.32
+    const rollover3 = sim.putUnspentBuyLimit; // from cycle 2
+
+    const totalSpent = budget1 * 0.8 + budget2 * 0.6 + budget3; // conservative: assume full spend of cycle 3
+    const avgPortfolio = (10000 + 11000 + 9000) / 3;
+    const cyclesSimulated = 3;
+    const annualizedRate = (totalSpent / avgPortfolio) * (365 / (PERIOD_DAYS * cyclesSimulated));
+
+    // Should be roughly in the neighborhood of 3.33%
+    assert.ok(annualizedRate > 0.02, `Annualized rate ${(annualizedRate * 100).toFixed(2)}% should be > 2%`);
+    assert.ok(annualizedRate < 0.06, `Annualized rate ${(annualizedRate * 100).toFixed(2)}% should be < 6%`);
+    assert.ok(rollover2 > 0, 'Unspent from cycle 1 should roll over');
+    assert.ok(rollover3 > 0, 'Unspent from cycle 2 should roll over');
+  });
+
+  test('all rollover accumulates when nothing is bought', () => {
+    resetSim();
+    const t0 = Date.now();
+
+    // 3 cycles with zero spending
+    simReset(10000, t0);
+    // Spend nothing
+    simReset(10000, t0 + PERIOD + 1);
+    // Spend nothing
+    simReset(10000, t0 + 2 * PERIOD + 2);
+
+    // 3 cycles of ~$13.69 each, all rolled over
+    const expectedRollover = 2 * (10000 * 0.0333 / (365 / 15)); // 2 full cycles rolled
+    assert.ok(Math.abs(sim.putUnspentBuyLimit - expectedRollover) < 0.02,
+      `Rollover $${sim.putUnspentBuyLimit.toFixed(2)} should be ~$${expectedRollover.toFixed(2)} (2 full cycles)`);
+    // Plus current cycle budget
+    const totalAvailable = sim.putBudgetForCycle + sim.putUnspentBuyLimit;
+    const expectedTotal = 3 * (10000 * 0.0333 / (365 / 15));
+    assert.ok(Math.abs(totalAvailable - expectedTotal) < 0.02,
+      `Total available $${totalAvailable.toFixed(2)} should be ~$${expectedTotal.toFixed(2)} (3 cycles saved up)`);
+  });
+
+  test('heavy spend one cycle → less available next cycle (no negative rollover)', () => {
+    resetSim();
+    const t0 = Date.now();
+
+    simReset(10000, t0);
+    const budget = sim.putBudgetForCycle;
+    sim.putNetBought = budget + 5; // Overspend by $5 (possible if rollover existed)
+
+    simReset(10000, t0 + PERIOD + 1);
+    assert.strictEqual(sim.putUnspentBuyLimit, 0, 'Overspend should not create negative rollover');
+    assert.strictEqual(sim.putNetBought, 0, 'New cycle resets putNetBought');
+  });
+});
+
+// ============================================================================
+// 44. Full schema: executeOrder direction and reduceOnly mapping
+// ============================================================================
+
+describe('executeOrder action → direction + reduceOnly mapping', () => {
+  const mapAction = (action) => {
+    const direction = (action === 'buy_put' || action === 'buyback_call') ? 'buy' : 'sell';
+    const reduceOnly = (action === 'sell_put' || action === 'buyback_call');
+    return { direction, reduceOnly };
+  };
+
+  test('buy_put → buy, not reduceOnly', () => {
+    const { direction, reduceOnly } = mapAction('buy_put');
+    assert.strictEqual(direction, 'buy');
+    assert.strictEqual(reduceOnly, false);
+  });
+
+  test('sell_put → sell, reduceOnly (closing position)', () => {
+    const { direction, reduceOnly } = mapAction('sell_put');
+    assert.strictEqual(direction, 'sell');
+    assert.strictEqual(reduceOnly, true);
+  });
+
+  test('sell_call → sell, not reduceOnly (opening short)', () => {
+    const { direction, reduceOnly } = mapAction('sell_call');
+    assert.strictEqual(direction, 'sell');
+    assert.strictEqual(reduceOnly, false);
+  });
+
+  test('buyback_call → buy, reduceOnly (closing short)', () => {
+    const { direction, reduceOnly } = mapAction('buyback_call');
+    assert.strictEqual(direction, 'buy');
+    assert.strictEqual(reduceOnly, true);
+  });
+});
+
+// ============================================================================
+// 45. Voter limit_price sanity check
+// ============================================================================
+
+describe('Voter limit_price sanity check', () => {
+  const resolvePrice = (voterLimitPrice, marketPrice) => {
+    let executionPrice = marketPrice;
+    if (typeof voterLimitPrice === 'number' && voterLimitPrice > 0 && marketPrice > 0) {
+      const ratio = voterLimitPrice / marketPrice;
+      if (ratio >= 0.5 && ratio <= 2.0) {
+        executionPrice = voterLimitPrice;
+      }
+    }
+    return executionPrice;
+  };
+
+  test('voter price within range → accepted', () => {
+    assert.strictEqual(resolvePrice(5.20, 5.50), 5.20);
+  });
+
+  test('voter price slightly below → accepted', () => {
+    assert.strictEqual(resolvePrice(3.00, 5.50), 3.00); // ratio 0.545
+  });
+
+  test('voter price way below (< 50%) → rejected, use market', () => {
+    assert.strictEqual(resolvePrice(2.00, 5.50), 5.50); // ratio 0.364
+  });
+
+  test('voter price way above (> 200%) → rejected, use market', () => {
+    assert.strictEqual(resolvePrice(12.00, 5.50), 5.50); // ratio 2.18
+  });
+
+  test('voter price null → use market', () => {
+    assert.strictEqual(resolvePrice(null, 5.50), 5.50);
+  });
+
+  test('voter price zero → use market', () => {
+    assert.strictEqual(resolvePrice(0, 5.50), 5.50);
+  });
+});
+
+// ============================================================================
+// 46. Call exposure cap: 40% of ETH holdings
+// ============================================================================
+
+describe('Call exposure cap discipline', () => {
+  const CALL_EXPOSURE_CAP_PCT = 0.40;
+
+  test('no short calls → full headroom available', () => {
+    const ethBalance = 5.0;
+    const currentExposure = 0;
+    const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance; // 2.0 ETH
+    const headroom = maxExposure - currentExposure;
+    assert.strictEqual(maxExposure, 2.0);
+    assert.strictEqual(headroom, 2.0);
+  });
+
+  test('existing 1.5 ETH short calls with 5 ETH → 0.5 headroom', () => {
+    const ethBalance = 5.0;
+    const currentExposure = 1.5;
+    const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance; // 2.0
+    const headroom = Math.max(0, maxExposure - currentExposure);
+    assert.strictEqual(headroom, 0.5);
+  });
+
+  test('at cap → sell_call blocked', () => {
+    const ethBalance = 5.0;
+    const currentExposure = 2.0; // exactly at 40%
+    const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance;
+    const blocked = currentExposure >= maxExposure;
+    assert.strictEqual(blocked, true, 'Should block at cap');
+  });
+
+  test('over cap → sell_call blocked', () => {
+    const ethBalance = 5.0;
+    const currentExposure = 2.5; // over 40%
+    const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance;
+    const blocked = currentExposure >= maxExposure;
+    assert.strictEqual(blocked, true, 'Should block over cap');
+  });
+
+  test('under cap → sell_call allowed', () => {
+    const ethBalance = 5.0;
+    const currentExposure = 1.0;
+    const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance;
+    const blocked = currentExposure >= maxExposure;
+    assert.strictEqual(blocked, false, 'Should allow under cap');
+  });
+
+  test('zero ETH balance → ethBalance guard prevents division issues', () => {
+    const ethBalance = 0;
+    // When ethBalance is 0, the cap check is skipped (no ETH to cover)
+    const shouldCheck = ethBalance > 0;
+    assert.strictEqual(shouldCheck, false, 'Skip cap check with no ETH');
+  });
+
+  test('amount sizing capped by remaining headroom', () => {
+    const ethBalance = 5.0;
+    const currentExposure = 1.5;
+    const headroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * ethBalance - currentExposure); // 0.5
+    const ruleBudgetMax = 10.0; // rule allows 10 ETH worth
+    const bookLiquidity = 3.0;
+    const raw = Math.min(ruleBudgetMax, headroom, bookLiquidity);
+    assert.strictEqual(raw, 0.5, 'Should be capped by headroom, not rule or book');
+  });
+
+  test('buy_put is NOT affected by call cap', () => {
+    const action = 'buy_put';
+    const shouldCheckCallCap = action === 'sell_call';
+    assert.strictEqual(shouldCheckCallCap, false, 'Put buying ignores call cap');
+  });
+
+  test('cap scales with ETH holdings', () => {
+    // More ETH = more room to sell calls
+    const small = CALL_EXPOSURE_CAP_PCT * 2.0; // 0.8 ETH
+    const large = CALL_EXPOSURE_CAP_PCT * 10.0; // 4.0 ETH
+    assert.strictEqual(small, 0.8);
+    assert.strictEqual(large, 4.0);
+    assert.ok(large > small, 'More ETH = bigger cap');
+  });
+});
+
+// ============================================================================
 // Summary
 // ============================================================================
 

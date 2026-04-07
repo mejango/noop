@@ -150,6 +150,8 @@ try { db.exec('ALTER TABLE options_snapshots ADD COLUMN implied_vol REAL'); } ca
 try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_put_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_call_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE trading_rules ADD COLUMN preferred_order_type TEXT'); } catch {}
+try { db.exec('ALTER TABLE bot_state ADD COLUMN last_advisory_spot_price REAL'); } catch {}
+try { db.exec('ALTER TABLE bot_state ADD COLUMN last_advisory_timestamp INTEGER NOT NULL DEFAULT 0'); } catch {}
 
 // Resting (GTC/post_only) orders we've placed — for fill reconciliation
 db.exec(`
@@ -181,11 +183,14 @@ db.exec(`
     put_cycle_start INTEGER,
     put_net_bought REAL NOT NULL DEFAULT 0,
     put_unspent_buy_limit REAL NOT NULL DEFAULT 0,
+    put_budget_for_cycle REAL NOT NULL DEFAULT 0,
     call_cycle_start INTEGER,
     call_net_sold REAL NOT NULL DEFAULT 0,
     call_unspent_sell_limit REAL NOT NULL DEFAULT 0,
     last_check INTEGER NOT NULL DEFAULT 0,
     last_journal_generation INTEGER NOT NULL DEFAULT 0,
+    last_advisory_spot_price REAL,
+    last_advisory_timestamp INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -223,6 +228,7 @@ db.exec(`
 // Hypothesis tracking columns (idempotent)
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_check INTEGER NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_journal_generation INTEGER NOT NULL DEFAULT 0'); } catch {}
+try { db.exec('ALTER TABLE bot_state ADD COLUMN put_budget_for_cycle REAL NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE ai_journal ADD COLUMN prediction_target TEXT'); } catch {}
 try { db.exec('ALTER TABLE ai_journal ADD COLUMN prediction_direction TEXT'); } catch {}
 try { db.exec('ALTER TABLE ai_journal ADD COLUMN prediction_value REAL'); } catch {}
@@ -370,19 +376,24 @@ const stmts = {
 
   // Bot state persistence
   upsertBotState: db.prepare(`
-    INSERT INTO bot_state (id, put_cycle_start, put_net_bought, put_unspent_buy_limit,
-      call_cycle_start, call_net_sold, call_unspent_sell_limit, last_check, last_journal_generation, updated_at)
-    VALUES (1, @put_cycle_start, @put_net_bought, @put_unspent_buy_limit,
-      @call_cycle_start, @call_net_sold, @call_unspent_sell_limit, @last_check, @last_journal_generation, datetime('now'))
+    INSERT INTO bot_state (id, put_cycle_start, put_net_bought, put_unspent_buy_limit, put_budget_for_cycle,
+      call_cycle_start, call_net_sold, call_unspent_sell_limit, last_check, last_journal_generation,
+      last_advisory_spot_price, last_advisory_timestamp, updated_at)
+    VALUES (1, @put_cycle_start, @put_net_bought, @put_unspent_buy_limit, @put_budget_for_cycle,
+      @call_cycle_start, @call_net_sold, @call_unspent_sell_limit, @last_check, @last_journal_generation,
+      @last_advisory_spot_price, @last_advisory_timestamp, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       put_cycle_start = @put_cycle_start,
       put_net_bought = @put_net_bought,
       put_unspent_buy_limit = @put_unspent_buy_limit,
+      put_budget_for_cycle = @put_budget_for_cycle,
       call_cycle_start = @call_cycle_start,
       call_net_sold = @call_net_sold,
       call_unspent_sell_limit = @call_unspent_sell_limit,
       last_check = @last_check,
       last_journal_generation = @last_journal_generation,
+      last_advisory_spot_price = @last_advisory_spot_price,
+      last_advisory_timestamp = @last_advisory_timestamp,
       updated_at = datetime('now')
   `),
 
@@ -1311,11 +1322,14 @@ const saveBotState = (botData) => {
     put_cycle_start: botData.putCycleStart || null,
     put_net_bought: botData.putNetBought || 0,
     put_unspent_buy_limit: botData.putUnspentBuyLimit || 0,
-    call_cycle_start: botData.callCycleStart || null,
-    call_net_sold: botData.callNetSold || 0,
-    call_unspent_sell_limit: botData.callUnspentSellLimit || 0,
+    put_budget_for_cycle: botData.putBudgetForCycle || 0,
+    call_cycle_start: null,
+    call_net_sold: 0,
+    call_unspent_sell_limit: 0,
     last_check: botData.lastCheck || 0,
     last_journal_generation: botData.lastJournalGeneration || 0,
+    last_advisory_spot_price: botData.lastAdvisorySpotPrice || null,
+    last_advisory_timestamp: botData.lastAdvisoryTimestamp || 0,
   });
 };
 
