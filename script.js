@@ -218,6 +218,10 @@ let botData = {
     // Timing (persisted to survive restarts)
     lastCheck: 0,
     lastJournalGeneration: 0,
+
+    // Advisory tracking
+    lastAdvisorySpotPrice: null,  // spot price when last advisory ran
+    lastAdvisoryTimestamp: 0,     // when last advisory ran
   };
 
   return botData;
@@ -226,6 +230,12 @@ let botData = {
 const DEFAULT_AMOUNT_STEP = 0.01;
 
 let botData = createBotData();
+
+// Advisory mutex — prevent overlapping LLM advisory runs
+let _advisoryInFlight = false;
+
+// Price move threshold to force a re-advisory (8% move since last advisory)
+const ADVISORY_PRICE_MOVE_THRESHOLD = 0.08;
 
 const persistCycleState = () => {
   if (!db) return;
@@ -239,7 +249,35 @@ const getAmountStep = (opt) =>
 const quantizeDown = (x, step) => {
   if (!Number.isFinite(x) || !Number.isFinite(step) || step <= 0) return 0;
   return Math.max(0, Math.floor(x / step) * step);
-};  
+};
+
+// Extract the first complete JSON object from a string using balanced braces.
+// The greedy regex /\{[\s\S]*\}/ matches from first { to LAST }, which captures
+// garbage if the LLM outputs text between JSON blocks. This counts braces instead.
+const extractJSON = (text) => {
+  if (!text || typeof text !== 'string') return null;
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        try { return JSON.parse(text.slice(start, i + 1)); }
+        catch { return null; }
+      }
+    }
+  }
+  return null;
+};
 
 // Load existing data from SQLite
 const loadData = () => {
@@ -1627,9 +1665,8 @@ Output ONLY this JSON:
       });
 
       const resultText = response.data?.content?.[0]?.text || '';
-      const jsonMatch = resultText.match(/\{[\s\S]*"status"[\s\S]*"verdict"[\s\S]*\}/);
-      if (jsonMatch) {
-        const result = JSON.parse(jsonMatch[0]);
+      const result = extractJSON(resultText);
+      if (result && result.status && result.verdict) {
         db.updateHypothesisVerdict(hyp.id, {
           status: result.status,
           verdict: result.verdict,
@@ -1694,9 +1731,8 @@ Output JSON:
     });
 
     const text = response.data?.content?.[0]?.text || '';
-    const jsonMatch = text.match(/\{[\s\S]*"new_lessons"[\s\S]*\}/);
-    if (jsonMatch) {
-      const result = JSON.parse(jsonMatch[0]);
+    const result = extractJSON(text);
+    if (result && result.new_lessons) {
       for (const lesson of (result.new_lessons || [])) {
         db.insertLesson(lesson.lesson, lesson.evidence_count || 0);
       }
@@ -3155,7 +3191,8 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
         const haikuResp = await axios.post('https://api.anthropic.com/v1/messages', {
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 256,
-          system: 'You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.',
+          system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
+REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.`,
           messages: [{ role: 'user', content: confirmPrompt }],
         }, {
           headers: {
@@ -3166,8 +3203,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
           timeout: 15000,
         });
         const haikuText = haikuResp.data?.content?.[0]?.text || '';
-        const haikuJson = haikuText.match(/\{[\s\S]*"confirm"[\s\S]*\}/);
-        if (haikuJson) haikuVote = JSON.parse(haikuJson[0]);
+        haikuVote = extractJSON(haikuText);
       } catch (e) {
         console.log(`⚠️ Haiku confirmation failed: ${e.message}`);
       }
@@ -3176,13 +3212,12 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
       let codexVote = null;
       try {
         const codexText = await callOpenAI(
-          'You are a Taleb-style risk advisor. Confirm trades that are convex (bounded downside, unbounded upside). Reject trades that expose us to ruin or have symmetric payoffs. Be conservative — when in doubt, reject. Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }',
+          'You are a Taleb-style risk advisor. Confirm trades that are convex (bounded downside, unbounded upside). Reject trades that expose us to ruin or have symmetric payoffs. Be conservative — when in doubt, reject. REGIME AWARENESS: ETH crashes cascade fast. Selling profitable puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV may overpay alongside the crowd. Use the actual position characteristics, Greeks, and momentum to judge. No rigid rules — just awareness that crashes go deeper than expected and fear lingers longer than expected. Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }',
           confirmPrompt,
           { maxTokens: 256, timeout: 15000, model: 'gpt-4o-mini' }
         );
         if (codexText) {
-          const codexJson = codexText.match(/\{[\s\S]*"confirm"[\s\S]*\}/);
-          if (codexJson) codexVote = JSON.parse(codexJson[0]);
+          codexVote = extractJSON(codexText);
         }
       } catch (e) {
         console.log(`⚠️ OpenAI confirmation failed: ${e.message}`);
@@ -3306,6 +3341,14 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     return null;
   }
 
+  // Mutex: prevent overlapping advisory runs
+  if (_advisoryInFlight) {
+    console.log('📋 Advisory: skipped — already in flight');
+    return null;
+  }
+  _advisoryInFlight = true;
+
+  try {
   const advisoryId = `adv_${Date.now()}`;
   console.log(`📋 Advisory ${advisoryId}: starting 3-step deliberation...`);
 
@@ -3446,6 +3489,17 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
 
 You advise a bot that accumulates OTM ETH puts (long insurance) and sells OTM ETH calls (premium harvesting).
 
+## Market Regime Awareness
+ETH crashes tend to cascade — they accelerate, not slow down. Your decisions should reflect the shape of the moment.
+
+Things to consider in your assessment:
+- In calm markets, insurance is cheap. That's when to accumulate it. If puts are expensive, patience is the edge.
+- In crashing markets, our puts become increasingly valuable. The temptation is to sell early. Consider whether the crash has further to go — ETH selloffs often have multiple legs.
+- In recovery, fear lingers and IV stays elevated even as price stabilizes. Panickers overpay for protection they no longer need as urgently. This can be an opportunity.
+- The full cycle: cash → cheap puts → crash → puts print → sell at the right time → buy cheap ETH → sell calls → premium → repeat.
+
+Use your judgment. Look at the actual Greeks, DTE, IV, momentum, and position characteristics. There are no absolute rules — only the principle that well-priced insurance is bought in calm and sold in fear, and that ETH selloffs tend to be deeper and faster than anyone expects.
+
 Given market data, produce a JSON trading agenda with:
 {
   "assessment": "1-3 sentence market assessment and overall stance",
@@ -3565,9 +3619,8 @@ Produce your trading agenda JSON now.`;
 
     const primaryText = primaryResponse.data?.content?.[0]?.text || '';
     try {
-      const jsonMatch = primaryText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        primaryAgenda = JSON.parse(jsonMatch[0]);
+      primaryAgenda = extractJSON(primaryText);
+      if (primaryAgenda) {
         console.log(`📋 Advisory Step 1: got ${primaryAgenda.entry_rules?.length || 0} entry rules, ${primaryAgenda.exit_rules?.length || 0} exit rules`);
       } else {
         throw new Error('No JSON block found in primary response');
@@ -3594,7 +3647,15 @@ You think like Nassim Taleb. You believe in:
 - Convexity. Every trade should have bounded downside and unbounded upside.
 - Skin in the game. If a trade goes wrong, the cost must be small and known.
 - Fat tails. The market is more volatile than anyone thinks. Events that "shouldn't happen" happen regularly.
-- Via negativa. What you DON'T do matters more than what you do. Avoid ruin above all.`;
+- Via negativa. What you DON'T do matters more than what you do. Avoid ruin above all.
+
+## Market Regime Awareness
+ETH crashes cascade — they accelerate, not slow down. Your critique should consider:
+- Selling puts during an active crash means selling convexity that could multiply further. Scrutinize the timing.
+- Buying puts when IV is spiked means overpaying for insurance alongside the crowd. Question the arithmetic.
+- In recovery (price stabilizing, IV still elevated), selling puts to fearful buyers can capture inflated premiums.
+- But these are tendencies, not absolutes. The actual Greeks, DTE, position size, and portfolio shape matter. Use your judgment.
+- Ask: is this trade benefiting from disorder (antifragile) or just reacting to it (fragile)?`;
 
     const talebPrompt = `## The Agenda to Review
 ${JSON.stringify(primaryAgenda)}
@@ -3619,9 +3680,8 @@ Output JSON only:
 
     const talebText = await callOpenAI(talebSystem, talebPrompt, { maxTokens: 2048, timeout: 60000 });
     if (talebText) {
-      const jsonMatch = talebText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        secondOpinion = JSON.parse(jsonMatch[0]);
+      secondOpinion = extractJSON(talebText);
+      if (secondOpinion) {
         console.log(`📋 Taleb review: ${secondOpinion.vetoes?.length || 0} vetoes, ${secondOpinion.amendments?.length || 0} amendments`);
       }
     }
@@ -3723,9 +3783,9 @@ Synthesize the final agenda now.`;
 
     const synthesisText = synthesisResponse.data?.content?.[0]?.text || '';
     try {
-      const jsonMatch = synthesisText.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        finalAgenda = JSON.parse(jsonMatch[0]);
+      const synthesized = extractJSON(synthesisText);
+      if (synthesized) {
+        finalAgenda = synthesized;
         console.log(`📋 Advisory Step 3: synthesized ${finalAgenda.entry_rules?.length || 0} entry rules, ${finalAgenda.exit_rules?.length || 0} exit rules`);
       } else {
         console.log('📋 Advisory Step 3: no JSON in synthesis response, using primary agenda');
@@ -3799,7 +3859,14 @@ Synthesize the final agenda now.`;
   const exitCount = finalAgenda.exit_rules?.length || 0;
   console.log(`📋 Advisory ${advisoryId}: complete — ${entryCount} entry rules, ${exitCount} exit rules`);
 
+  // Track advisory state for price-triggered re-advisory
+  botData.lastAdvisorySpotPrice = spotPrice;
+  botData.lastAdvisoryTimestamp = Date.now();
+
   return { advisoryId, agenda: finalAgenda, rulesCount: allRules.length };
+  } finally {
+    _advisoryInFlight = false;
+  }
 };
 
 // ─── Bot Loop ────────────────────────────────────────────────────────────────
@@ -4172,6 +4239,36 @@ const runBot = async () => {
           db.insertOptionsSnapshotBatch(allOptions, tickTimestamp);
         }
       } catch (e) { console.log('DB: options snapshot write failed:', e.message); }
+
+      // Portfolio P&L snapshot
+      try {
+        let balances = [];
+        try { balances = await fetchCollaterals(); } catch { /* ok */ }
+        const usdcBal = Number(balances.find(b => b.asset_name === 'USDC')?.amount || 0);
+        const ethBal = Number(balances.find(b => b.asset_name === 'ETH')?.amount || 0);
+
+        const unrealizedPnl = positions.reduce((sum, p) => sum + (Number(p.unrealized_pnl) || 0), 0);
+        const realizedData = db.getRealizedPnL();
+
+        // Portfolio value = USDC + ETH*spot + unrealized P&L on positions
+        const portfolioValue = usdcBal + (ethBal * spotPrice) + unrealizedPnl;
+
+        db.insertPortfolioSnapshot({
+          timestamp: tickTimestamp,
+          spot_price: spotPrice,
+          usdc_balance: usdcBal,
+          eth_balance: ethBal,
+          positions_json: positions.map(p => ({
+            instrument: p.instrument_name,
+            direction: p.direction,
+            amount: p.amount,
+            unrealized_pnl: p.unrealized_pnl,
+          })),
+          total_unrealized_pnl: unrealizedPnl,
+          total_realized_pnl: realizedData.net_realized_pnl || 0,
+          portfolio_value_usd: portfolioValue,
+        });
+      } catch (e) { console.log('DB: portfolio snapshot failed:', e.message); }
     }
 
     console.log('='.repeat(60));
@@ -4207,6 +4304,19 @@ const runBot = async () => {
         db.insertTick(tickTimestamp, JSON.stringify(tickSummary));
       } catch (e) {
         console.log('DB: tick write failed:', e.message);
+      }
+
+      // Price-triggered re-advisory: if price moved >8% since last advisory, recalibrate
+      if (process.env.ANTHROPIC_API_KEY && spotPrice && botData.lastAdvisorySpotPrice) {
+        const priceMoveRatio = Math.abs(spotPrice - botData.lastAdvisorySpotPrice) / botData.lastAdvisorySpotPrice;
+        const minAdvisoryGap = 10 * 60 * 1000; // 10 min minimum between advisories
+        if (priceMoveRatio >= ADVISORY_PRICE_MOVE_THRESHOLD && (Date.now() - botData.lastAdvisoryTimestamp) > minAdvisoryGap) {
+          const moveDirection = spotPrice > botData.lastAdvisorySpotPrice ? 'up' : 'down';
+          console.log(`📋 Price moved ${(priceMoveRatio * 100).toFixed(1)}% ${moveDirection} since last advisory ($${botData.lastAdvisorySpotPrice.toFixed(0)} → $${spotPrice.toFixed(0)}) — forcing re-advisory`);
+          generateTradingAdvisory(positions, spotPrice, tickerMap).catch(e => {
+            console.log(`📋 Price-triggered advisory failed (non-fatal): ${e.message}`);
+          });
+        }
       }
 
       // Auto-generate journal entries every 8 hours

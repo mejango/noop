@@ -1962,6 +1962,93 @@ describe('Resting order dedup for entry rules', () => {
   });
 });
 
+// ── Test 28: extractJSON (balanced brace parser) ────────────────────────────
+
+// Copy of extractJSON from script.js
+const extractJSON = (text) => {
+  if (!text || typeof text !== 'string') return null;
+  const start = text.indexOf('{');
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\' && inString) { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        try { return JSON.parse(text.slice(start, i + 1)); }
+        catch { return null; }
+      }
+    }
+  }
+  return null;
+};
+
+describe('extractJSON (balanced brace parser)', () => {
+  test('simple JSON object', () => {
+    const result = extractJSON('{"key": "value"}');
+    assert.deepStrictEqual(result, { key: 'value' });
+  });
+
+  test('JSON embedded in text', () => {
+    const result = extractJSON('Here is the result: {"assessment": "bearish"} End of response.');
+    assert.deepStrictEqual(result, { assessment: 'bearish' });
+  });
+
+  test('nested JSON objects', () => {
+    const result = extractJSON('{"outer": {"inner": 42}}');
+    assert.deepStrictEqual(result, { outer: { inner: 42 } });
+  });
+
+  test('greedy regex would fail: text between two JSON blocks', () => {
+    // Greedy /\{[\s\S]*\}/ would match from first { to last }, capturing garbage
+    const text = '{"first": 1} some text {"second": 2}';
+    const result = extractJSON(text);
+    // extractJSON should return FIRST complete object, not garbage
+    assert.deepStrictEqual(result, { first: 1 });
+  });
+
+  test('braces inside strings are handled', () => {
+    const result = extractJSON('{"msg": "hello { world }"}');
+    assert.deepStrictEqual(result, { msg: 'hello { world }' });
+  });
+
+  test('escaped quotes inside strings', () => {
+    const result = extractJSON('{"msg": "say \\"hello\\""}');
+    assert.deepStrictEqual(result, { msg: 'say "hello"' });
+  });
+
+  test('null input returns null', () => {
+    assert.strictEqual(extractJSON(null), null);
+  });
+
+  test('empty string returns null', () => {
+    assert.strictEqual(extractJSON(''), null);
+  });
+
+  test('no JSON returns null', () => {
+    assert.strictEqual(extractJSON('just plain text'), null);
+  });
+
+  test('invalid JSON returns null', () => {
+    assert.strictEqual(extractJSON('{not: valid json}'), null);
+  });
+
+  test('complex advisory-like JSON', () => {
+    const text = `Here's my analysis:\n{"assessment": "market bearish", "entry_rules": [{"action": "buy_put", "criteria": {"option_type": "P"}}], "exit_rules": []}`;
+    const result = extractJSON(text);
+    assert.strictEqual(result.assessment, 'market bearish');
+    assert.strictEqual(result.entry_rules.length, 1);
+    assert.strictEqual(result.entry_rules[0].criteria.option_type, 'P');
+  });
+});
+
 // ============================================================================
 // Summary
 // ============================================================================

@@ -425,6 +425,31 @@ function prepareAll(d: Database.Database) {
       WHERE entry_type = 'advisory'
       ORDER BY timestamp DESC LIMIT 1
     `),
+
+    // Portfolio P&L
+    getPortfolioHistory: d.prepare(`
+      SELECT timestamp, spot_price, usdc_balance, eth_balance,
+        total_unrealized_pnl, total_realized_pnl, portfolio_value_usd
+      FROM portfolio_snapshots
+      WHERE timestamp > ?
+      ORDER BY timestamp ASC
+    `),
+    getLatestPortfolioSnapshot: d.prepare(`
+      SELECT * FROM portfolio_snapshots ORDER BY id DESC LIMIT 1
+    `),
+    getRealizedPnL: d.prepare(`
+      SELECT
+        COALESCE(SUM(CASE WHEN action IN ('sell_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+        - COALESCE(SUM(CASE WHEN action IN ('buy_put','sell_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+        as net_realized_pnl,
+        COALESCE(SUM(CASE WHEN action = 'buy_put' AND success = 1 THEN total_value ELSE 0 END), 0) as total_put_cost,
+        COALESCE(SUM(CASE WHEN action = 'sell_put' AND success = 1 THEN total_value ELSE 0 END), 0) as total_put_revenue,
+        COALESCE(SUM(CASE WHEN action = 'sell_call' AND success = 1 THEN total_value ELSE 0 END), 0) as total_call_revenue,
+        COALESCE(SUM(CASE WHEN action = 'buyback_call' AND success = 1 THEN total_value ELSE 0 END), 0) as total_call_cost,
+        COUNT(CASE WHEN success = 1 THEN 1 END) as successful_orders,
+        COUNT(*) as total_orders
+      FROM orders
+    `),
   };
 }
 
@@ -822,6 +847,35 @@ export function getLatestAdvisoryAssessment() {
   try {
     return getStmts().getLatestAdvisoryAssessment.get() as {
       content: string; timestamp: string;
+    } | undefined;
+  } catch { return undefined; }
+}
+
+export function getPortfolioHistory(since: string) {
+  try {
+    return getStmts().getPortfolioHistory.all(since) as {
+      timestamp: string; spot_price: number; usdc_balance: number; eth_balance: number;
+      total_unrealized_pnl: number; total_realized_pnl: number; portfolio_value_usd: number;
+    }[];
+  } catch { return []; }
+}
+
+export function getLatestPortfolioSnapshot() {
+  try {
+    return getStmts().getLatestPortfolioSnapshot.get() as {
+      timestamp: string; spot_price: number; usdc_balance: number; eth_balance: number;
+      total_unrealized_pnl: number; total_realized_pnl: number; portfolio_value_usd: number;
+      positions_json: string;
+    } | undefined;
+  } catch { return undefined; }
+}
+
+export function getRealizedPnL() {
+  try {
+    return getStmts().getRealizedPnL.get() as {
+      net_realized_pnl: number; total_put_cost: number; total_put_revenue: number;
+      total_call_revenue: number; total_call_cost: number;
+      successful_orders: number; total_orders: number;
     } | undefined;
   } catch { return undefined; }
 }

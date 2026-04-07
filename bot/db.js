@@ -235,6 +235,22 @@ try { db.exec('ALTER TABLE ai_journal ADD COLUMN outcome_reviewed_at TEXT'); } c
 try { db.exec('ALTER TABLE ai_journal ADD COLUMN trade_pnl_attribution REAL'); } catch {}
 try { db.exec('ALTER TABLE ai_journal ADD COLUMN trades_in_window TEXT'); } catch {}
 
+// Portfolio P&L snapshots — taken each tick to track performance over time
+db.exec(`
+  CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    spot_price REAL NOT NULL,
+    usdc_balance REAL DEFAULT 0,
+    eth_balance REAL DEFAULT 0,
+    positions_json TEXT,
+    total_unrealized_pnl REAL DEFAULT 0,
+    total_realized_pnl REAL DEFAULT 0,
+    portfolio_value_usd REAL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_timestamp ON portfolio_snapshots(timestamp);
+`);
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS hypothesis_lessons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -797,6 +813,37 @@ const stmts = {
     SELECT COUNT(*) as count FROM resting_orders
     WHERE instrument_name = @instrument_name AND status = 'open'
   `),
+
+  // Portfolio P&L
+  insertPortfolioSnapshot: db.prepare(`
+    INSERT INTO portfolio_snapshots (timestamp, spot_price, usdc_balance, eth_balance, positions_json,
+      total_unrealized_pnl, total_realized_pnl, portfolio_value_usd)
+    VALUES (@timestamp, @spot_price, @usdc_balance, @eth_balance, @positions_json,
+      @total_unrealized_pnl, @total_realized_pnl, @portfolio_value_usd)
+  `),
+  getPortfolioHistory: db.prepare(`
+    SELECT timestamp, spot_price, usdc_balance, eth_balance,
+      total_unrealized_pnl, total_realized_pnl, portfolio_value_usd
+    FROM portfolio_snapshots
+    WHERE timestamp > @since
+    ORDER BY timestamp ASC
+  `),
+  getLatestPortfolioSnapshot: db.prepare(`
+    SELECT * FROM portfolio_snapshots ORDER BY id DESC LIMIT 1
+  `),
+  getRealizedPnL: db.prepare(`
+    SELECT
+      COALESCE(SUM(CASE WHEN action IN ('sell_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+      - COALESCE(SUM(CASE WHEN action IN ('buy_put','sell_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+      as net_realized_pnl,
+      COALESCE(SUM(CASE WHEN action = 'buy_put' AND success = 1 THEN total_value ELSE 0 END), 0) as total_put_cost,
+      COALESCE(SUM(CASE WHEN action = 'sell_put' AND success = 1 THEN total_value ELSE 0 END), 0) as total_put_revenue,
+      COALESCE(SUM(CASE WHEN action = 'sell_call' AND success = 1 THEN total_value ELSE 0 END), 0) as total_call_revenue,
+      COALESCE(SUM(CASE WHEN action = 'buyback_call' AND success = 1 THEN total_value ELSE 0 END), 0) as total_call_cost,
+      COUNT(CASE WHEN success = 1 THEN 1 END) as successful_orders,
+      COUNT(*) as total_orders
+    FROM orders
+  `),
 };
 
 // ─── Helper Functions ─────────────────────────────────────────────────────────
@@ -1238,6 +1285,25 @@ const hasRestingOrderForInstrument = (instrumentName) => {
   return (stmts.hasRestingOrderForInstrument.get({ instrument_name: instrumentName })?.count || 0) > 0;
 };
 
+// ─── Portfolio P&L ───────────────────────────────────────────────────────────
+
+const insertPortfolioSnapshot = (snapshot) => {
+  stmts.insertPortfolioSnapshot.run({
+    timestamp: snapshot.timestamp || new Date().toISOString(),
+    spot_price: snapshot.spot_price || 0,
+    usdc_balance: snapshot.usdc_balance || 0,
+    eth_balance: snapshot.eth_balance || 0,
+    positions_json: typeof snapshot.positions_json === 'string' ? snapshot.positions_json : JSON.stringify(snapshot.positions_json || []),
+    total_unrealized_pnl: snapshot.total_unrealized_pnl || 0,
+    total_realized_pnl: snapshot.total_realized_pnl || 0,
+    portfolio_value_usd: snapshot.portfolio_value_usd || 0,
+  });
+};
+
+const getPortfolioHistory = (since) => stmts.getPortfolioHistory.all({ since });
+const getLatestPortfolioSnapshot = () => stmts.getLatestPortfolioSnapshot.get() || null;
+const getRealizedPnL = () => stmts.getRealizedPnL.get() || {};
+
 // ─── Bot State Helpers ────────────────────────────────────────────────────────
 
 const saveBotState = (botData) => {
@@ -1363,5 +1429,10 @@ module.exports = {
   getOpenRestingOrders,
   updateRestingOrder,
   hasRestingOrderForInstrument,
+  // Portfolio P&L
+  insertPortfolioSnapshot,
+  getPortfolioHistory,
+  getLatestPortfolioSnapshot,
+  getRealizedPnL,
   close,
 };
