@@ -16,6 +16,12 @@ if [ ! -f "$WIKI_PATH/schema.md" ]; then
   cp -r knowledge-templates/* "$WIKI_PATH/" 2>/dev/null || true
 fi
 
+# Auto-seed wiki from journal history if not yet seeded
+if [ ! -f "$WIKI_PATH/.meta.json" ] && [ -n "$ANTHROPIC_API_KEY" ]; then
+  echo "Seeding knowledge wiki from journal history (one-time)..."
+  node bot/seed-wiki.js || echo "Wiki seed failed (non-fatal), will populate via ingest cycles"
+fi
+
 echo "Starting bot..."
 node bot/index.js &
 BOT_PID=$!
