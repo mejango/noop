@@ -1608,43 +1608,21 @@ const handleBuyingPuts = async (putOptionsWithDetails, historicalData, spotPrice
     logEntryDecision('PUT', qualifiedPutOptions.length, entryReason);
 
     const remainingBudget = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
-
-    // Wiki-based sizing adjustment (Phase 3)
-    // Wiki adjusts SIZING only, never overrides momentum SIGNALS
-    let wikiSizeMultiplier = 1.0;
-    const wikiSignal = getWikiSignalContext();
-    if (wikiSignal) {
-      const { regime, protectionAssessment } = wikiSignal;
-      if (regime === 'complacency' && protectionAssessment === 'cheap') {
-        wikiSizeMultiplier = 1.5;
-      } else if (regime === 'fear' && protectionAssessment === 'expensive') {
-        wikiSizeMultiplier = 0.5;
-      } else if (regime === 'complacency') {
-        wikiSizeMultiplier = 1.25;
-      } else if (protectionAssessment === 'expensive') {
-        wikiSizeMultiplier = 0.75;
-      }
-      if (wikiSizeMultiplier !== 1.0) {
-        console.log(`📚 Wiki sizing: ${regime}/${protectionAssessment} → ${wikiSizeMultiplier}x multiplier`);
-      }
-    }
-
-    console.log(`💰 Available budget: $${remainingBudget.toFixed(2)}${wikiSizeMultiplier !== 1.0 ? ` (wiki ${wikiSizeMultiplier}x)` : ''}`);
+    console.log(`💰 Available budget: $${remainingBudget.toFixed(2)}`);
 
     // Check if remaining budget is sufficient (>$10)
     for (const option of qualifiedPutOptions) {
       console.log(`🎯 NEW BEST PUT: ${option.instrument_name} | Delta: ${option.details.delta} | Score: ${option.score.toFixed(6)} | Previous best score: ${bestScore.toFixed(6)}`);
-        
+
       // Check if we have budget remaining
-      const currentRemaining = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
-      if (currentRemaining * wikiSizeMultiplier <= 10) {
+      if (remainingBudget <= 10) {
         console.log(`💸 Budget exhausted, skipping remaining options`);
         break;
       }
 
       const buyReason = shouldEnterConfidentDowntrend ? 'Confident Downside Setup' : 'Historical Best Buy';
       console.log(`💸 BUYING PUT: ${option.instrument_name} | Delta: ${option.details.delta} | Score: ${option.score.toFixed(6)} | Reason: ${buyReason}`);
-      const success = await executePutBuyOrder(option, buyReason, spotPrice, wikiSizeMultiplier);
+      const success = await executePutBuyOrder(option, buyReason, spotPrice);
         
       if (success) {
         // Update remaining budget after successful purchase
@@ -1914,11 +1892,11 @@ const handleSellingCalls = async (callOptionsWithDetails, historicalData, spotPr
   return validCallOptions;
 };
 
-const executePutBuyOrder = async (option, reason, spotPrice, sizeMultiplier = 1.0) => {
+const executePutBuyOrder = async (option, reason, spotPrice) => {
     const buyLimit = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit;
     const remainingBuyCapacity = buyLimit - botData.putNetBought; // signed (negative means you've earned extra room)
 
-    console.log("💳 Put buy order with", { buyLimit, remainingBuyCapacity, sizeMultiplier });
+    console.log("💳 Put buy order with", { buyLimit, remainingBuyCapacity });
 
     const askPx = Number(option?.details?.askPrice);
     const askAmt = Number(option?.details?.askAmount);
@@ -1928,8 +1906,7 @@ const executePutBuyOrder = async (option, reason, spotPrice, sizeMultiplier = 1.
     }
 
     const step = getAmountStep(option);
-    const effectiveCapacity = remainingBuyCapacity * sizeMultiplier;
-    const maxByCap = effectiveCapacity / askPx;               // can be negative
+    const maxByCap = remainingBuyCapacity / askPx;           // can be negative
     const raw = Math.max(0, Math.min(maxByCap, askAmt));     // clamp to >= 0
     const qty = quantizeDown(raw, step);                     // enforce 0.01 step
     if (qty === 0) {
