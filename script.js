@@ -146,9 +146,7 @@ const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'confi
 const PUT_BUYING_BASE_FUNDING_LIMIT = process.env.DRY_RUN === '1'
   ? Number(process.env.DRY_RUN_PUT_BUDGET || 2000)
   : BOT_CONFIG.PUT_BUYING_BASE_FUNDING_LIMIT;
-const CALL_SELLING_BASE_FUNDING_LIMIT = process.env.DRY_RUN === '1'
-  ? Number(process.env.DRY_RUN_CALL_BUDGET || 2000)
-  : BOT_CONFIG.CALL_SELLING_BASE_FUNDING_LIMIT;
+// Call selling has no fixed budget — sized by ETH collateral + risk-adjusted leverage
 const SUBACCOUNT_ID = 25923;
 
 // ETH contract addresses for analysis
@@ -2131,17 +2129,13 @@ const generateJournalEntries = async (tickSummary, botData) => {
       budget: (() => {
         const now = Date.now();
         const putDaysLeft = botData.putCycleStart ? Math.max(0, (PERIOD - (now - botData.putCycleStart)) / (1000 * 60 * 60 * 24)) : BOT_CONFIG.PERIOD_DAYS;
-        const callDaysLeft = botData.callCycleStart ? Math.max(0, (PERIOD - (now - botData.callCycleStart)) / (1000 * 60 * 60 * 24)) : BOT_CONFIG.PERIOD_DAYS;
         return {
           cycleDays: BOT_CONFIG.PERIOD_DAYS,
           putTotal: PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit,
           putSpent: botData.putNetBought,
           putRemaining: Math.max(0, PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought),
           putDaysLeft: +putDaysLeft.toFixed(1),
-          callTotal: CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit,
-          callSpent: botData.callNetSold,
-          callRemaining: Math.max(0, CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold),
-          callDaysLeft: +callDaysLeft.toFixed(1),
+          callSizing: 'collateral-based (no fixed budget)',
         };
       })(),
       previous_journal: previousJournal,
@@ -2543,11 +2537,9 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
           if (elapsed < 3600000) continue; // 1 hour cooldown
         }
 
-        // Budget check
+        // Budget check (puts only — calls are collateral-sized by advisory)
         const putRemaining = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
-        const callRemaining = CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold;
         if (rule.action === 'buy_put' && putRemaining <= 10) continue;
-        if (rule.action === 'sell_call' && callRemaining <= 10) continue;
 
         // Dedup: skip if already pending
         if (db.hasPendingActionForRule(rule.id)) continue;
@@ -2643,12 +2635,13 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         candidates.sort((a, b) => b.score - a.score);
         const best = candidates[0];
 
-        // Calculate amount based on budget and book liquidity
-        const remainingBudget = rule.action === 'buy_put' ? putRemaining : callRemaining;
+        // Calculate amount based on budget (puts) or rule limit (calls) and book liquidity
         const price = optionType === 'P' ? best.askPrice : best.bidPrice;
         if (price <= 0) continue;
 
-        const maxBudget = remainingBudget / price;
+        const maxBudget = rule.action === 'buy_put'
+          ? putRemaining / price
+          : (rule.budget_limit || Infinity) / price;
         const bookLiq = optionType === 'P' ? best.askAmount : best.bidAmount;
         const step = best.amountStep || 0.01;
         const raw = Math.min(maxBudget, bookLiq, 20);
@@ -2685,13 +2678,12 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
 // ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
 
 const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice) => {
-  // DRY_RUN mode: simulate budget consumption + log, but skip actual order
+  // DRY_RUN mode: simulate budget consumption (puts only) + log, but skip actual order
   if (process.env.DRY_RUN === '1') {
     const totalValue = amount * price;
     if (action === 'buy_put') botData.putNetBought += totalValue;
     else if (action === 'sell_put') botData.putNetBought -= totalValue;
-    else if (action === 'sell_call') botData.callNetSold += totalValue;
-    else if (action === 'buyback_call') botData.callNetSold -= totalValue;
+    // sell_call / buyback_call: no budget tracking — collateral-sized
     persistCycleState();
     if (db) db.insertOrder({
       action, success: true, reason: `DRY RUN: simulated ${action}`,
@@ -2700,7 +2692,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       filled_amount: amount, fill_price: price,
       total_value: totalValue, spot_price: spotPrice, raw_response: '{"dryRun":true}',
     });
-    console.log(`🔸 DRY RUN: ${action} ${amount} ${instrumentName} @ $${price} (budget: put=$${botData.putNetBought.toFixed(2)} call=$${botData.callNetSold.toFixed(2)})`);
+    console.log(`🔸 DRY RUN: ${action} ${amount} ${instrumentName} @ $${price} (put budget: $${botData.putNetBought.toFixed(2)})`);
     return { dryRun: true, action, instrumentName, amount, price, totalValue };
   }
 
@@ -2751,15 +2743,11 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     if (totAmt > 0) { filledAmt = totAmt; avgPx = totVal / totAmt; totalValue = totVal; }
   }
 
-  // Update budget tracking
+  // Update budget tracking (puts only — calls are collateral-sized)
   if (action === 'buy_put') {
     botData.putNetBought += totalValue;
   } else if (action === 'sell_put') {
     botData.putNetBought -= totalValue;
-  } else if (action === 'sell_call') {
-    botData.callNetSold += totalValue;
-  } else if (action === 'buyback_call') {
-    botData.callNetSold -= totalValue;
   }
   persistCycleState();
 
@@ -2978,16 +2966,26 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     }
   }
 
-  // Budget state
+  // Budget state (puts only — calls are collateral-sized, not budget-capped)
+  const ethBalance = balances.find(b => b.asset_name === 'ETH')?.amount || 0;
+  const usdcBalance = balances.find(b => b.asset_name === 'USDC')?.amount || 0;
+  const shortCallPositions = positions.filter(p =>
+    p.instrument_name?.endsWith('-C') && p.direction === 'short'
+  );
+  const totalCallExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
+
   const budgetState = {
     putBuyingBaseLimit: PUT_BUYING_BASE_FUNDING_LIMIT,
     putUnspentBuyLimit: botData.putUnspentBuyLimit,
     putNetBought: botData.putNetBought,
     putRemainingBudget: PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought,
-    callSellingBaseLimit: CALL_SELLING_BASE_FUNDING_LIMIT,
-    callUnspentSellLimit: botData.callUnspentSellLimit,
-    callNetSold: botData.callNetSold,
-    callRemainingBudget: CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold,
+    callSizing: {
+      ethCollateral: ethBalance,
+      usdcBalance,
+      shortCallExposure: totalCallExposure,
+      availableEthForCalls: Math.max(0, ethBalance - totalCallExposure),
+      note: 'Call selling is risk-adjusted against ETH collateral. No fixed budget. Size for moderate leverage with good risk-reward.',
+    },
   };
 
   // Recent orders
@@ -3092,7 +3090,8 @@ Given market data, produce a JSON trading agenda with:
 
 Rules:
 - Be specific in criteria (reference delta ranges, DTE windows, price levels)
-- Budget limits must respect remaining budget
+- PUT budget_limit must respect remaining put budget
+- CALL selling has NO fixed budget — it is sized against ETH collateral. The advisory should set a budget_limit on sell_call rules that reflects moderate leverage (e.g. sell calls covering 20-40% of available ETH, never more than 50%). Consider existing short call exposure.
 - Entry rules should target the highest-scoring candidates when possible
 - Exit rules should protect gains and limit losses
 - If the market is unclear, it is ALWAYS correct to produce fewer rules or none
@@ -3267,7 +3266,7 @@ ${JSON.stringify(secondOpinion, null, 2)}
 
 === KEY CONSTRAINTS ===
 - Put remaining budget: $${budgetState.putRemainingBudget.toFixed(2)}
-- Call remaining budget: $${budgetState.callRemainingBudget.toFixed(2)}
+- Call sizing: ${budgetState.callSizing.availableEthForCalls.toFixed(4)} ETH available (${budgetState.callSizing.ethCollateral.toFixed(4)} total - ${budgetState.callSizing.shortCallExposure.toFixed(4)} exposed)
 - Current positions: ${positions.length} open
 - Spot: $${spotPrice.toFixed(2)}
 
@@ -3280,7 +3279,7 @@ Not available (OpenAI key not set or call failed). Validate and pass through the
 
 === KEY CONSTRAINTS ===
 - Put remaining budget: $${budgetState.putRemainingBudget.toFixed(2)}
-- Call remaining budget: $${budgetState.callRemainingBudget.toFixed(2)}
+- Call sizing: ${budgetState.callSizing.availableEthForCalls.toFixed(4)} ETH available (${budgetState.callSizing.ethCollateral.toFixed(4)} total - ${budgetState.callSizing.shortCallExposure.toFixed(4)} exposed)
 - Current positions: ${positions.length} open
 - Spot: $${spotPrice.toFixed(2)}
 
@@ -3913,7 +3912,7 @@ console.log('='.repeat(70));
 console.log(`🥱 NO OPERATION`);
 console.log(' ');
 console.log("Welcome. Let's begin...");
-console.log(`Every ${PERIOD / (1000 * 60 * 60 * 24)} days, buy $${PUT_BUYING_BASE_FUNDING_LIMIT} worth of cheapest FOTM puts and sell $${CALL_SELLING_BASE_FUNDING_LIMIT} worth of most lucrative OTM calls`);
+console.log(`Every ${PERIOD / (1000 * 60 * 60 * 24)} days, buy $${PUT_BUYING_BASE_FUNDING_LIMIT} worth of cheapest FOTM puts. Call selling sized by ETH collateral (no fixed budget).`);
 console.log('='.repeat(70));
 console.log(' ');
 loadData();

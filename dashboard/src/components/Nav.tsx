@@ -81,7 +81,6 @@ export default function Nav() {
           )}
           <span className="text-gray-600 hidden md:inline">|</span>
           <span className="text-gray-400 hidden md:inline">PUT <span className="text-white">{formatUSD(b.putRemaining)}</span>/<span className="text-gray-500">{formatUSD(b.putTotalBudget)}</span></span>
-          <span className="text-gray-400 hidden md:inline">CALL <span className="text-white">{formatUSD(b.callRemaining)}</span>/<span className="text-gray-500">{formatUSD(b.callTotalBudget)}</span></span>
           <span className="text-gray-500 text-xs hidden md:inline">{b.putDaysLeft > 0 ? `${b.putDaysLeft}d left` : 'cycle ended'}</span>
         </div>
       </div>
