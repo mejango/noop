@@ -143,8 +143,12 @@ const DOMAIN_SEPARATOR = '0xd96e5f90797da7ec8dc4e276260c7f3f87fedf68775fbe1ef116
 
 // Common trading parameters (single source of truth: bot/config.json)
 const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'config.json'), 'utf-8'));
-const PUT_BUYING_BASE_FUNDING_LIMIT = BOT_CONFIG.PUT_BUYING_BASE_FUNDING_LIMIT;
-const CALL_SELLING_BASE_FUNDING_LIMIT = BOT_CONFIG.CALL_SELLING_BASE_FUNDING_LIMIT;
+const PUT_BUYING_BASE_FUNDING_LIMIT = process.env.DRY_RUN === '1'
+  ? Number(process.env.DRY_RUN_PUT_BUDGET || 2000)
+  : BOT_CONFIG.PUT_BUYING_BASE_FUNDING_LIMIT;
+const CALL_SELLING_BASE_FUNDING_LIMIT = process.env.DRY_RUN === '1'
+  ? Number(process.env.DRY_RUN_CALL_BUDGET || 2000)
+  : BOT_CONFIG.CALL_SELLING_BASE_FUNDING_LIMIT;
 const SUBACCOUNT_ID = 25923;
 
 // ETH contract addresses for analysis
@@ -2681,10 +2685,23 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
 // ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
 
 const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice) => {
-  // DRY_RUN mode check
+  // DRY_RUN mode: simulate budget consumption + log, but skip actual order
   if (process.env.DRY_RUN === '1') {
-    console.log(`🔸 DRY RUN: Would ${action} ${amount} ${instrumentName} @ $${price}`);
-    return { dryRun: true, action, instrumentName, amount, price };
+    const totalValue = amount * price;
+    if (action === 'buy_put') botData.putNetBought += totalValue;
+    else if (action === 'sell_put') botData.putNetBought -= totalValue;
+    else if (action === 'sell_call') botData.callNetSold += totalValue;
+    else if (action === 'buyback_call') botData.callNetSold -= totalValue;
+    persistCycleState();
+    if (db) db.insertOrder({
+      action, success: true, reason: `DRY RUN: simulated ${action}`,
+      instrument_name: instrumentName, strike: null, expiry: null,
+      delta: null, price, intended_amount: amount,
+      filled_amount: amount, fill_price: price,
+      total_value: totalValue, spot_price: spotPrice, raw_response: '{"dryRun":true}',
+    });
+    console.log(`🔸 DRY RUN: ${action} ${amount} ${instrumentName} @ $${price} (budget: put=$${botData.putNetBought.toFixed(2)} call=$${botData.callNetSold.toFixed(2)})`);
+    return { dryRun: true, action, instrumentName, amount, price, totalValue };
   }
 
   // Determine direction and reduceOnly from action type
