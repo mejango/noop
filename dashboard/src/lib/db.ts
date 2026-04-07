@@ -380,6 +380,45 @@ function prepareAll(d: Database.Database) {
       SELECT hour as timestamp, dex, tvl, volume, tx_count
       FROM onchain_hourly WHERE hour > ? ORDER BY hour ASC
     `),
+
+    // ─── Trading Ops Queries ────────────────────────────────────────────
+    getActiveTradingRules: d.prepare(`
+      SELECT id, rule_type, action, instrument_name, criteria, budget_limit,
+        priority, reasoning, created_at, advisory_id
+      FROM trading_rules WHERE is_active = 1
+      ORDER BY priority DESC, id ASC
+    `),
+
+    getRecentPendingActions: d.prepare(`
+      SELECT pa.id, pa.rule_id, pa.action, pa.instrument_name, pa.amount, pa.price,
+        pa.trigger_details, pa.status, pa.retries, pa.triggered_at,
+        pa.confirmation_reasoning, pa.confirmed_at, pa.executed_at, pa.execution_result,
+        tr.reasoning as rule_reasoning, tr.priority as rule_priority, tr.criteria as rule_criteria
+      FROM pending_actions pa
+      LEFT JOIN trading_rules tr ON pa.rule_id = tr.id
+      ORDER BY pa.triggered_at DESC
+      LIMIT ?
+    `),
+
+    getRecentOrders: d.prepare(`
+      SELECT id, timestamp, action, success, reason, instrument_name,
+        strike, expiry, delta, price, intended_amount, filled_amount,
+        fill_price, total_value, spot_price
+      FROM orders ORDER BY timestamp DESC LIMIT ?
+    `),
+
+    getOpsStats: d.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM trading_rules WHERE is_active = 1) as active_rules,
+        (SELECT COUNT(*) FROM pending_actions WHERE status = 'pending') as pending_count,
+        (SELECT COUNT(*) FROM pending_actions WHERE status = 'confirmed') as confirmed_count,
+        (SELECT COUNT(*) FROM pending_actions WHERE status = 'executed') as executed_count,
+        (SELECT COUNT(*) FROM pending_actions WHERE status = 'rejected') as rejected_count,
+        (SELECT COUNT(*) FROM pending_actions WHERE status = 'failed') as failed_count,
+        (SELECT COUNT(*) FROM orders WHERE success = 1 AND timestamp > datetime('now', '-24 hours')) as orders_24h,
+        (SELECT advisory_id FROM trading_rules WHERE is_active = 1 LIMIT 1) as current_advisory_id,
+        (SELECT created_at FROM trading_rules WHERE is_active = 1 ORDER BY id ASC LIMIT 1) as advisory_created_at
+    `),
   };
 }
 
@@ -723,4 +762,52 @@ export function getBotBudget() {
   } catch {
     return empty;
   }
+}
+
+// ─── Trading Ops ─────────────────────────────────────────────────────────────
+
+export function getActiveTradingRules() {
+  try {
+    return getStmts().getActiveTradingRules.all() as {
+      id: number; rule_type: string; action: string; instrument_name: string | null;
+      criteria: string; budget_limit: number | null; priority: string;
+      reasoning: string | null; created_at: string; advisory_id: string | null;
+    }[];
+  } catch { return []; }
+}
+
+export function getRecentPendingActions(limit = 30) {
+  try {
+    return getStmts().getRecentPendingActions.all(limit) as {
+      id: number; rule_id: number | null; action: string; instrument_name: string;
+      amount: number | null; price: number | null; trigger_details: string | null;
+      status: string; retries: number; triggered_at: string;
+      confirmation_reasoning: string | null; confirmed_at: string | null;
+      executed_at: string | null; execution_result: string | null;
+      rule_reasoning: string | null; rule_priority: string | null; rule_criteria: string | null;
+    }[];
+  } catch { return []; }
+}
+
+export function getRecentOrders(limit = 20) {
+  try {
+    return getStmts().getRecentOrders.all(limit) as {
+      id: number; timestamp: string; action: string; success: number;
+      reason: string | null; instrument_name: string | null;
+      strike: number | null; expiry: string | null; delta: number | null;
+      price: number | null; intended_amount: number | null; filled_amount: number | null;
+      fill_price: number | null; total_value: number | null; spot_price: number | null;
+    }[];
+  } catch { return []; }
+}
+
+export function getOpsStats() {
+  try {
+    return getStmts().getOpsStats.get() as {
+      active_rules: number; pending_count: number; confirmed_count: number;
+      executed_count: number; rejected_count: number; failed_count: number;
+      orders_24h: number; current_advisory_id: string | null;
+      advisory_created_at: string | null;
+    } | undefined;
+  } catch { return undefined; }
 }

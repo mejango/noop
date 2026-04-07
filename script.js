@@ -266,61 +266,7 @@ const loadData = () => {
 };
 
 
-const analyzePastOptionsData = (days = 6.2) => {
-  const now = new Date();
-  const cutoffDate = new Date(now.getTime() - (days * 24 * 60 * 60 * 1000));
-
-  if (!db) {
-    return { bestPutScore: 0, bestCallScore: 0, totalDataPoints: 0, filteredDataPoints: 0, excludedUpwardPeriods: 0, dateRange: { from: cutoffDate.toISOString(), to: now.toISOString() } };
-  }
-
-  const rows = db.getRecentTicks(5000).filter(r => r.timestamp > cutoffDate.toISOString());
-
-  let allOptionsData = [];
-  for (const row of rows) {
-    try {
-      const summary = typeof row.summary === 'string' ? JSON.parse(row.summary) : row.summary;
-      allOptionsData.push({
-        timestamp: row.timestamp,
-        bestPutScore: summary.current_best_put || 0,
-        bestCallScore: summary.current_best_call || 0,
-        mediumTermMomentum: summary.medium_momentum || null,
-        shortTermMomentum: summary.short_momentum || null,
-      });
-    } catch { /* skip unparseable rows */ }
-  }
-
-  const filteredOptionsData = allOptionsData.filter(data => {
-    if (!data.mediumTermMomentum && !data.shortTermMomentum) return true;
-
-    const { mainMomentum, shortMainMomentum, shortDerivative } = extractMomentumValues(
-      data.mediumTermMomentum, data.shortTermMomentum
-    );
-
-    const hasConfidentDowntrend = hasDowntrendWith7DayDownwardSpikeAndShortTermDowntrend(
-      data.mediumTermMomentum, data.shortTermMomentum
-    );
-    const hasStandardEntry = shouldEnterStandard(mainMomentum, shortMainMomentum, shortDerivative);
-
-    return hasConfidentDowntrend || hasStandardEntry;
-  });
-
-  let bestPutScore = 0;
-  let bestCallScore = 0;
-  filteredOptionsData.forEach(data => {
-    if (data.bestPutScore > bestPutScore) bestPutScore = data.bestPutScore;
-    if (data.bestCallScore > bestCallScore) bestCallScore = data.bestCallScore;
-  });
-
-  return {
-    bestPutScore,
-    bestCallScore,
-    totalDataPoints: allOptionsData.length,
-    filteredDataPoints: filteredOptionsData.length,
-    excludedUpwardPeriods: allOptionsData.length - filteredOptionsData.length,
-    dateRange: { from: cutoffDate.toISOString(), to: now.toISOString() },
-  };
-};
+// analyzePastOptionsData — removed (replaced by LLM-driven advisory)
 
 // ADX-gated momentum with proper OHLC resampling.
 const getTrueTimeBasedMomentum = (
@@ -519,18 +465,7 @@ const extractMomentumValues = (mediumTermMomentum, shortTermMomentum) => {
   return { mainMomentum, shortMainMomentum, shortDerivative };
 };
 
-// Helper function to determine standard entry conditions
-const shouldEnterStandard = (mainMomentum, shortMainMomentum, shortDerivative) => {
-  return (
-    // Case 1: Short term is downward with steep spike (regardless of medium term)
-    (shortMainMomentum === 'downward' && hasSteepWithDownwardSpike(shortDerivative)) ||
-    // Case 2: Medium term is not upward AND (short term is not upward OR short term is upward but flat)
-    (mainMomentum !== 'upward' && (
-      shortMainMomentum !== 'upward' ||
-      (shortDerivative && shortDerivative.startsWith('flat'))
-    ))
-  );
-};
+// shouldEnterStandard — removed (replaced by LLM-driven advisory)
 
 // ===== ONCHAIN ANALYSIS FUNCTIONS =====
 
@@ -875,22 +810,7 @@ const analyzeDEXLiquidity = async (spotPrice) => {
   }
 };
 
-// Helper function to check for downtrend with 3-day downward spike and short-term downtrend (new entry strategy)
-const hasDowntrendWith7DayDownwardSpikeAndShortTermDowntrend = (mediumTermMomentum, shortTermMomentum) => {
-  // Check if medium-term momentum is downward
-  const mainMomentum = typeof mediumTermMomentum === 'object' ? mediumTermMomentum.main : mediumTermMomentum;
-  if (mainMomentum !== 'downward') return false;
-  
-  // Check if short-term momentum is downward
-  const shortMainMomentum = typeof shortTermMomentum === 'object' ? shortTermMomentum.main : shortTermMomentum;
-  if (shortMainMomentum !== 'downward') return false;
-  
-  // Check if there's a 3-day downward spike
-  const shortDerivative = typeof shortTermMomentum === 'object' ? shortTermMomentum.derivative : null;
-  if (!shortDerivative) return false;
-  
-  return hasSpike(shortDerivative, '7d_down');
-};
+// hasDowntrendWith7DayDownwardSpikeAndShortTermDowntrend — removed (replaced by LLM-driven advisory)
 
 // Short-term momentum detection (trend continuation logic removed)
 const getShortTermMomentum = (priceHistory) => {
@@ -1489,486 +1409,13 @@ const fetchAndFilterInstruments = async (spotPrice) => {
   }
 };
 
-const handleBuyingPuts = async (putOptionsWithDetails, historicalData, spotPrice) => {
-  if (putOptionsWithDetails.length === 0) {
-    return [];
-  }
+// handleBuyingPuts — removed (replaced by LLM-driven trading system)
 
-  const now = Date.now();
+// executeCallSellOrder — removed (replaced by LLM-driven trading system)
 
-  // once at startup
-  if (!botData.putCycleStart) {
-    botData.putCycleStart = now;
-    persistCycleState();
-  }
+// handleSellingCalls — removed (replaced by LLM-driven trading system)
 
-  const timeSinceCycleStart = now - botData.putCycleStart;
-  const isCommitPhaseOver = timeSinceCycleStart >= PERIOD;
-  
-  console.log(' ');
-  console.log('⛳️ PUT STRATEGY');
-  const putTotalBudget = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit;
-  console.log(`💰 PUT Budget: $${putTotalBudget.toFixed(2)} | Bought: $${botData.putNetBought.toFixed(2)} | Available: $${(putTotalBudget - botData.putNetBought).toFixed(2)}`);
-  const cycleTimeLeft = Math.max(0, PERIOD - timeSinceCycleStart);
-  const cycleDaysLeft = (cycleTimeLeft / (1000 * 60 * 60 * 24)).toFixed(2);
-  
-  console.log(`⏰ Cycle timing: ${(timeSinceCycleStart / (1000 * 60 * 60 * 24)).toFixed(2)} days elapsed | Cycle ends in: ${cycleDaysLeft} days`);
-
-  // Determine buy decision based on momentum (no more phases)
-  const { mainMomentum, shortMainMomentum, shortDerivative } = extractMomentumValues(
-    botData.mediumTermMomentum, 
-    botData.shortTermMomentum
-  );
-  
-  // Confident downtrend setup: medium-term downtrend + short-term downtrend + 3-day downward spike
-  const shouldEnterConfidentDowntrend = hasDowntrendWith7DayDownwardSpikeAndShortTermDowntrend(botData.mediumTermMomentum, botData.shortTermMomentum);
-  
-  // Standard entry conditions
-  const shouldEnterStandardConditions = shouldEnterStandard(mainMomentum, shortMainMomentum, shortDerivative);
-  
-  // Buy if either confident downtrend OR standard conditions are met
-  const shouldBuy = shouldEnterConfidentDowntrend || shouldEnterStandardConditions;
-  
-  // Log the decision reasoning
-  if (shouldEnterConfidentDowntrend) {
-    console.log(`🚀 PUT BUYING ALLOWED: Confident downtrend setup`);
-  } else if (shouldEnterStandardConditions) {
-    console.log(`✅ PUT BUYING ALLOWED: Standard conditions met`);
-  } else {
-    console.log(`⏸️ PUT BUYING PAUSED: Standard conditions not met`);
-  }
-  
-  // Find best put option from current candidates
-  let bestScore = historicalData.bestPutScore;
-  console.log(`Current best PUT score is: ${bestScore.toFixed(6)}`);
-
-  // Apply delta range filter to pre-fetched options with error handling
-  const validPutOptions = filterValidOptions(putOptionsWithDetails, PUT_DELTA_RANGE[0], PUT_DELTA_RANGE[1]);
-
-  console.log(`✅ Found ${validPutOptions.length} valid PUT options (delta range: ${PUT_DELTA_RANGE[0]} to ${PUT_DELTA_RANGE[1]})`);
-
-  // Sort by score (highest first) and filter by historical best with error handling
-  const qualifiedPutOptions = validPutOptions
-    .map(option => {
-      try {
-        if (!option.details || !option.details.askDeltaValue) {
-          console.log(`⚠️ Skipping PUT option with missing score: ${option.instrument_name}`);
-          return null;
-        }
-        
-        const score = parseFloat(option.details.askDeltaValue);
-        if (isNaN(score)) {
-          console.log(`⚠️ Skipping PUT option with invalid score: ${option.instrument_name}`);
-          return null;
-        }
-        
-        return {
-          ...option,
-          score: score
-        };
-      } catch (error) {
-        console.log(`⚠️ Error processing PUT option score ${option?.instrument_name || 'unknown'}: ${error.message}`);
-        return null;
-      }
-    })
-    .filter(option => {
-      if (option === null) return false;
-      
-      // For confident downtrend setup, accept all valid options regardless of historical best
-      if (shouldEnterConfidentDowntrend) {
-        return true;
-      }
-      
-      // For standard conditions, only accept options better than historical best
-      return option.score > bestScore;
-    })
-    .sort((a, b) => b.score - a.score);
-
-  // Log all options that didn't meet the historical best score (only for standard conditions)
-  if (!shouldEnterConfidentDowntrend) {
-    validPutOptions.forEach(option => {
-      try {
-        const score = parseFloat(option.details?.askDeltaValue || 0);
-        if (score && score <= bestScore) {
-          const price = option.details?.askPrice || 'N/A';
-          console.log(`=> ${option.instrument_name} | Delta: ${option.details.delta} | Price: $${price} | Score: ${score.toFixed(6)}`);
-        }
-      } catch (error) {
-        console.log(`⚠️ Error logging PUT option ${option?.instrument_name || 'unknown'}: ${error.message}`);
-      }
-    });
-  }
-
-  const filterReason = shouldEnterConfidentDowntrend ? 'CONFIDENT DOWNSIDE SETUP (all valid options)' : `better than historical best (${bestScore.toFixed(6)})`;
-  logOptionSummary('PUT', qualifiedPutOptions.length, filterReason);
-  
-  // Buy multiple options within budget constraints
-  if (shouldBuy && qualifiedPutOptions.length > 0) {
-    const entryReason = shouldEnterConfidentDowntrend ? 'CONFIDENT DOWNSIDE SETUP' : 'STANDARD ENTRY CONDITIONS';
-    logEntryDecision('PUT', qualifiedPutOptions.length, entryReason);
-
-    const remainingBudget = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
-    console.log(`💰 Available budget: $${remainingBudget.toFixed(2)}`);
-
-    // Check if remaining budget is sufficient (>$10)
-    for (const option of qualifiedPutOptions) {
-      console.log(`🎯 NEW BEST PUT: ${option.instrument_name} | Delta: ${option.details.delta} | Score: ${option.score.toFixed(6)} | Previous best score: ${bestScore.toFixed(6)}`);
-
-      // Check if we have budget remaining
-      if (remainingBudget <= 10) {
-        console.log(`💸 Budget exhausted, skipping remaining options`);
-        break;
-      }
-
-      const buyReason = shouldEnterConfidentDowntrend ? 'Confident Downside Setup' : 'Historical Best Buy';
-      console.log(`💸 BUYING PUT: ${option.instrument_name} | Delta: ${option.details.delta} | Score: ${option.score.toFixed(6)} | Reason: ${buyReason}`);
-      const success = await executePutBuyOrder(option, buyReason, spotPrice);
-        
-      if (success) {
-        // Update remaining budget after successful purchase
-        const newRemainingBudget = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
-        console.log(`💰 Remaining budget after purchase: $${newRemainingBudget.toFixed(2)}`);
-      }
-    }
-  } 
-
-  // Reset budget limits if commit phase is over
-  if (isCommitPhaseOver) {
-    const totalBudget = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit;
-    const unspentAmount = totalBudget - botData.putNetBought;
-    
-    if (unspentAmount > 0) {
-      botData.putUnspentBuyLimit = unspentAmount;
-      console.log(`🔄 Carrying over $${unspentAmount} to next PUT cycle`);
-      } else {
-      botData.putUnspentBuyLimit = 0;
-      console.log(`💯 All PUT spent in this cycle`);
-    }
-    
-    botData.putNetBought = 0;
-    botData.putCycleStart = now;
-    persistCycleState();
-  }
-
-  return validPutOptions;
-};
-
-const executeCallSellOrder = async (option, reason, spotPrice) => {
-    const sellLimit = CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit;
-    const remainingSellCapacity = sellLimit - botData.callNetSold; // signed (negative means you've earned extra room)
-  
-    console.log("💳 Call sell order with", { sellLimit, remainingSellCapacity });
-    
-    const bidPx = Number(option?.details?.bidPrice);
-    const bidAmt = Number(option?.details?.bidAmount);
-    if (!Number.isFinite(bidPx) || bidPx <= 0 || !Number.isFinite(bidAmt) || bidAmt <= 0) {
-      console.log(`⚠️ Skip ${option.instrument_name}: invalid bid price/amount`);
-      return false;
-    }
-  
-    const step = getAmountStep(option);              // uses options.amount_step || 0.01
-    const maxByCap = remainingSellCapacity / bidPx;  // can be negative
-    const maxOrderAmount = 20;                       // maximum order amount for calls
-    const raw = Math.max(0, Math.min(maxByCap, bidAmt, maxOrderAmount));
-    const qty = quantizeDown(raw, step);
-    if (qty === 0) {
-      console.log(`⚠️ Size rounds to 0 (step ${step}), skipping ${option.instrument_name}`);
-      return false;
-    }
-  
-    console.log(
-      `$$$ ${reason}: ${option.instrument_name} bid=$${bidPx} | step=${step} | ` +
-      `sellLimit=$${sellLimit} | callNetSold=$${botData.callNetSold} | remaining=$${remainingSellCapacity.toFixed(4)} | ` +
-      `maxByCap=${Math.max(0, maxByCap).toFixed(4)} | book=${bidAmt} | qty=${qty}`
-    );
-  
-    let order;
-    try {
-      order = await placeOrder(
-        option.instrument_name,
-        qty.toFixed(2),
-        'sell',
-        bidPx,
-        option.base_asset_address,
-        option.base_asset_sub_id,
-        false
-      );
-    } catch (error) {
-      console.error(`❌ Error placing CALL sell order for ${option.instrument_name}:`, error.message);
-      if (db) db.insertOrder({ action: 'sell_call', success: false, reason: `Order placement error: ${error.message}`, instrument_name: option.instrument_name, spot_price: spotPrice });
-      return false;
-    }
-
-    if (!order) {
-      if (db) db.insertOrder({ action: 'sell_call', success: false, reason: 'Order placement failed', instrument_name: option.instrument_name, spot_price: spotPrice });
-      return false;
-    }
-
-    // Fill accounting (prefer actual fills)
-    let filledAmt = qty, avgPx = bidPx, gross = filledAmt * avgPx;
-    if (order.result?.trades?.length) {
-      let totAmt = 0, totVal = 0;
-      for (const t of order.result.trades) {
-        const ta = Number(t.trade_amount), tp = Number(t.trade_price);
-        totAmt += ta; totVal += ta * tp;
-      }
-      if (totAmt > 0) { filledAmt = totAmt; avgPx = totVal / totAmt; gross = totVal; }
-    }
-
-    botData.callNetSold += gross; // can go negative later from buybacks (earned capacity)
-    persistCycleState();
-
-    if (db) db.insertOrder({
-      action: 'sell_call', success: true, reason,
-      instrument_name: option.instrument_name, strike: option.option_details.strike,
-      expiry: option.option_details.expiry, delta: option.details.delta,
-      price: bidPx, intended_amount: qty, filled_amount: filledAmt,
-      fill_price: avgPx, total_value: gross, spot_price: spotPrice,
-      raw_response: order,
-    });
-
-    console.log(`✅ SOLD ${filledAmt} @ $${avgPx} | callNetSold now $${botData.callNetSold.toFixed(4)}`);
-
-    return true;
-  };
-  
-const handleSellingCalls = async (callOptionsWithDetails, historicalData, spotPrice) => {
-  if (callOptionsWithDetails.length === 0) {
-    return [];
-  }
-
-  const now = Date.now();
-
-  // once at startup
-  if (!botData.callCycleStart) {
-    botData.callCycleStart = now;
-    persistCycleState();
-  }
-
-  const timeSinceCycleStart = now - botData.callCycleStart;
-  const isCommitPhaseOver = timeSinceCycleStart >= PERIOD;
-
-
-  console.log(' ');
-  console.log('📞 CALL STRATEGY');
-  const callTotalBudget = CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit;
-  console.log(`💰 CALL Goal: $${callTotalBudget.toFixed(2)} | Sold: $${botData.callNetSold.toFixed(2)} | Available: $${(callTotalBudget - botData.callNetSold).toFixed(2)}`);
-  const callCycleTimeLeft = Math.max(0, PERIOD - timeSinceCycleStart);
-  const callCycleDaysLeft = (callCycleTimeLeft / (1000 * 60 * 60 * 24)).toFixed(2);
-  
-  console.log(`⏰ Cycle timing: ${(timeSinceCycleStart / (1000 * 60 * 60 * 24)).toFixed(2)} days elapsed | Cycle ends in: ${callCycleDaysLeft} days`);
-
-  // Determine sell decision based on momentum (no more phases)
-  const { mainMomentum, shortMainMomentum, shortDerivative } = extractMomentumValues(
-    botData.mediumTermMomentum, 
-    botData.shortTermMomentum
-  );
-  
-  // Confident downtrend setup: medium-term downtrend + short-term downtrend + 3-day downward spike
-  const shouldEnterConfidentDowntrend = hasDowntrendWith7DayDownwardSpikeAndShortTermDowntrend(botData.mediumTermMomentum, botData.shortTermMomentum);
-  
-  // Standard entry conditions
-  const shouldEnterStandardConditions = shouldEnterStandard(mainMomentum, shortMainMomentum, shortDerivative);
-  
-  // Sell if either confident downtrend OR standard conditions are met
-  const shouldSell = shouldEnterConfidentDowntrend || shouldEnterStandardConditions;
-
-  // Find best call option from current candidates
-  let bestScore = historicalData.bestCallScore;
-  console.log(`Current best CALL score is: ${bestScore.toFixed(6)}`);
-
-  // Apply delta range filter to pre-fetched options with error handling
-  const validCallOptions = filterValidOptions(callOptionsWithDetails, CALL_DELTA_RANGE[0], CALL_DELTA_RANGE[1]);
-
-  console.log(`✅ Found ${validCallOptions.length} valid CALL options (delta range: ${CALL_DELTA_RANGE[0]} to ${CALL_DELTA_RANGE[1]})`);
-
-  // Sort by score (highest first) and filter by historical best with error handling
-  const qualifiedCallOptions = validCallOptions
-    .map(option => {
-      try {
-        if (!option.details || !option.details.bidDeltaValue) {
-          console.log(`⚠️ Skipping CALL option with missing score: ${option.instrument_name}`);
-          return null;
-        }
-        
-        const score = parseFloat(option.details.bidDeltaValue);
-        if (isNaN(score)) {
-          console.log(`⚠️ Skipping CALL option with invalid score: ${option.instrument_name}`);
-          return null;
-        }
-        
-        return {
-          ...option,
-          score: score
-        };
-      } catch (error) {
-        console.log(`⚠️ Error processing CALL option score ${option?.instrument_name || 'unknown'}: ${error.message}`);
-        return null;
-      }
-    })
-    .filter(option => {
-      if (option === null) return false;
-      
-      // For confident downtrend setup, accept all valid options regardless of historical best
-      if (shouldEnterConfidentDowntrend) {
-        return true;
-      }
-      
-      // For standard conditions, only accept options better than historical best
-      return option.score > bestScore;
-    })
-    .sort((a, b) => b.score - a.score);
-
-  // Log all options that didn't meet the historical best score (only for standard conditions)
-  if (!shouldEnterConfidentDowntrend) {
-    validCallOptions.forEach(option => {
-      try {
-        const score = parseFloat(option.details?.bidDeltaValue || 0);
-        if (score && score <= bestScore) {
-          const price = option.details?.bidPrice || 'N/A';
-          console.log(`=> ${option.instrument_name} | Delta: ${option.details.delta} | Price: $${price} | Score: ${score.toFixed(6)}`);
-        }
-      } catch (error) {
-        console.log(`⚠️ Error logging CALL option ${option?.instrument_name || 'unknown'}: ${error.message}`);
-      }
-    });
-  }
-
-    const filterReason = shouldEnterConfidentDowntrend ? 'CONFIDENT DOWNSIDE SETUP (all valid options)' : `better than historical best (${bestScore.toFixed(6)})`;
-  logOptionSummary('CALL', qualifiedCallOptions.length, filterReason);
-  
-  // Sell multiple options within budget constraints
-  if (shouldSell && qualifiedCallOptions.length > 0) {
-    const entryReason = shouldEnterConfidentDowntrend ? 'CONFIDENT DOWNSIDE SETUP' : 'STANDARD ENTRY CONDITIONS';
-    logEntryDecision('CALL', qualifiedCallOptions.length, entryReason);
-    
-    const remainingBudget = CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold;
-    console.log(`💰 Available budget: $${remainingBudget.toFixed(2)}`);
-
-    // Check if remaining budget is sufficient (>$10)
-    if (remainingBudget <= 10) {
-      console.log(`💸 Insufficient budget for CALL trades ($${remainingBudget.toFixed(2)} remaining, need >$10)`);
-    } else {
-      for (const option of qualifiedCallOptions) {
-        console.log(`📞 NEW BEST CALL: ${option.instrument_name} | Delta: ${option.details.delta} | Score: ${option.score.toFixed(6)} | Previous best score: ${bestScore.toFixed(6)}`);
-        
-        // Check if we have budget remaining
-        if (remainingBudget <= 0) {
-          console.log(`💸 Budget exhausted, skipping remaining options`);
-          break;
-        }
-
-        const sellReason = shouldEnterConfidentDowntrend ? 'Confident Downside Setup' : 'Historical Best Sell';
-        console.log(`💰 SELLING CALL: ${option.instrument_name} | Score: ${option.score.toFixed(6)} | Reason: ${sellReason}`);
-        const success = await executeCallSellOrder(option, sellReason, spotPrice);
-        
-        if (success) {
-          // Update remaining budget after successful sale
-          const newRemainingBudget = CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold;
-          console.log(`💰 Remaining budget after sale: $${newRemainingBudget.toFixed(2)}`);
-        }
-      }
-    }
-  } 
-
-  // Reset budget limits if commit phase is over
-  if (isCommitPhaseOver) {
-    const totalBudget = CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit;
-    const unspentAmount = totalBudget - botData.callNetSold;
-    
-    if (unspentAmount > 0) {
-      botData.callUnspentSellLimit = unspentAmount;
-      console.log(`🔄 Carrying over $${unspentAmount} to next CALL cycle`);
-    } else {
-      botData.callUnspentSellLimit = 0;
-      console.log(`💯 All CALL budget spent in this cycle`);
-    }
-    
-    botData.callNetSold = 0;
-    botData.callCycleStart = now;
-    persistCycleState();
-  }
-
-  return validCallOptions;
-};
-
-const executePutBuyOrder = async (option, reason, spotPrice) => {
-    const buyLimit = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit;
-    const remainingBuyCapacity = buyLimit - botData.putNetBought; // signed (negative means you've earned extra room)
-
-    console.log("💳 Put buy order with", { buyLimit, remainingBuyCapacity });
-
-    const askPx = Number(option?.details?.askPrice);
-    const askAmt = Number(option?.details?.askAmount);
-    if (!Number.isFinite(askPx) || askPx <= 0 || !Number.isFinite(askAmt) || askAmt <= 0) {
-      console.log(`⚠️ Skip ${option.instrument_name}: invalid ask price/amount`);
-      return false;
-    }
-
-    const step = getAmountStep(option);
-    const maxByCap = remainingBuyCapacity / askPx;           // can be negative
-    const raw = Math.max(0, Math.min(maxByCap, askAmt));     // clamp to >= 0
-    const qty = quantizeDown(raw, step);                     // enforce 0.01 step
-    if (qty === 0) {
-      console.log(`⚠️ Size rounds to 0 (step ${step}), skipping ${option.instrument_name}`);
-      return false;
-    }
-  
-    console.log(
-      `$$$ ${reason}: ${option.instrument_name} ask=$${askPx} | step=${step} | ` +
-      `buyLimit=$${buyLimit} | putNetBought=$${botData.putNetBought} | remaining=$${remainingBuyCapacity.toFixed(4)} | ` +
-      `maxByCap=${Math.max(0, maxByCap).toFixed(4)} | book=${askAmt} | qty=${qty}`
-    );
-  
-    let order;
-    try {
-      order = await placeOrder(
-        option.instrument_name,
-        qty.toFixed(2),
-        'buy',
-        askPx,
-        option.base_asset_address,
-        option.base_asset_sub_id,
-        false
-      );
-    } catch (error) {
-      console.error(`❌ Error placing PUT buy order for ${option.instrument_name}:`, error.message);
-      if (db) db.insertOrder({ action: 'buy_put', success: false, reason: `Order placement error: ${error.message}`, instrument_name: option.instrument_name, spot_price: spotPrice });
-      return false;
-    }
-
-    if (!order) {
-      if (db) db.insertOrder({ action: 'buy_put', success: false, reason: 'Order placement failed', instrument_name: option.instrument_name, spot_price: spotPrice });
-      return false;
-    }
-
-    // Fill accounting (use actual fills if present)
-    let filledAmt = qty, avgPx = askPx, cost = filledAmt * avgPx;
-    if (order.result?.trades?.length) {
-      let totAmt = 0, totVal = 0;
-      for (const t of order.result.trades) {
-        const ta = Number(t.trade_amount), tp = Number(t.trade_price);
-        totAmt += ta; totVal += ta * tp;
-      }
-      filledAmt = totAmt; avgPx = totVal / totAmt; cost = totVal;
-    }
-
-    botData.putNetBought += cost; // stays signed (sellbacks can drive it negative = earned capacity)
-    persistCycleState();
-
-    if (db) db.insertOrder({
-      action: 'buy_put', success: true, reason,
-      instrument_name: option.instrument_name, strike: option.option_details.strike,
-      expiry: option.option_details.expiry, delta: option.details.delta,
-      price: askPx, intended_amount: qty, filled_amount: filledAmt,
-      fill_price: avgPx, total_value: cost, spot_price: spotPrice,
-      raw_response: order,
-    });
-
-    console.log(`✅ BOUGHT ${filledAmt} @ $${avgPx} | putNetBought now $${botData.putNetBought.toFixed(4)}`);
-
-    return true;
-};
+// executePutBuyOrder — removed (replaced by LLM-driven trading system)
 
 // ─── Hypothesis Review Cycle ──────────────────────────────────────────────────
 
@@ -2963,6 +2410,959 @@ Use this wiki context to:
   }
 };
 
+// ─── OpenAI API Helper ───────────────────────────────────────────────────────
+const callOpenAI = async (systemPrompt, userPrompt, { maxTokens = 2048, timeout = 30000, model = 'gpt-4o' } = {}) => {
+  if (!process.env.OPENAI_API_KEY) return null;
+  try {
+    const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model,
+      max_tokens: maxTokens,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    }, {
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      timeout,
+    });
+    return response.data?.choices?.[0]?.message?.content || '';
+  } catch (e) {
+    console.log(`⚠️ OpenAI API call failed: ${e.message}`);
+    return null;
+  }
+};
+
+// ─── LLM-Driven Trading: Monitoring ──────────────────────────────────────────
+
+const parseExpiryFromInstrument = (name) => {
+  // "ETH-20260501-1500-P" → Date(2026-05-01T08:00:00Z)
+  const parts = name.split('-');
+  if (parts.length < 4) return null;
+  const d = parts[1]; // "20260501"
+  return new Date(`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}T08:00:00Z`);
+};
+
+const computeCurrentValues = (position, ticker, spotPrice) => {
+  const expiry = parseExpiryFromInstrument(position.instrument_name);
+  const dte = expiry ? Math.max(0, (expiry.getTime() - Date.now()) / (86400000)) : null;
+  const markPrice = Number(ticker?.M) || position.mark_price || 0;
+  const entryPrice = position.avg_entry_price || 0;
+  const unrealizedPnlPct = entryPrice > 0 ? ((markPrice - entryPrice) / entryPrice) * 100 : 0;
+  // For short positions, P&L is inverted
+  const adjustedPnlPct = position.direction === 'short' ? -unrealizedPnlPct : unrealizedPnlPct;
+
+  return {
+    delta: Number(ticker?.option_pricing?.d) || position.delta || 0,
+    mark_price: markPrice,
+    spot_price: spotPrice,
+    unrealized_pnl_pct: adjustedPnlPct,
+    dte: dte,
+    iv: Number(ticker?.option_pricing?.i) || 0,
+    theta: Number(ticker?.option_pricing?.t) || position.theta || 0,
+  };
+};
+
+const evaluateConditions = (conditions, logic, values) => {
+  if (!Array.isArray(conditions) || conditions.length === 0) return false;
+  const results = conditions.map(c => {
+    const v = values[c.field];
+    if (v == null) return false;
+    if (c.op === 'gt') return v > c.value;
+    if (c.op === 'lt') return v < c.value;
+    if (c.op === 'gte') return v >= c.value;
+    if (c.op === 'lte') return v <= c.value;
+    return false;
+  });
+  return logic === 'all' ? results.every(Boolean) : results.some(Boolean);
+};
+
+const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
+  let triggeredCount = 0;
+
+  // ── Exit rules ─────────────────────────────────────────────────────────────
+  try {
+    const exitRules = db.getActiveRulesByType('exit');
+    for (const rule of exitRules) {
+      try {
+        const position = positions.find(p => p.instrument_name === rule.instrument_name);
+        if (!position) continue;
+
+        const ticker = tickerMap[rule.instrument_name];
+        const values = computeCurrentValues(position, ticker, spotPrice);
+
+        const criteria = JSON.parse(rule.criteria);
+        const triggered = evaluateConditions(criteria.conditions, criteria.condition_logic, values);
+        if (!triggered) continue;
+
+        // Dedup: skip if there's already a pending/confirmed action for this rule
+        if (db.hasPendingActionForRule(rule.id)) continue;
+
+        const askPrice = Number(ticker?.a) || 0;
+        const bidPrice = Number(ticker?.b) || 0;
+        const price = rule.action === 'buy_put' || rule.action === 'buy_call' ? askPrice : bidPrice;
+
+        db.insertPendingAction({
+          rule_id: rule.id,
+          action: rule.action,
+          instrument_name: rule.instrument_name,
+          amount: position.amount,
+          price: price,
+          trigger_details: {
+            conditions_met: criteria.conditions.map(c => ({ field: c.field, op: c.op, threshold: c.value, actual: values[c.field] })),
+            current_values: values,
+          },
+        });
+        triggeredCount++;
+        console.log(`📋 Exit triggered: ${rule.action} ${rule.instrument_name}`);
+      } catch (e) {
+        console.log(`📋 Exit rule ${rule.id} error: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    console.log(`📋 Exit rules evaluation failed: ${e.message}`);
+  }
+
+  // ── Entry rules ────────────────────────────────────────────────────────────
+  try {
+    const entryRules = db.getActiveRulesByType('entry');
+    for (const rule of entryRules) {
+      try {
+        const criteria = JSON.parse(rule.criteria);
+
+        // Cooldown check: skip if same action was executed within the last hour
+        const lastExec = db.getLastExecutedAction(rule.action);
+        if (lastExec) {
+          const elapsed = Date.now() - new Date(lastExec).getTime();
+          if (elapsed < 3600000) continue; // 1 hour cooldown
+        }
+
+        // Budget check
+        const putRemaining = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
+        const callRemaining = CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold;
+        if (rule.action === 'buy_put' && putRemaining <= 10) continue;
+        if (rule.action === 'sell_call' && callRemaining <= 10) continue;
+
+        // Dedup: skip if already pending
+        if (db.hasPendingActionForRule(rule.id)) continue;
+
+        // Scan tickerMap for candidates matching criteria
+        const optionType = criteria.option_type; // 'P' or 'C'
+        const deltaRange = criteria.delta_range; // [min, max]
+        const dteRange = criteria.dte_range; // [min, max]
+        const maxStrikePct = criteria.max_strike_pct || null;
+        const marketConditions = criteria.market_conditions || null;
+        const maxCost = criteria.max_cost ?? null;
+        const minBid = criteria.min_bid ?? null;
+        const minScore = criteria.min_score ?? null;
+
+        // Check market conditions if present
+        if (marketConditions) {
+          const marketValues = { spot_price: spotPrice };
+          if (!evaluateConditions(marketConditions, 'all', marketValues)) continue;
+        }
+
+        let candidates = [];
+        for (const [instrName, ticker] of Object.entries(tickerMap)) {
+          try {
+            // Find matching instrument
+            const instrument = instruments.find(i => i.instrument_name === instrName);
+            if (!instrument) continue;
+
+            // Filter by option type
+            if (optionType && instrument.option_details?.option_type !== optionType) continue;
+
+            // Compute DTE from instrument name
+            const expiry = parseExpiryFromInstrument(instrName);
+            if (!expiry) continue;
+            const dte = Math.max(0, (expiry.getTime() - Date.now()) / 86400000);
+
+            // Filter by DTE range
+            if (dteRange && (dte < dteRange[0] || dte > dteRange[1])) continue;
+
+            // Filter by delta range
+            const delta = Number(ticker?.option_pricing?.d) || 0;
+            if (deltaRange && (delta < deltaRange[0] || delta > deltaRange[1])) continue;
+
+            // Filter by max_strike_pct
+            const strike = Number(instrument.option_details?.strike) || 0;
+            if (maxStrikePct && strike >= maxStrikePct * spotPrice) continue;
+
+            const askPrice = Number(ticker?.a) || 0;
+            const askAmount = Number(ticker?.A) || 0;
+            const bidPrice = Number(ticker?.b) || 0;
+            const bidAmount = Number(ticker?.B) || 0;
+
+            // Filter by max_cost (for buys)
+            if (maxCost != null && askPrice > maxCost) continue;
+
+            // Filter by min_bid (for sells)
+            if (minBid != null && bidPrice < minBid) continue;
+
+            // Score: puts = |delta| / askPrice, calls = bidPrice / |delta|
+            const absDelta = Math.abs(delta);
+            let score;
+            if (optionType === 'P') {
+              score = askPrice > 0 ? absDelta / askPrice : 0;
+            } else {
+              score = absDelta > 0 ? bidPrice / absDelta : 0;
+            }
+
+            if (minScore != null && score < minScore) continue;
+
+            const amountStep = instrument.options?.amount_step || 0.01;
+
+            candidates.push({
+              name: instrName,
+              instrument,
+              ticker,
+              delta,
+              dte,
+              askPrice,
+              askAmount,
+              bidPrice,
+              bidAmount,
+              score,
+              strike,
+              amountStep,
+            });
+          } catch (e) {
+            // Skip individual candidate errors
+          }
+        }
+
+        if (candidates.length === 0) continue;
+
+        // Pick best candidate (highest score)
+        candidates.sort((a, b) => b.score - a.score);
+        const best = candidates[0];
+
+        // Calculate amount based on budget and book liquidity
+        const remainingBudget = rule.action === 'buy_put' ? putRemaining : callRemaining;
+        const price = optionType === 'P' ? best.askPrice : best.bidPrice;
+        if (price <= 0) continue;
+
+        const maxBudget = remainingBudget / price;
+        const bookLiq = optionType === 'P' ? best.askAmount : best.bidAmount;
+        const step = best.amountStep || 0.01;
+        const raw = Math.min(maxBudget, bookLiq, 20);
+        const qty = Math.floor(raw / step) * step;
+        if (qty < step) continue;
+
+        db.insertPendingAction({
+          rule_id: rule.id,
+          action: rule.action,
+          instrument_name: best.name,
+          amount: qty,
+          price: price,
+          trigger_details: {
+            score: best.score,
+            delta: best.delta,
+            dte: best.dte,
+            strike: best.strike,
+            candidates_evaluated: candidates.length,
+          },
+        });
+        triggeredCount++;
+        console.log(`📋 Entry candidate: ${rule.action} ${best.name} score=${best.score.toFixed(6)}`);
+      } catch (e) {
+        console.log(`📋 Entry rule ${rule.id} error: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    console.log(`📋 Entry rules evaluation failed: ${e.message}`);
+  }
+
+  return triggeredCount;
+};
+
+// ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
+
+const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice) => {
+  // DRY_RUN mode check
+  if (process.env.DRY_RUN === '1') {
+    console.log(`🔸 DRY RUN: Would ${action} ${amount} ${instrumentName} @ $${price}`);
+    return { dryRun: true, action, instrumentName, amount, price };
+  }
+
+  // Determine direction and reduceOnly from action type
+  const direction = (action === 'buy_put' || action === 'buyback_call') ? 'buy' : 'sell';
+  const reduceOnly = (action === 'sell_put' || action === 'buyback_call');
+
+  // Find instrument to get base_asset_address and base_asset_sub_id
+  const instrument = instruments.find(i => i.instrument_name === instrumentName);
+  if (!instrument) {
+    console.error(`❌ executeOrder: instrument ${instrumentName} not found`);
+    return null;
+  }
+
+  const addr = instrument.base_asset_address;
+  const subId = instrument.base_asset_sub_id;
+
+  let order;
+  try {
+    order = await placeOrder(
+      instrumentName,
+      amount.toFixed(2),
+      direction,
+      price,
+      addr,
+      subId,
+      reduceOnly
+    );
+  } catch (error) {
+    console.error(`❌ Error placing ${action} order for ${instrumentName}:`, error.message);
+    if (db) db.insertOrder({ action, success: false, reason: `Order error: ${error.message}`, instrument_name: instrumentName, spot_price: spotPrice });
+    return null;
+  }
+
+  if (!order) {
+    if (db) db.insertOrder({ action, success: false, reason: 'Order placement failed', instrument_name: instrumentName, spot_price: spotPrice });
+    return null;
+  }
+
+  // Fill accounting from actual trades
+  let filledAmt = amount, avgPx = price, totalValue = filledAmt * avgPx;
+  if (order.result?.trades?.length) {
+    let totAmt = 0, totVal = 0;
+    for (const t of order.result.trades) {
+      const ta = Number(t.trade_amount), tp = Number(t.trade_price);
+      totAmt += ta; totVal += ta * tp;
+    }
+    if (totAmt > 0) { filledAmt = totAmt; avgPx = totVal / totAmt; totalValue = totVal; }
+  }
+
+  // Update budget tracking
+  if (action === 'buy_put') {
+    botData.putNetBought += totalValue;
+  } else if (action === 'sell_put') {
+    botData.putNetBought -= totalValue;
+  } else if (action === 'sell_call') {
+    botData.callNetSold += totalValue;
+  } else if (action === 'buyback_call') {
+    botData.callNetSold -= totalValue;
+  }
+  persistCycleState();
+
+  // Log to DB
+  if (db) {
+    const strike = instrument.option_details?.strike || null;
+    const expiry = instrument.option_details?.expiry || null;
+    db.insertOrder({
+      action, success: true, reason: `LLM-confirmed ${action}`,
+      instrument_name: instrumentName, strike, expiry,
+      delta: null, price, intended_amount: amount,
+      filled_amount: filledAmt, fill_price: avgPx,
+      total_value: totalValue, spot_price: spotPrice,
+      raw_response: order,
+    });
+  }
+
+  console.log(`✅ ${action.toUpperCase()}: ${filledAmt} ${instrumentName} @ $${avgPx.toFixed(4)} | total=$${totalValue.toFixed(4)}`);
+  return { filledAmt, avgPx, totalValue, order };
+};
+
+const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
+  if (!db) return;
+
+  const pending = db.getPendingActions('pending');
+  if (pending.length === 0) return;
+
+  console.log(`🔍 ${pending.length} pending action(s) to confirm`);
+
+  let confirmed = 0;
+  for (const action of pending.slice(0, 2)) { // Max 2 per tick
+    try {
+      // Auto-reject after 3 retries
+      if (action.retries >= 3) {
+        db.updatePendingAction(action.id, { status: 'rejected', confirmation_reasoning: 'Auto-rejected after 3 failed confirmation attempts' });
+        console.log(`❌ Auto-rejected: ${action.action} ${action.instrument_name} (3 retries)`);
+        continue;
+      }
+
+      // Build context for confirmation
+      const ticker = tickerMap[action.instrument_name];
+      const currentPrice = ticker ? (action.action.includes('buy') ? Number(ticker.a) : Number(ticker.b)) : action.price;
+      const momentum = botData.mediumTermMomentum;
+
+      // Determine what details to show
+      let detailsStr;
+      if (action.action === 'sell_put' || action.action === 'buyback_call') {
+        // Exit: show position info
+        detailsStr = `Position exit. Trigger: ${action.trigger_details || 'N/A'}`;
+      } else {
+        // Entry: show option info
+        const delta = ticker ? Number(ticker.option_pricing?.d) : null;
+        detailsStr = `Delta: ${delta?.toFixed(4) || 'N/A'}, Price: $${currentPrice?.toFixed(4) || 'N/A'}`;
+      }
+
+      const confirmPrompt = `Trade confirmation:
+Action: ${action.action} ${action.instrument_name}
+Amount: ${action.amount || 'TBD'}
+Price: $${currentPrice || action.price || 'N/A'}
+${detailsStr}
+Rule reasoning: ${action.rule_reasoning || 'N/A'}
+Triggered because: ${action.trigger_details || 'N/A'}
+Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
+
+Is this trade disciplined, well-priced, and convex? Confirm or reject.
+JSON only: { "confirm": true/false, "reasoning": "..." }`;
+
+      // Vote 1: Claude Haiku (Spitznagel temperament)
+      let haikuVote = null;
+      try {
+        const haikuResp = await axios.post('https://api.anthropic.com/v1/messages', {
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 256,
+          system: 'You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.',
+          messages: [{ role: 'user', content: confirmPrompt }],
+        }, {
+          headers: {
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+          timeout: 15000,
+        });
+        const haikuText = haikuResp.data?.content?.[0]?.text || '';
+        const haikuJson = haikuText.match(/\{[\s\S]*"confirm"[\s\S]*\}/);
+        if (haikuJson) haikuVote = JSON.parse(haikuJson[0]);
+      } catch (e) {
+        console.log(`⚠️ Haiku confirmation failed: ${e.message}`);
+      }
+
+      // Vote 2: OpenAI GPT (Taleb temperament)
+      let codexVote = null;
+      try {
+        const codexText = await callOpenAI(
+          'You are a Taleb-style risk advisor. Confirm trades that are convex (bounded downside, unbounded upside). Reject trades that expose us to ruin or have symmetric payoffs. Be conservative — when in doubt, reject. Output JSON only: { "confirm": true/false, "reasoning": "..." }',
+          confirmPrompt,
+          { maxTokens: 256, timeout: 15000, model: 'gpt-4o-mini' }
+        );
+        if (codexText) {
+          const codexJson = codexText.match(/\{[\s\S]*"confirm"[\s\S]*\}/);
+          if (codexJson) codexVote = JSON.parse(codexJson[0]);
+        }
+      } catch (e) {
+        console.log(`⚠️ OpenAI confirmation failed: ${e.message}`);
+      }
+
+      // Voting logic
+      let decision;
+      if (haikuVote && codexVote) {
+        // Both voted
+        decision = (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
+      } else if (haikuVote) {
+        // Single advisor fallback
+        decision = haikuVote.confirm ? 'confirmed' : 'rejected';
+      } else if (codexVote) {
+        decision = codexVote.confirm ? 'confirmed' : 'rejected';
+      } else {
+        // Both failed — increment retries
+        db.updatePendingAction(action.id, { retries: (action.retries || 0) + 1 });
+        console.log(`⚠️ Confirmation failed for ${action.instrument_name} (retry ${(action.retries || 0) + 1})`);
+        continue;
+      }
+
+      const reasoning = [
+        haikuVote ? `Haiku: ${haikuVote.confirm ? 'CONFIRM' : 'REJECT'} — ${haikuVote.reasoning || 'no reason'}` : 'Haiku: FAILED',
+        codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : 'OpenAI: FAILED',
+      ].join(' | ');
+
+      if (decision === 'confirmed') {
+        db.updatePendingAction(action.id, {
+          status: 'confirmed',
+          confirmation_reasoning: reasoning,
+          confirmed_at: new Date().toISOString(),
+        });
+
+        // Execute the trade
+        const result = await executeOrder(
+          action.action,
+          action.instrument_name,
+          action.amount || 0.01,
+          currentPrice || action.price,
+          instruments,
+          spotPrice
+        );
+
+        if (result) {
+          db.updatePendingAction(action.id, {
+            status: 'executed',
+            executed_at: new Date().toISOString(),
+            execution_result: JSON.stringify(result),
+          });
+          confirmed++;
+          console.log(`✅ Confirmed & executed: ${action.action} ${action.instrument_name} | ${reasoning}`);
+        } else {
+          db.updatePendingAction(action.id, { status: 'failed', execution_result: 'Order placement failed' });
+          console.log(`❌ Confirmed but execution failed: ${action.action} ${action.instrument_name}`);
+        }
+      } else {
+        db.updatePendingAction(action.id, {
+          status: 'rejected',
+          confirmation_reasoning: reasoning,
+        });
+        console.log(`🚫 Rejected: ${action.action} ${action.instrument_name} | ${reasoning}`);
+      }
+    } catch (e) {
+      console.error(`❌ Confirmation error for ${action.instrument_name}:`, e.message);
+      db.updatePendingAction(action.id, { retries: (action.retries || 0) + 1 });
+    }
+  }
+
+  if (confirmed > 0) console.log(`📋 Executed ${confirmed} trade(s) this tick`);
+};
+
+// ─── LLM-Driven Trading Advisory ─────────────────────────────────────────────
+
+const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log('📋 Advisory: skipped — no ANTHROPIC_API_KEY');
+    return null;
+  }
+
+  const advisoryId = `adv_${Date.now()}`;
+  console.log(`📋 Advisory ${advisoryId}: starting 3-step deliberation...`);
+
+  // ── Gather context ──────────────────────────────────────────────────────────
+
+  // Balances
+  let balances = [];
+  try { balances = await fetchCollaterals(); } catch (e) {
+    console.log('📋 Advisory: failed to fetch collaterals:', e.message);
+  }
+
+  // Momentum
+  const momentum = {
+    mediumTerm: botData.mediumTermMomentum,
+    shortTerm: botData.shortTermMomentum,
+  };
+
+  // Wiki knowledge
+  const wikiContext = queryWikiContext();
+
+  // Market sentiment
+  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  let sentiment = {};
+  if (db) {
+    try {
+      sentiment = {
+        fundingRate: db.getFundingRateLatest(),
+        fundingAvg24h: db.getFundingRateAvg24h(),
+        optionsSkew: db.getOptionsSkew(since24h),
+        aggregateOI: db.getAggregateOI(since24h),
+        marketQuality: db.getMarketQualitySummary(since24h),
+      };
+    } catch (e) {
+      console.log('📋 Advisory: failed to fetch sentiment:', e.message);
+    }
+  }
+
+  // Budget state
+  const budgetState = {
+    putBuyingBaseLimit: PUT_BUYING_BASE_FUNDING_LIMIT,
+    putUnspentBuyLimit: botData.putUnspentBuyLimit,
+    putNetBought: botData.putNetBought,
+    putRemainingBudget: PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought,
+    callSellingBaseLimit: CALL_SELLING_BASE_FUNDING_LIMIT,
+    callUnspentSellLimit: botData.callUnspentSellLimit,
+    callNetSold: botData.callNetSold,
+    callRemainingBudget: CALL_SELLING_BASE_FUNDING_LIMIT + botData.callUnspentSellLimit - botData.callNetSold,
+  };
+
+  // Recent orders
+  const since7d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  let recentOrders = [];
+  if (db) {
+    try { recentOrders = db.getRecentOrders(since7d, 10); } catch { /* ok */ }
+  }
+
+  // Current active rules + recent pending actions
+  let activeRules = [];
+  let recentPendingActions = [];
+  if (db) {
+    try { activeRules = db.getActiveRules(); } catch { /* ok */ }
+    try { recentPendingActions = db.getRecentPendingActions(10); } catch { /* ok */ }
+  }
+
+  // ── Score and rank top 5 puts and calls from tickerMap ──────────────────────
+
+  const parseInstrumentName = (name) => {
+    // ETH-20260501-1500-P => { expiry: Date, strike: 1500, optionType: 'P' }
+    const parts = name.split('-');
+    if (parts.length !== 4) return null;
+    const expiryStr = parts[1]; // YYYYMMDD
+    const expiry = new Date(
+      `${expiryStr.slice(0, 4)}-${expiryStr.slice(4, 6)}-${expiryStr.slice(6, 8)}T08:00:00Z`
+    );
+    return {
+      expiry,
+      strike: Number(parts[2]),
+      optionType: parts[3], // 'P' or 'C'
+      dte: Math.max(0, (expiry.getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
+    };
+  };
+
+  const scoredPuts = [];
+  const scoredCalls = [];
+
+  for (const [name, ticker] of Object.entries(tickerMap)) {
+    const parsed = parseInstrumentName(name);
+    if (!parsed) continue;
+
+    const delta = Number(ticker.option_pricing?.d) || 0;
+    const askPrice = Number(ticker.a) || 0;
+    const bidPrice = Number(ticker.b) || 0;
+
+    if (parsed.optionType === 'P') {
+      // Filter: delta -0.08 to -0.02, DTE 45-75
+      if (delta >= -0.08 && delta <= -0.02 && parsed.dte >= 45 && parsed.dte <= 75 && askPrice > 0) {
+        const score = Math.abs(delta) / askPrice;
+        scoredPuts.push({ name, delta, askPrice, bidPrice, dte: Math.round(parsed.dte), strike: parsed.strike, score });
+      }
+    } else if (parsed.optionType === 'C') {
+      // Filter: delta 0.02 to 0.10, DTE 7-21
+      if (delta >= 0.02 && delta <= 0.10 && parsed.dte >= 7 && parsed.dte <= 21 && bidPrice > 0) {
+        const score = bidPrice / Math.abs(delta);
+        scoredCalls.push({ name, delta, askPrice, bidPrice, dte: Math.round(parsed.dte), strike: parsed.strike, score });
+      }
+    }
+  }
+
+  scoredPuts.sort((a, b) => b.score - a.score);
+  scoredCalls.sort((a, b) => b.score - a.score);
+  const top5Puts = scoredPuts.slice(0, 5);
+  const top5Calls = scoredCalls.slice(0, 5);
+
+  // ── Step 1: Primary Advisor (Claude Opus, Spitznagel temperament) ───────────
+
+  console.log('📋 Advisory Step 1: Primary advisor (Claude Opus)...');
+
+  const primarySystemPrompt = `You are a senior options strategist with Mark Spitznagel's temperament. Your philosophy:
+- Arithmetic discipline above all: every trade must have positive expected value in crash scenarios
+- Patience is the edge: being willing to sit on hands when pricing is unfavorable
+- Insurance must be well-priced: never overpay for puts, never undersell calls
+- Tail risk is the real risk: the portfolio must survive a 40%+ drawdown
+- Premium collection supplements, not replaces, insurance accumulation
+
+You advise a bot that accumulates OTM ETH puts (long insurance) and sells OTM ETH calls (premium harvesting).
+
+Given market data, produce a JSON trading agenda with:
+{
+  "assessment": "1-3 sentence market assessment and overall stance",
+  "entry_rules": [
+    {
+      "action": "buy_put" | "sell_call",
+      "criteria": "specific conditions for entry",
+      "budget_limit": <max USD to spend on this rule>,
+      "priority": "high" | "medium" | "low",
+      "reasoning": "why this trade makes sense now"
+    }
+  ],
+  "exit_rules": [
+    {
+      "action": "sell_put" | "buy_call",
+      "instrument_name": "<specific instrument or 'any_put'/'any_call'>",
+      "criteria": "specific conditions for exit",
+      "priority": "high" | "medium" | "low",
+      "reasoning": "why exit is warranted"
+    }
+  ]
+}
+
+Rules:
+- Be specific in criteria (reference delta ranges, DTE windows, price levels)
+- Budget limits must respect remaining budget
+- Entry rules should target the highest-scoring candidates when possible
+- Exit rules should protect gains and limit losses
+- If the market is unclear, it is ALWAYS correct to produce fewer rules or none
+- Maximum 5 entry rules and 5 exit rules
+- Return ONLY valid JSON, no markdown fences`;
+
+  const primaryUserPrompt = `=== CURRENT MARKET STATE ===
+Spot Price: $${spotPrice.toFixed(2)}
+Momentum: Medium-term ${momentum.mediumTerm.main} (${momentum.mediumTerm.derivative || 'n/a'}), Short-term ${momentum.shortTerm.main} (${momentum.shortTerm.derivative || 'n/a'})
+
+=== PORTFOLIO ===
+Positions: ${JSON.stringify(positions.map(p => ({
+  instrument: p.instrument_name, direction: p.direction, amount: p.amount,
+  delta: p.delta, theta: p.theta, unrealized_pnl: p.unrealized_pnl
+})), null, 1)}
+
+Balances: ${JSON.stringify(balances, null, 1)}
+
+=== BUDGET STATE ===
+${JSON.stringify(budgetState, null, 2)}
+
+=== MARKET SENTIMENT ===
+${JSON.stringify(sentiment, null, 2)}
+
+=== TOP 5 PUT CANDIDATES (by delta/ask ratio) ===
+${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte} | score=${p.score.toFixed(4)}`).join('\n') : 'No qualifying puts found'}
+
+=== TOP 5 CALL CANDIDATES (by bid/delta ratio) ===
+${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${c.delta.toFixed(4)} | bid=$${c.bidPrice.toFixed(2)} | DTE=${c.dte} | score=${c.score.toFixed(4)}`).join('\n') : 'No qualifying calls found'}
+
+=== RECENT ORDERS (last 7d) ===
+${recentOrders.length > 0 ? recentOrders.map(o => `${o.timestamp} | ${o.action} ${o.instrument_name} | ${o.success ? 'OK' : 'FAIL'} | $${o.total_value || '?'}`).join('\n') : 'No recent orders'}
+
+=== CURRENT ACTIVE RULES ===
+${activeRules.length > 0 ? JSON.stringify(activeRules.map(r => ({ type: r.rule_type, action: r.action, criteria: r.criteria, priority: r.priority })), null, 1) : 'No active rules'}
+
+=== RECENT PENDING ACTIONS ===
+${recentPendingActions.length > 0 ? JSON.stringify(recentPendingActions.map(a => ({ action: a.action, instrument: a.instrument_name, status: a.status, triggered: a.triggered_at })), null, 1) : 'No recent pending actions'}
+${wikiContext ? `\n=== KNOWLEDGE WIKI (cumulative bot knowledge) ===\n${wikiContext}` : ''}
+
+Produce your trading agenda JSON now.`;
+
+  let primaryAgenda = null;
+  try {
+    const primaryResponse = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-opus-4-6',
+      max_tokens: 3000,
+      system: primarySystemPrompt,
+      messages: [{ role: 'user', content: primaryUserPrompt }],
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      timeout: 120000,
+    });
+
+    const primaryText = primaryResponse.data?.content?.[0]?.text || '';
+    try {
+      const jsonMatch = primaryText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        primaryAgenda = JSON.parse(jsonMatch[0]);
+        console.log(`📋 Advisory Step 1: got ${primaryAgenda.entry_rules?.length || 0} entry rules, ${primaryAgenda.exit_rules?.length || 0} exit rules`);
+      } else {
+        throw new Error('No JSON block found in primary response');
+      }
+    } catch (parseErr) {
+      console.log('📋 Advisory Step 1: JSON parse failed:', parseErr.message);
+      throw parseErr;
+    }
+  } catch (e) {
+    console.log('📋 Advisory Step 1 FAILED:', e.message);
+    throw e; // Primary failure is fatal
+  }
+
+  // ── Step 2: Second Opinion (OpenAI GPT, Taleb temperament) ─────────────────
+
+  console.log('📋 Advisory Step 2: Taleb review (OpenAI GPT)...');
+  let secondOpinion = null;
+  try {
+    const talebSystem = `You are the Taleb Advisor reviewing a trading agenda from the Spitznagel Advisor.
+
+## Your Temperament
+You think like Nassim Taleb. You believe in:
+- Antifragility. Position to BENEFIT from disorder, not just survive it.
+- Convexity. Every trade should have bounded downside and unbounded upside.
+- Skin in the game. If a trade goes wrong, the cost must be small and known.
+- Fat tails. The market is more volatile than anyone thinks. Events that "shouldn't happen" happen regularly.
+- Via negativa. What you DON'T do matters more than what you do. Avoid ruin above all.`;
+
+    const talebPrompt = `## The Agenda to Review
+${JSON.stringify(primaryAgenda)}
+
+## Market Context
+Spot: $${spotPrice}, Positions: ${JSON.stringify(positions.slice(0, 5))}, Momentum: ${JSON.stringify(momentum)}
+
+## Your Task
+Critique the agenda. For each rule, ask:
+1. Is the downside truly bounded? What's the worst case?
+2. Where is the convexity? Is the asymmetry real or imagined?
+3. Are we being antifragile or just hedged?
+4. What would the naive crowd do here, and are we positioned opposite them?
+
+Output JSON only:
+{
+  "critique": "Overall assessment of the agenda",
+  "amendments": [{"rule_index": 0, "concern": "...", "suggested_change": {...}, "severity": "medium"}],
+  "vetoes": [{"rule_index": 0, "reason": "..."}],
+  "additions": []
+}`;
+
+    const talebText = await callOpenAI(talebSystem, talebPrompt, { maxTokens: 2048, timeout: 60000 });
+    if (talebText) {
+      const jsonMatch = talebText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        secondOpinion = JSON.parse(jsonMatch[0]);
+        console.log(`📋 Taleb review: ${secondOpinion.vetoes?.length || 0} vetoes, ${secondOpinion.amendments?.length || 0} amendments`);
+      }
+    }
+  } catch (e) {
+    console.log(`📋 Taleb review failed (non-fatal): ${e.message}`);
+  }
+
+  // ── Step 3: Synthesis (Claude Sonnet) ───────────────────────────────────────
+
+  console.log('📋 Advisory Step 3: Synthesis (Claude Sonnet)...');
+
+  let finalAgenda = primaryAgenda; // Default: use primary if synthesis fails
+
+  const synthesisSystemPrompt = secondOpinion
+    ? `You are the Synthesizer on a trading council. You have two advisor inputs. Your job is to produce the final trading agenda.
+
+Return the FINAL trading agenda as JSON in the same format:
+{
+  "assessment": "synthesized assessment",
+  "entry_rules": [...],
+  "exit_rules": [...]
+}
+
+Return ONLY valid JSON, no markdown fences.`
+    : `You are a risk-management synthesizer for an options trading bot. You have a single advisor opinion to validate. Your job:
+- Check for internal consistency (do entry rules match budget constraints?)
+- Verify exit rules cover existing positions
+- Flag any rules that seem overaggressive for current conditions
+- Pass through valid rules, remove or adjust problematic ones
+
+Return the FINAL trading agenda as JSON in the same format:
+{
+  "assessment": "synthesized assessment",
+  "entry_rules": [...],
+  "exit_rules": [...]
+}
+
+Return ONLY valid JSON, no markdown fences.`;
+
+  const synthesisUserPrompt = secondOpinion
+    ? `You are the Synthesizer on a trading council. You have two advisor inputs:
+
+## Spitznagel Advisor's Agenda
+${JSON.stringify(primaryAgenda, null, 2)}
+
+## Taleb Advisor's Review
+${JSON.stringify(secondOpinion, null, 2)}
+
+## Rules for Synthesis:
+- VETOES are binding: if Taleb vetoes a rule, remove it
+- AMENDMENTS are suggestions: apply if they improve convexity without breaking budget discipline
+- The Spitznagel advisor's budget limits take precedence (arithmetic discipline)
+- Taleb's concerns about fat-tail exposure should be taken seriously
+- When advisors agree, high confidence. When they disagree, reduce priority or tighten conditions.
+
+=== KEY CONSTRAINTS ===
+- Put remaining budget: $${budgetState.putRemainingBudget.toFixed(2)}
+- Call remaining budget: $${budgetState.callRemainingBudget.toFixed(2)}
+- Current positions: ${positions.length} open
+- Spot: $${spotPrice.toFixed(2)}
+
+Output the FINAL trading agenda JSON (same format as Spitznagel's output — with assessment, entry_rules, exit_rules).`
+    : `=== PRIMARY ADVISOR AGENDA ===
+${JSON.stringify(primaryAgenda, null, 2)}
+
+=== SECOND OPINION ===
+Not available (OpenAI key not set or call failed). Validate and pass through the primary agenda.
+
+=== KEY CONSTRAINTS ===
+- Put remaining budget: $${budgetState.putRemainingBudget.toFixed(2)}
+- Call remaining budget: $${budgetState.callRemainingBudget.toFixed(2)}
+- Current positions: ${positions.length} open
+- Spot: $${spotPrice.toFixed(2)}
+
+Synthesize the final agenda now.`;
+
+  try {
+    const synthesisResponse = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      system: synthesisSystemPrompt,
+      messages: [{ role: 'user', content: synthesisUserPrompt }],
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      timeout: 60000,
+    });
+
+    const synthesisText = synthesisResponse.data?.content?.[0]?.text || '';
+    try {
+      const jsonMatch = synthesisText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        finalAgenda = JSON.parse(jsonMatch[0]);
+        console.log(`📋 Advisory Step 3: synthesized ${finalAgenda.entry_rules?.length || 0} entry rules, ${finalAgenda.exit_rules?.length || 0} exit rules`);
+      } else {
+        console.log('📋 Advisory Step 3: no JSON in synthesis response, using primary agenda');
+      }
+    } catch (parseErr) {
+      console.log('📋 Advisory Step 3: JSON parse failed, using primary agenda:', parseErr.message);
+    }
+  } catch (e) {
+    console.log('📋 Advisory Step 3 FAILED, using primary agenda:', e.message);
+  }
+
+  // ── Persist rules to database ───────────────────────────────────────────────
+
+  const allRules = [];
+
+  // Parse entry rules
+  if (finalAgenda.entry_rules && Array.isArray(finalAgenda.entry_rules)) {
+    for (const rule of finalAgenda.entry_rules) {
+      allRules.push({
+        rule_type: 'entry',
+        action: rule.action,
+        instrument_name: null,
+        criteria: rule.criteria,
+        budget_limit: rule.budget_limit ?? null,
+        priority: rule.priority || 'medium',
+        reasoning: rule.reasoning || null,
+        advisory_id: advisoryId,
+      });
+    }
+  }
+
+  // Parse exit rules
+  if (finalAgenda.exit_rules && Array.isArray(finalAgenda.exit_rules)) {
+    for (const rule of finalAgenda.exit_rules) {
+      allRules.push({
+        rule_type: 'exit',
+        action: rule.action,
+        instrument_name: rule.instrument_name || null,
+        criteria: rule.criteria,
+        budget_limit: null,
+        priority: rule.priority || 'medium',
+        reasoning: rule.reasoning || null,
+        advisory_id: advisoryId,
+      });
+    }
+  }
+
+  // Write rules to database
+  if (db && allRules.length > 0) {
+    try {
+      db.replaceActiveRules(advisoryId, allRules);
+      console.log(`📋 Advisory ${advisoryId}: persisted ${allRules.length} rules to database`);
+    } catch (e) {
+      console.log('📋 Advisory: failed to persist rules:', e.message);
+    }
+  }
+
+  // Journal the assessment
+  const assessmentText = finalAgenda.assessment || primaryAgenda.assessment || 'No assessment produced';
+  if (db) {
+    try {
+      db.insertJournalEntry('advisory', assessmentText);
+    } catch (e) {
+      console.log('📋 Advisory: failed to journal assessment:', e.message);
+    }
+  }
+
+  const entryCount = finalAgenda.entry_rules?.length || 0;
+  const exitCount = finalAgenda.exit_rules?.length || 0;
+  console.log(`📋 Advisory ${advisoryId}: complete — ${entryCount} entry rules, ${exitCount} exit rules`);
+
+  return { advisoryId, agenda: finalAgenda, rulesCount: allRules.length };
+};
+
 // ─── Bot Loop ────────────────────────────────────────────────────────────────
 
 const runBot = async () => {
@@ -2996,17 +3396,7 @@ const runBot = async () => {
     console.log('⚠️ Continuing with empty instrument lists to prevent script exit');
   }
 
-  // Analyze past 6.2 days of options data once for both strategies
-  const historicalData = analyzePastOptionsData(6.2);
-  console.log(`👴🏼 Historical analysis (${historicalData.totalDataPoints} total data points from past 6.2 days):`);
-  console.log(`   📊 Filtered data points (excluding upward momentum): ${historicalData.filteredDataPoints}`);
-  console.log(`   🚫 Excluded upward momentum periods: ${historicalData.excludedUpwardPeriods}`);
-  console.log(`   Best PUT score (filtered): ${historicalData.bestPutScore.toFixed(6)}`);
-  console.log(`   Best CALL score (filtered): ${historicalData.bestCallScore.toFixed(6)}`);
-  console.log(`   3-day high: $${botData.shortTermMomentum?.threeDayHigh?.toFixed(2) || 'N/A'}`);
-  console.log(`   3-day low: $${botData.shortTermMomentum?.threeDayLow?.toFixed(2) || 'N/A'}`);
-  console.log(`   7-day high: $${botData.shortTermMomentum?.sevenDayHigh?.toFixed(2) || 'N/A'}`);
-  console.log(`   7-day low: $${botData.shortTermMomentum?.sevenDayLow?.toFixed(2) || 'N/A'}`);
+    // Historical options analysis removed (replaced by LLM advisory)
 
     // Batch-fetch AMM tickers per unique expiry (get_tickers returns AMM prices)
     const allCandidates = [...putCandidates, ...callCandidates];
@@ -3029,6 +3419,19 @@ const runBot = async () => {
       }
     }
     console.log(`📊 Ticker map contains ${Object.keys(tickerMap).length} instruments`);
+
+    // Fetch position tickers for exit monitoring
+    const positions = await fetchPositions();
+    if (positions.length > 0) {
+      const posExpiries = [...new Set(positions.map(p => p.instrument_name.split('-')[1]))];
+      const missing = posExpiries.filter(exp => !expiryDates.includes(exp));
+      if (missing.length > 0) {
+        const results = await Promise.all(missing.map(e => fetchTickersByExpiry(e)));
+        for (const tickers of results)
+          for (const [name, data] of Object.entries(tickers))
+            tickerMap[name] = data;
+      }
+    }
 
     // ─── OI Collection: fetch ALL expiry tickers for put/call ratio ────────
     if (db && instruments.length > 0) {
@@ -3308,73 +3711,23 @@ const runBot = async () => {
     console.log('⚠️ No spot price available (CoinGecko + Lyra fallback both failed)');
   }
 
-    // Enrich candidates from the ticker map
-    const putOptionsWithDetails = [];
-    const callOptionsWithDetails = [];
-    let successfulFetches = 0;
-    let failedFetches = 0;
+    console.log(`📊 ${Object.keys(tickerMap).length} tickers | ${putCandidates.length} put + ${callCandidates.length} call candidates`);
 
-    for (const instrument of putCandidates) {
-      const ticker = tickerMap[instrument.instrument_name];
-      const enriched = enrichCandidateFromTicker(instrument, ticker, spotPrice);
-      if (enriched) {
-        putOptionsWithDetails.push(enriched);
-        successfulFetches++;
-      } else {
-        failedFetches++;
-      }
-    }
-
-    for (const instrument of callCandidates) {
-      const ticker = tickerMap[instrument.instrument_name];
-      const enriched = enrichCandidateFromTicker(instrument, ticker, spotPrice);
-      if (enriched) {
-        callOptionsWithDetails.push(enriched);
-        successfulFetches++;
-      } else {
-        failedFetches++;
-      }
-    }
-
-    console.log(`✅ Successfully enriched ${successfulFetches} options from AMM tickers (${failedFetches} missing)`);
-
-    // Run both strategies with pre-fetched option details
-    let processedPutOptions = [];
-    let processedCallOptions = [];
-    
+    // ── LLM-Driven Trading ─────────────────────────────────────────
     try {
-      processedPutOptions = await handleBuyingPuts(putOptionsWithDetails, historicalData, spotPrice);
+      await evaluateTradingRules(positions, instruments, tickerMap, spotPrice);
+      await confirmAndExecutePending(instruments, tickerMap, spotPrice);
     } catch (error) {
-      console.error('❌ Error in handleBuyingPuts:', error.message);
-      console.log('⚠️ Continuing with empty PUT results to prevent script exit');
+      console.error('❌ Trading system error:', error.message);
     }
-    
-    try {
-      processedCallOptions = await handleSellingCalls(callOptionsWithDetails, historicalData, spotPrice);
-    } catch (error) {
-      console.error('❌ Error in handleSellingCalls:', error.message);
-      console.log('⚠️ Continuing with empty CALL results to prevent script exit');
-    }
-    
-    // Log best scores from this run for historical analysis
-    const bestPutScore = processedPutOptions.length > 0 ? 
-      Math.max(...processedPutOptions.map(option => option.details?.askDeltaValue || 0)) : 0;
-    
-    const bestCallScore = processedCallOptions.length > 0 ?
-      Math.max(...processedCallOptions.map(option => option.details?.bidDeltaValue || 0)) : 0;
-
-    // Find the actual best options for detail info
-    const bestPutOption = processedPutOptions.length > 0
-      ? processedPutOptions.reduce((best, o) => (o.details?.askDeltaValue || 0) > (best.details?.askDeltaValue || 0) ? o : best)
-      : null;
-    const bestCallOption = processedCallOptions.length > 0
-      ? processedCallOptions.reduce((best, o) => (o.details?.bidDeltaValue || 0) > (best.details?.bidDeltaValue || 0) ? o : best)
-      : null;
 
     // SQLite: persist options snapshots (candidates only — heatmap/chart data)
     if (db) {
       try {
-        const allOptions = [...(putOptionsWithDetails || []), ...(callOptionsWithDetails || [])];
+        const allOptions = [...(putCandidates || []), ...(callCandidates || [])].map(inst => {
+          const ticker = tickerMap[inst.instrument_name];
+          return ticker ? enrichCandidateFromTicker(inst, ticker, spotPrice) : null;
+        }).filter(Boolean);
         if (allOptions.length > 0) {
           db.insertOptionsSnapshotBatch(allOptions, tickTimestamp);
         }
@@ -3405,32 +3758,10 @@ const runBot = async () => {
             put_candidates: putCandidates.length,
             call_candidates: callCandidates.length,
           },
-          historical: {
-            total_data_points: historicalData.totalDataPoints,
-            filtered_data_points: historicalData.filteredDataPoints,
-            best_put_score: historicalData.bestPutScore,
-            best_call_score: historicalData.bestCallScore,
-          },
           strategy: {
-            put_valid: processedPutOptions.length,
-            call_valid: processedCallOptions.length,
+            mode: 'llm_driven',
+            active_rules: db ? db.getActiveRules().length : 0,
           },
-          current_best_put: bestPutScore,
-          current_best_call: bestCallScore,
-          best_put_detail: bestPutOption ? {
-            delta: bestPutOption.details?.delta || null,
-            price: bestPutOption.details?.askPrice || null,
-            strike: bestPutOption.option_details?.strike || null,
-            expiry: bestPutOption.option_details?.expiry || null,
-            instrument: bestPutOption.instrument_name || null,
-          } : null,
-          best_call_detail: bestCallOption ? {
-            delta: bestCallOption.details?.delta || null,
-            price: bestCallOption.details?.bidPrice || null,
-            strike: bestCallOption.option_details?.strike || null,
-            expiry: bestCallOption.option_details?.expiry || null,
-            instrument: bestCallOption.instrument_name || null,
-          } : null,
           next_check_minutes: checkInterval / (1000 * 60),
         };
         db.insertTick(tickTimestamp, JSON.stringify(tickSummary));
@@ -3454,6 +3785,9 @@ const runBot = async () => {
           try { await lintWiki(); } catch (e) {
             console.log('📚 Wiki lint failed (non-fatal):', e.message);
           }
+          // Generate trading advisory alongside journal
+          try { await generateTradingAdvisory(positions, spotPrice, tickerMap); }
+          catch (e) { console.log('📋 Advisory failed (non-fatal):', e.message); }
           // Extract lessons after successful journal generation (not every tick)
           return extractHypothesisLessons();
         }).catch(e => {
@@ -3566,6 +3900,26 @@ console.log(`Every ${PERIOD / (1000 * 60 * 60 * 24)} days, buy $${PUT_BUYING_BAS
 console.log('='.repeat(70));
 console.log(' ');
 loadData();
+
+// First-boot: generate advisory if no active rules exist
+const _bootAdvisory = async () => {
+  if (db && db.getActiveRules().length === 0 && process.env.ANTHROPIC_API_KEY) {
+    console.log('📋 No active trading rules — generating first advisory...');
+    try {
+      const positions = await fetchPositions();
+      const spotPrice = await getSpotPrice();
+      if (spotPrice) {
+        const fetchResult = await fetchAndFilterInstruments(spotPrice);
+        const expiryDates = [...new Set([...(fetchResult.putCandidates || []), ...(fetchResult.callCandidates || [])].map(i => i.instrument_name.split('-')[1]))];
+        const tickerResults = await Promise.all(expiryDates.map(e => fetchTickersByExpiry(e)));
+        const tickerMap = {};
+        for (const tickers of tickerResults) for (const [name, data] of Object.entries(tickers)) tickerMap[name] = data;
+        await generateTradingAdvisory(positions, spotPrice, tickerMap);
+      }
+    } catch (e) { console.log('📋 First-boot advisory failed (non-fatal):', e.message); }
+  }
+};
+_bootAdvisory();
 
 // Defer first run if the bot ran recently (prevents premature runs on redeploy)
 const timeSinceLastCheck = Date.now() - botData.lastCheck;

@@ -107,6 +107,41 @@ db.exec(`
     PRIMARY KEY (hour, dex)
   );
   CREATE INDEX IF NOT EXISTS idx_onchain_hourly_hour ON onchain_hourly(hour);
+
+  -- LLM-driven trading tables
+  CREATE TABLE IF NOT EXISTS trading_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_type TEXT NOT NULL,
+    action TEXT NOT NULL,
+    instrument_name TEXT,
+    criteria TEXT NOT NULL,
+    budget_limit REAL,
+    priority TEXT DEFAULT 'medium',
+    reasoning TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    is_active INTEGER DEFAULT 1,
+    advisory_id TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_trading_rules_active ON trading_rules(is_active);
+  CREATE INDEX IF NOT EXISTS idx_trading_rules_type ON trading_rules(rule_type, is_active);
+
+  CREATE TABLE IF NOT EXISTS pending_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER REFERENCES trading_rules(id),
+    action TEXT NOT NULL,
+    instrument_name TEXT NOT NULL,
+    amount REAL,
+    price REAL,
+    trigger_details TEXT,
+    status TEXT DEFAULT 'pending',
+    retries INTEGER DEFAULT 0,
+    triggered_at TEXT DEFAULT (datetime('now')),
+    confirmation_reasoning TEXT,
+    confirmed_at TEXT,
+    executed_at TEXT,
+    execution_result TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_pending_actions_status ON pending_actions(status);
 `);
 
 // Idempotent migrations for new columns
@@ -671,6 +706,63 @@ const stmts = {
       AND timestamp > @since
       AND bid_price > 0
   `),
+
+  // ─── Trading Rules & Pending Actions ────────────────────────────────────────
+  deactivateAllRules: db.prepare(`
+    UPDATE trading_rules SET is_active = 0 WHERE is_active = 1
+  `),
+
+  insertTradingRule: db.prepare(`
+    INSERT INTO trading_rules (rule_type, action, instrument_name, criteria, budget_limit, priority, reasoning, advisory_id, is_active)
+    VALUES (@rule_type, @action, @instrument_name, @criteria, @budget_limit, @priority, @reasoning, @advisory_id, 1)
+  `),
+
+  getActiveRules: db.prepare(`
+    SELECT * FROM trading_rules WHERE is_active = 1 ORDER BY priority DESC, id ASC
+  `),
+
+  getActiveRulesByType: db.prepare(`
+    SELECT * FROM trading_rules WHERE is_active = 1 AND rule_type = @rule_type ORDER BY priority DESC, id ASC
+  `),
+
+  insertPendingAction: db.prepare(`
+    INSERT INTO pending_actions (rule_id, action, instrument_name, amount, price, trigger_details, status)
+    VALUES (@rule_id, @action, @instrument_name, @amount, @price, @trigger_details, 'pending')
+  `),
+
+  updatePendingAction: db.prepare(`
+    UPDATE pending_actions SET
+      status = COALESCE(@status, status),
+      confirmation_reasoning = COALESCE(@confirmation_reasoning, confirmation_reasoning),
+      confirmed_at = COALESCE(@confirmed_at, confirmed_at),
+      executed_at = COALESCE(@executed_at, executed_at),
+      execution_result = COALESCE(@execution_result, execution_result),
+      retries = COALESCE(@retries, retries)
+    WHERE id = @id
+  `),
+
+  getPendingActionsByStatus: db.prepare(`
+    SELECT pa.*, tr.reasoning as rule_reasoning, tr.criteria as rule_criteria
+    FROM pending_actions pa
+    LEFT JOIN trading_rules tr ON pa.rule_id = tr.id
+    WHERE pa.status = @status
+    ORDER BY pa.triggered_at ASC
+  `),
+
+  getRecentPendingActions: db.prepare(`
+    SELECT * FROM pending_actions ORDER BY triggered_at DESC LIMIT @limit
+  `),
+
+  hasPendingActionForRule: db.prepare(`
+    SELECT COUNT(*) as count FROM pending_actions
+    WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed')
+  `),
+
+  getLastExecutedAction: db.prepare(`
+    SELECT executed_at FROM pending_actions
+    WHERE action = @action AND status = 'executed'
+    ORDER BY executed_at DESC LIMIT 1
+  `),
 };
 
 // ─── Helper Functions ─────────────────────────────────────────────────────────
@@ -1037,6 +1129,57 @@ const countReviewedSinceLastLesson = () => {
   return stmts.countReviewedSinceLastLesson.get()?.count || 0;
 };
 
+// ─── Trading Rules & Pending Actions Helpers ─────────────────────────────────
+
+const replaceActiveRules = (advisoryId, rules) => {
+  const replace = db.transaction((items) => {
+    stmts.deactivateAllRules.run();
+    for (const rule of items) {
+      stmts.insertTradingRule.run({
+        rule_type: rule.rule_type,
+        action: rule.action,
+        instrument_name: rule.instrument_name || null,
+        criteria: typeof rule.criteria === 'string' ? rule.criteria : JSON.stringify(rule.criteria),
+        budget_limit: rule.budget_limit ?? null,
+        priority: rule.priority || 'medium',
+        reasoning: rule.reasoning || null,
+        advisory_id: advisoryId,
+      });
+    }
+  });
+  replace(rules);
+};
+
+const insertPendingAction = (action) => {
+  return stmts.insertPendingAction.run({
+    rule_id: action.rule_id ?? null,
+    action: action.action,
+    instrument_name: action.instrument_name,
+    amount: action.amount ?? null,
+    price: action.price ?? null,
+    trigger_details: action.trigger_details ? (typeof action.trigger_details === 'string' ? action.trigger_details : JSON.stringify(action.trigger_details)) : null,
+  });
+};
+
+const updatePendingAction = (id, fields) => {
+  stmts.updatePendingAction.run({
+    id,
+    status: fields.status ?? null,
+    confirmation_reasoning: fields.confirmation_reasoning ?? null,
+    confirmed_at: fields.confirmed_at ?? null,
+    executed_at: fields.executed_at ?? null,
+    execution_result: fields.execution_result ? (typeof fields.execution_result === 'string' ? fields.execution_result : JSON.stringify(fields.execution_result)) : null,
+    retries: fields.retries ?? null,
+  });
+};
+
+const getActiveRules = () => stmts.getActiveRules.all();
+const getActiveRulesByType = (ruleType) => stmts.getActiveRulesByType.all({ rule_type: ruleType });
+const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ status });
+const getRecentPendingActions = (limit = 20) => stmts.getRecentPendingActions.all({ limit });
+const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
+const getLastExecutedAction = (action) => stmts.getLastExecutedAction.get({ action })?.executed_at || null;
+
 // ─── Bot State Helpers ────────────────────────────────────────────────────────
 
 const saveBotState = (botData) => {
@@ -1147,5 +1290,15 @@ module.exports = {
   getOptionsSkew,
   getAggregateOI,
   getMarketQualitySummary,
+  // Trading rules & pending actions
+  replaceActiveRules,
+  insertPendingAction,
+  updatePendingAction,
+  getActiveRules,
+  getActiveRulesByType,
+  getPendingActions,
+  getRecentPendingActions,
+  hasPendingActionForRule,
+  getLastExecutedAction,
   close,
 };

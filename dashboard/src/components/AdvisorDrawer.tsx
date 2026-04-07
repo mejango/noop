@@ -106,9 +106,70 @@ const STARTERS = [
   'Synthesize your journal — what patterns are forming and what do you expect next?',
 ];
 
+// ─── Ops Types ──────────────────────────────────────────────────────────────
+
+interface OpsStats {
+  active_rules: number; pending_count: number; confirmed_count: number;
+  executed_count: number; rejected_count: number; failed_count: number;
+  orders_24h: number; current_advisory_id: string | null;
+  advisory_created_at: string | null;
+}
+
+interface TradingRule {
+  id: number; rule_type: string; action: string; instrument_name: string | null;
+  criteria: string; budget_limit: number | null; priority: string;
+  reasoning: string | null; created_at: string; advisory_id: string | null;
+}
+
+interface PendingAction {
+  id: number; rule_id: number | null; action: string; instrument_name: string;
+  amount: number | null; price: number | null; trigger_details: string | null;
+  status: string; retries: number; triggered_at: string;
+  confirmation_reasoning: string | null; confirmed_at: string | null;
+  executed_at: string | null; execution_result: string | null;
+  rule_reasoning: string | null; rule_priority: string | null; rule_criteria: string | null;
+}
+
+interface Order {
+  id: number; timestamp: string; action: string; success: number;
+  reason: string | null; instrument_name: string | null;
+  strike: number | null; expiry: string | null; delta: number | null;
+  price: number | null; intended_amount: number | null; filled_amount: number | null;
+  fill_price: number | null; total_value: number | null; spot_price: number | null;
+}
+
+interface OpsData {
+  stats: OpsStats | null;
+  rules: TradingRule[];
+  actions: PendingAction[];
+  orders: Order[];
+}
+
+const ACTION_STYLES: Record<string, { label: string; color: string }> = {
+  buy_put: { label: 'BUY PUT', color: 'bg-red-500/20 text-red-400' },
+  sell_put: { label: 'SELL PUT', color: 'bg-green-500/20 text-green-400' },
+  sell_call: { label: 'SELL CALL', color: 'bg-amber-500/20 text-amber-400' },
+  buyback_call: { label: 'BUY CALL', color: 'bg-blue-500/20 text-blue-400' },
+};
+
+const STATUS_STYLES: Record<string, { color: string }> = {
+  pending: { color: 'bg-yellow-500/20 text-yellow-400' },
+  confirmed: { color: 'bg-blue-500/20 text-blue-400' },
+  executed: { color: 'bg-green-500/20 text-green-400' },
+  rejected: { color: 'bg-gray-500/20 text-gray-400' },
+  failed: { color: 'bg-red-500/20 text-red-400' },
+};
+
+const PRIORITY_STYLES: Record<string, { color: string }> = {
+  urgent: { color: 'text-red-400' },
+  high: { color: 'text-amber-400' },
+  medium: { color: 'text-gray-400' },
+  low: { color: 'text-gray-600' },
+};
+
 export default function AdvisorDrawer() {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<'chat' | 'journal' | 'wiki'>('chat');
+  const [tab, setTab] = useState<'chat' | 'journal' | 'wiki' | 'ops'>('chat');
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState('');
@@ -117,6 +178,9 @@ export default function AdvisorDrawer() {
   const [journalLoading, setJournalLoading] = useState(false);
   const [analyticsTab, setAnalyticsTab] = useState(false);
   const [journalFilter, setJournalFilter] = useState<string | null>(null);
+  const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [] });
+  const [opsLoading, setOpsLoading] = useState(false);
+  const [opsView, setOpsView] = useState<'tldr' | 'thorough'>('tldr');
   const [hypStats, setHypStats] = useState<{
     total: number; reviewed: number; pending: number;
     confirmed_convex: number; confirmed_linear: number;
@@ -222,6 +286,26 @@ export default function AdvisorDrawer() {
       fetchAnalytics();
     }
   }, [open, tab, analyticsTab, fetchAnalytics]);
+
+  const fetchOps = useCallback(async () => {
+    setOpsLoading(true);
+    try {
+      const res = await fetch('/api/ops');
+      if (res.ok) {
+        const data = await res.json();
+        setOpsData(data);
+      }
+    } catch { /* silent */ }
+    setOpsLoading(false);
+  }, []);
+
+  useEffect(() => {
+    if (open && tab === 'ops') {
+      fetchOps();
+      const id = setInterval(fetchOps, 30_000);
+      return () => clearInterval(id);
+    }
+  }, [open, tab, fetchOps]);
 
   useEffect(() => {
     if (open && tab === 'chat' && inputRef.current) {
@@ -404,6 +488,16 @@ export default function AdvisorDrawer() {
               }`}
             >
               Journal{journalEntries.length > 0 ? ` (${journalEntries.length})` : ''}
+            </button>
+            <button
+              onClick={() => setTab('ops')}
+              className={`text-xs px-3 py-1 transition-colors ${
+                tab === 'ops'
+                  ? 'bg-white/10 text-white'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Ops{opsData.stats?.pending_count ? ` (${opsData.stats.pending_count})` : ''}
             </button>
             <button
               onClick={() => setTab('wiki')}
@@ -629,6 +723,331 @@ export default function AdvisorDrawer() {
         {tab === 'wiki' && (
           <div className="flex-1 overflow-y-auto">
             <WikiBrowser />
+          </div>
+        )}
+
+        {/* Ops View */}
+        {tab === 'ops' && (
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+            {/* View toggle: TLDR / Thorough */}
+            <div className="flex gap-1 border-b border-white/5 pb-2">
+              <button
+                onClick={() => setOpsView('tldr')}
+                className={`text-[11px] px-2.5 py-1 transition-colors ${
+                  opsView === 'tldr' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                TLDR
+              </button>
+              <button
+                onClick={() => setOpsView('thorough')}
+                className={`text-[11px] px-2.5 py-1 transition-colors ${
+                  opsView === 'thorough' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                Thorough
+              </button>
+              <button
+                onClick={fetchOps}
+                className="text-[11px] px-2.5 py-1 text-gray-600 hover:text-gray-300 transition-colors ml-auto"
+              >
+                refresh
+              </button>
+            </div>
+
+            {opsLoading && !opsData.stats && (
+              <p className="text-gray-500 text-xs">Loading ops data...</p>
+            )}
+
+            {/* ── TLDR View ─────────────────────────────────────────── */}
+            {opsView === 'tldr' && opsData.stats && (
+              <div className="space-y-3">
+                {/* Status Banner */}
+                <div className="bg-white/5 border border-white/10 px-3 py-2.5">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] text-gray-500 uppercase tracking-wider">LLM Brain Status</span>
+                    <span className="text-[10px] text-gray-600">
+                      {opsData.stats.advisory_created_at ? `advisory ${timeAgo(opsData.stats.advisory_created_at)}` : 'no advisory yet'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div>
+                      <p className="text-lg font-bold text-white">{opsData.stats.active_rules}</p>
+                      <p className="text-[10px] text-gray-500">active rules</p>
+                    </div>
+                    <div>
+                      <p className="text-lg font-bold text-yellow-400">{opsData.stats.pending_count}</p>
+                      <p className="text-[10px] text-gray-500">pending</p>
+                    </div>
+                    <div>
+                      <p className="text-lg font-bold text-green-400">{opsData.stats.orders_24h}</p>
+                      <p className="text-[10px] text-gray-500">orders 24h</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-3 mt-2 pt-2 border-t border-white/5 text-[10px]">
+                    <span className="text-green-400">{opsData.stats.executed_count} executed</span>
+                    <span className="text-gray-400">{opsData.stats.rejected_count} rejected</span>
+                    <span className="text-red-400">{opsData.stats.failed_count} failed</span>
+                  </div>
+                </div>
+
+                {/* Active Rules Summary */}
+                {opsData.rules.length > 0 && (
+                  <div>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Active Rules</p>
+                    {opsData.rules.map((rule) => {
+                      const actionStyle = ACTION_STYLES[rule.action] || { label: rule.action, color: 'bg-white/10 text-gray-400' };
+                      const priorityStyle = PRIORITY_STYLES[rule.priority] || { color: 'text-gray-500' };
+                      return (
+                        <div key={rule.id} className="border border-white/5 px-3 py-2 mb-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 ${actionStyle.color}`}>
+                              {actionStyle.label}
+                            </span>
+                            <span className={`text-[10px] ${priorityStyle.color}`}>{rule.priority}</span>
+                            <span className="text-[10px] text-gray-600">{rule.rule_type}</span>
+                            {rule.instrument_name && (
+                              <span className="text-[10px] text-gray-500 font-mono ml-auto truncate max-w-[140px]">
+                                {rule.instrument_name}
+                              </span>
+                            )}
+                          </div>
+                          {rule.reasoning && (
+                            <p className="text-[11px] text-gray-400 mt-1 leading-relaxed line-clamp-2">{rule.reasoning}</p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Recent Actions - last 5 */}
+                {opsData.actions.length > 0 && (
+                  <div>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Recent Actions</p>
+                    {opsData.actions.slice(0, 5).map((a) => {
+                      const actionStyle = ACTION_STYLES[a.action] || { label: a.action, color: 'bg-white/10 text-gray-400' };
+                      const statusStyle = STATUS_STYLES[a.status] || { color: 'bg-white/10 text-gray-400' };
+                      return (
+                        <div key={a.id} className="border border-white/5 px-3 py-2 mb-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 ${actionStyle.color}`}>
+                              {actionStyle.label}
+                            </span>
+                            <span className={`text-[10px] px-1.5 py-0.5 ${statusStyle.color}`}>
+                              {a.status}
+                            </span>
+                            <span className="text-[10px] text-gray-600 ml-auto">{timeAgo(a.triggered_at)}</span>
+                          </div>
+                          <p className="text-[11px] text-gray-500 font-mono mt-0.5 truncate">{a.instrument_name}</p>
+                          {a.price && (
+                            <span className="text-[10px] text-gray-500">@ ${a.price.toFixed(2)}</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {opsData.rules.length === 0 && opsData.actions.length === 0 && (
+                  <div className="pt-4 text-center">
+                    <p className="text-gray-500 text-xs">No active rules or actions. The advisory council hasn&apos;t generated rules yet.</p>
+                    <p className="text-gray-600 text-[10px] mt-1">Rules are generated every 8h during the journal cycle, or on first boot.</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── Thorough View ────────────────────────────────────── */}
+            {opsView === 'thorough' && opsData.stats && (
+              <div className="space-y-4">
+                {/* Advisory Info */}
+                <div className="bg-white/5 border border-white/10 px-3 py-2.5">
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Current Advisory</p>
+                  <div className="text-xs text-gray-300 space-y-0.5">
+                    <p>ID: <span className="font-mono text-gray-500">{opsData.stats.current_advisory_id || 'none'}</span></p>
+                    <p>Generated: <span className="text-gray-400">{opsData.stats.advisory_created_at ? timeAgo(opsData.stats.advisory_created_at) : 'never'}</span></p>
+                    <p>Active rules: <span className="text-white font-bold">{opsData.stats.active_rules}</span></p>
+                  </div>
+                  <div className="flex gap-3 mt-2 pt-2 border-t border-white/5 text-[10px]">
+                    <span className="text-yellow-400">{opsData.stats.pending_count} pending</span>
+                    <span className="text-blue-400">{opsData.stats.confirmed_count} confirmed</span>
+                    <span className="text-green-400">{opsData.stats.executed_count} executed</span>
+                    <span className="text-gray-400">{opsData.stats.rejected_count} rejected</span>
+                    <span className="text-red-400">{opsData.stats.failed_count} failed</span>
+                  </div>
+                </div>
+
+                {/* Full Rules Detail */}
+                {opsData.rules.length > 0 && (
+                  <div>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Trading Rules ({opsData.rules.length})</p>
+                    {opsData.rules.map((rule) => {
+                      const actionStyle = ACTION_STYLES[rule.action] || { label: rule.action, color: 'bg-white/10 text-gray-400' };
+                      const priorityStyle = PRIORITY_STYLES[rule.priority] || { color: 'text-gray-500' };
+                      let criteria: Record<string, unknown> = {};
+                      try { criteria = JSON.parse(rule.criteria); } catch { /* skip */ }
+                      return (
+                        <details key={rule.id} className="border border-white/5 mb-1.5">
+                          <summary className="px-3 py-2 cursor-pointer hover:bg-white/5 transition-colors">
+                            <div className="inline-flex items-center gap-1.5">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 ${actionStyle.color}`}>
+                                {actionStyle.label}
+                              </span>
+                              <span className={`text-[10px] ${priorityStyle.color}`}>{rule.priority}</span>
+                              <span className="text-[10px] text-gray-600">#{rule.id} · {rule.rule_type}</span>
+                              {rule.instrument_name && (
+                                <span className="text-[10px] text-gray-500 font-mono">{rule.instrument_name}</span>
+                              )}
+                              {rule.budget_limit && (
+                                <span className="text-[10px] text-gray-500">${rule.budget_limit.toFixed(0)}</span>
+                              )}
+                            </div>
+                          </summary>
+                          <div className="px-3 pb-2.5 space-y-1.5 border-t border-white/5">
+                            {rule.reasoning && (
+                              <div className="mt-1.5">
+                                <p className="text-[10px] text-gray-600 uppercase">Reasoning</p>
+                                <p className="text-[11px] text-gray-300 leading-relaxed">{rule.reasoning}</p>
+                              </div>
+                            )}
+                            <div>
+                              <p className="text-[10px] text-gray-600 uppercase">Criteria</p>
+                              <pre className="text-[10px] text-gray-500 font-mono bg-black/30 px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
+                                {JSON.stringify(criteria, null, 2)}
+                              </pre>
+                            </div>
+                            <p className="text-[10px] text-gray-600">Created: {rule.created_at}</p>
+                          </div>
+                        </details>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Full Pending Actions */}
+                {opsData.actions.length > 0 && (
+                  <div>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Action Pipeline ({opsData.actions.length})</p>
+                    {opsData.actions.map((a) => {
+                      const actionStyle = ACTION_STYLES[a.action] || { label: a.action, color: 'bg-white/10 text-gray-400' };
+                      const statusStyle = STATUS_STYLES[a.status] || { color: 'bg-white/10 text-gray-400' };
+                      let triggerDetails: Record<string, unknown> = {};
+                      try { if (a.trigger_details) triggerDetails = JSON.parse(a.trigger_details); } catch { /* skip */ }
+                      let confirmReasoning: Record<string, unknown> | string = '';
+                      try { if (a.confirmation_reasoning) confirmReasoning = JSON.parse(a.confirmation_reasoning); } catch { confirmReasoning = a.confirmation_reasoning || ''; }
+                      let execResult: Record<string, unknown> = {};
+                      try { if (a.execution_result) execResult = JSON.parse(a.execution_result); } catch { /* skip */ }
+                      return (
+                        <details key={a.id} className="border border-white/5 mb-1.5">
+                          <summary className="px-3 py-2 cursor-pointer hover:bg-white/5 transition-colors">
+                            <div className="inline-flex items-center gap-1.5 flex-wrap">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 ${actionStyle.color}`}>
+                                {actionStyle.label}
+                              </span>
+                              <span className={`text-[10px] px-1.5 py-0.5 ${statusStyle.color}`}>
+                                {a.status}
+                              </span>
+                              <span className="text-[10px] text-gray-500 font-mono truncate max-w-[160px]">{a.instrument_name}</span>
+                              {a.price && <span className="text-[10px] text-gray-500">@ ${a.price.toFixed(2)}</span>}
+                              {a.retries > 0 && <span className="text-[10px] text-red-400">retry {a.retries}</span>}
+                              <span className="text-[10px] text-gray-600">{timeAgo(a.triggered_at)}</span>
+                            </div>
+                          </summary>
+                          <div className="px-3 pb-2.5 space-y-1.5 border-t border-white/5">
+                            {/* Timeline */}
+                            <div className="mt-1.5 space-y-0.5 text-[10px] text-gray-500">
+                              <p>Triggered: {a.triggered_at}</p>
+                              {a.confirmed_at && <p>Confirmed: {a.confirmed_at}</p>}
+                              {a.executed_at && <p>Executed: {a.executed_at}</p>}
+                            </div>
+                            {/* Rule context */}
+                            {a.rule_reasoning && (
+                              <div>
+                                <p className="text-[10px] text-gray-600 uppercase">Rule Reasoning</p>
+                                <p className="text-[11px] text-gray-400 leading-relaxed">{a.rule_reasoning}</p>
+                              </div>
+                            )}
+                            {/* Trigger details */}
+                            {Object.keys(triggerDetails).length > 0 && (
+                              <div>
+                                <p className="text-[10px] text-gray-600 uppercase">Trigger</p>
+                                <pre className="text-[10px] text-gray-500 font-mono bg-black/30 px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
+                                  {JSON.stringify(triggerDetails, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                            {/* Confirmation reasoning */}
+                            {confirmReasoning && (
+                              <div>
+                                <p className="text-[10px] text-gray-600 uppercase">Confirmation Votes</p>
+                                {typeof confirmReasoning === 'string' ? (
+                                  <p className="text-[11px] text-gray-400 leading-relaxed">{confirmReasoning}</p>
+                                ) : (
+                                  <pre className="text-[10px] text-gray-500 font-mono bg-black/30 px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
+                                    {JSON.stringify(confirmReasoning, null, 2)}
+                                  </pre>
+                                )}
+                              </div>
+                            )}
+                            {/* Execution result */}
+                            {Object.keys(execResult).length > 0 && (
+                              <div>
+                                <p className="text-[10px] text-gray-600 uppercase">Execution Result</p>
+                                <pre className="text-[10px] text-gray-500 font-mono bg-black/30 px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
+                                  {JSON.stringify(execResult, null, 2)}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        </details>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Orders */}
+                {opsData.orders.length > 0 && (
+                  <div>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Recent Orders ({opsData.orders.length})</p>
+                    {opsData.orders.map((o) => (
+                      <details key={o.id} className="border border-white/5 mb-1.5">
+                        <summary className="px-3 py-2 cursor-pointer hover:bg-white/5 transition-colors">
+                          <div className="inline-flex items-center gap-1.5">
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 ${o.success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
+                              {o.success ? 'FILLED' : 'FAILED'}
+                            </span>
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 ${ACTION_STYLES[o.action]?.color || 'bg-white/10 text-gray-400'}`}>
+                              {ACTION_STYLES[o.action]?.label || o.action}
+                            </span>
+                            <span className="text-[10px] text-gray-500 font-mono truncate max-w-[140px]">{o.instrument_name}</span>
+                            {o.total_value && <span className="text-[10px] text-white">${o.total_value.toFixed(2)}</span>}
+                            <span className="text-[10px] text-gray-600">{timeAgo(o.timestamp)}</span>
+                          </div>
+                        </summary>
+                        <div className="px-3 pb-2.5 space-y-0.5 border-t border-white/5 mt-0 text-[10px] text-gray-500">
+                          <p className="mt-1.5">Time: {o.timestamp}</p>
+                          {o.strike && <p>Strike: {o.strike}</p>}
+                          {o.delta && <p>Delta: {o.delta.toFixed(4)}</p>}
+                          {o.intended_amount && <p>Intended: {o.intended_amount}</p>}
+                          {o.filled_amount && <p>Filled: {o.filled_amount}</p>}
+                          {o.fill_price && <p>Fill price: ${o.fill_price.toFixed(2)}</p>}
+                          {o.spot_price && <p>Spot: ${o.spot_price.toFixed(2)}</p>}
+                          {o.reason && <p>Reason: {o.reason}</p>}
+                        </div>
+                      </details>
+                    ))}
+                  </div>
+                )}
+
+                {opsData.rules.length === 0 && opsData.actions.length === 0 && opsData.orders.length === 0 && (
+                  <div className="pt-4 text-center">
+                    <p className="text-gray-500 text-xs">No trading activity yet.</p>
+                    <p className="text-gray-600 text-[10px] mt-1">The advisory council generates rules every 8h, or on first boot if none exist.</p>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
