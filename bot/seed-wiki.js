@@ -58,15 +58,15 @@ async function seedWiki() {
   // Read schema
   const schema = fs.readFileSync(SCHEMA_PATH, 'utf-8');
 
-  // Prepare journal summary (sample to fit token budget)
-  const sampleEntries = journalEntries.slice(0, 100);
+  // Prepare journal summary — keep compact to avoid API timeout
+  const sampleEntries = journalEntries.slice(0, 40);
   const journalText = sampleEntries
-    .map(e => `[${e.entry_type}] (${e.timestamp}) ${e.content.slice(0, 400)}`)
-    .join('\n\n---\n\n');
-
-  const hypothesesText = reviewedHypotheses
-    .map(h => `#${h.id} [${h.outcome_status}] conf:${h.outcome_confidence} — ${h.content.slice(0, 200)}... VERDICT: ${h.outcome_verdict || 'none'}`)
+    .map(e => `[${e.entry_type}] (${e.timestamp}) ${e.content.slice(0, 250)}`)
     .join('\n\n');
+
+  const hypothesesText = reviewedHypotheses.slice(0, 20)
+    .map(h => `#${h.id} [${h.outcome_status}] — ${h.content.slice(0, 150)}... VERDICT: ${h.outcome_verdict || 'none'}`)
+    .join('\n');
 
   const lessonsText = activeLessons.length > 0
     ? activeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')
@@ -74,7 +74,7 @@ async function seedWiki() {
 
   const prompt = `You are bootstrapping a knowledge wiki for a Spitznagel-style tail-risk hedging bot (ETH options on Lyra/Derive).
 
-Synthesize the historical data below into 11 well-structured wiki pages. Each page must follow the schema exactly.
+Synthesize the historical data below into 11 wiki pages. Follow the schema. Be concise — each page should be 200-400 words.
 
 ## Wiki Schema
 ${schema}
@@ -109,7 +109,7 @@ Generate ALL 11 pages: ${WIKI_ALL_PAGES.join(', ')}`;
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: 'claude-sonnet-4-6',
-      max_tokens: 16384,
+      max_tokens: 8192,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
