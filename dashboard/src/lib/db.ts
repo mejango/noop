@@ -419,6 +419,12 @@ function prepareAll(d: Database.Database) {
         (SELECT advisory_id FROM trading_rules WHERE is_active = 1 LIMIT 1) as current_advisory_id,
         (SELECT created_at FROM trading_rules WHERE is_active = 1 ORDER BY id ASC LIMIT 1) as advisory_created_at
     `),
+
+    getLatestAdvisoryAssessment: d.prepare(`
+      SELECT content, timestamp FROM ai_journal
+      WHERE entry_type = 'advisory'
+      ORDER BY timestamp DESC LIMIT 1
+    `),
   };
 }
 
@@ -808,6 +814,14 @@ export function getOpsStats() {
       executed_count: number; rejected_count: number; failed_count: number;
       orders_24h: number; current_advisory_id: string | null;
       advisory_created_at: string | null;
+    } | undefined;
+  } catch { return undefined; }
+}
+
+export function getLatestAdvisoryAssessment() {
+  try {
+    return getStmts().getLatestAdvisoryAssessment.get() as {
+      content: string; timestamp: string;
     } | undefined;
   } catch { return undefined; }
 }

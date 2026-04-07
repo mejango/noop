@@ -138,11 +138,17 @@ interface Order {
   fill_price: number | null; total_value: number | null; spot_price: number | null;
 }
 
+interface OpsAssessment {
+  content: string;
+  timestamp: string;
+}
+
 interface OpsData {
   stats: OpsStats | null;
   rules: TradingRule[];
   actions: PendingAction[];
   orders: Order[];
+  assessment: OpsAssessment | null;
 }
 
 const ACTION_STYLES: Record<string, { label: string; color: string }> = {
@@ -178,9 +184,8 @@ export default function AdvisorDrawer() {
   const [journalLoading, setJournalLoading] = useState(false);
   const [analyticsTab, setAnalyticsTab] = useState(false);
   const [journalFilter, setJournalFilter] = useState<string | null>(null);
-  const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [] });
+  const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null });
   const [opsLoading, setOpsLoading] = useState(false);
-  const [opsView, setOpsView] = useState<'tldr' | 'thorough'>('tldr');
   const [hypStats, setHypStats] = useState<{
     total: number; reviewed: number; pending: number;
     confirmed_convex: number; confirmed_linear: number;
@@ -729,24 +734,8 @@ export default function AdvisorDrawer() {
         {/* Ops View */}
         {tab === 'ops' && (
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-            {/* View toggle: TLDR / Thorough */}
-            <div className="flex gap-1 border-b border-white/5 pb-2">
-              <button
-                onClick={() => setOpsView('tldr')}
-                className={`text-[11px] px-2.5 py-1 transition-colors ${
-                  opsView === 'tldr' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300'
-                }`}
-              >
-                TLDR
-              </button>
-              <button
-                onClick={() => setOpsView('thorough')}
-                className={`text-[11px] px-2.5 py-1 transition-colors ${
-                  opsView === 'thorough' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300'
-                }`}
-              >
-                Thorough
-              </button>
+            <div className="flex items-center border-b border-white/5 pb-2">
+              <span className="text-[10px] text-gray-500 uppercase tracking-wider">Trading Operations</span>
               <button
                 onClick={fetchOps}
                 className="text-[11px] px-2.5 py-1 text-gray-600 hover:text-gray-300 transition-colors ml-auto"
@@ -759,21 +748,23 @@ export default function AdvisorDrawer() {
               <p className="text-gray-500 text-xs">Loading ops data...</p>
             )}
 
-            {/* ── TLDR View ─────────────────────────────────────────── */}
-            {opsView === 'tldr' && opsData.stats && (
+            {opsData.stats && (
               <div className="space-y-3">
                 {/* Status Banner */}
                 <div className="bg-white/5 border border-white/10 px-3 py-2.5">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-[10px] text-gray-500 uppercase tracking-wider">LLM Brain Status</span>
                     <span className="text-[10px] text-gray-600">
-                      {opsData.stats.advisory_created_at ? `advisory ${timeAgo(opsData.stats.advisory_created_at)}` : 'no advisory yet'}
+                      advisory {opsData.stats.advisory_created_at ? timeAgo(opsData.stats.advisory_created_at) : 'never'}
+                      {opsData.stats.current_advisory_id && (
+                        <span className="text-gray-700 ml-1">({opsData.stats.current_advisory_id.slice(0, 8)})</span>
+                      )}
                     </span>
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-center">
                     <div>
                       <p className="text-lg font-bold text-white">{opsData.stats.active_rules}</p>
-                      <p className="text-[10px] text-gray-500">active rules</p>
+                      <p className="text-[10px] text-gray-500">rules</p>
                     </div>
                     <div>
                       <p className="text-lg font-bold text-yellow-400">{opsData.stats.pending_count}</p>
@@ -786,102 +777,27 @@ export default function AdvisorDrawer() {
                   </div>
                   <div className="flex gap-3 mt-2 pt-2 border-t border-white/5 text-[10px]">
                     <span className="text-green-400">{opsData.stats.executed_count} executed</span>
-                    <span className="text-gray-400">{opsData.stats.rejected_count} rejected</span>
-                    <span className="text-red-400">{opsData.stats.failed_count} failed</span>
-                  </div>
-                </div>
-
-                {/* Active Rules Summary */}
-                {opsData.rules.length > 0 && (
-                  <div>
-                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Active Rules</p>
-                    {opsData.rules.map((rule) => {
-                      const actionStyle = ACTION_STYLES[rule.action] || { label: rule.action, color: 'bg-white/10 text-gray-400' };
-                      const priorityStyle = PRIORITY_STYLES[rule.priority] || { color: 'text-gray-500' };
-                      return (
-                        <div key={rule.id} className="border border-white/5 px-3 py-2 mb-1.5">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`text-[10px] font-bold px-1.5 py-0.5 ${actionStyle.color}`}>
-                              {actionStyle.label}
-                            </span>
-                            <span className={`text-[10px] ${priorityStyle.color}`}>{rule.priority}</span>
-                            <span className="text-[10px] text-gray-600">{rule.rule_type}</span>
-                            {rule.instrument_name && (
-                              <span className="text-[10px] text-gray-500 font-mono ml-auto truncate max-w-[140px]">
-                                {rule.instrument_name}
-                              </span>
-                            )}
-                          </div>
-                          {rule.reasoning && (
-                            <p className="text-[11px] text-gray-400 mt-1 leading-relaxed line-clamp-2">{rule.reasoning}</p>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {/* Recent Actions - last 5 */}
-                {opsData.actions.length > 0 && (
-                  <div>
-                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Recent Actions</p>
-                    {opsData.actions.slice(0, 5).map((a) => {
-                      const actionStyle = ACTION_STYLES[a.action] || { label: a.action, color: 'bg-white/10 text-gray-400' };
-                      const statusStyle = STATUS_STYLES[a.status] || { color: 'bg-white/10 text-gray-400' };
-                      return (
-                        <div key={a.id} className="border border-white/5 px-3 py-2 mb-1.5">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`text-[10px] font-bold px-1.5 py-0.5 ${actionStyle.color}`}>
-                              {actionStyle.label}
-                            </span>
-                            <span className={`text-[10px] px-1.5 py-0.5 ${statusStyle.color}`}>
-                              {a.status}
-                            </span>
-                            <span className="text-[10px] text-gray-600 ml-auto">{timeAgo(a.triggered_at)}</span>
-                          </div>
-                          <p className="text-[11px] text-gray-500 font-mono mt-0.5 truncate">{a.instrument_name}</p>
-                          {a.price && (
-                            <span className="text-[10px] text-gray-500">@ ${a.price.toFixed(2)}</span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
-                {opsData.rules.length === 0 && opsData.actions.length === 0 && (
-                  <div className="pt-4 text-center">
-                    <p className="text-gray-500 text-xs">No active rules or actions. The advisory council hasn&apos;t generated rules yet.</p>
-                    <p className="text-gray-600 text-[10px] mt-1">Rules are generated every 8h during the journal cycle, or on first boot.</p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ── Thorough View ────────────────────────────────────── */}
-            {opsView === 'thorough' && opsData.stats && (
-              <div className="space-y-4">
-                {/* Advisory Info */}
-                <div className="bg-white/5 border border-white/10 px-3 py-2.5">
-                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1">Current Advisory</p>
-                  <div className="text-xs text-gray-300 space-y-0.5">
-                    <p>ID: <span className="font-mono text-gray-500">{opsData.stats.current_advisory_id || 'none'}</span></p>
-                    <p>Generated: <span className="text-gray-400">{opsData.stats.advisory_created_at ? timeAgo(opsData.stats.advisory_created_at) : 'never'}</span></p>
-                    <p>Active rules: <span className="text-white font-bold">{opsData.stats.active_rules}</span></p>
-                  </div>
-                  <div className="flex gap-3 mt-2 pt-2 border-t border-white/5 text-[10px]">
-                    <span className="text-yellow-400">{opsData.stats.pending_count} pending</span>
                     <span className="text-blue-400">{opsData.stats.confirmed_count} confirmed</span>
-                    <span className="text-green-400">{opsData.stats.executed_count} executed</span>
                     <span className="text-gray-400">{opsData.stats.rejected_count} rejected</span>
                     <span className="text-red-400">{opsData.stats.failed_count} failed</span>
                   </div>
                 </div>
 
-                {/* Full Rules Detail */}
+                {/* Advisory Assessment */}
+                {opsData.assessment && (
+                  <div className="bg-white/5 border border-white/10 px-3 py-2.5">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[10px] text-gray-500 uppercase tracking-wider">Advisory Assessment</span>
+                      <span className="text-[10px] text-gray-600">{timeAgo(opsData.assessment.timestamp)}</span>
+                    </div>
+                    <p className="text-[11px] text-gray-300 leading-relaxed">{opsData.assessment.content}</p>
+                  </div>
+                )}
+
+                {/* Trading Rules */}
                 {opsData.rules.length > 0 && (
                   <div>
-                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Trading Rules ({opsData.rules.length})</p>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Active Rules ({opsData.rules.length})</p>
                     {opsData.rules.map((rule) => {
                       const actionStyle = ACTION_STYLES[rule.action] || { label: rule.action, color: 'bg-white/10 text-gray-400' };
                       const priorityStyle = PRIORITY_STYLES[rule.priority] || { color: 'text-gray-500' };
@@ -890,17 +806,17 @@ export default function AdvisorDrawer() {
                       return (
                         <details key={rule.id} className="border border-white/5 mb-1.5">
                           <summary className="px-3 py-2 cursor-pointer hover:bg-white/5 transition-colors">
-                            <div className="inline-flex items-center gap-1.5">
+                            <div className="inline-flex items-center gap-1.5 flex-wrap">
                               <span className={`text-[10px] font-bold px-1.5 py-0.5 ${actionStyle.color}`}>
                                 {actionStyle.label}
                               </span>
                               <span className={`text-[10px] ${priorityStyle.color}`}>{rule.priority}</span>
-                              <span className="text-[10px] text-gray-600">#{rule.id} · {rule.rule_type}</span>
+                              <span className="text-[10px] text-gray-600">{rule.rule_type}</span>
                               {rule.instrument_name && (
                                 <span className="text-[10px] text-gray-500 font-mono">{rule.instrument_name}</span>
                               )}
                               {rule.budget_limit && (
-                                <span className="text-[10px] text-gray-500">${rule.budget_limit.toFixed(0)}</span>
+                                <span className="text-[10px] text-gray-500">${rule.budget_limit.toFixed(0)} limit</span>
                               )}
                             </div>
                           </summary>
@@ -917,7 +833,7 @@ export default function AdvisorDrawer() {
                                 {JSON.stringify(criteria, null, 2)}
                               </pre>
                             </div>
-                            <p className="text-[10px] text-gray-600">Created: {rule.created_at}</p>
+                            <p className="text-[10px] text-gray-600">Rule #{rule.id} &middot; Created {rule.created_at}</p>
                           </div>
                         </details>
                       );
@@ -925,7 +841,7 @@ export default function AdvisorDrawer() {
                   </div>
                 )}
 
-                {/* Full Pending Actions */}
+                {/* Action Pipeline */}
                 {opsData.actions.length > 0 && (
                   <div>
                     <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Action Pipeline ({opsData.actions.length})</p>
@@ -950,16 +866,17 @@ export default function AdvisorDrawer() {
                               </span>
                               <span className="text-[10px] text-gray-500 font-mono truncate max-w-[160px]">{a.instrument_name}</span>
                               {a.price && <span className="text-[10px] text-gray-500">@ ${a.price.toFixed(2)}</span>}
+                              {a.amount && <span className="text-[10px] text-gray-500">x{a.amount}</span>}
                               {a.retries > 0 && <span className="text-[10px] text-red-400">retry {a.retries}</span>}
-                              <span className="text-[10px] text-gray-600">{timeAgo(a.triggered_at)}</span>
+                              <span className="text-[10px] text-gray-600 ml-auto">{timeAgo(a.triggered_at)}</span>
                             </div>
                           </summary>
                           <div className="px-3 pb-2.5 space-y-1.5 border-t border-white/5">
                             {/* Timeline */}
-                            <div className="mt-1.5 space-y-0.5 text-[10px] text-gray-500">
-                              <p>Triggered: {a.triggered_at}</p>
-                              {a.confirmed_at && <p>Confirmed: {a.confirmed_at}</p>}
-                              {a.executed_at && <p>Executed: {a.executed_at}</p>}
+                            <div className="mt-1.5 flex gap-3 flex-wrap text-[10px] text-gray-500">
+                              <span>triggered {a.triggered_at}</span>
+                              {a.confirmed_at && <span>confirmed {a.confirmed_at}</span>}
+                              {a.executed_at && <span>executed {a.executed_at}</span>}
                             </div>
                             {/* Rule context */}
                             {a.rule_reasoning && (
@@ -971,7 +888,7 @@ export default function AdvisorDrawer() {
                             {/* Trigger details */}
                             {Object.keys(triggerDetails).length > 0 && (
                               <div>
-                                <p className="text-[10px] text-gray-600 uppercase">Trigger</p>
+                                <p className="text-[10px] text-gray-600 uppercase">Trigger Conditions</p>
                                 <pre className="text-[10px] text-gray-500 font-mono bg-black/30 px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
                                   {JSON.stringify(triggerDetails, null, 2)}
                                 </pre>
@@ -1021,19 +938,22 @@ export default function AdvisorDrawer() {
                               {ACTION_STYLES[o.action]?.label || o.action}
                             </span>
                             <span className="text-[10px] text-gray-500 font-mono truncate max-w-[140px]">{o.instrument_name}</span>
-                            {o.total_value && <span className="text-[10px] text-white">${o.total_value.toFixed(2)}</span>}
+                            {o.total_value != null && <span className="text-[10px] text-white">${o.total_value.toFixed(2)}</span>}
                             <span className="text-[10px] text-gray-600">{timeAgo(o.timestamp)}</span>
                           </div>
                         </summary>
-                        <div className="px-3 pb-2.5 space-y-0.5 border-t border-white/5 mt-0 text-[10px] text-gray-500">
-                          <p className="mt-1.5">Time: {o.timestamp}</p>
-                          {o.strike && <p>Strike: {o.strike}</p>}
-                          {o.delta && <p>Delta: {o.delta.toFixed(4)}</p>}
-                          {o.intended_amount && <p>Intended: {o.intended_amount}</p>}
-                          {o.filled_amount && <p>Filled: {o.filled_amount}</p>}
-                          {o.fill_price && <p>Fill price: ${o.fill_price.toFixed(2)}</p>}
-                          {o.spot_price && <p>Spot: ${o.spot_price.toFixed(2)}</p>}
-                          {o.reason && <p>Reason: {o.reason}</p>}
+                        <div className="px-3 pb-2.5 border-t border-white/5 mt-0">
+                          <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-gray-500">
+                            <span>Time: {o.timestamp}</span>
+                            {o.spot_price != null && <span>Spot: ${o.spot_price.toFixed(2)}</span>}
+                            {o.strike != null && <span>Strike: {o.strike}</span>}
+                            {o.delta != null && <span>Delta: {o.delta.toFixed(4)}</span>}
+                            {o.intended_amount != null && <span>Intended: {o.intended_amount}</span>}
+                            {o.filled_amount != null && <span>Filled: {o.filled_amount}</span>}
+                            {o.price != null && <span>Limit: ${o.price.toFixed(2)}</span>}
+                            {o.fill_price != null && <span>Fill: ${o.fill_price.toFixed(2)}</span>}
+                          </div>
+                          {o.reason && <p className="text-[10px] text-gray-500 mt-1">{o.reason}</p>}
                         </div>
                       </details>
                     ))}
