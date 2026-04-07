@@ -3768,7 +3768,7 @@ Synthesize the final agenda now.`;
 
   try {
     const synthesisResponse = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-6',
+      model: 'claude-opus-4-6',
       max_tokens: 2048,
       system: synthesisSystemPrompt,
       messages: [{ role: 'user', content: synthesisUserPrompt }],
