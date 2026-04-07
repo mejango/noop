@@ -149,6 +149,24 @@ try { db.exec('ALTER TABLE options_snapshots ADD COLUMN open_interest REAL'); } 
 try { db.exec('ALTER TABLE options_snapshots ADD COLUMN implied_vol REAL'); } catch {}
 try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_put_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_call_iv REAL'); } catch {}
+try { db.exec('ALTER TABLE trading_rules ADD COLUMN preferred_order_type TEXT'); } catch {}
+
+// Resting (GTC/post_only) orders we've placed — for fill reconciliation
+db.exec(`
+  CREATE TABLE IF NOT EXISTS resting_orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT NOT NULL UNIQUE,
+    instrument_name TEXT NOT NULL,
+    action TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    amount REAL NOT NULL,
+    limit_price REAL NOT NULL,
+    placed_at TEXT DEFAULT (datetime('now')),
+    filled_amount REAL DEFAULT 0,
+    status TEXT DEFAULT 'open'
+  );
+  CREATE INDEX IF NOT EXISTS idx_resting_orders_status ON resting_orders(status);
+`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS bot_ticks (
@@ -713,8 +731,8 @@ const stmts = {
   `),
 
   insertTradingRule: db.prepare(`
-    INSERT INTO trading_rules (rule_type, action, instrument_name, criteria, budget_limit, priority, reasoning, advisory_id, is_active)
-    VALUES (@rule_type, @action, @instrument_name, @criteria, @budget_limit, @priority, @reasoning, @advisory_id, 1)
+    INSERT INTO trading_rules (rule_type, action, instrument_name, criteria, budget_limit, priority, reasoning, advisory_id, is_active, preferred_order_type)
+    VALUES (@rule_type, @action, @instrument_name, @criteria, @budget_limit, @priority, @reasoning, @advisory_id, 1, @preferred_order_type)
   `),
 
   getActiveRules: db.prepare(`
@@ -762,6 +780,22 @@ const stmts = {
     SELECT executed_at FROM pending_actions
     WHERE action = @action AND status = 'executed'
     ORDER BY executed_at DESC LIMIT 1
+  `),
+
+  // Resting order tracking
+  insertRestingOrder: db.prepare(`
+    INSERT OR IGNORE INTO resting_orders (order_id, instrument_name, action, direction, amount, limit_price)
+    VALUES (@order_id, @instrument_name, @action, @direction, @amount, @limit_price)
+  `),
+  getOpenRestingOrders: db.prepare(`
+    SELECT * FROM resting_orders WHERE status = 'open'
+  `),
+  updateRestingOrder: db.prepare(`
+    UPDATE resting_orders SET status = @status, filled_amount = @filled_amount WHERE order_id = @order_id
+  `),
+  hasRestingOrderForInstrument: db.prepare(`
+    SELECT COUNT(*) as count FROM resting_orders
+    WHERE instrument_name = @instrument_name AND status = 'open'
   `),
 };
 
@@ -1144,6 +1178,7 @@ const replaceActiveRules = (advisoryId, rules) => {
         priority: rule.priority || 'medium',
         reasoning: rule.reasoning || null,
         advisory_id: advisoryId,
+        preferred_order_type: rule.preferred_order_type || null,
       });
     }
   });
@@ -1179,6 +1214,29 @@ const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ stat
 const getRecentPendingActions = (limit = 20) => stmts.getRecentPendingActions.all({ limit });
 const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
 const getLastExecutedAction = (action) => stmts.getLastExecutedAction.get({ action })?.executed_at || null;
+
+// ─── Resting Order Helpers ──────────────────────────────────────────────────
+
+const insertRestingOrder = (order) => {
+  stmts.insertRestingOrder.run({
+    order_id: order.order_id,
+    instrument_name: order.instrument_name,
+    action: order.action,
+    direction: order.direction,
+    amount: order.amount,
+    limit_price: order.limit_price,
+  });
+};
+
+const getOpenRestingOrders = () => stmts.getOpenRestingOrders.all();
+
+const updateRestingOrder = (orderId, status, filledAmount) => {
+  stmts.updateRestingOrder.run({ order_id: orderId, status, filled_amount: filledAmount ?? 0 });
+};
+
+const hasRestingOrderForInstrument = (instrumentName) => {
+  return (stmts.hasRestingOrderForInstrument.get({ instrument_name: instrumentName })?.count || 0) > 0;
+};
 
 // ─── Bot State Helpers ────────────────────────────────────────────────────────
 
@@ -1300,5 +1358,10 @@ module.exports = {
   getRecentPendingActions,
   hasPendingActionForRule,
   getLastExecutedAction,
+  // Resting orders
+  insertRestingOrder,
+  getOpenRestingOrders,
+  updateRestingOrder,
+  hasRestingOrderForInstrument,
   close,
 };

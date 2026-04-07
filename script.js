@@ -122,6 +122,9 @@ const API_URL = {
   GET_TICKERS: 'https://api.lyra.finance/public/get_tickers',
   GET_INSTRUMENTS: 'https://api.lyra.finance/public/get_instruments',
   PLACE_ORDER: 'https://api.lyra.finance/private/order',
+  GET_OPEN_ORDERS: 'https://api.lyra.finance/private/get_open_orders',
+  CANCEL_ORDER: 'https://api.lyra.finance/private/cancel',
+  GET_ORDER: 'https://api.lyra.finance/private/get_order',
 }
 
 // CoinGecko API for spot price
@@ -1214,7 +1217,7 @@ function encodeTradeData(order, assetAddress, optionSubId) {
 }
 
 // Place order function
-const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, reduceOnly = true) => {
+const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, reduceOnly = true, timeInForce = 'ioc') => {
   try {
     const wallet = createWallet();
     const timestamp = Date.now(); // Current UTC timestamp in ms
@@ -1233,7 +1236,8 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         signer: wallet.address,
         order_type: 'limit',
         reduce_only: reduceOnly,
-        time_in_force: 'ioc'
+        time_in_force: timeInForce,
+        ...(timeInForce === 'post_only' ? { post_only: true } : {}),
     };
 
     const tradeModuleData = encodeTradeData(order, assetAddress, optionSubId)
@@ -1275,14 +1279,135 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     );
     
     if (response.data.error) {
-      console.error(`Error placing limit order for ${name}:`, response.data.error);
+      const errMsg = typeof response.data.error === 'string' ? response.data.error : JSON.stringify(response.data.error);
+      // Detect post_only rejection (would cross the book)
+      if (timeInForce === 'post_only' && (errMsg.includes('post_only') || errMsg.includes('cross') || errMsg.includes('reject'))) {
+        console.log(`📋 post_only rejected for ${name}: would cross the book`);
+        return { rejected_post_only: true, error: errMsg };
+      }
+      console.error(`Error placing limit order for ${name}:`, errMsg);
       return null;
     }
-    console.log(`Order placed successfully:`, response.data);
+    // Check for cancelled IOC (cancel_reason in response indicates immediate cancel)
+    const orderResult = response.data?.result || response.data;
+    if (orderResult?.order_status === 'cancelled' && orderResult?.cancel_reason) {
+      console.log(`📋 Order ${name} immediately cancelled: ${orderResult.cancel_reason}`);
+    }
+    console.log(`Order placed successfully:`, JSON.stringify(orderResult).slice(0, 300));
     return response.data;
   } catch (error) {
     const status = error.response?.status;
+    const errBody = error.response?.data;
+    // Detect post_only rejection from HTTP error
+    if (timeInForce === 'post_only' && errBody) {
+      const errStr = typeof errBody === 'string' ? errBody : JSON.stringify(errBody);
+      if (errStr.includes('post_only') || errStr.includes('cross') || errStr.includes('reject')) {
+        console.log(`📋 post_only rejected for ${name}: would cross the book`);
+        return { rejected_post_only: true, error: errStr };
+      }
+    }
     console.error(`Error placing limit order for ${name}: ${error.message} | status: ${status || 'N/A'}${status === 429 ? ' (RATE LIMITED)' : ''}`);
+    return null;
+  }
+};
+
+// Fetch all open (resting) orders from Derive
+const fetchOpenOrders = async () => {
+  try {
+    const wallet = createWallet();
+    const timestamp = Date.now();
+    const signature = await signMessage(wallet, timestamp);
+    const response = await axios.post(API_URL.GET_OPEN_ORDERS, {
+      subaccount_id: SUBACCOUNT_ID,
+    }, {
+      headers: {
+        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(),
+        'X-LyraSignature': signature,
+      },
+      timeout: 10000,
+    });
+    // Defensive: result could be array directly, or { orders: [...] }, or { result: { orders: [...] } }
+    const raw = response.data?.result;
+    const orders = Array.isArray(raw) ? raw : (raw?.orders || []);
+    return orders.map(o => ({
+      order_id: o.order_id,
+      instrument_name: o.instrument_name,
+      direction: o.direction,
+      amount: o.amount,
+      filled_amount: o.filled_amount,
+      limit_price: o.limit_price,
+      average_price: o.average_price,
+      order_status: o.order_status,
+      time_in_force: o.time_in_force,
+      creation_timestamp: o.creation_timestamp,
+      last_update_timestamp: o.last_update_timestamp,
+    }));
+  } catch (error) {
+    console.error(`❌ fetchOpenOrders failed: ${error.message}`);
+    return [];
+  }
+};
+
+// Fetch a specific order's final status from Derive (for fill reconciliation)
+const fetchOrderStatus = async (orderId) => {
+  try {
+    const wallet = createWallet();
+    const timestamp = Date.now();
+    const signature = await signMessage(wallet, timestamp);
+    const response = await axios.post('https://api.lyra.finance/private/get_order', {
+      subaccount_id: SUBACCOUNT_ID,
+      order_id: orderId,
+    }, {
+      headers: {
+        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(),
+        'X-LyraSignature': signature,
+      },
+      timeout: 10000,
+    });
+    const raw = response.data?.result;
+    if (!raw) return null;
+    return {
+      order_id: raw.order_id,
+      order_status: raw.order_status, // 'open'|'filled'|'cancelled'|'expired'
+      amount: Number(raw.amount || 0),
+      filled_amount: Number(raw.filled_amount || 0),
+      average_price: Number(raw.average_price || 0),
+      cancel_reason: raw.cancel_reason || null,
+    };
+  } catch (error) {
+    console.error(`❌ fetchOrderStatus ${orderId} failed: ${error.message}`);
+    return null;
+  }
+};
+
+// Cancel a specific order on Derive
+const cancelOrder = async (orderId, instrumentName) => {
+  try {
+    const wallet = createWallet();
+    const timestamp = Date.now();
+    const signature = await signMessage(wallet, timestamp);
+    const response = await axios.post(API_URL.CANCEL_ORDER, {
+      subaccount_id: SUBACCOUNT_ID,
+      order_id: orderId,
+      instrument_name: instrumentName,
+    }, {
+      headers: {
+        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(),
+        'X-LyraSignature': signature,
+      },
+      timeout: 10000,
+    });
+    if (response.data?.error) {
+      console.error(`❌ cancelOrder ${orderId}: ${response.data.error}`);
+      return null;
+    }
+    console.log(`🗑️ Cancelled order ${orderId} (${instrumentName})`);
+    return response.data?.result;
+  } catch (error) {
+    console.error(`❌ cancelOrder ${orderId} failed: ${error.message}`);
     return null;
   }
 };
@@ -2491,7 +2616,12 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         const ticker = tickerMap[rule.instrument_name];
         const values = computeCurrentValues(position, ticker, spotPrice);
 
-        const criteria = JSON.parse(rule.criteria);
+        let criteria;
+        try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { criteria = null; }
+        if (!criteria || typeof criteria !== 'object' || !Array.isArray(criteria.conditions)) {
+          console.log(`📋 Exit rule ${rule.id}: skipping — criteria missing structured conditions`);
+          continue;
+        }
         const triggered = evaluateConditions(criteria.conditions, criteria.condition_logic, values);
         if (!triggered) continue;
 
@@ -2511,6 +2641,7 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
           trigger_details: {
             conditions_met: criteria.conditions.map(c => ({ field: c.field, op: c.op, threshold: c.value, actual: values[c.field] })),
             current_values: values,
+            preferred_order_type: rule.preferred_order_type || null,
           },
         });
         triggeredCount++;
@@ -2528,7 +2659,12 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
     const entryRules = db.getActiveRulesByType('entry');
     for (const rule of entryRules) {
       try {
-        const criteria = JSON.parse(rule.criteria);
+        let criteria;
+        try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { criteria = null; }
+        if (!criteria || typeof criteria !== 'object' || !criteria.option_type) {
+          console.log(`📋 Entry rule ${rule.id}: skipping — criteria missing structured fields (need option_type, delta_range, dte_range)`);
+          continue;
+        }
 
         // Cooldown check: skip if same action was executed within the last hour
         const lastExec = db.getLastExecutedAction(rule.action);
@@ -2541,8 +2677,12 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         const putRemaining = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
         if (rule.action === 'buy_put' && putRemaining <= 10) continue;
 
-        // Dedup: skip if already pending
+        // Dedup: skip if already pending or confirmed
         if (db.hasPendingActionForRule(rule.id)) continue;
+
+        // Dedup: skip if we already have a resting order for this action type
+        // (prevents GTC duplicate stacking — entry rules match multiple instruments,
+        //  but we don't want to queue a new one while an order is on the book)
 
         // Scan tickerMap for candidates matching criteria
         const optionType = criteria.option_type; // 'P' or 'C'
@@ -2635,6 +2775,12 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         candidates.sort((a, b) => b.score - a.score);
         const best = candidates[0];
 
+        // Dedup: skip if we already have a resting GTC/post_only order for this instrument
+        if (db.hasRestingOrderForInstrument(best.name)) {
+          console.log(`📋 Skip ${rule.action} ${best.name}: resting order already on book`);
+          continue;
+        }
+
         // Calculate amount based on budget (puts) or rule limit (calls) and book liquidity
         const price = optionType === 'P' ? best.askPrice : best.bidPrice;
         if (price <= 0) continue;
@@ -2660,6 +2806,7 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
             dte: best.dte,
             strike: best.strike,
             candidates_evaluated: candidates.length,
+            preferred_order_type: rule.preferred_order_type || null,
           },
         });
         triggeredCount++;
@@ -2675,9 +2822,130 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
   return triggeredCount;
 };
 
+// ─── LLM-Driven Trading: Open Order Management ──────────────────────────────
+
+const manageOpenOrders = async (tickerMap) => {
+  if (process.env.DRY_RUN === '1') return; // No real orders in dry run
+  if (!db) return;
+
+  let openOrders;
+  try {
+    openOrders = await fetchOpenOrders();
+  } catch (e) {
+    console.log(`📋 Open orders fetch failed: ${e.message}`);
+    return;
+  }
+
+  // ── Fill reconciliation: detect resting orders that have been filled ──────
+  const trackedResting = db.getOpenRestingOrders();
+  if (trackedResting.length > 0) {
+    const exchangeOrderIds = new Set(openOrders.map(o => o.order_id));
+    for (const tracked of trackedResting) {
+      if (!exchangeOrderIds.has(tracked.order_id)) {
+        // Order disappeared from open orders → query its final status
+        let finalStatus = null;
+        try {
+          finalStatus = await fetchOrderStatus(tracked.order_id);
+        } catch (e) {
+          console.log(`⚠️ Failed to fetch status for ${tracked.order_id}: ${e.message}`);
+        }
+
+        let filledAmt, fillPrice, status;
+        if (finalStatus) {
+          filledAmt = finalStatus.filled_amount || 0;
+          fillPrice = finalStatus.average_price > 0 ? finalStatus.average_price : tracked.limit_price;
+          status = finalStatus.order_status; // 'filled', 'cancelled', 'expired'
+          console.log(`📋 Order ${tracked.order_id} status: ${status}, filled=${filledAmt}/${tracked.amount} @ $${fillPrice}`);
+        } else {
+          // API failed — fall back to assuming full fill (conservative)
+          filledAmt = tracked.amount;
+          fillPrice = tracked.limit_price;
+          status = 'filled';
+          console.log(`⚠️ Order ${tracked.order_id} status unknown — assuming full fill at $${fillPrice}`);
+        }
+
+        const fillValue = filledAmt * fillPrice;
+
+        // Only account for budget if something was actually filled
+        if (filledAmt > 0) {
+          const isPut = tracked.instrument_name?.endsWith('-P');
+          if (isPut && tracked.direction === 'buy') botData.putNetBought += fillValue;
+          else if (isPut && tracked.direction === 'sell') botData.putNetBought -= fillValue;
+          persistCycleState();
+        }
+
+        const dbStatus = status === 'cancelled' || status === 'expired' ? 'cancelled' : 'filled';
+        db.updateRestingOrder(tracked.order_id, dbStatus, filledAmt);
+        db.insertOrder({
+          action: tracked.action,
+          success: filledAmt > 0,
+          reason: `Resting order ${status} — filled ${filledAmt}/${tracked.amount}${finalStatus?.cancel_reason ? ` (${finalStatus.cancel_reason})` : ''}`,
+          instrument_name: tracked.instrument_name,
+          strike: null, expiry: null, delta: null,
+          price: fillPrice, intended_amount: tracked.amount,
+          filled_amount: filledAmt, fill_price: filledAmt > 0 ? fillPrice : null,
+          total_value: fillValue, spot_price: null,
+          raw_response: finalStatus ? JSON.stringify(finalStatus) : null,
+        });
+        console.log(`${filledAmt > 0 ? '✅' : '🗑️'} Resting order reconciled: ${tracked.action} ${tracked.instrument_name} — ${status}, filled=${filledAmt} ($${fillValue.toFixed(2)})`);
+      }
+    }
+  }
+
+  if (openOrders.length === 0) return;
+
+  console.log(`📋 ${openOrders.length} open order(s) on book`);
+
+  // ── Stale/orphan cancellation ────────────────────────────────────────────
+  const activeRules = db.getActiveRules();
+  const activeExitInstruments = new Set(
+    activeRules.filter(r => r.rule_type === 'exit').map(r => r.instrument_name).filter(Boolean)
+  );
+  // Entry rules match by criteria, not instrument. Check if any entry rule's action matches the order's direction.
+  const activeEntryActions = new Set(activeRules.filter(r => r.rule_type === 'entry').map(r => r.action));
+
+  for (const order of openOrders) {
+    const ageMs = Date.now() - (order.creation_timestamp || 0);
+    const ageHours = ageMs / (1000 * 60 * 60);
+    const filled = Number(order.filled_amount || 0);
+
+    // Cancel stale orders (>8h) or orphaned orders
+    const isStale = ageHours > 8;
+
+    // Orphan check: is this order still backed by an active rule?
+    const matchesExitRule = activeExitInstruments.has(order.instrument_name);
+    const isBuyOrder = order.direction === 'buy';
+    const matchesEntryAction = (isBuyOrder && order.instrument_name?.endsWith('-P') && activeEntryActions.has('buy_put'))
+      || (!isBuyOrder && order.instrument_name?.endsWith('-C') && activeEntryActions.has('sell_call'))
+      || (isBuyOrder && order.instrument_name?.endsWith('-C') && activeEntryActions.has('buyback_call'))
+      || (!isBuyOrder && order.instrument_name?.endsWith('-P') && activeEntryActions.has('sell_put'));
+    const isOrphaned = !matchesExitRule && !matchesEntryAction;
+
+    if (isStale || isOrphaned) {
+      const reason = isStale ? `stale (${ageHours.toFixed(1)}h old)` : 'orphaned (no matching active rule)';
+      console.log(`🗑️ Cancelling ${order.instrument_name} order ${order.order_id}: ${reason}`);
+      const result = await cancelOrder(order.order_id, order.instrument_name);
+
+      // If cancelled order had partial fills, account for budget
+      if (result && filled > 0) {
+        const avgPx = Number(order.average_price || order.limit_price || 0);
+        const fillValue = filled * avgPx;
+        const isPut = order.instrument_name?.endsWith('-P');
+        if (isPut && order.direction === 'buy') botData.putNetBought += fillValue;
+        else if (isPut && order.direction === 'sell') botData.putNetBought -= fillValue;
+        persistCycleState();
+        console.log(`📋 Accounted partial fill: $${fillValue.toFixed(2)} for cancelled ${order.instrument_name}`);
+      }
+
+      // Update our tracking table
+      db.updateRestingOrder(order.order_id, 'cancelled', filled);
+    }
+  }
+};
+
 // ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
 
-const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice) => {
+const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc') => {
   // DRY_RUN mode: simulate budget consumption (puts only) + log, but skip actual order
   if (process.env.DRY_RUN === '1') {
     const totalValue = amount * price;
@@ -2686,14 +2954,14 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     // sell_call / buyback_call: no budget tracking — collateral-sized
     persistCycleState();
     if (db) db.insertOrder({
-      action, success: true, reason: `DRY RUN: simulated ${action}`,
+      action, success: true, reason: `DRY RUN: simulated ${action} (${orderType})`,
       instrument_name: instrumentName, strike: null, expiry: null,
       delta: null, price, intended_amount: amount,
       filled_amount: amount, fill_price: price,
-      total_value: totalValue, spot_price: spotPrice, raw_response: '{"dryRun":true}',
+      total_value: totalValue, spot_price: spotPrice, raw_response: `{"dryRun":true,"orderType":"${orderType}"}`,
     });
-    console.log(`🔸 DRY RUN: ${action} ${amount} ${instrumentName} @ $${price} (put budget: $${botData.putNetBought.toFixed(2)})`);
-    return { dryRun: true, action, instrumentName, amount, price, totalValue };
+    console.log(`🔸 DRY RUN: ${action} ${amount} ${instrumentName} @ $${price} [${orderType}] (put budget: $${botData.putNetBought.toFixed(2)})`);
+    return { dryRun: true, action, instrumentName, amount, price, totalValue, orderType };
   }
 
   // Determine direction and reduceOnly from action type
@@ -2719,7 +2987,8 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       price,
       addr,
       subId,
-      reduceOnly
+      reduceOnly,
+      orderType
     );
   } catch (error) {
     console.error(`❌ Error placing ${action} order for ${instrumentName}:`, error.message);
@@ -2732,8 +3001,20 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     return null;
   }
 
+  // Detect post_only rejection (order would cross the book)
+  if (order.rejected_post_only) {
+    console.log(`📋 post_only rejected: ${action} ${instrumentName} @ $${price} — would cross book, not retrying as IOC`);
+    if (db) db.insertOrder({
+      action, success: false,
+      reason: `post_only rejected: would cross book at $${price}`,
+      instrument_name: instrumentName, spot_price: spotPrice,
+      price, intended_amount: amount,
+    });
+    return { postOnlyRejected: true, action, instrumentName, amount, price, orderType };
+  }
+
   // Fill accounting from actual trades
-  let filledAmt = amount, avgPx = price, totalValue = filledAmt * avgPx;
+  let filledAmt = 0, avgPx = price, totalValue = 0;
   if (order.result?.trades?.length) {
     let totAmt = 0, totVal = 0;
     for (const t of order.result.trades) {
@@ -2741,6 +3022,50 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       totAmt += ta; totVal += ta * tp;
     }
     if (totAmt > 0) { filledAmt = totAmt; avgPx = totVal / totAmt; totalValue = totVal; }
+  }
+
+  // Zero-fill detection: IOC orders that matched nothing
+  if (filledAmt === 0 && orderType === 'ioc') {
+    console.log(`⚠️ Zero fill: ${action} ${instrumentName} @ $${price} [IOC] — no liquidity`);
+    if (db) db.insertOrder({
+      action, success: false, reason: `Zero fill (IOC) — no matching orders at $${price}`,
+      instrument_name: instrumentName,
+      strike: instrument.option_details?.strike || null,
+      expiry: instrument.option_details?.expiry || null,
+      delta: null, price, intended_amount: amount,
+      filled_amount: 0, fill_price: null,
+      total_value: 0, spot_price: spotPrice,
+      raw_response: order,
+    });
+    return { zeroFill: true, action, instrumentName, amount, price, orderType };
+  }
+
+  // GTC/post-only orders with zero fills are resting on the book — track as open
+  if (filledAmt === 0 && (orderType === 'gtc' || orderType === 'post_only')) {
+    const orderId = order.result?.order_id || order.result?.order?.order_id || null;
+    console.log(`📋 Order resting: ${action} ${instrumentName} @ $${price} [${orderType}] orderId=${orderId}`);
+    if (db) db.insertOrder({
+      action, success: true, reason: `Resting ${orderType} order placed`,
+      instrument_name: instrumentName,
+      strike: instrument.option_details?.strike || null,
+      expiry: instrument.option_details?.expiry || null,
+      delta: null, price, intended_amount: amount,
+      filled_amount: 0, fill_price: null,
+      total_value: 0, spot_price: spotPrice,
+      raw_response: order,
+    });
+    // Track resting order for fill reconciliation
+    if (db && orderId) {
+      db.insertRestingOrder({
+        order_id: orderId,
+        instrument_name: instrumentName,
+        action,
+        direction,
+        amount,
+        limit_price: price,
+      });
+    }
+    return { resting: true, orderId, action, instrumentName, amount, price, orderType };
   }
 
   // Update budget tracking (puts only — calls are collateral-sized)
@@ -2756,7 +3081,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     const strike = instrument.option_details?.strike || null;
     const expiry = instrument.option_details?.expiry || null;
     db.insertOrder({
-      action, success: true, reason: `LLM-confirmed ${action}`,
+      action, success: true, reason: `LLM-confirmed ${action} [${orderType}]`,
       instrument_name: instrumentName, strike, expiry,
       delta: null, price, intended_amount: amount,
       filled_amount: filledAmt, fill_price: avgPx,
@@ -2765,8 +3090,8 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     });
   }
 
-  console.log(`✅ ${action.toUpperCase()}: ${filledAmt} ${instrumentName} @ $${avgPx.toFixed(4)} | total=$${totalValue.toFixed(4)}`);
-  return { filledAmt, avgPx, totalValue, order };
+  console.log(`✅ ${action.toUpperCase()}: ${filledAmt} ${instrumentName} @ $${avgPx.toFixed(4)} [${orderType}] | total=$${totalValue.toFixed(4)}`);
+  return { filledAmt, avgPx, totalValue, order, orderType };
 };
 
 const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
@@ -2803,17 +3128,26 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         detailsStr = `Delta: ${delta?.toFixed(4) || 'N/A'}, Price: $${currentPrice?.toFixed(4) || 'N/A'}`;
       }
 
+      // Parse trigger details for advisory's preferred order type
+      let triggerData = {};
+      try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
+      const advisoryOrderPref = triggerData.preferred_order_type;
+
       const confirmPrompt = `Trade confirmation:
 Action: ${action.action} ${action.instrument_name}
 Amount: ${action.amount || 'TBD'}
-Price: $${currentPrice || action.price || 'N/A'}
+Best available price: $${currentPrice || action.price || 'N/A'}
 ${detailsStr}
 Rule reasoning: ${action.rule_reasoning || 'N/A'}
 Triggered because: ${action.trigger_details || 'N/A'}
 Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
+${advisoryOrderPref ? `Advisory suggested order type: ${advisoryOrderPref}` : ''}
+Confirm or reject this trade. If confirming, choose the order execution strategy:
+- "ioc" (immediate-or-cancel): fill now at market or cancel. Taker fee ~0.06%. Best when the price is great and you want it NOW.
+- "gtc" (good-til-cancelled): rest on the order book at your limit_price until filled. Maker fee ~0.02%. Best when you want a specific price and can wait.
+- "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee ~0.02%). Best for patient limit orders.
 
-Is this trade disciplined, well-priced, and convex? Confirm or reject.
-JSON only: { "confirm": true/false, "reasoning": "..." }`;
+JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null for market>, "reasoning": "..." }`;
 
       // Vote 1: Claude Haiku (Spitznagel temperament)
       let haikuVote = null;
@@ -2842,7 +3176,7 @@ JSON only: { "confirm": true/false, "reasoning": "..." }`;
       let codexVote = null;
       try {
         const codexText = await callOpenAI(
-          'You are a Taleb-style risk advisor. Confirm trades that are convex (bounded downside, unbounded upside). Reject trades that expose us to ruin or have symmetric payoffs. Be conservative — when in doubt, reject. Output JSON only: { "confirm": true/false, "reasoning": "..." }',
+          'You are a Taleb-style risk advisor. Confirm trades that are convex (bounded downside, unbounded upside). Reject trades that expose us to ruin or have symmetric payoffs. Be conservative — when in doubt, reject. Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }',
           confirmPrompt,
           { maxTokens: 256, timeout: 15000, model: 'gpt-4o-mini' }
         );
@@ -2876,10 +3210,29 @@ JSON only: { "confirm": true/false, "reasoning": "..." }`;
         codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : 'OpenAI: FAILED',
       ].join(' | ');
 
+      // Resolve order type from voter consensus (prefer haiku's pick, fallback to codex)
+      const confirmedOrderType = (haikuVote?.order_type || codexVote?.order_type || 'ioc');
+      const validOrderTypes = ['ioc', 'gtc', 'post_only'];
+      const orderType = validOrderTypes.includes(confirmedOrderType) ? confirmedOrderType : 'ioc';
+
+      // Resolve limit price: voter can override, otherwise use current market price
+      // Sanity check: voter price must be within 50% of market price (prevents LLM hallucinating insane prices)
+      const voterLimitPrice = haikuVote?.limit_price || codexVote?.limit_price;
+      const marketPrice = currentPrice || action.price;
+      let executionPrice = marketPrice;
+      if (typeof voterLimitPrice === 'number' && voterLimitPrice > 0 && marketPrice > 0) {
+        const ratio = voterLimitPrice / marketPrice;
+        if (ratio >= 0.5 && ratio <= 2.0) {
+          executionPrice = voterLimitPrice;
+        } else {
+          console.log(`⚠️ Voter price $${voterLimitPrice} rejected (${(ratio * 100).toFixed(0)}% of market $${marketPrice}) — using market price`);
+        }
+      }
+
       if (decision === 'confirmed') {
         db.updatePendingAction(action.id, {
           status: 'confirmed',
-          confirmation_reasoning: reasoning,
+          confirmation_reasoning: `${reasoning} | order_type=${orderType} limit=$${executionPrice}`,
           confirmed_at: new Date().toISOString(),
         });
 
@@ -2888,19 +3241,43 @@ JSON only: { "confirm": true/false, "reasoning": "..." }`;
           action.action,
           action.instrument_name,
           action.amount || 0.01,
-          currentPrice || action.price,
+          executionPrice,
           instruments,
-          spotPrice
+          spotPrice,
+          orderType
         );
 
-        if (result) {
+        if (result && result.postOnlyRejected) {
+          // post_only would cross the book — mark failed, don't retry with same order type
+          db.updatePendingAction(action.id, {
+            status: 'failed',
+            execution_result: `post_only rejected: would cross book at $${executionPrice}. Price may have moved — will re-evaluate next tick.`,
+          });
+          console.log(`📋 post_only rejected: ${action.action} ${action.instrument_name} — price crossed book`);
+        } else if (result && result.zeroFill) {
+          // IOC got zero fill — mark as failed, will retry next tick
+          db.updatePendingAction(action.id, {
+            status: 'failed',
+            execution_result: `Zero fill (IOC) — no liquidity at $${executionPrice}`,
+          });
+          console.log(`⚠️ Zero fill: ${action.action} ${action.instrument_name} @ $${executionPrice} — will retry`);
+        } else if (result && result.resting) {
+          // GTC/post-only order is resting on the book
+          db.updatePendingAction(action.id, {
+            status: 'executed',
+            executed_at: new Date().toISOString(),
+            execution_result: JSON.stringify({ ...result, note: 'Resting on order book' }),
+          });
+          confirmed++;
+          console.log(`📋 Resting order: ${action.action} ${action.instrument_name} @ $${executionPrice} [${orderType}] | ${reasoning}`);
+        } else if (result) {
           db.updatePendingAction(action.id, {
             status: 'executed',
             executed_at: new Date().toISOString(),
             execution_result: JSON.stringify(result),
           });
           confirmed++;
-          console.log(`✅ Confirmed & executed: ${action.action} ${action.instrument_name} | ${reasoning}`);
+          console.log(`✅ Confirmed & executed: ${action.action} ${action.instrument_name} [${orderType}] | ${reasoning}`);
         } else {
           db.updatePendingAction(action.id, { status: 'failed', execution_result: 'Order placement failed' });
           console.log(`❌ Confirmed but execution failed: ${action.action} ${action.instrument_name}`);
@@ -3003,6 +3380,10 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     try { recentPendingActions = db.getRecentPendingActions(10); } catch { /* ok */ }
   }
 
+  // Open orders on the book
+  let openOrders = [];
+  try { openOrders = await fetchOpenOrders(); } catch { /* ok */ }
+
   // ── Score and rank top 5 puts and calls from tickerMap ──────────────────────
 
   const parseInstrumentName = (name) => {
@@ -3071,31 +3452,60 @@ Given market data, produce a JSON trading agenda with:
   "entry_rules": [
     {
       "action": "buy_put" | "sell_call",
-      "criteria": "specific conditions for entry",
+      "criteria": {
+        "option_type": "P" or "C",
+        "delta_range": [min_delta, max_delta],
+        "dte_range": [min_dte, max_dte],
+        "max_strike_pct": 0.80,
+        "min_score": 0.004,
+        "max_cost": 15.00,
+        "min_bid": 2.00,
+        "market_conditions": [{"field": "spot_price", "op": "lt"|"gt"|"gte"|"lte", "value": 2000}]
+      },
       "budget_limit": <max USD to spend on this rule>,
       "priority": "high" | "medium" | "low",
+      "preferred_order_type": "ioc" | "gtc" | "post_only",
       "reasoning": "why this trade makes sense now"
     }
   ],
   "exit_rules": [
     {
-      "action": "sell_put" | "buy_call",
-      "instrument_name": "<specific instrument or 'any_put'/'any_call'>",
-      "criteria": "specific conditions for exit",
+      "action": "sell_put" | "buyback_call",
+      "instrument_name": "<specific instrument name from positions>",
+      "criteria": {
+        "conditions": [{"field": "dte"|"delta"|"mark_price"|"unrealized_pnl_pct"|"iv"|"theta"|"spot_price", "op": "lt"|"gt"|"gte"|"lte", "value": <number>}],
+        "condition_logic": "any" | "all"
+      },
       "priority": "high" | "medium" | "low",
+      "preferred_order_type": "ioc" | "gtc" | "post_only",
       "reasoning": "why exit is warranted"
     }
   ]
 }
 
+CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, max_cost, min_bid, market_conditions. Exit criteria uses: conditions (array of field/op/value objects) and condition_logic ("any" or "all").
+
 Rules:
-- Be specific in criteria (reference delta ranges, DTE windows, price levels)
+- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, max_cost (for buys), min_bid (for sells), market_conditions.
+- Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
+- For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price
+- For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price
+- For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct
+- For buyback_call exits: use conditions on unrealized_pnl_pct (e.g. gt 60) and/or dte
 - PUT budget_limit must respect remaining put budget
-- CALL selling has NO fixed budget — it is sized against ETH collateral. The advisory should set a budget_limit on sell_call rules that reflects moderate leverage (e.g. sell calls covering 20-40% of available ETH, never more than 50%). Consider existing short call exposure.
+- CALL selling has NO fixed budget — sized against ETH collateral. Set budget_limit reflecting moderate leverage (20-40% of available ETH, never >50%). Consider existing short call exposure.
 - Entry rules should target the highest-scoring candidates when possible
-- Exit rules should protect gains and limit losses
+- Exit rules MUST reference specific instrument_name from current positions
 - If the market is unclear, it is ALWAYS correct to produce fewer rules or none
 - Maximum 5 entry rules and 5 exit rules
+
+Order type guidance:
+- "ioc" (immediate-or-cancel): fill instantly or cancel. Taker fee ~0.06%. Use when the price is great and you want it NOW.
+- "gtc" (good-til-cancelled): rest on the order book. Maker fee ~0.02%. Use when you want to name your price and wait for fills.
+- "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee). Best for patient entries where you want the cheapest execution.
+- Prefer post_only/gtc when pricing is good but not urgent. Use ioc only when the opportunity is exceptional and might vanish.
+- The confirmation step can override your suggestion, so this is advisory guidance not a hard rule.
+
 - Return ONLY valid JSON, no markdown fences`;
 
   const primaryUserPrompt = `=== CURRENT MARKET STATE ===
@@ -3130,6 +3540,9 @@ ${activeRules.length > 0 ? JSON.stringify(activeRules.map(r => ({ type: r.rule_t
 
 === RECENT PENDING ACTIONS ===
 ${recentPendingActions.length > 0 ? JSON.stringify(recentPendingActions.map(a => ({ action: a.action, instrument: a.instrument_name, status: a.status, triggered: a.triggered_at })), null, 1) : 'No recent pending actions'}
+
+=== OPEN ORDERS ON BOOK ===
+${openOrders.length > 0 ? openOrders.map(o => `${o.instrument_name} | ${o.direction} ${o.amount} @ $${o.limit_price} | filled=${o.filled_amount} | ${o.time_in_force} | age=${((Date.now() - o.creation_timestamp) / 3600000).toFixed(1)}h`).join('\n') : 'No open orders'}
 ${wikiContext ? `\n=== KNOWLEDGE WIKI (cumulative bot knowledge) ===\n${wikiContext}` : ''}
 
 Produce your trading agenda JSON now.`;
@@ -3225,7 +3638,11 @@ Output JSON only:
   const synthesisSystemPrompt = secondOpinion
     ? `You are the Synthesizer on a trading council. You have two advisor inputs. Your job is to produce the final trading agenda.
 
-Return the FINAL trading agenda as JSON in the same format:
+CRITICAL: criteria must be a JSON OBJECT, not a string.
+- Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
+- Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all" }
+
+Return the FINAL trading agenda as JSON:
 {
   "assessment": "synthesized assessment",
   "entry_rules": [...],
@@ -3239,7 +3656,11 @@ Return ONLY valid JSON, no markdown fences.`
 - Flag any rules that seem overaggressive for current conditions
 - Pass through valid rules, remove or adjust problematic ones
 
-Return the FINAL trading agenda as JSON in the same format:
+CRITICAL: criteria must be a JSON OBJECT, not a string.
+- Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
+- Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all" }
+
+Return the FINAL trading agenda as JSON:
 {
   "assessment": "synthesized assessment",
   "entry_rules": [...],
@@ -3332,6 +3753,7 @@ Synthesize the final agenda now.`;
         priority: rule.priority || 'medium',
         reasoning: rule.reasoning || null,
         advisory_id: advisoryId,
+        preferred_order_type: rule.preferred_order_type || null,
       });
     }
   }
@@ -3348,6 +3770,7 @@ Synthesize the final agenda now.`;
         priority: rule.priority || 'medium',
         reasoning: rule.reasoning || null,
         advisory_id: advisoryId,
+        preferred_order_type: rule.preferred_order_type || null,
       });
     }
   }
@@ -3731,6 +4154,7 @@ const runBot = async () => {
 
     // ── LLM-Driven Trading ─────────────────────────────────────────
     try {
+      await manageOpenOrders(tickerMap);
       await evaluateTradingRules(positions, instruments, tickerMap, spotPrice);
       await confirmAndExecutePending(instruments, tickerMap, spotPrice);
     } catch (error) {

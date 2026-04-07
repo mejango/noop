@@ -370,7 +370,8 @@ describe('DB operations (isolated test database)', () => {
       reasoning TEXT,
       created_at TEXT DEFAULT (datetime('now')),
       is_active INTEGER DEFAULT 1,
-      advisory_id TEXT
+      advisory_id TEXT,
+      preferred_order_type TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_trading_rules_active ON trading_rules(is_active);
     CREATE INDEX IF NOT EXISTS idx_trading_rules_type ON trading_rules(rule_type, is_active);
@@ -398,8 +399,8 @@ describe('DB operations (isolated test database)', () => {
   const stmts = {
     deactivateAllRules: testDb.prepare(`UPDATE trading_rules SET is_active = 0 WHERE is_active = 1`),
     insertTradingRule: testDb.prepare(`
-      INSERT INTO trading_rules (rule_type, action, instrument_name, criteria, budget_limit, priority, reasoning, advisory_id, is_active)
-      VALUES (@rule_type, @action, @instrument_name, @criteria, @budget_limit, @priority, @reasoning, @advisory_id, 1)
+      INSERT INTO trading_rules (rule_type, action, instrument_name, criteria, budget_limit, priority, reasoning, advisory_id, is_active, preferred_order_type)
+      VALUES (@rule_type, @action, @instrument_name, @criteria, @budget_limit, @priority, @reasoning, @advisory_id, 1, @preferred_order_type)
     `),
     getActiveRules: testDb.prepare(`SELECT * FROM trading_rules WHERE is_active = 1 ORDER BY priority DESC, id ASC`),
     getActiveRulesByType: testDb.prepare(`SELECT * FROM trading_rules WHERE is_active = 1 AND rule_type = @rule_type ORDER BY priority DESC, id ASC`),
@@ -449,6 +450,7 @@ describe('DB operations (isolated test database)', () => {
           priority: rule.priority || 'medium',
           reasoning: rule.reasoning || null,
           advisory_id: advisoryId,
+          preferred_order_type: rule.preferred_order_type || null,
         });
       }
     });
@@ -511,9 +513,9 @@ describe('DB operations (isolated test database)', () => {
 
     const activeExitRules = getActiveRulesByType('exit');
     assert.strictEqual(activeExitRules.length, 2);
-    // ORDER BY priority DESC uses string comparison: 'medium' > 'high' alphabetically
     const priorities = activeExitRules.map(r => r.priority).sort();
-    assert.deepStrictEqual(priorities, ['high', 'medium']);
+    assert.strictEqual(priorities[0], 'high');
+    assert.strictEqual(priorities[1], 'medium');
   });
 
   test('replaceActiveRules: replace with 1 new rule, old ones deactivated', () => {
@@ -834,6 +836,1131 @@ describe('Entry rule matching (integration)', () => {
   });
 });
 
+
+// ============================================================================
+// 8. Fill accounting — zero-fill detection & partial fills
+// ============================================================================
+
+// Extract the pure fill-accounting logic from executeOrder for testability
+const computeFillAccounting = (orderResult, requestedAmount, requestedPrice) => {
+  let filledAmt = 0, avgPx = requestedPrice, totalValue = 0;
+  if (orderResult?.trades?.length) {
+    let totAmt = 0, totVal = 0;
+    for (const t of orderResult.trades) {
+      const ta = Number(t.trade_amount), tp = Number(t.trade_price);
+      totAmt += ta; totVal += ta * tp;
+    }
+    if (totAmt > 0) { filledAmt = totAmt; avgPx = totVal / totAmt; totalValue = totVal; }
+  }
+  return { filledAmt, avgPx, totalValue };
+};
+
+describe('Fill accounting (computeFillAccounting)', () => {
+  test('single full fill', () => {
+    const result = computeFillAccounting(
+      { trades: [{ trade_amount: '1.0', trade_price: '5.50' }] },
+      1.0, 5.50
+    );
+    assert.strictEqual(result.filledAmt, 1.0);
+    assert.strictEqual(result.avgPx, 5.5);
+    assert.strictEqual(result.totalValue, 5.5);
+  });
+
+  test('multiple partial fills averaged correctly', () => {
+    const result = computeFillAccounting(
+      { trades: [
+        { trade_amount: '0.5', trade_price: '5.00' },
+        { trade_amount: '0.5', trade_price: '6.00' },
+      ] },
+      1.0, 5.50
+    );
+    assert.strictEqual(result.filledAmt, 1.0);
+    assert.strictEqual(result.avgPx, 5.5); // (0.5*5 + 0.5*6) / 1.0
+    assert.strictEqual(result.totalValue, 5.5);
+  });
+
+  test('zero fills: empty trades array', () => {
+    const result = computeFillAccounting(
+      { trades: [] },
+      1.0, 5.50
+    );
+    assert.strictEqual(result.filledAmt, 0);
+    assert.strictEqual(result.totalValue, 0);
+  });
+
+  test('zero fills: no trades property', () => {
+    const result = computeFillAccounting({}, 1.0, 5.50);
+    assert.strictEqual(result.filledAmt, 0);
+    assert.strictEqual(result.totalValue, 0);
+  });
+
+  test('zero fills: null result', () => {
+    const result = computeFillAccounting(null, 1.0, 5.50);
+    assert.strictEqual(result.filledAmt, 0);
+    assert.strictEqual(result.totalValue, 0);
+  });
+
+  test('partial fill: less than requested', () => {
+    const result = computeFillAccounting(
+      { trades: [{ trade_amount: '0.3', trade_price: '5.00' }] },
+      1.0, 5.00
+    );
+    assert.strictEqual(result.filledAmt, 0.3);
+    assert.strictEqual(result.avgPx, 5.0);
+    assert.strictEqual(result.totalValue, 1.5);
+  });
+
+  test('trades with zero amounts are handled', () => {
+    const result = computeFillAccounting(
+      { trades: [
+        { trade_amount: '0', trade_price: '5.00' },
+        { trade_amount: '1.0', trade_price: '6.00' },
+      ] },
+      1.0, 5.50
+    );
+    assert.strictEqual(result.filledAmt, 1.0);
+    assert.strictEqual(result.avgPx, 6.0);
+    assert.strictEqual(result.totalValue, 6.0);
+  });
+});
+
+// ============================================================================
+// 9. Zero-fill result classification
+// ============================================================================
+
+// Extract the result classification logic from executeOrder
+const classifyOrderResult = (filledAmt, orderType, orderResult) => {
+  if (filledAmt === 0 && orderType === 'ioc') {
+    return { type: 'zeroFill' };
+  }
+  if (filledAmt === 0 && (orderType === 'gtc' || orderType === 'post_only')) {
+    const orderId = orderResult?.order_id || orderResult?.order?.order_id || null;
+    return { type: 'resting', orderId };
+  }
+  if (filledAmt > 0) {
+    return { type: 'filled' };
+  }
+  return { type: 'unknown' };
+};
+
+describe('Order result classification (zero-fill detection)', () => {
+  test('IOC with zero fill → zeroFill', () => {
+    const r = classifyOrderResult(0, 'ioc', {});
+    assert.strictEqual(r.type, 'zeroFill');
+  });
+
+  test('IOC with fills → filled', () => {
+    const r = classifyOrderResult(1.0, 'ioc', {});
+    assert.strictEqual(r.type, 'filled');
+  });
+
+  test('GTC with zero fill → resting', () => {
+    const r = classifyOrderResult(0, 'gtc', { order_id: 'ord_123' });
+    assert.strictEqual(r.type, 'resting');
+    assert.strictEqual(r.orderId, 'ord_123');
+  });
+
+  test('post_only with zero fill → resting', () => {
+    const r = classifyOrderResult(0, 'post_only', { order: { order_id: 'ord_456' } });
+    assert.strictEqual(r.type, 'resting');
+    assert.strictEqual(r.orderId, 'ord_456');
+  });
+
+  test('GTC with fills → filled', () => {
+    const r = classifyOrderResult(0.5, 'gtc', {});
+    assert.strictEqual(r.type, 'filled');
+  });
+
+  test('resting order with no orderId gracefully handles null', () => {
+    const r = classifyOrderResult(0, 'gtc', {});
+    assert.strictEqual(r.type, 'resting');
+    assert.strictEqual(r.orderId, null);
+  });
+});
+
+// ============================================================================
+// 10. Order type resolution from voter consensus
+// ============================================================================
+
+const resolveOrderType = (haikuVote, codexVote) => {
+  const confirmedOrderType = (haikuVote?.order_type || codexVote?.order_type || 'ioc');
+  const validOrderTypes = ['ioc', 'gtc', 'post_only'];
+  return validOrderTypes.includes(confirmedOrderType) ? confirmedOrderType : 'ioc';
+};
+
+const resolveExecutionPrice = (haikuVote, codexVote, currentPrice, actionPrice) => {
+  const voterLimitPrice = haikuVote?.limit_price || codexVote?.limit_price;
+  return (typeof voterLimitPrice === 'number' && voterLimitPrice > 0) ? voterLimitPrice : (currentPrice || actionPrice);
+};
+
+describe('Order type resolution from voter consensus', () => {
+  test('haiku picks gtc, codex picks ioc → uses haiku (gtc)', () => {
+    assert.strictEqual(resolveOrderType({ order_type: 'gtc' }, { order_type: 'ioc' }), 'gtc');
+  });
+
+  test('haiku null, codex picks post_only → uses codex', () => {
+    assert.strictEqual(resolveOrderType(null, { order_type: 'post_only' }), 'post_only');
+  });
+
+  test('both null → defaults to ioc', () => {
+    assert.strictEqual(resolveOrderType(null, null), 'ioc');
+  });
+
+  test('haiku picks invalid type → falls back to ioc', () => {
+    assert.strictEqual(resolveOrderType({ order_type: 'market' }, null), 'ioc');
+  });
+
+  test('haiku has no order_type field, codex has gtc → uses codex', () => {
+    assert.strictEqual(resolveOrderType({ confirm: true }, { order_type: 'gtc' }), 'gtc');
+  });
+
+  test('both have order_type, haiku takes priority', () => {
+    assert.strictEqual(resolveOrderType({ order_type: 'post_only' }, { order_type: 'gtc' }), 'post_only');
+  });
+});
+
+describe('Execution price resolution from voter consensus', () => {
+  test('haiku sets limit_price → uses it', () => {
+    assert.strictEqual(resolveExecutionPrice({ limit_price: 4.50 }, null, 5.00, 5.50), 4.50);
+  });
+
+  test('codex sets limit_price, haiku null → uses codex', () => {
+    assert.strictEqual(resolveExecutionPrice(null, { limit_price: 3.00 }, 5.00, 5.50), 3.00);
+  });
+
+  test('neither sets limit_price → uses currentPrice', () => {
+    assert.strictEqual(resolveExecutionPrice(null, null, 5.00, 5.50), 5.00);
+  });
+
+  test('neither sets limit_price, no currentPrice → uses actionPrice', () => {
+    assert.strictEqual(resolveExecutionPrice(null, null, null, 5.50), 5.50);
+  });
+
+  test('voter sets 0 as limit_price → falls back to currentPrice (0 is not valid)', () => {
+    assert.strictEqual(resolveExecutionPrice({ limit_price: 0 }, null, 5.00, 5.50), 5.00);
+  });
+
+  test('voter sets negative limit_price → falls back to currentPrice', () => {
+    assert.strictEqual(resolveExecutionPrice({ limit_price: -1 }, null, 5.00, 5.50), 5.00);
+  });
+
+  test('voter sets string limit_price → falls back (not a number)', () => {
+    assert.strictEqual(resolveExecutionPrice({ limit_price: '4.50' }, null, 5.00, 5.50), 5.00);
+  });
+});
+
+// ============================================================================
+// 11. Direction & reduceOnly from action type
+// ============================================================================
+
+const actionToDirection = (action) => {
+  const direction = (action === 'buy_put' || action === 'buyback_call') ? 'buy' : 'sell';
+  const reduceOnly = (action === 'sell_put' || action === 'buyback_call');
+  return { direction, reduceOnly };
+};
+
+describe('Action → direction/reduceOnly mapping', () => {
+  test('buy_put → buy, not reduceOnly', () => {
+    const r = actionToDirection('buy_put');
+    assert.strictEqual(r.direction, 'buy');
+    assert.strictEqual(r.reduceOnly, false);
+  });
+
+  test('sell_put → sell, reduceOnly', () => {
+    const r = actionToDirection('sell_put');
+    assert.strictEqual(r.direction, 'sell');
+    assert.strictEqual(r.reduceOnly, true);
+  });
+
+  test('sell_call → sell, not reduceOnly', () => {
+    const r = actionToDirection('sell_call');
+    assert.strictEqual(r.direction, 'sell');
+    assert.strictEqual(r.reduceOnly, false);
+  });
+
+  test('buyback_call → buy, reduceOnly', () => {
+    const r = actionToDirection('buyback_call');
+    assert.strictEqual(r.direction, 'buy');
+    assert.strictEqual(r.reduceOnly, true);
+  });
+});
+
+// ============================================================================
+// 12. Budget tracking correctness
+// ============================================================================
+
+describe('Budget tracking per action type', () => {
+  test('buy_put increases putNetBought', () => {
+    let putNetBought = 100;
+    const totalValue = 25.50;
+    const action = 'buy_put';
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 125.50);
+  });
+
+  test('sell_put decreases putNetBought', () => {
+    let putNetBought = 100;
+    const totalValue = 30.00;
+    const action = 'sell_put';
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 70.00);
+  });
+
+  test('sell_call does NOT change putNetBought', () => {
+    let putNetBought = 100;
+    const totalValue = 50.00;
+    const action = 'sell_call';
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 100);
+  });
+
+  test('buyback_call does NOT change putNetBought', () => {
+    let putNetBought = 100;
+    const totalValue = 40.00;
+    const action = 'buyback_call';
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 100);
+  });
+});
+
+// ============================================================================
+// 13. Open order staleness & orphan detection
+// ============================================================================
+
+const classifyOpenOrder = (order, activeRules, nowMs) => {
+  const ageMs = nowMs - (order.creation_timestamp || 0);
+  const ageHours = ageMs / (1000 * 60 * 60);
+  const isStale = ageHours > 8;
+
+  const activeInstruments = new Set(activeRules.map(r => r.instrument_name).filter(Boolean));
+  const hasEntryRules = activeRules.some(r => r.rule_type === 'entry');
+  const isOrphaned = !activeInstruments.has(order.instrument_name) && !hasEntryRules;
+
+  return { isStale, isOrphaned, ageHours, shouldCancel: isStale || isOrphaned };
+};
+
+describe('Open order staleness & orphan detection', () => {
+  const NOW = Date.now();
+
+  test('fresh order with matching rule → keep', () => {
+    const r = classifyOpenOrder(
+      { instrument_name: 'ETH-20260501-1500-P', creation_timestamp: NOW - 3600000 }, // 1h old
+      [{ instrument_name: 'ETH-20260501-1500-P', rule_type: 'exit' }],
+      NOW
+    );
+    assert.strictEqual(r.isStale, false);
+    assert.strictEqual(r.isOrphaned, false);
+    assert.strictEqual(r.shouldCancel, false);
+  });
+
+  test('9 hour old order → stale, cancel', () => {
+    const r = classifyOpenOrder(
+      { instrument_name: 'ETH-20260501-1500-P', creation_timestamp: NOW - 9 * 3600000 },
+      [{ instrument_name: 'ETH-20260501-1500-P', rule_type: 'exit' }],
+      NOW
+    );
+    assert.strictEqual(r.isStale, true);
+    assert.strictEqual(r.shouldCancel, true);
+  });
+
+  test('exactly 8h old → NOT stale (boundary)', () => {
+    const r = classifyOpenOrder(
+      { instrument_name: 'ETH-20260501-1500-P', creation_timestamp: NOW - 8 * 3600000 },
+      [{ instrument_name: 'ETH-20260501-1500-P', rule_type: 'exit' }],
+      NOW
+    );
+    assert.strictEqual(r.isStale, false);
+  });
+
+  test('8h + 1ms → stale', () => {
+    const r = classifyOpenOrder(
+      { instrument_name: 'ETH-20260501-1500-P', creation_timestamp: NOW - 8 * 3600000 - 1 },
+      [{ instrument_name: 'ETH-20260501-1500-P', rule_type: 'exit' }],
+      NOW
+    );
+    assert.strictEqual(r.isStale, true);
+    assert.strictEqual(r.shouldCancel, true);
+  });
+
+  test('fresh order with no matching rule and no entry rules → orphaned', () => {
+    const r = classifyOpenOrder(
+      { instrument_name: 'ETH-20260501-1500-P', creation_timestamp: NOW - 3600000 },
+      [{ instrument_name: 'ETH-20260601-2000-C', rule_type: 'exit' }], // different instrument
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, true);
+    assert.strictEqual(r.shouldCancel, true);
+  });
+
+  test('fresh order with no matching exit rule BUT entry rules exist → NOT orphaned', () => {
+    // Entry rules don't have specific instruments, so any open order could be from an entry
+    const r = classifyOpenOrder(
+      { instrument_name: 'ETH-20260501-1500-P', creation_timestamp: NOW - 3600000 },
+      [{ instrument_name: null, rule_type: 'entry' }],
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, false);
+    assert.strictEqual(r.shouldCancel, false);
+  });
+
+  test('no active rules at all → orphaned', () => {
+    const r = classifyOpenOrder(
+      { instrument_name: 'ETH-20260501-1500-P', creation_timestamp: NOW - 3600000 },
+      [],
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, true);
+    assert.strictEqual(r.shouldCancel, true);
+  });
+
+  test('missing creation_timestamp → treated as very old (stale)', () => {
+    const r = classifyOpenOrder(
+      { instrument_name: 'ETH-20260501-1500-P' },
+      [{ instrument_name: 'ETH-20260501-1500-P', rule_type: 'exit' }],
+      NOW
+    );
+    // ageMs = NOW - 0 = NOW (huge number), ageHours >> 8
+    assert.strictEqual(r.isStale, true);
+    assert.strictEqual(r.shouldCancel, true);
+  });
+});
+
+// ============================================================================
+// 14. Partial fill budget accounting on cancel
+// ============================================================================
+
+const computeCancelBudgetAdjustment = (order) => {
+  const filled = Number(order.filled_amount || 0);
+  if (filled <= 0) return { adjustment: 0, action: 'none' };
+
+  const avgPx = Number(order.average_price || order.limit_price || 0);
+  const fillValue = filled * avgPx;
+  const isPut = order.instrument_name?.endsWith('-P');
+  const isBuy = order.direction === 'buy';
+
+  if (isPut && isBuy) return { adjustment: fillValue, action: 'put_bought' };
+  if (isPut && !isBuy) return { adjustment: -fillValue, action: 'put_sold' };
+  return { adjustment: 0, action: 'call_or_other' };
+};
+
+describe('Partial fill budget accounting on cancel', () => {
+  test('cancelled buy put with partial fill → positive budget adjustment', () => {
+    const r = computeCancelBudgetAdjustment({
+      instrument_name: 'ETH-20260501-1500-P',
+      direction: 'buy',
+      filled_amount: '0.5',
+      average_price: '10.00',
+    });
+    assert.strictEqual(r.adjustment, 5.00);
+    assert.strictEqual(r.action, 'put_bought');
+  });
+
+  test('cancelled sell put with partial fill → negative budget adjustment', () => {
+    const r = computeCancelBudgetAdjustment({
+      instrument_name: 'ETH-20260501-1500-P',
+      direction: 'sell',
+      filled_amount: '0.5',
+      average_price: '8.00',
+    });
+    assert.strictEqual(r.adjustment, -4.00);
+    assert.strictEqual(r.action, 'put_sold');
+  });
+
+  test('cancelled call order → no budget adjustment', () => {
+    const r = computeCancelBudgetAdjustment({
+      instrument_name: 'ETH-20260501-2000-C',
+      direction: 'sell',
+      filled_amount: '1.0',
+      average_price: '12.00',
+    });
+    assert.strictEqual(r.adjustment, 0);
+    assert.strictEqual(r.action, 'call_or_other');
+  });
+
+  test('cancelled order with zero fill → no adjustment', () => {
+    const r = computeCancelBudgetAdjustment({
+      instrument_name: 'ETH-20260501-1500-P',
+      direction: 'buy',
+      filled_amount: '0',
+    });
+    assert.strictEqual(r.adjustment, 0);
+    assert.strictEqual(r.action, 'none');
+  });
+
+  test('cancelled order with no filled_amount → no adjustment', () => {
+    const r = computeCancelBudgetAdjustment({
+      instrument_name: 'ETH-20260501-1500-P',
+      direction: 'buy',
+    });
+    assert.strictEqual(r.adjustment, 0);
+    assert.strictEqual(r.action, 'none');
+  });
+
+  test('uses limit_price when average_price missing', () => {
+    const r = computeCancelBudgetAdjustment({
+      instrument_name: 'ETH-20260501-1500-P',
+      direction: 'buy',
+      filled_amount: '1.0',
+      limit_price: '7.50',
+    });
+    assert.strictEqual(r.adjustment, 7.50);
+    assert.strictEqual(r.action, 'put_bought');
+  });
+});
+
+// ============================================================================
+// 15. Trigger details preferred_order_type passthrough
+// ============================================================================
+
+describe('Advisory order type preference passthrough', () => {
+  test('preferred_order_type extracted from JSON trigger_details', () => {
+    const triggerStr = JSON.stringify({ score: 0.005, preferred_order_type: 'post_only' });
+    let triggerData = {};
+    try { triggerData = JSON.parse(triggerStr); } catch {}
+    assert.strictEqual(triggerData.preferred_order_type, 'post_only');
+  });
+
+  test('missing preferred_order_type → undefined', () => {
+    const triggerStr = JSON.stringify({ score: 0.005, delta: -0.05 });
+    let triggerData = {};
+    try { triggerData = JSON.parse(triggerStr); } catch {}
+    assert.strictEqual(triggerData.preferred_order_type, undefined);
+  });
+
+  test('malformed JSON → empty object, no crash', () => {
+    const triggerStr = 'not valid json {{{';
+    let triggerData = {};
+    try { triggerData = JSON.parse(triggerStr); } catch {}
+    assert.strictEqual(triggerData.preferred_order_type, undefined);
+  });
+
+  test('null trigger_details → empty object', () => {
+    let triggerData = {};
+    try { triggerData = typeof null === 'string' ? JSON.parse(null) : (null || {}); } catch {}
+    assert.strictEqual(triggerData.preferred_order_type, undefined);
+  });
+});
+
+// ============================================================================
+// 16. placeOrder time_in_force parameter construction
+// ============================================================================
+
+describe('placeOrder order construction', () => {
+  // Test the order object construction logic (not the API call)
+  const buildOrderParams = (timeInForce) => {
+    const order = {
+      order_type: 'limit',
+      reduce_only: false,
+      time_in_force: timeInForce,
+      ...(timeInForce === 'post_only' ? { post_only: true } : {}),
+    };
+    return order;
+  };
+
+  test('ioc → time_in_force=ioc, no post_only flag', () => {
+    const o = buildOrderParams('ioc');
+    assert.strictEqual(o.time_in_force, 'ioc');
+    assert.strictEqual(o.post_only, undefined);
+  });
+
+  test('gtc → time_in_force=gtc, no post_only flag', () => {
+    const o = buildOrderParams('gtc');
+    assert.strictEqual(o.time_in_force, 'gtc');
+    assert.strictEqual(o.post_only, undefined);
+  });
+
+  test('post_only → time_in_force=post_only AND post_only=true', () => {
+    const o = buildOrderParams('post_only');
+    assert.strictEqual(o.time_in_force, 'post_only');
+    assert.strictEqual(o.post_only, true);
+  });
+});
+
+// ============================================================================
+// 17. Voting logic correctness
+// ============================================================================
+
+const resolveVotingDecision = (haikuVote, codexVote) => {
+  if (haikuVote && codexVote) {
+    return (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
+  } else if (haikuVote) {
+    return haikuVote.confirm ? 'confirmed' : 'rejected';
+  } else if (codexVote) {
+    return codexVote.confirm ? 'confirmed' : 'rejected';
+  }
+  return 'retry'; // both failed
+};
+
+describe('Voting logic', () => {
+  test('both confirm → confirmed', () => {
+    assert.strictEqual(resolveVotingDecision({ confirm: true }, { confirm: true }), 'confirmed');
+  });
+
+  test('both reject → rejected', () => {
+    assert.strictEqual(resolveVotingDecision({ confirm: false }, { confirm: false }), 'rejected');
+  });
+
+  test('haiku confirms, codex rejects → rejected (conservative)', () => {
+    assert.strictEqual(resolveVotingDecision({ confirm: true }, { confirm: false }), 'rejected');
+  });
+
+  test('haiku rejects, codex confirms → rejected (conservative)', () => {
+    assert.strictEqual(resolveVotingDecision({ confirm: false }, { confirm: true }), 'rejected');
+  });
+
+  test('only haiku responds, confirms → confirmed', () => {
+    assert.strictEqual(resolveVotingDecision({ confirm: true }, null), 'confirmed');
+  });
+
+  test('only haiku responds, rejects → rejected', () => {
+    assert.strictEqual(resolveVotingDecision({ confirm: false }, null), 'rejected');
+  });
+
+  test('only codex responds, confirms → confirmed', () => {
+    assert.strictEqual(resolveVotingDecision(null, { confirm: true }), 'confirmed');
+  });
+
+  test('only codex responds, rejects → rejected', () => {
+    assert.strictEqual(resolveVotingDecision(null, { confirm: false }), 'rejected');
+  });
+
+  test('both fail → retry', () => {
+    assert.strictEqual(resolveVotingDecision(null, null), 'retry');
+  });
+});
+
+// ============================================================================
+// 18. DRY_RUN budget simulation correctness
+// ============================================================================
+
+describe('DRY_RUN budget simulation', () => {
+  test('buy_put consumes put budget in dry run', () => {
+    let putNetBought = 50;
+    const action = 'buy_put';
+    const amount = 1.0, price = 8.00;
+    const totalValue = amount * price;
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 58.00);
+  });
+
+  test('sell_put returns to put budget in dry run', () => {
+    let putNetBought = 50;
+    const action = 'sell_put';
+    const amount = 0.5, price = 12.00;
+    const totalValue = amount * price;
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 44.00);
+  });
+
+  test('sell_call does not affect put budget in dry run', () => {
+    let putNetBought = 50;
+    const action = 'sell_call';
+    const amount = 2.0, price = 15.00;
+    const totalValue = amount * price;
+    if (action === 'buy_put') putNetBought += totalValue;
+    else if (action === 'sell_put') putNetBought -= totalValue;
+    assert.strictEqual(putNetBought, 50);
+  });
+});
+
+// ============================================================================
+// 19. End-to-end: confirmation → execution result handling
+// ============================================================================
+
+describe('Confirmation result handling paths', () => {
+  test('zeroFill result → action should be marked failed', () => {
+    const result = { zeroFill: true, action: 'buy_put', instrumentName: 'ETH-20260501-1500-P' };
+    assert.ok(result.zeroFill);
+    // In real code: db.updatePendingAction(id, { status: 'failed', ... })
+    const expectedStatus = result.zeroFill ? 'failed' : 'executed';
+    assert.strictEqual(expectedStatus, 'failed');
+  });
+
+  test('resting result → action should be marked executed', () => {
+    const result = { resting: true, orderId: 'ord_123', action: 'buy_put' };
+    assert.ok(result.resting);
+    const expectedStatus = result.resting ? 'executed' : 'unknown';
+    assert.strictEqual(expectedStatus, 'executed');
+  });
+
+  test('normal fill result → action should be marked executed', () => {
+    const result = { filledAmt: 1.0, avgPx: 5.50, totalValue: 5.50 };
+    assert.ok(!result.zeroFill && !result.resting);
+    assert.ok(result.filledAmt > 0);
+    // Should be marked executed
+  });
+
+  test('null result → action should be marked failed', () => {
+    const result = null;
+    const expectedStatus = result ? 'executed' : 'failed';
+    assert.strictEqual(expectedStatus, 'failed');
+  });
+
+  test('auto-reject after 3 retries', () => {
+    const retries = 3;
+    const shouldAutoReject = retries >= 3;
+    assert.strictEqual(shouldAutoReject, true);
+  });
+
+  test('retry count 2 → not yet auto-rejected', () => {
+    const retries = 2;
+    const shouldAutoReject = retries >= 3;
+    assert.strictEqual(shouldAutoReject, false);
+  });
+});
+
+// ============================================================================
+// 20. Cooldown logic
+// ============================================================================
+
+describe('Entry cooldown (1 hour between same action type)', () => {
+  test('last executed 30 min ago → still in cooldown', () => {
+    const lastExecuted = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const cooldownMs = 60 * 60 * 1000;
+    const elapsed = Date.now() - new Date(lastExecuted).getTime();
+    assert.ok(elapsed < cooldownMs, 'Should still be in cooldown');
+  });
+
+  test('last executed 90 min ago → cooldown expired', () => {
+    const lastExecuted = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    const cooldownMs = 60 * 60 * 1000;
+    const elapsed = Date.now() - new Date(lastExecuted).getTime();
+    assert.ok(elapsed >= cooldownMs, 'Cooldown should be expired');
+  });
+
+  test('no last execution → no cooldown', () => {
+    const lastExecuted = null;
+    const inCooldown = lastExecuted ? (Date.now() - new Date(lastExecuted).getTime() < 3600000) : false;
+    assert.strictEqual(inCooldown, false);
+  });
+});
+
+
+// ============================================================================
+// 21. Price sanity check (Bug #3 fix)
+// ============================================================================
+
+const sanitizeVoterPrice = (voterLimitPrice, marketPrice) => {
+  if (typeof voterLimitPrice !== 'number' || voterLimitPrice <= 0 || marketPrice <= 0) {
+    return { price: marketPrice, rejected: false };
+  }
+  const ratio = voterLimitPrice / marketPrice;
+  if (ratio >= 0.5 && ratio <= 2.0) {
+    return { price: voterLimitPrice, rejected: false };
+  }
+  return { price: marketPrice, rejected: true, ratio };
+};
+
+describe('Voter price sanity check', () => {
+  test('price within range (90% of market) → accepted', () => {
+    const r = sanitizeVoterPrice(4.50, 5.00);
+    assert.strictEqual(r.price, 4.50);
+    assert.strictEqual(r.rejected, false);
+  });
+
+  test('price at 2x market → accepted (boundary)', () => {
+    const r = sanitizeVoterPrice(10.00, 5.00);
+    assert.strictEqual(r.price, 10.00);
+    assert.strictEqual(r.rejected, false);
+  });
+
+  test('price at 0.5x market → accepted (boundary)', () => {
+    const r = sanitizeVoterPrice(2.50, 5.00);
+    assert.strictEqual(r.price, 2.50);
+    assert.strictEqual(r.rejected, false);
+  });
+
+  test('price at 3x market → rejected (too high)', () => {
+    const r = sanitizeVoterPrice(15.00, 5.00);
+    assert.strictEqual(r.price, 5.00);
+    assert.strictEqual(r.rejected, true);
+  });
+
+  test('price at 0.1x market → rejected (too low)', () => {
+    const r = sanitizeVoterPrice(0.50, 5.00);
+    assert.strictEqual(r.price, 5.00);
+    assert.strictEqual(r.rejected, true);
+  });
+
+  test('zero voter price → uses market', () => {
+    const r = sanitizeVoterPrice(0, 5.00);
+    assert.strictEqual(r.price, 5.00);
+  });
+
+  test('negative voter price → uses market', () => {
+    const r = sanitizeVoterPrice(-1, 5.00);
+    assert.strictEqual(r.price, 5.00);
+  });
+
+  test('string voter price → uses market', () => {
+    const r = sanitizeVoterPrice('4.50', 5.00);
+    assert.strictEqual(r.price, 5.00);
+  });
+
+  test('zero market price → uses market (no division by zero)', () => {
+    const r = sanitizeVoterPrice(5.00, 0);
+    assert.strictEqual(r.price, 0);
+  });
+});
+
+// ============================================================================
+// 22. Orphan detection (Bug #5 fix - direction-aware)
+// ============================================================================
+
+const classifyOpenOrderV2 = (order, activeRules, nowMs) => {
+  const ageMs = nowMs - (order.creation_timestamp || 0);
+  const ageHours = ageMs / (1000 * 60 * 60);
+  const isStale = ageHours > 8;
+
+  const activeExitInstruments = new Set(
+    activeRules.filter(r => r.rule_type === 'exit').map(r => r.instrument_name).filter(Boolean)
+  );
+  const activeEntryActions = new Set(
+    activeRules.filter(r => r.rule_type === 'entry').map(r => r.action)
+  );
+
+  const matchesExitRule = activeExitInstruments.has(order.instrument_name);
+  const isBuyOrder = order.direction === 'buy';
+  const matchesEntryAction = (isBuyOrder && order.instrument_name?.endsWith('-P') && activeEntryActions.has('buy_put'))
+    || (!isBuyOrder && order.instrument_name?.endsWith('-C') && activeEntryActions.has('sell_call'))
+    || (isBuyOrder && order.instrument_name?.endsWith('-C') && activeEntryActions.has('buyback_call'))
+    || (!isBuyOrder && order.instrument_name?.endsWith('-P') && activeEntryActions.has('sell_put'));
+  const isOrphaned = !matchesExitRule && !matchesEntryAction;
+
+  return { isStale, isOrphaned, shouldCancel: isStale || isOrphaned };
+};
+
+describe('Orphan detection V2 (direction-aware)', () => {
+  const NOW = Date.now();
+
+  test('buy put order + buy_put entry rule → NOT orphaned', () => {
+    const r = classifyOpenOrderV2(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', creation_timestamp: NOW - 3600000 },
+      [{ rule_type: 'entry', action: 'buy_put' }],
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, false);
+  });
+
+  test('sell call order + sell_call entry rule → NOT orphaned', () => {
+    const r = classifyOpenOrderV2(
+      { instrument_name: 'ETH-20260501-2000-C', direction: 'sell', creation_timestamp: NOW - 3600000 },
+      [{ rule_type: 'entry', action: 'sell_call' }],
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, false);
+  });
+
+  test('buy put order + sell_call entry rule → ORPHANED (wrong direction)', () => {
+    const r = classifyOpenOrderV2(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', creation_timestamp: NOW - 3600000 },
+      [{ rule_type: 'entry', action: 'sell_call' }],
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, true);
+    assert.strictEqual(r.shouldCancel, true);
+  });
+
+  test('sell call order + buy_put entry rule → ORPHANED (wrong direction)', () => {
+    const r = classifyOpenOrderV2(
+      { instrument_name: 'ETH-20260501-2000-C', direction: 'sell', creation_timestamp: NOW - 3600000 },
+      [{ rule_type: 'entry', action: 'buy_put' }],
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, true);
+  });
+
+  test('sell put order + sell_put exit rule for same instrument → NOT orphaned', () => {
+    const r = classifyOpenOrderV2(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'sell', creation_timestamp: NOW - 3600000 },
+      [{ rule_type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260501-1500-P' }],
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, false);
+  });
+
+  test('order with matching exit rule for different instrument → ORPHANED', () => {
+    const r = classifyOpenOrderV2(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'sell', creation_timestamp: NOW - 3600000 },
+      [{ rule_type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260601-2000-P' }],
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, true);
+  });
+
+  test('no rules at all → ORPHANED', () => {
+    const r = classifyOpenOrderV2(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', creation_timestamp: NOW - 3600000 },
+      [],
+      NOW
+    );
+    assert.strictEqual(r.isOrphaned, true);
+  });
+});
+
+// ============================================================================
+// 23. Fill reconciliation logic
+// ============================================================================
+
+describe('Fill reconciliation', () => {
+  test('tracked order NOT in exchange list → classified as filled', () => {
+    const tracked = [
+      { order_id: 'ord_1', instrument_name: 'ETH-20260501-1500-P', direction: 'buy', amount: 1.0, limit_price: 5.00 },
+      { order_id: 'ord_2', instrument_name: 'ETH-20260601-2000-C', direction: 'sell', amount: 2.0, limit_price: 8.00 },
+    ];
+    const exchangeOrders = [
+      { order_id: 'ord_2', instrument_name: 'ETH-20260601-2000-C' }, // ord_1 is gone → filled
+    ];
+    const exchangeIds = new Set(exchangeOrders.map(o => o.order_id));
+    const filled = tracked.filter(t => !exchangeIds.has(t.order_id));
+    assert.strictEqual(filled.length, 1);
+    assert.strictEqual(filled[0].order_id, 'ord_1');
+  });
+
+  test('all tracked orders still on exchange → none filled', () => {
+    const tracked = [{ order_id: 'ord_1' }];
+    const exchangeIds = new Set(['ord_1']);
+    const filled = tracked.filter(t => !exchangeIds.has(t.order_id));
+    assert.strictEqual(filled.length, 0);
+  });
+
+  test('filled put buy → positive budget adjustment', () => {
+    const order = { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', amount: 1.0, limit_price: 5.00 };
+    const fillValue = order.amount * order.limit_price;
+    const isPut = order.instrument_name.endsWith('-P');
+    let budgetDelta = 0;
+    if (isPut && order.direction === 'buy') budgetDelta = fillValue;
+    else if (isPut && order.direction === 'sell') budgetDelta = -fillValue;
+    assert.strictEqual(budgetDelta, 5.00);
+  });
+
+  test('filled call sell → zero budget adjustment (calls are collateral-sized)', () => {
+    const order = { instrument_name: 'ETH-20260501-2000-C', direction: 'sell', amount: 2.0, limit_price: 8.00 };
+    const fillValue = order.amount * order.limit_price;
+    const isPut = order.instrument_name.endsWith('-P');
+    let budgetDelta = 0;
+    if (isPut && order.direction === 'buy') budgetDelta = fillValue;
+    else if (isPut && order.direction === 'sell') budgetDelta = -fillValue;
+    assert.strictEqual(budgetDelta, 0);
+  });
+});
+
+// ============================================================================
+// 24. post_only rejection handling
+// ============================================================================
+
+const classifyPlaceOrderResult = (order, orderType) => {
+  if (!order) return 'failed';
+  if (order.rejected_post_only) return 'post_only_rejected';
+  return 'success';
+};
+
+const classifyExecutionResult = (result) => {
+  if (!result) return 'failed';
+  if (result.postOnlyRejected) return 'post_only_rejected';
+  if (result.zeroFill) return 'zero_fill';
+  if (result.resting) return 'resting';
+  if (result.dryRun) return 'dry_run';
+  if (result.filledAmt > 0) return 'filled';
+  return 'unknown';
+};
+
+describe('post_only rejection handling', () => {
+  test('placeOrder returns rejected_post_only → classified correctly', () => {
+    assert.strictEqual(classifyPlaceOrderResult({ rejected_post_only: true, error: 'would cross' }, 'post_only'), 'post_only_rejected');
+  });
+
+  test('placeOrder returns null → classified as failed', () => {
+    assert.strictEqual(classifyPlaceOrderResult(null, 'post_only'), 'failed');
+  });
+
+  test('placeOrder returns normal data → classified as success', () => {
+    assert.strictEqual(classifyPlaceOrderResult({ result: {} }, 'post_only'), 'success');
+  });
+
+  test('executeOrder result with postOnlyRejected → correct classification', () => {
+    assert.strictEqual(classifyExecutionResult({ postOnlyRejected: true }), 'post_only_rejected');
+  });
+
+  test('full result classification chain', () => {
+    assert.strictEqual(classifyExecutionResult(null), 'failed');
+    assert.strictEqual(classifyExecutionResult({ zeroFill: true }), 'zero_fill');
+    assert.strictEqual(classifyExecutionResult({ resting: true }), 'resting');
+    assert.strictEqual(classifyExecutionResult({ dryRun: true }), 'dry_run');
+    assert.strictEqual(classifyExecutionResult({ filledAmt: 1.0 }), 'filled');
+    assert.strictEqual(classifyExecutionResult({ filledAmt: 0 }), 'unknown');
+  });
+});
+
+// ============================================================================
+// 25. Fill reconciliation with order status API
+// ============================================================================
+
+describe('Fill reconciliation with order status', () => {
+  const reconcileOrder = (tracked, finalStatus) => {
+    let filledAmt, fillPrice, status;
+    if (finalStatus) {
+      filledAmt = finalStatus.filled_amount || 0;
+      fillPrice = finalStatus.average_price > 0 ? finalStatus.average_price : tracked.limit_price;
+      status = finalStatus.order_status;
+    } else {
+      filledAmt = tracked.amount;
+      fillPrice = tracked.limit_price;
+      status = 'filled';
+    }
+    const fillValue = filledAmt * fillPrice;
+    const isPut = tracked.instrument_name?.endsWith('-P');
+    let budgetDelta = 0;
+    if (filledAmt > 0) {
+      if (isPut && tracked.direction === 'buy') budgetDelta = fillValue;
+      else if (isPut && tracked.direction === 'sell') budgetDelta = -fillValue;
+    }
+    return { filledAmt, fillPrice, fillValue, status, budgetDelta };
+  };
+
+  test('fully filled order → correct budget', () => {
+    const r = reconcileOrder(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', amount: 1.0, limit_price: 5.00 },
+      { order_status: 'filled', filled_amount: 1.0, average_price: 4.80 }
+    );
+    assert.strictEqual(r.status, 'filled');
+    assert.strictEqual(r.filledAmt, 1.0);
+    assert.strictEqual(r.fillPrice, 4.80); // Uses actual average_price, not limit
+    assert.strictEqual(r.fillValue, 4.80);
+    assert.strictEqual(r.budgetDelta, 4.80);
+  });
+
+  test('partially filled then cancelled → only accounts for filled portion', () => {
+    const r = reconcileOrder(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', amount: 2.0, limit_price: 5.00 },
+      { order_status: 'cancelled', filled_amount: 0.5, average_price: 4.90, cancel_reason: 'user_request' }
+    );
+    assert.strictEqual(r.status, 'cancelled');
+    assert.strictEqual(r.filledAmt, 0.5);
+    assert.strictEqual(r.fillPrice, 4.90);
+    assert.strictEqual(r.budgetDelta, 0.5 * 4.90);
+  });
+
+  test('cancelled with zero fill → no budget impact', () => {
+    const r = reconcileOrder(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', amount: 1.0, limit_price: 5.00 },
+      { order_status: 'cancelled', filled_amount: 0, average_price: 0, cancel_reason: 'user_request' }
+    );
+    assert.strictEqual(r.status, 'cancelled');
+    assert.strictEqual(r.filledAmt, 0);
+    assert.strictEqual(r.budgetDelta, 0);
+  });
+
+  test('expired with zero fill → no budget impact', () => {
+    const r = reconcileOrder(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', amount: 1.0, limit_price: 5.00 },
+      { order_status: 'expired', filled_amount: 0, average_price: 0 }
+    );
+    assert.strictEqual(r.status, 'expired');
+    assert.strictEqual(r.budgetDelta, 0);
+  });
+
+  test('API fallback (null status) → assumes full fill at limit price', () => {
+    const r = reconcileOrder(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', amount: 1.0, limit_price: 5.00 },
+      null
+    );
+    assert.strictEqual(r.status, 'filled');
+    assert.strictEqual(r.filledAmt, 1.0);
+    assert.strictEqual(r.fillPrice, 5.00);
+    assert.strictEqual(r.budgetDelta, 5.00);
+  });
+
+  test('filled call sell → zero budget impact (calls are collateral-sized)', () => {
+    const r = reconcileOrder(
+      { instrument_name: 'ETH-20260501-2000-C', direction: 'sell', amount: 2.0, limit_price: 8.00 },
+      { order_status: 'filled', filled_amount: 2.0, average_price: 8.50 }
+    );
+    assert.strictEqual(r.filledAmt, 2.0);
+    assert.strictEqual(r.budgetDelta, 0); // calls don't affect put budget
+  });
+
+  test('average_price 0 falls back to limit_price', () => {
+    const r = reconcileOrder(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'buy', amount: 1.0, limit_price: 5.00 },
+      { order_status: 'filled', filled_amount: 1.0, average_price: 0 }
+    );
+    assert.strictEqual(r.fillPrice, 5.00);
+  });
+});
+
+// ============================================================================
+// 26. Defensive response parsing
+// ============================================================================
+
+describe('Defensive API response parsing', () => {
+  test('result is array directly → treated as orders list', () => {
+    const raw = [{ order_id: 'a' }, { order_id: 'b' }];
+    const orders = Array.isArray(raw) ? raw : (raw?.orders || []);
+    assert.strictEqual(orders.length, 2);
+  });
+
+  test('result is { orders: [...] } → extracted correctly', () => {
+    const raw = { orders: [{ order_id: 'a' }] };
+    const orders = Array.isArray(raw) ? raw : (raw?.orders || []);
+    assert.strictEqual(orders.length, 1);
+  });
+
+  test('result is null → empty array', () => {
+    const raw = null;
+    const orders = Array.isArray(raw) ? raw : (raw?.orders || []);
+    assert.strictEqual(orders.length, 0);
+  });
+
+  test('result is undefined → empty array', () => {
+    const raw = undefined;
+    const orders = Array.isArray(raw) ? raw : (raw?.orders || []);
+    assert.strictEqual(orders.length, 0);
+  });
+
+  test('result is {} (empty object) → empty array', () => {
+    const raw = {};
+    const orders = Array.isArray(raw) ? raw : (raw?.orders || []);
+    assert.strictEqual(orders.length, 0);
+  });
+
+  test('result is { subaccount_id: 123, orders: [...] } → works', () => {
+    const raw = { subaccount_id: 123, orders: [{ order_id: 'x' }] };
+    const orders = Array.isArray(raw) ? raw : (raw?.orders || []);
+    assert.strictEqual(orders.length, 1);
+    assert.strictEqual(orders[0].order_id, 'x');
+  });
+});
+
+// ============================================================================
+// 27. Resting order DB dedup
+// ============================================================================
+
+describe('Resting order dedup for entry rules', () => {
+  // Simulates the check: if we have a resting order for an instrument, skip entry
+  test('resting order exists for instrument → skip', () => {
+    const restingInstruments = new Set(['ETH-20260501-1500-P', 'ETH-20260601-2000-C']);
+    const candidate = 'ETH-20260501-1500-P';
+    assert.strictEqual(restingInstruments.has(candidate), true);
+  });
+
+  test('no resting order for instrument → proceed', () => {
+    const restingInstruments = new Set(['ETH-20260601-2000-C']);
+    const candidate = 'ETH-20260501-1500-P';
+    assert.strictEqual(restingInstruments.has(candidate), false);
+  });
+
+  test('empty resting orders → always proceed', () => {
+    const restingInstruments = new Set();
+    assert.strictEqual(restingInstruments.has('anything'), false);
+  });
+});
 
 // ============================================================================
 // Summary

@@ -801,8 +801,26 @@ export default function AdvisorDrawer() {
                     {opsData.rules.map((rule) => {
                       const actionStyle = ACTION_STYLES[rule.action] || { label: rule.action, color: 'bg-white/10 text-gray-400' };
                       const priorityStyle = PRIORITY_STYLES[rule.priority] || { color: 'text-gray-500' };
-                      let criteria: Record<string, unknown> = {};
-                      try { criteria = JSON.parse(rule.criteria); } catch { /* skip */ }
+                      let criteriaDisplay: string = '';
+                      let criteriaIsJson = false;
+                      if (rule.criteria) {
+                        try {
+                          const parsed = JSON.parse(rule.criteria);
+                          if (typeof parsed === 'object' && parsed !== null && Object.keys(parsed).length > 0) {
+                            criteriaDisplay = JSON.stringify(parsed, null, 2);
+                            criteriaIsJson = true;
+                          } else if (typeof parsed === 'string' && parsed.trim()) {
+                            criteriaDisplay = parsed;
+                          }
+                        } catch {
+                          // Not JSON — treat as plain text criteria
+                          criteriaDisplay = rule.criteria;
+                        }
+                      }
+                      // Summary snippet: first 80 chars of criteria for collapsed view
+                      const criteriaSnippet = criteriaDisplay
+                        ? (criteriaIsJson ? '' : criteriaDisplay.slice(0, 80) + (criteriaDisplay.length > 80 ? '...' : ''))
+                        : '';
                       return (
                         <details key={rule.id} className="border border-white/5 mb-1.5">
                           <summary className="px-3 py-2 cursor-pointer hover:bg-white/5 transition-colors">
@@ -819,6 +837,9 @@ export default function AdvisorDrawer() {
                                 <span className="text-[10px] text-gray-500">${rule.budget_limit.toFixed(0)} limit</span>
                               )}
                             </div>
+                            {criteriaSnippet && (
+                              <p className="text-[10px] text-gray-600 mt-0.5 ml-1 truncate">{criteriaSnippet}</p>
+                            )}
                           </summary>
                           <div className="px-3 pb-2.5 space-y-1.5 border-t border-white/5">
                             {rule.reasoning && (
@@ -827,12 +848,18 @@ export default function AdvisorDrawer() {
                                 <p className="text-[11px] text-gray-300 leading-relaxed">{rule.reasoning}</p>
                               </div>
                             )}
-                            <div>
-                              <p className="text-[10px] text-gray-600 uppercase">Criteria</p>
-                              <pre className="text-[10px] text-gray-500 font-mono bg-black/30 px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
-                                {JSON.stringify(criteria, null, 2)}
-                              </pre>
-                            </div>
+                            {criteriaDisplay && (
+                              <div>
+                                <p className="text-[10px] text-gray-600 uppercase">Criteria</p>
+                                {criteriaIsJson ? (
+                                  <pre className="text-[10px] text-gray-500 font-mono bg-black/30 px-2 py-1.5 overflow-x-auto whitespace-pre-wrap break-all">
+                                    {criteriaDisplay}
+                                  </pre>
+                                ) : (
+                                  <p className="text-[11px] text-gray-400 leading-relaxed">{criteriaDisplay}</p>
+                                )}
+                              </div>
+                            )}
                             <p className="text-[10px] text-gray-600">Rule #{rule.id} &middot; Created {rule.created_at}</p>
                           </div>
                         </details>
