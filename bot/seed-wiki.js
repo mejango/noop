@@ -9,7 +9,7 @@
  * Usage: node bot/seed-wiki.js
  */
 
-require('dotenv').config();
+try { require('dotenv').config(); } catch { /* dotenv optional — railway run provides env vars */ }
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
