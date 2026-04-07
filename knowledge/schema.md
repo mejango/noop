@@ -1,0 +1,92 @@
+# Wiki Schema
+
+This file defines the structure, update rules, and format conventions for the NOOP-C knowledge wiki.
+
+## Page Types & Required Sections
+
+### regimes/current.md
+- **TLDR** (bold, 1 line)
+- **Classification** (complacency | fear | transition | recovery)
+- **Evidence** (specific data values supporting classification)
+- **Falsification** (what would change the classification)
+- **Confidence** (high | medium | low with reasoning)
+
+### regimes/history.md
+- **Regime Transitions** (table: date | from | to | trigger | duration)
+- **Patterns** (recurring transition sequences)
+
+### protection/pricing.md
+- **TLDR** (bold, 1 line)
+- **Current IV Environment** (absolute levels + percentile)
+- **Skew Analysis** (put-call IV spread, direction)
+- **Term Structure** (near vs far IV, contango/backwardation)
+- **Cost Assessment** (cheap | fair | expensive with evidence)
+
+### protection/windows.md
+- **TLDR** (bold, 1 line)
+- **Active Windows** (current cheap protection opportunities)
+- **Historical Windows** (past windows with dates, durations, outcomes)
+- **Window Indicators** (what signals precede cheap windows)
+
+### protection/convexity.md
+- **TLDR** (bold, 1 line)
+- **Current Convexity Map** (where in the put chain is convexity highest)
+- **Strike-Delta Sweet Spots** (optimal delta ranges for convexity)
+- **Convexity Shifts** (how the map has changed recently)
+
+### indicators/leading.md
+- **TLDR** (bold, 1 line)
+- **Confirmed Leading Indicators** (signals that reliably precede cost changes)
+- **Experimental Indicators** (signals under observation)
+- **Failed Indicators** (signals that didn't hold up)
+
+### indicators/correlations.md
+- **TLDR** (bold, 1 line)
+- **Strong Correlations** (consistently observed cross-series relationships)
+- **Weakening Correlations** (relationships losing reliability)
+- **New Correlations** (recently detected patterns)
+
+### indicators/divergences.md
+- **TLDR** (bold, 1 line)
+- **Active Divergences** (current put-price divergence signals)
+- **Historical Divergence Episodes** (past divergences and their resolutions)
+- **Divergence Playbook** (how to act on different divergence types)
+
+### strategy/lessons.md
+- **TLDR** (bold, 1 line)
+- **Active Lessons** (currently valid actionable insights)
+- **Archived Lessons** (lessons that no longer hold, with reason)
+- **Evidence Tracker** (which lessons have the most supporting evidence)
+
+### strategy/mistakes.md
+- **TLDR** (bold, 1 line)
+- **Costly Patterns** (mistakes that led to disproven_costly outcomes)
+- **Near Misses** (close calls that should inform future behavior)
+- **Anti-Patterns** (conditions where the bot should NOT buy)
+
+### strategy/playbook.md
+- **TLDR** (bold, 1 line)
+- **Core Rules** (distilled actionable rules from all experience)
+- **Regime-Specific Actions** (what to do in each regime)
+- **Sizing Guidelines** (when to increase/decrease position sizes)
+- **Timing Rules** (when in the cycle to be aggressive vs patient)
+
+## Update Rules
+
+1. **Preserve accurate content** — never delete observations that are still valid
+2. **Add with dates** — new observations include `[YYYY-MM-DD]` date stamps
+3. **Revise transparently** — when updating, use "Previously: X. Updated [YYYY-MM-DD]: Y" format
+4. **Word limit** — each page should stay under 2000 words. If approaching limit, consolidate older entries
+5. **Bold TLDR** — every page starts with a bold one-line summary of current state
+6. **Evidence required** — claims must reference specific data values (IV levels, percentages, dates)
+7. **Falsification criteria** — regime assessments and hypotheses include what would disprove them
+8. **No speculation without evidence** — wiki captures confirmed patterns, not guesses
+
+## Format Conventions
+
+- Use markdown headers (##) for sections
+- Use **bold** for the TLDR line
+- Use `code` formatting for specific numeric values
+- Use tables for structured historical data
+- Use bullet lists for evidence and indicators
+- Date format: YYYY-MM-DD

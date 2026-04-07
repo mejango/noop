@@ -12,4 +12,6 @@ public_key.pem
 *.db-shm
 price_history.json
 bot_data.json
+knowledge/.history/
+knowledge/.meta.json
 .DS_Store

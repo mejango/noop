@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import WikiBrowser from './WikiBrowser';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -107,7 +108,7 @@ const STARTERS = [
 
 export default function AdvisorDrawer() {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<'chat' | 'journal'>('chat');
+  const [tab, setTab] = useState<'chat' | 'journal' | 'wiki'>('chat');
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState('');
@@ -404,6 +405,16 @@ export default function AdvisorDrawer() {
             >
               Journal{journalEntries.length > 0 ? ` (${journalEntries.length})` : ''}
             </button>
+            <button
+              onClick={() => setTab('wiki')}
+              className={`text-xs px-3 py-1 transition-colors ${
+                tab === 'wiki'
+                  ? 'bg-white/10 text-white'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Wiki
+            </button>
           </div>
           {/* Chat list chips */}
           {tab === 'chat' && chats.length > 0 && (
@@ -611,6 +622,13 @@ export default function AdvisorDrawer() {
                 })}
               </>
             )}
+          </div>
+        )}
+
+        {/* Wiki View */}
+        {tab === 'wiki' && (
+          <div className="flex-1 overflow-y-auto">
+            <WikiBrowser />
           </div>
         )}
 

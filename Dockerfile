@@ -26,6 +26,10 @@ RUN npm ci --omit=dev
 COPY bot/ ./bot/
 COPY script.js ./
 
+# Copy knowledge wiki templates (used to seed empty volumes on first deploy)
+COPY knowledge/ ./knowledge-templates/
+COPY knowledge/ ./knowledge/
+
 # Copy dashboard standalone build
 COPY --from=dashboard-builder /dashboard/.next/standalone ./dashboard/
 COPY --from=dashboard-builder /dashboard/.next/static ./dashboard/.next/static

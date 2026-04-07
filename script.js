@@ -1606,23 +1606,45 @@ const handleBuyingPuts = async (putOptionsWithDetails, historicalData, spotPrice
   if (shouldBuy && qualifiedPutOptions.length > 0) {
     const entryReason = shouldEnterConfidentDowntrend ? 'CONFIDENT DOWNSIDE SETUP' : 'STANDARD ENTRY CONDITIONS';
     logEntryDecision('PUT', qualifiedPutOptions.length, entryReason);
-    
+
     const remainingBudget = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
-    console.log(`💰 Available budget: $${remainingBudget.toFixed(2)}`);
+
+    // Wiki-based sizing adjustment (Phase 3)
+    // Wiki adjusts SIZING only, never overrides momentum SIGNALS
+    let wikiSizeMultiplier = 1.0;
+    const wikiSignal = getWikiSignalContext();
+    if (wikiSignal) {
+      const { regime, protectionAssessment } = wikiSignal;
+      if (regime === 'complacency' && protectionAssessment === 'cheap') {
+        wikiSizeMultiplier = 1.5;
+      } else if (regime === 'fear' && protectionAssessment === 'expensive') {
+        wikiSizeMultiplier = 0.5;
+      } else if (regime === 'complacency') {
+        wikiSizeMultiplier = 1.25;
+      } else if (protectionAssessment === 'expensive') {
+        wikiSizeMultiplier = 0.75;
+      }
+      if (wikiSizeMultiplier !== 1.0) {
+        console.log(`📚 Wiki sizing: ${regime}/${protectionAssessment} → ${wikiSizeMultiplier}x multiplier`);
+      }
+    }
+
+    console.log(`💰 Available budget: $${remainingBudget.toFixed(2)}${wikiSizeMultiplier !== 1.0 ? ` (wiki ${wikiSizeMultiplier}x)` : ''}`);
 
     // Check if remaining budget is sufficient (>$10)
     for (const option of qualifiedPutOptions) {
       console.log(`🎯 NEW BEST PUT: ${option.instrument_name} | Delta: ${option.details.delta} | Score: ${option.score.toFixed(6)} | Previous best score: ${bestScore.toFixed(6)}`);
         
       // Check if we have budget remaining
-      if (remainingBudget <= 10) {
+      const currentRemaining = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit - botData.putNetBought;
+      if (currentRemaining * wikiSizeMultiplier <= 10) {
         console.log(`💸 Budget exhausted, skipping remaining options`);
         break;
       }
 
       const buyReason = shouldEnterConfidentDowntrend ? 'Confident Downside Setup' : 'Historical Best Buy';
       console.log(`💸 BUYING PUT: ${option.instrument_name} | Delta: ${option.details.delta} | Score: ${option.score.toFixed(6)} | Reason: ${buyReason}`);
-      const success = await executePutBuyOrder(option, buyReason, spotPrice);
+      const success = await executePutBuyOrder(option, buyReason, spotPrice, wikiSizeMultiplier);
         
       if (success) {
         // Update remaining budget after successful purchase
@@ -1892,11 +1914,11 @@ const handleSellingCalls = async (callOptionsWithDetails, historicalData, spotPr
   return validCallOptions;
 };
 
-const executePutBuyOrder = async (option, reason, spotPrice) => {
+const executePutBuyOrder = async (option, reason, spotPrice, sizeMultiplier = 1.0) => {
     const buyLimit = PUT_BUYING_BASE_FUNDING_LIMIT + botData.putUnspentBuyLimit;
     const remainingBuyCapacity = buyLimit - botData.putNetBought; // signed (negative means you've earned extra room)
-  
-    console.log("💳 Put buy order with", { buyLimit, remainingBuyCapacity });
+
+    console.log("💳 Put buy order with", { buyLimit, remainingBuyCapacity, sizeMultiplier });
 
     const askPx = Number(option?.details?.askPrice);
     const askAmt = Number(option?.details?.askAmount);
@@ -1904,9 +1926,10 @@ const executePutBuyOrder = async (option, reason, spotPrice) => {
       console.log(`⚠️ Skip ${option.instrument_name}: invalid ask price/amount`);
       return false;
     }
-  
+
     const step = getAmountStep(option);
-    const maxByCap = remainingBuyCapacity / askPx;           // can be negative
+    const effectiveCapacity = remainingBuyCapacity * sizeMultiplier;
+    const maxByCap = effectiveCapacity / askPx;               // can be negative
     const raw = Math.max(0, Math.min(maxByCap, askAmt));     // clamp to >= 0
     const qty = quantizeDown(raw, step);                     // enforce 0.01 step
     if (qty === 0) {
@@ -2133,6 +2156,414 @@ Output JSON:
     }
   } catch (e) {
     console.log('🧠 Lesson extraction failed:', e.message);
+  }
+};
+
+// ─── Wiki Knowledge System ──────────────────────────────────────────────────
+
+const WIKI_DIR = process.env.WIKI_DIR || path.join(__dirname, 'knowledge');
+const WIKI_META_PATH = path.join(WIKI_DIR, '.meta.json');
+const WIKI_HISTORY_DIR = path.join(WIKI_DIR, '.history');
+
+const WIKI_KEY_PAGES = [
+  'regimes/current.md',
+  'protection/pricing.md',
+  'protection/windows.md',
+  'indicators/leading.md',
+  'strategy/lessons.md',
+  'strategy/playbook.md',
+];
+
+const WIKI_ALL_PAGES = [
+  'regimes/current.md',
+  'regimes/history.md',
+  'protection/pricing.md',
+  'protection/windows.md',
+  'protection/convexity.md',
+  'indicators/leading.md',
+  'indicators/correlations.md',
+  'indicators/divergences.md',
+  'strategy/lessons.md',
+  'strategy/mistakes.md',
+  'strategy/playbook.md',
+];
+
+const readWikiPage = (pagePath) => {
+  try {
+    const fullPath = path.join(WIKI_DIR, pagePath);
+    return fs.readFileSync(fullPath, 'utf-8');
+  } catch {
+    return '';
+  }
+};
+
+const readWikiMeta = () => {
+  try {
+    return JSON.parse(fs.readFileSync(WIKI_META_PATH, 'utf-8'));
+  } catch {
+    return {};
+  }
+};
+
+const writeWikiMeta = (meta) => {
+  fs.writeFileSync(WIKI_META_PATH, JSON.stringify(meta, null, 2));
+};
+
+const queryWikiContext = () => {
+  const sections = [];
+  for (const page of WIKI_KEY_PAGES) {
+    const content = readWikiPage(page);
+    if (!content || content.includes('Awaiting initial assessment')) continue;
+    // Truncate to ~1500 chars to keep total context manageable
+    const truncated = content.length > 1500 ? content.slice(0, 1500) + '\n...[truncated]' : content;
+    sections.push(`--- ${page} ---\n${truncated}`);
+  }
+  return sections.length > 0 ? sections.join('\n\n') : '';
+};
+
+const saveWikiHistory = (pagePath, content) => {
+  try {
+    fs.mkdirSync(WIKI_HISTORY_DIR, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    const safeName = pagePath.replace(/\//g, '__');
+    const historyPath = path.join(WIKI_HISTORY_DIR, `${ts}__${safeName}`);
+    fs.writeFileSync(historyPath, content);
+  } catch (e) {
+    console.log('Wiki history save failed:', e.message);
+  }
+};
+
+const ingestToWiki = async (journalEntries) => {
+  if (!journalEntries || journalEntries.length === 0) return;
+  if (!process.env.ANTHROPIC_API_KEY) return;
+
+  console.log('📚 Wiki ingest: processing', journalEntries.length, 'journal entries...');
+
+  // Read schema + all pages
+  const schema = readWikiPage('schema.md');
+  const pages = {};
+  for (const page of WIKI_ALL_PAGES) {
+    pages[page] = readWikiPage(page);
+  }
+
+  const pagesContext = Object.entries(pages)
+    .map(([p, content]) => `--- ${p} ---\n${content}`)
+    .join('\n\n');
+
+  const entriesText = journalEntries
+    .map(e => `[${e.type || e.entry_type || 'unknown'}] ${e.content}`)
+    .join('\n\n---\n\n');
+
+  const prompt = `You are maintaining a knowledge wiki for a Spitznagel-style tail-risk hedging bot. Your job is to update wiki pages based on new journal entries.
+
+## Wiki Schema
+${schema}
+
+## Current Wiki Pages
+${pagesContext}
+
+## New Journal Entries
+${entriesText}
+
+## Instructions
+1. Analyze which wiki pages need updating based on the new journal entries
+2. Preserve existing accurate content — ADD to it, don't replace it
+3. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
+4. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" format
+5. Keep each page under 2000 words — consolidate older entries if approaching limit
+6. Every page must start with a bold TLDR line reflecting current state
+
+Output your updates as XML blocks. Only include pages that need changes:
+
+<wiki_update path="regimes/current.md">
+[full updated page content]
+</wiki_update>
+
+If no pages need updating, output: <no_updates/>`;
+
+  try {
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-6',
+      max_tokens: 8192,
+      messages: [{ role: 'user', content: prompt }],
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      timeout: 120000,
+    });
+
+    const text = response.data?.content?.[0]?.text || '';
+
+    if (text.includes('<no_updates/>')) {
+      console.log('📚 Wiki ingest: no updates needed');
+      return;
+    }
+
+    // Parse wiki_update blocks
+    const updateRegex = /<wiki_update\s+path="([^"]+)">([\s\S]*?)<\/wiki_update>/g;
+    let match;
+    let updateCount = 0;
+
+    while ((match = updateRegex.exec(text)) !== null) {
+      const pagePath = match[1];
+      const newContent = match[2].trim();
+
+      // Validate page path
+      if (!WIKI_ALL_PAGES.includes(pagePath)) {
+        console.log(`📚 Wiki ingest: rejected unknown page "${pagePath}"`);
+        continue;
+      }
+
+      // Safety: reject updates < 50 chars
+      if (newContent.length < 50) {
+        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — too short (${newContent.length} chars)`);
+        continue;
+      }
+
+      // Safety: reject updates that shrink page by > 50%
+      const existingContent = pages[pagePath] || '';
+      if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) {
+        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — shrinks by >50% (${existingContent.length} -> ${newContent.length})`);
+        continue;
+      }
+
+      // Safety: check expected section headers from schema
+      const expectedHeaders = {
+        'regimes/current.md': ['Classification', 'Evidence'],
+        'regimes/history.md': ['Regime Transitions'],
+        'protection/pricing.md': ['Current IV Environment', 'Cost Assessment'],
+        'protection/windows.md': ['Active Windows', 'Historical Windows'],
+        'protection/convexity.md': ['Current Convexity Map'],
+        'indicators/leading.md': ['Confirmed Leading Indicators'],
+        'indicators/correlations.md': ['Strong Correlations'],
+        'indicators/divergences.md': ['Active Divergences'],
+        'strategy/lessons.md': ['Active Lessons'],
+        'strategy/mistakes.md': ['Costly Patterns'],
+        'strategy/playbook.md': ['Core Rules'],
+      };
+      const required = expectedHeaders[pagePath] || [];
+      const missingHeaders = required.filter(h => !newContent.includes(h));
+      if (missingHeaders.length > 0) {
+        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — missing sections: ${missingHeaders.join(', ')}`);
+        continue;
+      }
+
+      // Save history before overwriting
+      if (existingContent && !existingContent.includes('Awaiting initial assessment')) {
+        saveWikiHistory(pagePath, existingContent);
+      }
+
+      // Write updated page
+      const fullPath = path.join(WIKI_DIR, pagePath);
+      fs.writeFileSync(fullPath, newContent);
+      updateCount++;
+      console.log(`📚 Wiki ingest: updated ${pagePath}`);
+    }
+
+    // Update meta
+    const meta = readWikiMeta();
+    meta.last_ingest = new Date().toISOString();
+    meta.last_ingest_updates = updateCount;
+    writeWikiMeta(meta);
+
+    console.log(`📚 Wiki ingest: ${updateCount} page(s) updated`);
+  } catch (e) {
+    console.log('📚 Wiki ingest failed:', e.message);
+    throw e;
+  }
+};
+
+const getWikiSignalContext = () => {
+  try {
+    const regimePage = readWikiPage('regimes/current.md');
+    const playbookPage = readWikiPage('strategy/playbook.md');
+
+    if (!regimePage || regimePage.includes('Awaiting initial assessment')) {
+      return null;
+    }
+
+    // Parse regime classification
+    const classMatch = regimePage.match(/##\s*Classification\s*\n+\s*(\w+)/i);
+    const regime = classMatch ? classMatch[1].toLowerCase() : null;
+
+    // Parse confidence
+    const confMatch = regimePage.match(/##\s*Confidence\s*\n+\s*(\w+)/i);
+    const regimeConfidence = confMatch ? confMatch[1].toLowerCase() : null;
+
+    // Parse protection cost assessment from pricing page
+    const pricingPage = readWikiPage('protection/pricing.md');
+    let protectionAssessment = null;
+    if (pricingPage) {
+      const costMatch = pricingPage.match(/##\s*Cost Assessment\s*\n+\s*(\w+)/i);
+      protectionAssessment = costMatch ? costMatch[1].toLowerCase() : null;
+    }
+
+    // Parse playbook rules (first 5 bullet points from Core Rules)
+    const playbookRules = [];
+    if (playbookPage) {
+      const rulesMatch = playbookPage.match(/##\s*Core Rules\s*\n([\s\S]*?)(?=\n##|$)/i);
+      if (rulesMatch) {
+        const bullets = rulesMatch[1].match(/^[-*]\s+.+/gm);
+        if (bullets) {
+          playbookRules.push(...bullets.slice(0, 5).map(b => b.replace(/^[-*]\s+/, '')));
+        }
+      }
+    }
+
+    return { regime, regimeConfidence, protectionAssessment, playbookRules };
+  } catch {
+    return null;
+  }
+};
+
+const lintWiki = async () => {
+  if (!process.env.ANTHROPIC_API_KEY) return;
+
+  // Guard: only run once per 20 hours
+  const meta = readWikiMeta();
+  const LINT_INTERVAL_MS = 20 * 60 * 60 * 1000; // 20 hours
+  if (meta.last_lint && Date.now() - new Date(meta.last_lint).getTime() < LINT_INTERVAL_MS) {
+    return;
+  }
+
+  console.log('📚 Wiki lint: auditing wiki pages...');
+
+  // Read all pages
+  const pages = {};
+  let hasContent = false;
+  for (const page of WIKI_ALL_PAGES) {
+    pages[page] = readWikiPage(page);
+    if (pages[page] && !pages[page].includes('Awaiting initial assessment')) hasContent = true;
+  }
+  if (!hasContent) {
+    console.log('📚 Wiki lint: skipped — wiki not yet seeded');
+    return;
+  }
+
+  const schema = readWikiPage('schema.md');
+  const pagesContext = Object.entries(pages)
+    .map(([p, content]) => `--- ${p} ---\n${content}`)
+    .join('\n\n');
+
+  const prompt = `You are auditing a knowledge wiki for a Spitznagel-style tail-risk hedging bot. Check for quality issues.
+
+## Wiki Schema
+${schema}
+
+## Current Wiki Pages
+${pagesContext}
+
+## Audit Checklist
+1. **Contradictions**: Do any pages contradict each other?
+2. **Staleness**: Are any observations older than 7 days without recent updates?
+3. **Redundancy**: Is the same information repeated across pages?
+4. **Missing links**: Do pages reference concepts that should be in another page but aren't?
+5. **Quality**: Are TLDRs accurate? Are evidence values specific?
+
+## Instructions
+Return a JSON object with:
+{
+  "issues": [{"page": "path", "type": "contradiction|stale|redundant|missing_link|quality", "description": "..."}],
+  "updates": [{"page": "path", "content": "full updated page content"}]
+}
+
+Only include updates for pages that genuinely need fixing. If no issues found, return {"issues":[],"updates":[]}.
+Wrap your JSON in a <lint_result> tag.`;
+
+  try {
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4096,
+      messages: [{ role: 'user', content: prompt }],
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      timeout: 60000,
+    });
+
+    const text = response.data?.content?.[0]?.text || '';
+    const lintMatch = text.match(/<lint_result>([\s\S]*?)<\/lint_result>/);
+    if (!lintMatch) {
+      console.log('📚 Wiki lint: no structured result returned');
+      meta.last_lint = new Date().toISOString();
+      writeWikiMeta(meta);
+      return;
+    }
+
+    let result;
+    try {
+      result = JSON.parse(lintMatch[1].trim());
+    } catch (parseErr) {
+      console.log('📚 Wiki lint: malformed JSON in lint_result:', parseErr.message);
+      meta.last_lint = new Date().toISOString();
+      writeWikiMeta(meta);
+      return;
+    }
+
+    if (result.issues?.length > 0) {
+      console.log(`📚 Wiki lint: found ${result.issues.length} issue(s):`);
+      for (const issue of result.issues) {
+        console.log(`  - [${issue.type}] ${issue.page}: ${issue.description}`);
+      }
+    } else {
+      console.log('📚 Wiki lint: no issues found');
+    }
+
+    // Apply updates with same safety guards as ingest
+    let updateCount = 0;
+    for (const update of (result.updates || [])) {
+      const pagePath = update.page;
+      const newContent = update.content?.trim();
+      if (!pagePath || !newContent) continue;
+      if (!WIKI_ALL_PAGES.includes(pagePath)) continue;
+      if (newContent.length < 50) continue;
+
+      const existingContent = pages[pagePath] || '';
+      if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) continue;
+
+      if (existingContent && !existingContent.includes('Awaiting initial assessment')) {
+        saveWikiHistory(pagePath, existingContent);
+      }
+
+      fs.writeFileSync(path.join(WIKI_DIR, pagePath), newContent);
+      updateCount++;
+      console.log(`📚 Wiki lint: updated ${pagePath}`);
+    }
+
+    // Prune history files older than 30 days
+    try {
+      const PRUNE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+      if (fs.existsSync(WIKI_HISTORY_DIR)) {
+        const historyFiles = fs.readdirSync(WIKI_HISTORY_DIR);
+        let pruned = 0;
+        for (const file of historyFiles) {
+          const filePath = path.join(WIKI_HISTORY_DIR, file);
+          const stat = fs.statSync(filePath);
+          if (Date.now() - stat.mtimeMs > PRUNE_AGE_MS) {
+            fs.unlinkSync(filePath);
+            pruned++;
+          }
+        }
+        if (pruned > 0) console.log(`📚 Wiki lint: pruned ${pruned} old history file(s)`);
+      }
+    } catch (e) {
+      console.log('📚 Wiki history prune failed:', e.message);
+    }
+
+    meta.last_lint = new Date().toISOString();
+    meta.last_lint_issues = result.issues?.length || 0;
+    meta.last_lint_updates = updateCount;
+    writeWikiMeta(meta);
+
+    console.log(`📚 Wiki lint: complete (${updateCount} updates applied)`);
+  } catch (e) {
+    console.log('📚 Wiki lint failed:', e.message);
   }
 };
 
@@ -2413,7 +2844,7 @@ IMPORTANT: A high disproven_bounded rate means the bot is buying cheap insurance
       console.log('📓 Failed to build hypothesis performance summary:', e.message);
     }
 
-    const systemPrompt = `You are the Spitznagel Bot — a tail-risk hedging advisor operating on ETH options with Universa-style principles. You maintain an analytical journal tracking market observations, hypotheses, and regime assessments.
+    const systemPromptBase = `You are the Spitznagel Bot — a tail-risk hedging advisor operating on ETH options with Universa-style principles. You maintain an analytical journal tracking market observations, hypotheses, and regime assessments.
 
 **STRATEGIC FOCUS — PUT BUYING IS THE MISSION:** Your primary analytical job is evaluating OTM PUT BUYING WINDOWS — when is protection cheap, when is convexity high, when should the bot accumulate puts? Call selling is a minor financing activity that exists only to offset put bleed. It is NOT the strategy itself.
 
@@ -2473,6 +2904,21 @@ This is critical for the Spitznagel strategy: we want to buy puts when they're C
 
 Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).${hypothesisPerformance}`;
 
+    // Inject wiki context if available
+    const wikiContext = queryWikiContext();
+    const wikiSection = wikiContext ? `
+
+=== KNOWLEDGE WIKI (cumulative bot knowledge) ===
+${wikiContext}
+
+Use this wiki context to:
+1. Build on confirmed patterns rather than rediscovering them
+2. Reference specific wiki findings when forming hypotheses
+3. Avoid repeating observations already well-documented in the wiki
+4. Challenge wiki assessments when current data contradicts them` : '';
+
+    const systemPrompt = systemPromptBase + wikiSection;
+
     const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite exactly 3 journal entries: one regime_note, one hypothesis, one observation. Use the <journal type="..."> tags. Do NOT write a suggestion entry.`;
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
@@ -2497,6 +2943,7 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
     const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol'];
     let match;
     let count = 0;
+    const parsedEntries = [];
 
     while ((match = regex.exec(text)) !== null) {
       const entryType = match[1];
@@ -2524,13 +2971,15 @@ Ground everything in the data. Focus on: cost of protection (put pricing), crash
       } else {
         db.insertJournalEntry(entryType, content, referenced.length > 0 ? referenced : null);
       }
+      parsedEntries.push({ type: entryType, content });
       count++;
     }
 
     console.log(`📓 Journal: generated ${count} entries`);
-    if (count < 4) {
-      console.log(`⚠️ Expected 4 journal entries but only extracted ${count}`);
+    if (count < 3) {
+      console.log(`⚠️ Expected 3 journal entries but only extracted ${count}`);
     }
+    return parsedEntries;
   } catch (e) {
     console.log('📓 Journal generation failed:', e.message);
     throw e;
@@ -3018,8 +3467,16 @@ const runBot = async () => {
         const prevJournalTs = botData.lastJournalGeneration;
         botData.lastJournalGeneration = Date.now();
         persistCycleState();
-        generateJournalEntries(tickSummary, botData).then(() => {
+        generateJournalEntries(tickSummary, botData).then(async (entries) => {
           console.log('📓 Journal generation succeeded, next in 8h');
+          // Ingest journal entries into wiki (non-fatal)
+          try { await ingestToWiki(entries); } catch (e) {
+            console.log('📚 Wiki ingest failed (non-fatal):', e.message);
+          }
+          // Lint wiki if enough time has passed (non-fatal)
+          try { await lintWiki(); } catch (e) {
+            console.log('📚 Wiki lint failed (non-fatal):', e.message);
+          }
           // Extract lessons after successful journal generation (not every tick)
           return extractHypothesisLessons();
         }).catch(e => {

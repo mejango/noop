@@ -17,6 +17,20 @@ import {
 } from './db';
 import { buildCorrelationAnalysis } from './correlation';
 import { getPositions, getCollaterals } from './lyra';
+import fs from 'fs';
+import path from 'path';
+
+const WIKI_DIR = process.env.WIKI_DIR || path.join(process.cwd(), '..', 'knowledge');
+
+function readWikiPageForSnapshot(pagePath: string): string | null {
+  try {
+    const content = fs.readFileSync(path.join(WIKI_DIR, pagePath), 'utf-8');
+    if (content.includes('Awaiting initial assessment')) return null;
+    return content.length > 2000 ? content.slice(0, 2000) + '\n...[truncated]' : content;
+  } catch {
+    return null;
+  }
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _cache: { data: any; ts: number } | null = null;
@@ -299,5 +313,16 @@ async function _buildUncached() {
         });
       })(),
     },
+
+    wiki_knowledge: (() => {
+      const regimeCurrent = readWikiPageForSnapshot('regimes/current.md');
+      const playbook = readWikiPageForSnapshot('strategy/playbook.md');
+      if (!regimeCurrent && !playbook) return null;
+      return {
+        _description: 'Compiled knowledge from the wiki. Use to ground chat responses in accumulated bot intelligence.',
+        regime_current: regimeCurrent,
+        strategy_playbook: playbook,
+      };
+    })(),
   };
 }

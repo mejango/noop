@@ -7,6 +7,7 @@ services:
       - "3000:3000"
     volumes:
       - noop-data:/data
+      - noop-knowledge:/app/knowledge
     env_file:
       - .env
     environment:
@@ -16,3 +17,4 @@ services:
 
 volumes:
   noop-data:
+  noop-knowledge:
