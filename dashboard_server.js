@@ -1,37 +1,53 @@
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const cors = require('cors');
 
 const app = express();
 const PORT = 3000;
+const ARCHIVE_DIR = path.join(__dirname, 'archive');
+const DASHBOARD_FILE = path.join(__dirname, 'trading_dashboard.html');
 
 // Simple queue to prevent multiple simultaneous file processing
 let isProcessingFiles = false;
 
-// Enable CORS for all routes
-app.use(cors());
+app.get('/', (req, res) => {
+    res.sendFile(DASHBOARD_FILE);
+});
 
-// Serve static files
-app.use(express.static('.'));
+app.get('/trading_dashboard.html', (req, res) => {
+    res.sendFile(DASHBOARD_FILE);
+});
+
+function safeArchivePath(filename) {
+    if (typeof filename !== 'string' || filename.includes('/') || filename.includes('\\') || filename.includes('\0')) {
+        return null;
+    }
+
+    const normalized = path.basename(filename);
+    if (normalized !== filename) return null;
+
+    const root = path.resolve(ARCHIVE_DIR);
+    const resolved = path.resolve(root, normalized);
+    if (!resolved.startsWith(root + path.sep)) return null;
+
+    return resolved;
+}
 
 // API endpoint to get all available data files
 app.get('/api/data-files', (req, res) => {
     try {
-        const archiveDir = './archive';
         const files = [];
         
-        if (fs.existsSync(archiveDir)) {
-            const fileList = fs.readdirSync(archiveDir);
+        if (fs.existsSync(ARCHIVE_DIR)) {
+            const fileList = fs.readdirSync(ARCHIVE_DIR);
             
             fileList.forEach(file => {
-                const filePath = path.join(archiveDir, file);
+                const filePath = path.join(ARCHIVE_DIR, file);
                 const stats = fs.statSync(filePath);
                 
                 if (stats.isFile()) {
                     files.push({
                         name: file,
-                        path: filePath,
                         size: stats.size,
                         modified: stats.mtime,
                         type: getFileType(file)
@@ -53,7 +69,10 @@ app.get('/api/data-files', (req, res) => {
 app.get('/api/data/:filename', (req, res) => {
     try {
         const filename = req.params.filename;
-        const filePath = path.join('./archive', filename);
+        const filePath = safeArchivePath(filename);
+        if (!filePath) {
+            return res.status(400).json({ error: 'Invalid filename' });
+        }
         
         if (!fs.existsSync(filePath)) {
             return res.status(404).json({ error: 'File not found' });
@@ -75,20 +94,18 @@ app.get('/api/data/:filename', (req, res) => {
 // API endpoint to get the most recent file data (fast initial load)
 app.get('/api/recent-data', async (req, res) => {
     try {
-        const archiveDir = './archive';
-        
-        if (!fs.existsSync(archiveDir)) {
+        if (!fs.existsSync(ARCHIVE_DIR)) {
             return res.json([]);
         }
         
-        const files = fs.readdirSync(archiveDir);
+        const files = fs.readdirSync(ARCHIVE_DIR);
         
         // Get the most recent files, prioritizing data-rich files
         const sortedFiles = files
             .map(file => ({
                 name: file,
-                path: path.join(archiveDir, file),
-                stats: fs.statSync(path.join(archiveDir, file))
+                path: path.join(ARCHIVE_DIR, file),
+                stats: fs.statSync(path.join(ARCHIVE_DIR, file))
             }))
             .filter(file => file.stats.isFile())
             .sort((a, b) => b.stats.mtime - a.stats.mtime);
@@ -144,21 +161,20 @@ app.get('/api/latest-data', async (req, res) => {
     }, 30000); // 30 second timeout
     
     try {
-        const archiveDir = './archive';
         const allData = [];
         
-        if (!fs.existsSync(archiveDir)) {
+        if (!fs.existsSync(ARCHIVE_DIR)) {
             return res.json([]);
         }
         
-        const files = fs.readdirSync(archiveDir);
+        const files = fs.readdirSync(ARCHIVE_DIR);
         
         // Sort files by modification time and process most recent first
         const sortedFiles = files
             .map(file => ({
                 name: file,
-                path: path.join(archiveDir, file),
-                stats: fs.statSync(path.join(archiveDir, file))
+                path: path.join(ARCHIVE_DIR, file),
+                stats: fs.statSync(path.join(ARCHIVE_DIR, file))
             }))
             .filter(file => file.stats.isFile())
             .sort((a, b) => b.stats.mtime - a.stats.mtime);
@@ -172,7 +188,7 @@ app.get('/api/latest-data', async (req, res) => {
         // Process different file types
         for (const fileInfo of recentFiles) {
             const file = fileInfo.name;
-            const filePath = path.join(archiveDir, file);
+            const filePath = path.join(ARCHIVE_DIR, file);
             const content = fs.readFileSync(filePath, 'utf-8');
             
             try {
@@ -208,21 +224,20 @@ app.get('/api/historical-data', async (req, res) => {
     const offset = parseInt(req.query.offset) || 0; // Days to skip from most recent
     
     try {
-        const archiveDir = './archive';
         const allData = [];
         
-        if (!fs.existsSync(archiveDir)) {
+        if (!fs.existsSync(ARCHIVE_DIR)) {
             return res.json([]);
         }
         
-        const files = fs.readdirSync(archiveDir);
+        const files = fs.readdirSync(ARCHIVE_DIR);
         
         // Sort files by modification time
         const sortedFiles = files
             .map(file => ({
                 name: file,
-                path: path.join(archiveDir, file),
-                stats: fs.statSync(path.join(archiveDir, file))
+                path: path.join(ARCHIVE_DIR, file),
+                stats: fs.statSync(path.join(ARCHIVE_DIR, file))
             }))
             .filter(file => file.stats.isFile())
             .sort((a, b) => b.stats.mtime - a.stats.mtime);
@@ -240,7 +255,7 @@ app.get('/api/historical-data', async (req, res) => {
         // Process files in this batch
         for (const fileInfo of batchFiles) {
             const file = fileInfo.name;
-            const filePath = path.join(archiveDir, file);
+            const filePath = path.join(ARCHIVE_DIR, file);
             
             try {
                 const content = fs.readFileSync(filePath, 'utf-8');
@@ -281,20 +296,18 @@ app.get('/api/load-file', async (req, res) => {
     isProcessingFiles = true;
     
     try {
-        const archiveDir = './archive';
-        
-        if (!fs.existsSync(archiveDir)) {
+        if (!fs.existsSync(ARCHIVE_DIR)) {
             return res.json([]);
         }
         
-        const files = fs.readdirSync(archiveDir);
+        const files = fs.readdirSync(ARCHIVE_DIR);
         
         // Sort files by modification time (most recent first)
         const sortedFiles = files
             .map(file => ({
                 name: file,
-                path: path.join(archiveDir, file),
-                stats: fs.statSync(path.join(archiveDir, file))
+                path: path.join(ARCHIVE_DIR, file),
+                stats: fs.statSync(path.join(ARCHIVE_DIR, file))
             }))
             .filter(file => file.stats.isFile())
             .sort((a, b) => b.stats.mtime - a.stats.mtime);

@@ -3,6 +3,7 @@ import {
   getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap,
   getFundingRates, getOptionsSkew, getAggregateOI, getOISnapshots,
 } from '@/lib/db';
+import { CHART_ROW_LIMITS } from '@/lib/limits';
 
 export const dynamic = 'force-dynamic';
 
@@ -58,7 +59,8 @@ function downsampleHeatmap(rows: Record<string, any>[], bucketMs: number): Recor
   if (rows.length === 0 || bucketMs <= 0) return rows;
   const seen = new Set<string>();
   const result: typeof rows = [];
-  for (const row of rows) {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
     const t = new Date(row.timestamp).getTime();
     const bucket = Math.floor(t / bucketMs) * bucketMs;
     const key = `${bucket}|${row.instrument_name}`;
@@ -67,7 +69,7 @@ function downsampleHeatmap(rows: Record<string, any>[], bucketMs: number): Recor
       result.push({ ...row, timestamp: new Date(bucket).toISOString() });
     }
   }
-  return result;
+  return result.reverse();
 }
 
 // Downsample liquidity rows (dynamic keys per dex)
@@ -116,12 +118,11 @@ export function GET(request: NextRequest) {
     const bestScores = getBestScores();
     const bucketMs = BUCKET_MS[range] || 0;
 
-    // Fetch raw data — use higher limit for longer ranges since we'll downsample
-    const rowLimit = bucketMs > 0 ? 50000 : 5000;
-    const prices = getSpotPrices(since, rowLimit);
+    const limits = CHART_ROW_LIMITS[range] || CHART_ROW_LIMITS['7d'];
+    const prices = getSpotPrices(since, limits.prices);
     const options = getBestOptionsOverTime(since);
     const liquidity = getLiquidityOverTime(since);
-    const optionsHeatmap = getOptionsHeatmap(since);
+    const optionsHeatmap = getOptionsHeatmap(since, limits.heatmap);
 
     // Sentiment data
     const fundingRates = getFundingRates(since);

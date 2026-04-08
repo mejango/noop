@@ -6,18 +6,23 @@ const DERIVE_WALLET = '0xD87890df93bf74173b51077e5c6cD12121d87903';
 const SUBACCOUNT_ID = 25923;
 const BASE_URL = 'https://api.lyra.finance';
 const CACHE_TTL = 30_000; // 30s
+const REQUEST_TIMEOUT_MS = 15_000;
+let cachedPrivateKey: `0x${string}` | null = null;
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
 function loadPrivateKey(): `0x${string}` {
+  if (cachedPrivateKey) return cachedPrivateKey;
   if (process.env.PRIVATE_KEY) {
     const key = process.env.PRIVATE_KEY.trim();
-    return (key.startsWith('0x') ? key : `0x${key}`) as `0x${string}`;
+    cachedPrivateKey = (key.startsWith('0x') ? key : `0x${key}`) as `0x${string}`;
+    return cachedPrivateKey;
   }
   try {
     const keyPath = path.join(process.cwd(), '..', '.private_key.txt');
     const key = fs.readFileSync(keyPath, 'utf8').trim();
-    return (key.startsWith('0x') ? key : `0x${key}`) as `0x${string}`;
+    cachedPrivateKey = (key.startsWith('0x') ? key : `0x${key}`) as `0x${string}`;
+    return cachedPrivateKey;
   } catch {
     throw new Error('No private key found (set PRIVATE_KEY env or create ../.private_key.txt)');
   }
@@ -58,6 +63,7 @@ async function lyraPost<T>(endpoint: string, body: Record<string, unknown>): Pro
     method: 'POST',
     headers,
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!res.ok) {
     const text = await res.text();

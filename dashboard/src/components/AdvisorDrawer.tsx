@@ -20,6 +20,7 @@ interface Chat {
 }
 
 const STORAGE_KEY = 'advisor-chats';
+const WRITE_TOKEN_KEY = 'noop-write-token';
 
 function loadChats(): Chat[] {
   try {
@@ -199,6 +200,8 @@ export default function AdvisorDrawer() {
   const [journalFilter, setJournalFilter] = useState<string | null>(null);
   const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null });
   const [opsLoading, setOpsLoading] = useState(false);
+  const [writeToken, setWriteToken] = useState('');
+  const [writeAuthError, setWriteAuthError] = useState<string | null>(null);
   const [hypStats, setHypStats] = useState<{
     total: number; reviewed: number; pending: number;
     confirmed_convex: number; confirmed_linear: number;
@@ -217,7 +220,17 @@ export default function AdvisorDrawer() {
       setChats(saved);
       setActiveChatId(saved[0].id); // most recent first
     }
+    try {
+      setWriteToken(localStorage.getItem(WRITE_TOKEN_KEY) || '');
+    } catch { /* ignore */ }
   }, []);
+
+  useEffect(() => {
+    try {
+      if (writeToken.trim()) localStorage.setItem(WRITE_TOKEN_KEY, writeToken.trim());
+      else localStorage.removeItem(WRITE_TOKEN_KEY);
+    } catch { /* ignore */ }
+  }, [writeToken]);
 
   // Save chats to localStorage whenever they change
   const chatsRef = useRef(chats);
@@ -333,6 +346,11 @@ export default function AdvisorDrawer() {
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || streaming) return;
+    if (!writeToken.trim()) {
+      setWriteAuthError('Set the write token to use the advisor.');
+      return;
+    }
+    setWriteAuthError(null);
 
     // Ensure we have an active chat
     let chatId = activeChatId;
@@ -369,7 +387,10 @@ export default function AdvisorDrawer() {
     try {
       const res = await fetch('/api/ai/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-NOOP-Write-Token': writeToken.trim(),
+        },
         body: JSON.stringify({
           message: text.trim(),
           timestamp: now,
@@ -379,6 +400,9 @@ export default function AdvisorDrawer() {
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: 'Request failed' }));
+        if (res.status === 401 || res.status === 503) {
+          setWriteAuthError(err.error || 'Write access denied');
+        }
         setChats(prev => {
           const updated = prev.map(c => {
             if (c.id !== chatId) return c;
@@ -437,7 +461,7 @@ export default function AdvisorDrawer() {
     } finally {
       setStreaming(false);
     }
-  }, [activeChatId, createNewChat, streaming, scrollToBottom, saveChatsDebounced]);
+  }, [activeChatId, createNewChat, saveChatsDebounced, scrollToBottom, streaming, writeToken]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1102,6 +1126,20 @@ export default function AdvisorDrawer() {
         {/* Input — only show in chat tab */}
         {tab === 'chat' && (
           <div className="px-4 py-3 border-t border-white/10 shrink-0">
+            <div className="mb-3">
+              <input
+                type="password"
+                value={writeToken}
+                onChange={e => setWriteToken(e.target.value)}
+                placeholder="Write token"
+                className="w-full bg-white/5 border border-white/10 text-white text-sm px-3 py-2 focus:outline-none focus:border-juice-orange/50 placeholder-gray-600"
+              />
+              {writeAuthError ? (
+                <p className="mt-2 text-xs text-red-400">{writeAuthError}</p>
+              ) : (
+                <p className="mt-2 text-xs text-gray-500">Required for advisor writes. Public reads remain open.</p>
+              )}
+            </div>
             <div className="flex gap-2">
               <textarea
                 ref={inputRef}

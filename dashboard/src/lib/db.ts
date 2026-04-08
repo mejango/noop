@@ -56,11 +56,15 @@ function prepareAll(d: Database.Database) {
     `),
 
     getOptionsHeatmap: d.prepare(`
-      SELECT timestamp, option_type, instrument_name, strike, delta, ask_price, bid_price,
-        index_price, expiry, ask_delta_value, bid_delta_value,
-        mark_price, implied_vol, ask_amount, bid_amount
-      FROM options_snapshots
-      WHERE timestamp > ?
+      SELECT * FROM (
+        SELECT timestamp, option_type, instrument_name, strike, delta, ask_price, bid_price,
+          index_price, expiry, ask_delta_value, bid_delta_value,
+          mark_price, implied_vol, ask_amount, bid_amount
+        FROM options_snapshots
+        WHERE timestamp > ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+      )
       ORDER BY timestamp ASC
     `),
 
@@ -473,8 +477,8 @@ export function getSpotPrices(since: string, limit = 2000) {
   return getStmts().getSpotPrices.all(since, limit);
 }
 
-export function getOptionsHeatmap(since: string) {
-  return getStmts().getOptionsHeatmap.all(since);
+export function getOptionsHeatmap(since: string, limit = 12000) {
+  return getStmts().getOptionsHeatmap.all(since, limit);
 }
 
 export function getBestOptionsOverTime(since: string) {

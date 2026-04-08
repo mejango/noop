@@ -1,6 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { buildMarketSnapshot } from '@/lib/snapshot';
 import { insertJournalEntry } from '@/lib/journal';
+import { validateWriteAccess } from '@/lib/write-access';
+import { CHAT_HISTORY_MAX_MESSAGES, CHAT_MESSAGE_MAX_CHARS } from '@/lib/limits';
 
 export const dynamic = 'force-dynamic';
 
@@ -142,6 +144,14 @@ function formatTimestamp(ts: number): string {
 
 export async function POST(request: Request) {
   try {
+    const writeAccess = validateWriteAccess(request);
+    if (!writeAccess.ok) {
+      return new Response(JSON.stringify({ error: writeAccess.reason }), {
+        status: writeAccess.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
     const { message, history, timestamp: msgTimestamp } = (await request.json()) as {
       message: string;
       history?: ChatMessage[];
@@ -150,6 +160,12 @@ export async function POST(request: Request) {
 
     if (!message || typeof message !== 'string') {
       return new Response(JSON.stringify({ error: 'message is required' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (message.length > CHAT_MESSAGE_MAX_CHARS) {
+      return new Response(JSON.stringify({ error: `message exceeds ${CHAT_MESSAGE_MAX_CHARS} characters` }), {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -172,7 +188,7 @@ export async function POST(request: Request) {
 
     // Build messages array with snapshot context
     const messages: Anthropic.MessageParam[] = [];
-    const HISTORY_WINDOW = 16; // last 8 user-assistant pairs
+    const HISTORY_WINDOW = CHAT_HISTORY_MAX_MESSAGES;
 
     if (history && Array.isArray(history)) {
       // Strip journal tags and stale snapshots from history, then window

@@ -5,6 +5,7 @@
   "main": "dashboard_server.js",
   "scripts": {
     "start": "node dashboard_server.js",
+    "test": "node test/trading-system.test.js",
     "bot": "node bot/index.js",
     "bot:standalone": "node script.js",
     "dashboard": "node dashboard_server.js"
