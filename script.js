@@ -1165,25 +1165,46 @@ const getSpotPrice = async () => {
   }
 };
 
-// Fetch ETH funding rates from Binance (public, no auth)
-const BINANCE_FAPI = 'https://fapi.binance.com';
+// Fetch ETH funding rates — Bybit primary (no geo-block), Binance fallback
 const fetchFundingRates = async () => {
+  // Try Bybit first (public, no geo-restrictions)
   try {
-    const response = await axios.get(`${BINANCE_FAPI}/fapi/v1/fundingRate`, {
+    const response = await axios.get('https://api.bybit.com/v5/market/funding/history', {
+      params: { category: 'linear', symbol: 'ETHUSDT', limit: 10 },
+      timeout: 5000,
+    });
+    const list = response.data?.result?.list;
+    if (Array.isArray(list) && list.length > 0) {
+      return list.map(r => ({
+        timestamp: new Date(Number(r.fundingRateTimestamp)).toISOString(),
+        exchange: 'bybit',
+        symbol: 'ETHUSDT',
+        rate: Number(r.fundingRate),
+      }));
+    }
+  } catch (e) {
+    console.log(`⚠️ Bybit funding rate failed: ${e.message}`);
+  }
+
+  // Fallback to Binance
+  try {
+    const response = await axios.get('https://fapi.binance.com/fapi/v1/fundingRate', {
       params: { symbol: 'ETHUSDT', limit: 10 },
       timeout: 5000,
     });
-    if (!Array.isArray(response.data) || response.data.length === 0) return [];
-    return response.data.map(r => ({
-      timestamp: new Date(r.fundingTime).toISOString(),
-      exchange: 'binance',
-      symbol: r.symbol,
-      rate: Number(r.fundingRate),
-    }));
-  } catch (error) {
-    console.log(`⚠️ Funding rate fetch failed: ${error.message}`);
-    return [];
+    if (Array.isArray(response.data) && response.data.length > 0) {
+      return response.data.map(r => ({
+        timestamp: new Date(r.fundingTime).toISOString(),
+        exchange: 'binance',
+        symbol: r.symbol,
+        rate: Number(r.fundingRate),
+      }));
+    }
+  } catch (e) {
+    console.log(`⚠️ Binance funding rate failed: ${e.message}`);
   }
+
+  return [];
 };
 
 // Fetch option details
@@ -1732,7 +1753,7 @@ Output ONLY this JSON:
 {"status":"<category>","confidence":<0-1>,"verdict":"<2-3 sentence explanation focusing on whether protection was cheap/expensive and the bleed cost, not just whether the price moved correctly>"}`;
 
       const response = await axios.post('https://api.anthropic.com/v1/messages', {
-        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+        model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
         max_tokens: 512,
         messages: [{ role: 'user', content: reviewPrompt }],
       }, {
@@ -1798,7 +1819,7 @@ Output JSON:
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
       max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -1950,7 +1971,7 @@ If no pages need updating, output: <no_updates/>`;
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-6',
+      model: 'claude-opus-4-6',
       max_tokens: 8192,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -1959,7 +1980,7 @@ If no pages need updating, output: <no_updates/>`;
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 120000,
+      timeout: 180000,
     });
 
     const text = response.data?.content?.[0]?.text || '';
@@ -2574,7 +2595,7 @@ Use this wiki context to:
     const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite exactly 3 journal entries: one regime_note, one hypothesis, one observation. Use the <journal type="..."> tags. Do NOT write a suggestion entry.`;
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
       max_tokens: 4096,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
