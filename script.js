@@ -338,14 +338,17 @@ const loadData = () => {
   try {
     const state = db.loadBotState();
     if (state) {
-      botData.putCycleStart = state.put_cycle_start;
-      botData.putNetBought = state.put_net_bought;
-      botData.putUnspentBuyLimit = state.put_unspent_buy_limit;
-      botData.putBudgetForCycle = state.put_budget_for_cycle || 0;
+      // Preserve non-cycle state
       botData.lastCheck = state.last_check || 0;
       botData.lastJournalGeneration = state.last_journal_generation || 0;
       botData.lastAdvisorySpotPrice = state.last_advisory_spot_price || null;
       botData.lastAdvisoryTimestamp = state.last_advisory_timestamp || 0;
+
+      // Force fresh put cycle — putCycleStart left null so maybeResetPutCycle
+      // triggers on first tick with a clean budget from current portfolio value.
+      console.log(`📋 Put cycle reset on startup (clearing putNetBought=$${(state.put_net_bought || 0).toFixed(2)}, rollover=$${(state.put_unspent_buy_limit || 0).toFixed(2)})`);
+      persistCycleState();
+
       console.log(`✅ Loaded cycle state from SQLite`);
     }
   } catch (e) {
