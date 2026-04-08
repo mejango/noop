@@ -1537,7 +1537,7 @@ const fetchCollaterals = async () => {
     const raw = response.data?.result;
     const collaterals = Array.isArray(raw) ? raw : (raw?.collaterals || []);
     return collaterals.map(c => ({
-      asset: c.asset_name,
+      asset_name: c.asset_name,
       amount: Number(c.amount ?? 0),
       mark_price: Number(c.mark_price ?? 0),
       value_usd: Number(c.mark_value ?? c.value ?? 0),
@@ -1566,13 +1566,13 @@ const fetchSubaccount = async () => {
     });
     const r = response.data?.result;
     return {
-      initial_margin: Number(r?.initial_margin ?? 0),
-      maintenance_margin: Number(r?.maintenance_margin ?? 0),
+      initial_margin: Number(r?.initial_margin ?? 0),        // available margin (≈ buying power)
+      maintenance_margin: Number(r?.maintenance_margin ?? 0), // available before liquidation
       subaccount_value: Number(r?.subaccount_value ?? 0),
       positions_value: Number(r?.positions_value ?? 0),
       collaterals_value: Number(r?.collaterals_value ?? 0),
-      collaterals_initial_margin: Number(r?.collaterals_initial_margin ?? 0),
-      collaterals_maintenance_margin: Number(r?.collaterals_maintenance_margin ?? 0),
+      positions_initial_margin: Number(r?.positions_initial_margin ?? 0),   // margin consumed by positions
+      positions_maintenance_margin: Number(r?.positions_maintenance_margin ?? 0),
       open_orders_margin: Number(r?.open_orders_margin ?? 0),
       is_under_liquidation: r?.is_under_liquidation || false,
     };
@@ -3208,7 +3208,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
     let marginState = null;
     try { marginState = await fetchSubaccount(); } catch { /* ok */ }
     const marginStr = marginState
-      ? `Margin: initial=$${marginState.initial_margin.toFixed(2)}, maintenance=$${marginState.maintenance_margin.toFixed(2)}, account_value=$${marginState.subaccount_value.toFixed(2)}${marginState.is_under_liquidation ? ' [UNDER LIQUIDATION]' : ''}`
+      ? `Margin: buying_power=$${marginState.initial_margin.toFixed(2)}, account_value=$${marginState.subaccount_value.toFixed(2)}, collateral=$${marginState.collaterals_value.toFixed(2)}${marginState.is_under_liquidation ? ' [UNDER LIQUIDATION]' : ''}`
       : 'Margin: unavailable';
     try {
       // Auto-reject after 3 retries
@@ -3272,6 +3272,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
 CALL DISCIPLINE: Short call exposure is hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each call trade should put skin in the game — meaningful size, not tiny nibbles. Reject call sells that are too small to matter.
+CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. Buying back a short call because price rose is paying the crowd's fear premium. Ask: is the position genuinely threatened, or does it just feel that way? Confirm buybacks that lock in meaningful profit or exit a position that's truly challenged. Reject buybacks driven by price action alone when theta is still working and the position isn't under real threat. Use the Greeks and remaining DTE to judge the actual risk.
 REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.`,
           messages: [{ role: 'user', content: confirmPrompt }],
         }, {
@@ -3292,7 +3293,7 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
       let codexVote = null;
       try {
         const codexText = await callOpenAI(
-          `You are a Taleb-style risk advisor. Confirm trades that are convex (bounded downside, unbounded upside). Reject trades that expose us to ruin or have symmetric payoffs. Be conservative — when in doubt, reject. MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin engine. Reject if initial_margin is too low or account is under liquidation. CALL DISCIPLINE: Short call exposure is hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each call trade should put skin in the game — meaningful size, not tiny trades. Reject call sells that are too small to matter. REGIME AWARENESS: ETH crashes cascade fast. Selling profitable puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV may overpay alongside the crowd. Use the actual position characteristics, Greeks, and momentum to judge. No rigid rules — just awareness that crashes go deeper than expected and fear lingers longer than expected. Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }`,
+          `You are a Taleb-style risk advisor. Confirm trades that are convex (bounded downside, unbounded upside). Reject trades that expose us to ruin or have symmetric payoffs. Be conservative — when in doubt, reject. MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin engine. Reject if initial_margin is too low or account is under liquidation. CALL DISCIPLINE: Short call exposure is hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each call trade should put skin in the game — meaningful size, not tiny trades. Reject call sells that are too small to matter. CALL BUYBACK DISCIPLINE: For buyback_call — panic buybacks are the opposite of antifragility. The crowd buys back calls on rising prices out of fear. Ask: is this position genuinely at risk, or does it just feel that way? Confirm buybacks that capture real profit or exit genuinely challenged positions. Reject buybacks driven by price noise when the position is still working. Use the Greeks, DTE, and premium captured to judge — not the last candle. REGIME AWARENESS: ETH crashes cascade fast. Selling profitable puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV may overpay alongside the crowd. Use the actual position characteristics, Greeks, and momentum to judge. No rigid rules — just awareness that crashes go deeper than expected and fear lingers longer than expected. Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }`,
           confirmPrompt,
           { maxTokens: 256, timeout: 15000, model: 'gpt-4o-mini' }
         );
@@ -3491,15 +3492,16 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
       note: `Hard cap: ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each trade should be meaningful (~20%+ of cap). Current: ${totalCallExposure.toFixed(2)} / ${(CALL_EXPOSURE_CAP_PCT * ethBalance).toFixed(2)} ETH.`,
     },
     margin: marginState ? {
-      initial_margin: marginState.initial_margin,
-      maintenance_margin: marginState.maintenance_margin,
-      subaccount_value: marginState.subaccount_value,
-      collaterals_value: marginState.collaterals_value,
+      buying_power: +marginState.initial_margin.toFixed(2),              // available margin for new trades
+      maintenance_margin: +marginState.maintenance_margin.toFixed(2),    // available before liquidation
+      subaccount_value: +marginState.subaccount_value.toFixed(2),
+      collaterals_value: +marginState.collaterals_value.toFixed(2),
+      positions_margin: +marginState.positions_initial_margin.toFixed(2), // margin consumed by positions
       open_orders_margin: marginState.open_orders_margin,
       is_under_liquidation: marginState.is_under_liquidation,
       margin_usage_pct: marginState.collaterals_value > 0
-        ? +((1 - marginState.initial_margin / marginState.collaterals_value) * 100).toFixed(1)
-        : null,
+        ? +((marginState.positions_initial_margin / marginState.collaterals_value) * 100).toFixed(1)
+        : 0,
     } : null,
     putBudgetDiscipline: {
       annualRate: PUT_ANNUAL_RATE,
@@ -3510,7 +3512,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
       cycleDays: BOT_CONFIG.PERIOD_DAYS,
       note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of portfolio value per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once.`,
     },
-    note: 'Account is ETH-collateralized. Long puts offset ETH exposure in margin. Sizing must respect margin headroom, put budget discipline, AND call exposure cap.',
+    note: 'Account is ETH-collateralized on Derive. buying_power = available margin for new trades (initial_margin from API). margin_usage_pct = positions_margin / collaterals_value. 0% means positions consume no margin (standard long puts). Sizing must respect buying power, put budget discipline, AND call exposure cap.',
   };
 
   // Recent orders
@@ -3605,6 +3607,13 @@ There are TWO constraints on put buying:
 
 For calls: **hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings** in total short call exposure. The bot enforces this — you can't exceed it. Within that cap, put skin in the game: each call trade should be meaningful (roughly 20%+ of the cap), not tiny nibbles. Size against margin headroom, ETH collateral, and remaining cap headroom.
 
+## Call Buyback Philosophy (Spitznagel)
+We sell short-dated calls. The arithmetic of buybacks is simple: don't pay fear premiums to exit positions that are working.
+- **Profit capture over panic**: When a meaningful chunk of premium has decayed, locking it in and redeploying is disciplined. Buying back at a loss because the price moved against you is not — it's paying the crowd's fear premium.
+- **Let theta work**: Short calls are a time-decay trade. A price move against you doesn't change the thesis unless the position is genuinely threatened. Use the Greeks and the position's actual risk profile to judge, not the price action alone.
+- **Rolling discipline**: Rolling should improve the position, not just delay a loss. If rolling costs more than it's worth, accepting assignment is the honest response.
+- Use your judgment on the specific situation — the Greeks, DTE remaining, how much premium has decayed, and the broader portfolio context all matter more than any fixed threshold.
+
 ## Market Regime Awareness
 ETH crashes tend to cascade — they accelerate, not slow down. Your decisions should reflect the shape of the moment.
 
@@ -3661,7 +3670,7 @@ Rules:
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price
 - For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct
-- For buyback_call exits: use conditions on unrealized_pnl_pct (e.g. gt 60) and/or dte
+- For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. Profit capture, genuine assignment risk, and expiry cleanup are good reasons. Price moving against you alone is not — that's panic buying the crowd's fear premium. Set conditions that reflect the position's actual risk profile.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending.
@@ -3766,6 +3775,13 @@ You think like Nassim Taleb. You believe in:
 - Skin in the game. If a trade goes wrong, the cost must be small and known.
 - Fat tails. The market is more volatile than anyone thinks. Events that "shouldn't happen" happen regularly.
 - Via negativa. What you DON'T do matters more than what you do. Avoid ruin above all.
+
+## Call Buyback Anti-Fragility (Taleb)
+Panic buybacks are the opposite of antifragility. The crowd buys back calls when price rises because it FEELS dangerous. That's paying a fear premium — the exact behavior we profit from.
+- The asymmetry of short calls is known and bounded. You sold time decay. The question is always: is the position genuinely threatened, or does it just feel that way?
+- Scrutinize any buyback rule that triggers on price movement alone. Ask: is the portfolio actually at risk of ruin, or is this noise?
+- Rolling for a net debit is paying to extend exposure. If you can't roll favorably, accepting assignment is the antifragile response — it means you were right about the price level when you sold.
+- Use your judgment on what constitutes a real threat vs. noise. The Greeks, remaining DTE, premium captured, and portfolio shape tell the story — not the last candle.
 
 ## Market Regime Awareness
 ETH crashes cascade — they accelerate, not slow down. Your critique should consider:

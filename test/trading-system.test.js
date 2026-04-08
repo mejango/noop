@@ -731,7 +731,7 @@ describe('Entry rule matching (integration)', () => {
   test('evaluateConditions + computeCurrentValues work together for exit rule triggering', () => {
     // Simulate: position has DTE < 2 and unrealized P&L > 30%
     const position = {
-      instrument_name: 'ETH-20260410-1500-P', // 3 days from "today" April 7, 2026
+      instrument_name: 'ETH-20260415-1500-P', // ~7 days out, comfortably above DTE thresholds
       direction: 'long',
       avg_entry_price: 0.05,
       mark_price: 0,
