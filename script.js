@@ -156,6 +156,22 @@ const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
 const CALL_EXPOSURE_CAP_PCT = BOT_CONFIG.CALL_EXPOSURE_CAP_PCT || 0.40;
 const SUBACCOUNT_ID = 25923;
 
+// ─── Telegram Notifications ──────────────────────────────────────────────────
+const sendTelegram = async (message) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+  try {
+    await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+      chat_id: chatId,
+      text: message,
+      parse_mode: 'Markdown',
+    }, { timeout: 5000 });
+  } catch (e) {
+    console.log('📱 Telegram failed:', e.message);
+  }
+};
+
 // ETH contract addresses for analysis
 const ETH_CONTRACTS = {
   WETH: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
@@ -3061,6 +3077,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       total_value: totalValue, spot_price: spotPrice, raw_response: `{"dryRun":true,"orderType":"${orderType}"}`,
     });
     console.log(`🔸 DRY RUN: ${action} ${amount} ${instrumentName} @ $${price} [${orderType}] | $${totalValue.toFixed(2)} (put budget: $${botData.putNetBought.toFixed(2)})`);
+    sendTelegram(`🧪 *DRY RUN: ${action.toUpperCase()}* ${instrumentName} @ $${price}`);
     return { dryRun: true, action, instrumentName, amount, price, totalValue, orderType };
   }
 
@@ -3191,6 +3208,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   }
 
   console.log(`✅ ${action.toUpperCase()}: ${filledAmt} ${instrumentName} @ $${avgPx.toFixed(4)} [${orderType}] | total=$${totalValue.toFixed(4)}`);
+  sendTelegram(`✅ *${action.toUpperCase()}* ${instrumentName}\nAmount: ${filledAmt} @ $${avgPx.toFixed(4)}\nTotal: $${totalValue.toFixed(4)}`);
   return { filledAmt, avgPx, totalValue, order, orderType };
 };
 
@@ -3222,6 +3240,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       if (marginState?.is_under_liquidation && (action.action === 'buy_put' || action.action === 'sell_call')) {
         db.updatePendingAction(action.id, { status: 'rejected', confirmation_reasoning: 'Auto-rejected: account under liquidation' });
         console.log(`🚨 Auto-rejected ${action.action} ${action.instrument_name}: account under liquidation`);
+        sendTelegram(`🚨 *LIQUIDATION WARNING* — auto-rejected ${action.action} ${action.instrument_name}`);
         continue;
       }
 
@@ -3404,6 +3423,7 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
           confirmation_reasoning: reasoning,
         });
         console.log(`🚫 Rejected: ${action.action} ${action.instrument_name} | ${reasoning}`);
+        sendTelegram(`❌ *REJECTED*: ${action.action} ${action.instrument_name}\n${reasoning}`);
       }
     } catch (e) {
       console.error(`❌ Confirmation error for ${action.instrument_name}:`, e.message);
@@ -4373,6 +4393,7 @@ const runBot = async () => {
       await confirmAndExecutePending(instruments, tickerMap, spotPrice);
     } catch (error) {
       console.error('❌ Trading system error:', error.message);
+      sendTelegram(`❌ *Trading system error*: ${error.message}`);
     }
 
     // SQLite: persist options snapshots (candidates only — heatmap/chart data)
@@ -4511,6 +4532,7 @@ const runBot = async () => {
   
   } catch (error) {
     console.error('Error in bot loop:', error);
+    sendTelegram(`⚠️ *Bot loop error* (retrying 60s): ${error.message}`);
     setTimeout(runBotWithWatchdog, 60000); // Retry in 1 minute on error
   }
 };
@@ -4521,12 +4543,14 @@ let allowExit = false;
 // Global error handlers - let PM2 handle restarts
 process.on('unhandledRejection', (reason, promise) => {
   console.error('❌ Unhandled Promise Rejection:', reason);
+  sendTelegram(`🚨 *Bot crash* (unhandled rejection): ${reason}`);
   console.log('📦 Letting PM2 handle restart');
   process.exit(1);
 });
 
 process.on('uncaughtException', (error) => {
   console.error('❌ Uncaught Exception:', error.message);
+  sendTelegram(`🚨 *Bot crash* (uncaught exception): ${error.message}`);
   console.log('📦 Letting PM2 handle restart');
   process.exit(1);
 });
@@ -4617,6 +4641,8 @@ const _bootAdvisory = async () => {
   }
 };
 _bootAdvisory();
+
+sendTelegram('🔄 *NOOP Bot restarted*');
 
 // Defer first run if the bot ran recently (prevents premature runs on redeploy)
 const timeSinceLastCheck = Date.now() - botData.lastCheck;
