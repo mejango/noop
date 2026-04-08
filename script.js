@@ -4712,9 +4712,16 @@ Output each page as:
 
 Generate ALL 3 pages: ${STRATEGY_PAGES.join(', ')}`;
 
+    // Seed only pages that still need it
+    const pagesToSeed = STRATEGY_PAGES.filter(p => {
+      const content = readWikiPage(p);
+      return !content || content.includes('Awaiting initial assessment');
+    });
+    if (pagesToSeed.length === 0) return;
+
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4096,
+      model: 'claude-opus-4-6',
+      max_tokens: 8192,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -4722,7 +4729,7 @@ Generate ALL 3 pages: ${STRATEGY_PAGES.join(', ')}`;
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 120000,
+      timeout: 180000,
     });
 
     const text = response.data?.content?.[0]?.text || '';
@@ -4733,12 +4740,12 @@ Generate ALL 3 pages: ${STRATEGY_PAGES.join(', ')}`;
     while ((match = pageRegex.exec(text)) !== null) {
       const pagePath = match[1];
       const content = match[2].trim();
-      if (!STRATEGY_PAGES.includes(pagePath) || content.length < 50) continue;
+      if (!pagesToSeed.includes(pagePath) || content.length < 50) continue;
       fs.writeFileSync(path.join(WIKI_DIR, pagePath), content);
       writeCount++;
       console.log(`  📚 ${pagePath} (${content.length} chars)`);
     }
-    console.log(`📚 Strategy wiki seeded: ${writeCount}/3 pages`);
+    console.log(`📚 Strategy wiki seeded: ${writeCount}/${pagesToSeed.length} pages`);
   } catch (e) { console.log('📚 Strategy seed failed (non-fatal):', e.message); }
 };
 _bootSeedStrategy();
