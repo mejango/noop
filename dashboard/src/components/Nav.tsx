@@ -3,15 +3,14 @@
 import { usePolling, useLiveTimeAgo, useCountdown } from '@/lib/hooks';
 import { formatUSD } from '@/lib/format';
 
+const PUT_ANNUAL_RATE = 0.0333;
+const CYCLE_DAYS = 15;
+
 interface Budget {
   putTotalBudget: number;
   putSpent: number;
   putRemaining: number;
   putDaysLeft: number;
-  callTotalBudget: number;
-  callSpent: number;
-  callRemaining: number;
-  callDaysLeft: number;
   cycleDays: number;
 }
 
@@ -31,38 +30,30 @@ interface AccountData {
   collaterals: Collateral[];
 }
 
-const emptyBudget: Budget = {
-  putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0,
-  callTotalBudget: 0, callSpent: 0, callRemaining: 0, callDaysLeft: 0, cycleDays: 10,
-};
-
-const emptyStats: NavStats = {
-  last_price: 0, last_price_time: '', lyra_spot: null, budget: emptyBudget,
-};
-
+const emptyBudget: Budget = { putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0, cycleDays: CYCLE_DAYS };
+const emptyStats: NavStats = { last_price: 0, last_price_time: '', lyra_spot: null, budget: emptyBudget };
 const emptyAccount: AccountData = { collaterals: [] };
 
 export default function Nav() {
   const STATS_INTERVAL = 60_000;
   const { data: stats, fetchTick } = usePolling<NavStats>('/api/stats', emptyStats, STATS_INTERVAL);
   const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
-  const rawBudget = stats.budget || emptyBudget;
+  const b = stats.budget || emptyBudget;
   const liveAgo = useLiveTimeAgo(stats.last_price_time);
   const nextTick = useCountdown(STATS_INTERVAL, [fetchTick]);
 
   const usdc = account.collaterals.find(c => c.asset_name === 'USDC');
   const eth = account.collaterals.find(c => c.asset_name === 'ETH');
 
-  // Compute budget client-side if API returns 0 (DB column not yet populated)
-  const PUT_ANNUAL_RATE = 0.0333;
-  const CYCLE_DAYS = rawBudget.cycleDays || 15;
-  let b = rawBudget;
-  if (b.putTotalBudget === 0 && stats.last_price > 0) {
+  // Use API budget, fallback to client-side computation if DB hasn't set it yet
+  let putTotalBudget = b.putTotalBudget;
+  let putRemaining = b.putRemaining;
+  if (putTotalBudget === 0 && stats.last_price > 0) {
     const portfolioValue = Number(eth?.amount || 0) * stats.last_price + Number(usdc?.amount || 0);
     if (portfolioValue > 0) {
-      const cyclesPerYear = 365 / CYCLE_DAYS;
-      const computed = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
-      b = { ...b, putTotalBudget: computed, putRemaining: computed };
+      const cyclesPerYear = 365 / (b.cycleDays || CYCLE_DAYS);
+      putTotalBudget = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
+      putRemaining = Math.max(0, putTotalBudget - (b.putSpent || 0));
     }
   }
 
@@ -93,7 +84,7 @@ export default function Nav() {
             </>
           )}
           <span className="text-gray-600 hidden md:inline">|</span>
-          <span className="text-gray-400 hidden md:inline">PUT <span className="text-white">{formatUSD(b.putRemaining)}</span>/<span className="text-gray-500">{formatUSD(b.putTotalBudget)}</span></span>
+          <span className="text-gray-400 hidden md:inline">PUT <span className="text-white">{formatUSD(putRemaining)}</span>/<span className="text-gray-500">{formatUSD(putTotalBudget)}</span></span>
           <span className="text-gray-500 text-xs hidden md:inline">{b.putDaysLeft > 0 ? `${b.putDaysLeft}d left` : 'cycle ended'}</span>
         </div>
       </div>
