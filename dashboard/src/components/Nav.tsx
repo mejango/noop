@@ -46,12 +46,25 @@ export default function Nav() {
   const STATS_INTERVAL = 60_000;
   const { data: stats, fetchTick } = usePolling<NavStats>('/api/stats', emptyStats, STATS_INTERVAL);
   const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
-  const b = stats.budget || emptyBudget;
+  const rawBudget = stats.budget || emptyBudget;
   const liveAgo = useLiveTimeAgo(stats.last_price_time);
   const nextTick = useCountdown(STATS_INTERVAL, [fetchTick]);
 
   const usdc = account.collaterals.find(c => c.asset_name === 'USDC');
   const eth = account.collaterals.find(c => c.asset_name === 'ETH');
+
+  // Compute budget client-side if API returns 0 (DB column not yet populated)
+  const PUT_ANNUAL_RATE = 0.0333;
+  const CYCLE_DAYS = rawBudget.cycleDays || 15;
+  let b = rawBudget;
+  if (b.putTotalBudget === 0 && stats.last_price > 0) {
+    const portfolioValue = Number(eth?.amount || 0) * stats.last_price + Number(usdc?.amount || 0);
+    if (portfolioValue > 0) {
+      const cyclesPerYear = 365 / CYCLE_DAYS;
+      const computed = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
+      b = { ...b, putTotalBudget: computed, putRemaining: computed };
+    }
+  }
 
   return (
     <nav className="border-b border-white/10 bg-juice-dark/80 backdrop-blur-md py-3">

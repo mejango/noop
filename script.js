@@ -1165,45 +1165,25 @@ const getSpotPrice = async () => {
   }
 };
 
-// Fetch ETH funding rates — Bybit primary (no geo-block), Binance fallback
+// Fetch ETH funding rate from Derive's own perp ticker (no geo-block, already used by bot)
 const fetchFundingRates = async () => {
-  // Try Bybit first (public, no geo-restrictions)
   try {
-    const response = await axios.get('https://api.bybit.com/v5/market/funding/history', {
-      params: { category: 'linear', symbol: 'ETHUSDT', limit: 10 },
-      timeout: 5000,
-    });
-    const list = response.data?.result?.list;
-    if (Array.isArray(list) && list.length > 0) {
-      return list.map(r => ({
-        timestamp: new Date(Number(r.fundingRateTimestamp)).toISOString(),
-        exchange: 'bybit',
-        symbol: 'ETHUSDT',
-        rate: Number(r.fundingRate),
-      }));
+    const response = await axios.post(ENDPOINTS.GET_TICKERS, {
+      instrument_type: 'perp', currency: 'ETH',
+    }, { timeout: 5000 });
+    const tickers = response.data?.result || [];
+    const ethPerp = tickers.find(t => t.instrument_name === 'ETH-PERP');
+    if (ethPerp?.funding_rate_info?.funding_rate != null) {
+      return [{
+        timestamp: new Date().toISOString(),
+        exchange: 'derive',
+        symbol: 'ETH-PERP',
+        rate: Number(ethPerp.funding_rate_info.funding_rate),
+      }];
     }
   } catch (e) {
-    console.log(`⚠️ Bybit funding rate failed: ${e.message}`);
+    console.log(`⚠️ Derive funding rate failed: ${e.message}`);
   }
-
-  // Fallback to Binance
-  try {
-    const response = await axios.get('https://fapi.binance.com/fapi/v1/fundingRate', {
-      params: { symbol: 'ETHUSDT', limit: 10 },
-      timeout: 5000,
-    });
-    if (Array.isArray(response.data) && response.data.length > 0) {
-      return response.data.map(r => ({
-        timestamp: new Date(r.fundingTime).toISOString(),
-        exchange: 'binance',
-        symbol: r.symbol,
-        rate: Number(r.fundingRate),
-      }));
-    }
-  } catch (e) {
-    console.log(`⚠️ Binance funding rate failed: ${e.message}`);
-  }
-
   return [];
 };
 
