@@ -9,6 +9,7 @@ const DB_PATH = path.join(DATA_DIR, 'noop.db');
 const CONFIG_PATH = process.env.BOT_CONFIG_PATH || path.join(process.cwd(), '..', 'bot', 'config.json');
 const BOT_CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 // Budget is now dynamic (calculated per cycle in bot_state), not static config constants
+const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
 const PERIOD_MS = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 const MEASUREMENT_WINDOW_DAYS = 6.2;
 
@@ -771,7 +772,18 @@ export function getBotBudget() {
 
     const now = Date.now();
 
-    const putTotalBudget = (row.put_budget_for_cycle || 0) + (row.put_unspent_buy_limit || 0);
+    // Use stored budget, or compute from portfolio value if not yet set
+    let cycleBudget = row.put_budget_for_cycle || 0;
+    if (cycleBudget === 0) {
+      try {
+        const snap = getStmts().getLatestPortfolioSnapshot.get() as { portfolio_value_usd: number } | undefined;
+        if (snap && snap.portfolio_value_usd > 0) {
+          const cyclesPerYear = 365 / (PERIOD_MS / (1000 * 60 * 60 * 24));
+          cycleBudget = snap.portfolio_value_usd * PUT_ANNUAL_RATE / cyclesPerYear;
+        }
+      } catch { /* ok */ }
+    }
+    const putTotalBudget = cycleBudget + (row.put_unspent_buy_limit || 0);
     const putSpent = row.put_net_bought || 0;
     const putRemaining = Math.max(0, putTotalBudget - putSpent);
     const putCycleStart = row.put_cycle_start || now;
