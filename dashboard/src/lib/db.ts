@@ -787,15 +787,12 @@ export function getBotBudget() {
         }
       } catch { /* ok */ }
     }
+    const putTotalBudget = cycleBudget + (row.put_unspent_buy_limit || 0);
+    const putSpent = row.put_net_bought || 0;
+    const putRemaining = Math.max(0, putTotalBudget - putSpent);
     const putCycleStart = row.put_cycle_start || now;
     const putCycleElapsed = now - putCycleStart;
-    const cycleExpired = putCycleElapsed >= PERIOD_MS;
-
-    // If the cycle expired, treat spent as 0 (stale data from prior cycle)
-    const putTotalBudget = cycleBudget + (cycleExpired ? 0 : (row.put_unspent_buy_limit || 0));
-    const putSpent = cycleExpired ? 0 : (row.put_net_bought || 0);
-    const putRemaining = Math.max(0, putTotalBudget - putSpent);
-    const putDaysLeft = cycleExpired ? 0 : Math.max(0, (PERIOD_MS - putCycleElapsed) / (1000 * 60 * 60 * 24));
+    const putDaysLeft = Math.max(0, (PERIOD_MS - putCycleElapsed) / (1000 * 60 * 60 * 24));
 
     const callTotalBudget = 0; // calls are margin-sized, no fixed budget
     const callSpent = row.call_net_sold || 0;
