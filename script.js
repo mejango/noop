@@ -1168,7 +1168,7 @@ const getSpotPrice = async () => {
 // Fetch ETH funding rate from Derive's own perp ticker (no geo-block, already used by bot)
 const fetchFundingRates = async () => {
   try {
-    const response = await axios.post(ENDPOINTS.GET_TICKERS, {
+    const response = await axios.post(API_URL.GET_TICKERS, {
       instrument_type: 'perp', currency: 'ETH',
     }, { timeout: 5000 });
     const tickers = response.data?.result || [];
@@ -1833,10 +1833,16 @@ const WIKI_DIR = process.env.WIKI_DIR || path.join(__dirname, 'knowledge');
 const WIKI_META_PATH = path.join(WIKI_DIR, '.meta.json');
 const WIKI_HISTORY_DIR = path.join(WIKI_DIR, '.history');
 
+// Ensure all wiki subdirectories exist
+for (const sub of ['regimes', 'protection', 'revenue', 'indicators', 'strategy']) {
+  fs.mkdirSync(path.join(WIKI_DIR, sub), { recursive: true });
+}
+
 const WIKI_KEY_PAGES = [
   'regimes/current.md',
   'protection/pricing.md',
   'protection/windows.md',
+  'revenue/pricing.md',
   'indicators/leading.md',
   'strategy/lessons.md',
   'strategy/playbook.md',
@@ -1848,6 +1854,9 @@ const WIKI_ALL_PAGES = [
   'protection/pricing.md',
   'protection/windows.md',
   'protection/convexity.md',
+  'revenue/pricing.md',
+  'revenue/windows.md',
+  'revenue/efficiency.md',
   'indicators/leading.md',
   'indicators/correlations.md',
   'indicators/divergences.md',
@@ -2005,6 +2014,9 @@ If no pages need updating, output: <no_updates/>`;
         'protection/pricing.md': ['Current IV Environment', 'Cost Assessment'],
         'protection/windows.md': ['Active Windows', 'Historical Windows'],
         'protection/convexity.md': ['Current Convexity Map'],
+        'revenue/pricing.md': ['Current Premium Environment', 'Premium Assessment'],
+        'revenue/windows.md': ['Active Windows', 'Historical Windows'],
+        'revenue/efficiency.md': ['Premium Per Unit Risk'],
         'indicators/leading.md': ['Confirmed Leading Indicators'],
         'indicators/correlations.md': ['Strong Correlations'],
         'indicators/divergences.md': ['Active Divergences'],
@@ -2069,6 +2081,14 @@ const getWikiSignalContext = () => {
       protectionAssessment = costMatch ? costMatch[1].toLowerCase() : null;
     }
 
+    // Parse revenue/call premium assessment
+    const revenuePage = readWikiPage('revenue/pricing.md');
+    let revenueAssessment = null;
+    if (revenuePage && !revenuePage.includes('Awaiting initial assessment')) {
+      const premMatch = revenuePage.match(/##\s*Premium Assessment\s*\n+\s*(\w+)/i);
+      revenueAssessment = premMatch ? premMatch[1].toLowerCase() : null;
+    }
+
     // Parse playbook rules (first 5 bullet points from Core Rules)
     const playbookRules = [];
     if (playbookPage) {
@@ -2081,7 +2101,7 @@ const getWikiSignalContext = () => {
       }
     }
 
-    return { regime, regimeConfidence, protectionAssessment, playbookRules };
+    return { regime, regimeConfidence, protectionAssessment, revenueAssessment, playbookRules };
   } catch {
     return null;
   }
@@ -2499,25 +2519,31 @@ IMPORTANT: A high disproven_bounded rate means the bot is buying cheap insurance
 
     const systemPromptBase = `You are the Spitznagel Bot — a tail-risk hedging advisor operating on ETH options with Universa-style principles. You maintain an analytical journal tracking market observations, hypotheses, and regime assessments.
 
-**STRATEGIC FOCUS — PUT BUYING IS THE MISSION:** Your primary analytical job is evaluating OTM PUT BUYING WINDOWS — when is protection cheap, when is convexity high, when should the bot accumulate puts? Call selling is a minor financing activity that exists only to offset put bleed. It is NOT the strategy itself.
+**STRATEGIC PRIORITY — TWO-SIDED ANALYSIS:**
+1. **PUT BUYING (primary):** Evaluating OTM PUT BUYING WINDOWS — when is protection cheap, when is convexity high, when should the bot accumulate puts? This is the core mission.
+2. **CALL SELLING (secondary):** Evaluating call premium environment — when is premium rich, when should the bot sell calls? Call selling is an independent revenue operation that also has the side effect of financing put protection. Both sides serve the same portfolio but are evaluated on their own merits.
 
-DO NOT spend observation, hypothesis, or regime_note entries analyzing short call theta decay, call mark compression, call expiry mechanics, call delta risk, or premium harvest optimization.
+The regime is the SAME for both sides — it's a property of the market, not of a strategy leg. But each side responds differently:
+- **Complacency:** Puts are cheap (accumulate aggressively). Call premium is moderate — IV is low, so premiums are thin but selling is low-risk.
+- **Greed/euphoria:** Puts are cheap and ignored. Call premiums are RICHEST here — high IV on upside, crowd paying up for calls. Best window for call selling revenue.
+- **Fear:** Puts are expensive (don't chase). Call premium may spike but selling is dangerous — realized vol is high.
+- **Transition:** Both sides need reassessment — old pricing assumptions break down.
 
 The journal (observation, hypothesis, regime_note) should track:
 - Is OTM put protection getting cheaper or more expensive? (IV environment, skew, put delta-value scores)
+- Is call premium rich or thin? (call IV, premium/delta ratios, term structure)
 - Are macro conditions building toward a crash? (flows, leverage, funding, OI structure)
-- What regime are we in? (complacency = accumulate puts, fear = hold existing, don't chase)
+- What regime are we in and what does it mean for BOTH put buying AND call selling?
 - Where is the cheap convexity in the put chain right now?
-
-Short calls do NOT warrant observation, hypothesis, or regime_note entries unless they directly impact the cost or availability of put protection.
+- Where is the best risk-adjusted premium in the call chain right now?
 
 Analyze the provided snapshot across three time scales:
 
-**Short-term (hours):** Price action, short momentum shifts, spike events, intraday patterns — how do they affect put pricing?
-**Medium-term (days):** Trend direction changes, momentum regime shifts, onchain flow patterns, protection cost trends.
-**Long-term (week+):** Structural patterns, correlation shifts, regime transitions, compounding geometry.
+**Short-term (hours):** Price action, short momentum shifts, spike events — how do they affect put pricing AND call premium?
+**Medium-term (days):** Trend direction changes, momentum regime shifts, onchain flow patterns, protection cost trends, premium harvest trends.
+**Long-term (week+):** Structural patterns, correlation shifts, regime transitions, compounding geometry of both put protection and call financing.
 
-**Recent trades:** The snapshot includes recent_orders — actual put buys and call sells executed by the bot. Prioritize evaluating PUT trades: was the timing good, was the strike/delta appropriate, did we get good value on protection? Call sell evaluation is secondary — only note if premium collected was notably good or bad.
+**Recent trades:** The snapshot includes recent_orders — actual put buys and call sells executed by the bot. Evaluate PUT trades first: was the timing good, was the strike/delta appropriate, did we get good value on protection? Then evaluate CALL trades: was premium rich, was the strike safe, was the risk-adjusted return good?
 
 **IMPORTANT — No position data in journal entries:** The regime_note, hypothesis, and observation entries must focus EXCLUSIVELY on market conditions, price action, flows, and external signals — do NOT mention specific positions, P&L, greeks, or trading actions in journal entries.
 
@@ -2526,27 +2552,32 @@ Review your previous journal entries. Confirm patterns that held, revise those t
 Output exactly 3 journal entries — one of each type, in this order (do NOT include a suggestion entry):
 
 1. First, a REGIME NOTE classifying the current market state (MARKET CONDITIONS ONLY — no positions or P&L):
-<journal type="regime_note">How cheap is protection right now relative to the tail risk it covers? Classify the current regime (complacency, fear, transition, etc.) and assess protection pricing. During complacency, the answer is almost always "accumulate" — puts are cheap precisely when nobody wants them. Focus on IV levels, put skew, term structure, and realized vs implied vol — NOT on any specific positions.</journal>
+<journal type="regime_note">Classify the current regime (complacency, fear, transition, etc.) and assess what it means for BOTH sides:
+- **Protection side:** How cheap is put protection relative to tail risk? During complacency, accumulate — puts are cheap when nobody wants them.
+- **Revenue side:** How rich is call premium relative to the risk of selling? During fear, premium is juicy but tread carefully.
+Focus on IV levels, put/call skew, term structure, realized vs implied vol. Do NOT mention specific positions.</journal>
 
-2. Then, a HYPOTHESIS about PROTECTION PRICING CONDITIONS (not price predictions):
-<journal type="hypothesis">Identify when protection is mispriced — when puts are cheap or expensive relative to the tail risk they cover. Frame hypotheses around protection cost trajectories, not where price goes. Example: "Put skew is compressing while realized vol picks up — protection will get more expensive within 24h, making now a cheap window."
+2. Then, a HYPOTHESIS about PROTECTION OR REVENUE CONDITIONS (not price predictions):
+<journal type="hypothesis">Primary hypothesis about protection cost OR call premium trajectory. Frame around mispricing — when puts are cheap or calls are rich relative to what the market should price. The hypothesis can focus on either side but must note the implication for the other side.
+
+Example: "Put skew compressing while realized vol picks up — protection will get more expensive within 24h, making now a cheap window. Call side implication: if put IV rises, call IV likely follows — premium harvest window may also be opening."
 
 IMPORTANT: After your hypothesis prose, include a structured metadata block:
 <hypothesis_meta>{"target":"put cost","direction":"cheaper|expensive|above|below","value":0.15,"deadline":"2026-03-04T01:39:00Z","falsification":"If 30-day put IV doesn't rise above 60% within 24h"}</hypothesis_meta>
 
 The metadata must have:
-- target: what you're assessing (e.g. "put cost", "put skew", "IV term structure", "ETH spot")
-- direction: "cheaper", "expensive", "above", or "below" — prefer protection-cost directions over price directions
+- target: what you're assessing (e.g. "put cost", "put skew", "call premium", "IV term structure", "ETH spot")
+- direction: "cheaper", "expensive", "above", or "below"
 - value: the numeric threshold
 - deadline: ISO timestamp for when to check
 - falsification: plain text summary of what would disprove it
 
-Every hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity? The best hypothesis identifies when protection is cheap, not where price goes.</journal>
+Every hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity or rich premium?</journal>
 
 3. Finally, an OBSERVATION documenting the most notable factual pattern in MARKET DATA (not positions):
-<journal type="observation">The single most important factual pattern in the current market data — price action, flows, volatility, or structural signals. Do NOT discuss positions or P&L here.</journal>
+<journal type="observation">The single most important factual pattern in the current market data — price action, flows, volatility, or structural signals. Include a secondary observation about the call premium environment if notable (e.g., call IV diverging from put IV, unusual call skew, premium compression). Do NOT discuss positions or P&L here.</journal>
 
-IMPORTANT: Start every journal entry with a single bold TLDR line (e.g., "**TLDR: Put protection costs dropped 15% while ETH consolidated — cheap insurance window.**"). Follow with detailed analysis. Keep each entry under 300 words — be dense and precise, not verbose. All 3 entries must fit within the response.
+IMPORTANT: Start every journal entry with a single bold TLDR line (e.g., "**TLDR: Put protection costs dropped 15% while call premium stays rich — favorable both-sides window.**"). Follow with detailed analysis. Keep each entry under 350 words — be dense and precise, not verbose. All 3 entries must fit within the response.
 
 ## Put Value / Price Divergence
 The snapshot includes a put_price_divergence section that detects when put option values move independently of spot price:
@@ -2555,7 +2586,7 @@ The snapshot includes a put_price_divergence section that detects when put optio
 
 This is critical for the Spitznagel strategy: we want to buy puts when they're CHEAP (before the market prices in risk), not after a spike. If put spikes reliably lead price drops, the bot should be accumulating protection during PUT_CHEAP_PRICE_STABLE windows.
 
-Ground everything in the data. Focus on: cost of protection (put pricing), crash probability (flow reversals), and portfolio geometry (spot-options relationship).${hypothesisPerformance}`;
+Ground everything in the data. Focus on: cost of protection (put pricing), revenue opportunity (call premium), crash probability (flow reversals), and portfolio geometry (how put+call positions work together).${hypothesisPerformance}`;
 
     // Inject wiki context if available
     const wikiContext = queryWikiContext();
@@ -3470,6 +3501,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
 
   // Wiki knowledge
   const wikiContext = queryWikiContext();
+  const wikiSignals = getWikiSignalContext();
 
   // Market sentiment
   const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -3745,6 +3777,11 @@ ${recentPendingActions.length > 0 ? JSON.stringify(recentPendingActions.map(a =>
 
 === OPEN ORDERS ON BOOK ===
 ${openOrders.length > 0 ? openOrders.map(o => `${o.instrument_name} | ${o.direction} ${o.amount} @ $${o.limit_price} | filled=${o.filled_amount} | ${o.time_in_force} | age=${((Date.now() - o.creation_timestamp) / 3600000).toFixed(1)}h`).join('\n') : 'No open orders'}
+${wikiSignals ? `\n=== WIKI SIGNALS (parsed from knowledge base) ===
+Regime: ${wikiSignals.regime || 'unknown'} (confidence: ${wikiSignals.regimeConfidence || 'unknown'})
+Protection cost: ${wikiSignals.protectionAssessment || 'unknown'}
+Call premium: ${wikiSignals.revenueAssessment || 'unknown'}
+${wikiSignals.playbookRules.length > 0 ? `Playbook rules:\n${wikiSignals.playbookRules.map(r => `- ${r}`).join('\n')}` : ''}` : ''}
 ${wikiContext ? `\n=== KNOWLEDGE WIKI (cumulative bot knowledge) ===\n${wikiContext}` : ''}
 
 Produce your trading agenda JSON now.`;
@@ -4419,8 +4456,15 @@ const runBot = async () => {
         const unrealizedPnl = positions.reduce((sum, p) => sum + (Number(p.unrealized_pnl) || 0), 0);
         const realizedData = db.getRealizedPnL();
 
-        // Portfolio value = USDC + ETH*spot + unrealized P&L on positions
-        const portfolioValue = usdcBal + (ethBal * spotPrice) + unrealizedPnl;
+        // Portfolio value = subaccount_value from Derive API (includes collateral + positions mark-to-market)
+        // Fallback to collateral-only if subaccount API unavailable
+        let portfolioValue = usdcBal + (ethBal * spotPrice);
+        try {
+          const sub = await fetchSubaccount();
+          if (sub && sub.subaccount_value > 0) {
+            portfolioValue = sub.subaccount_value;
+          }
+        } catch { /* use fallback */ }
 
         db.insertPortfolioSnapshot({
           timestamp: tickTimestamp,

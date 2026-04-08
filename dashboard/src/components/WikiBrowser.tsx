@@ -31,6 +31,7 @@ interface SearchResult {
 const CATEGORY_LABELS: Record<string, { label: string; color: string }> = {
   regimes: { label: 'Regimes', color: 'text-purple-400' },
   protection: { label: 'Protection', color: 'text-blue-400' },
+  revenue: { label: 'Revenue', color: 'text-emerald-400' },
   indicators: { label: 'Indicators', color: 'text-amber-400' },
   strategy: { label: 'Strategy', color: 'text-green-400' },
 };

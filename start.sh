@@ -10,7 +10,7 @@ trap cleanup SIGTERM SIGINT
 
 # Initialize knowledge wiki if volume dir is empty (first deploy)
 WIKI_PATH="${WIKI_DIR:-knowledge}"
-mkdir -p "$WIKI_PATH"
+mkdir -p "$WIKI_PATH" "$WIKI_PATH/regimes" "$WIKI_PATH/protection" "$WIKI_PATH/revenue" "$WIKI_PATH/indicators" "$WIKI_PATH/strategy"
 if [ ! -f "$WIKI_PATH/schema.md" ]; then
   echo "Initializing knowledge wiki at $WIKI_PATH from templates..."
   cp -r knowledge-templates/* "$WIKI_PATH/" 2>/dev/null || true

@@ -52,6 +52,24 @@ This file defines the structure, update rules, and format conventions for the NO
 - **Historical Divergence Episodes** (past divergences and their resolutions)
 - **Divergence Playbook** (how to act on different divergence types)
 
+### revenue/pricing.md
+- **TLDR** (bold, 1 line)
+- **Current Premium Environment** (call IV levels, premium richness)
+- **Skew & IV Context** (how call IV relates to put IV, what skew says about opportunity)
+- **Premium Assessment** (cheap | fair | rich with evidence)
+
+### revenue/windows.md
+- **TLDR** (bold, 1 line)
+- **Active Windows** (current rich-premium opportunities for call selling)
+- **Historical Windows** (past premium windows with dates, durations, premium captured)
+- **Window Indicators** (what signals precede rich premium windows)
+
+### revenue/efficiency.md
+- **TLDR** (bold, 1 line)
+- **Premium Per Unit Risk** (premium/delta ratios, risk-adjusted returns)
+- **Strike Selection Patterns** (which strike-delta combos yield best risk-adjusted premium)
+- **Buyback Patterns** (when buybacks capture value vs destroy it, timing insights)
+
 ### strategy/lessons.md
 - **TLDR** (bold, 1 line)
 - **Active Lessons** (currently valid actionable insights)
