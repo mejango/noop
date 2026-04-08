@@ -2767,7 +2767,14 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
 
         const askPrice = Number(ticker?.a) || 0;
         const bidPrice = Number(ticker?.b) || 0;
+        const markPrice = Number(ticker?.M) || values.mark_price || 0;
         const price = rule.action === 'buy_put' || rule.action === 'buy_call' ? askPrice : bidPrice;
+
+        // Skip selling worthless positions — mark < $0.10 means nothing to recover
+        if (rule.action === 'sell_put' && markPrice < 0.10) {
+          console.log(`📋 Exit skip: ${rule.instrument_name} mark $${markPrice.toFixed(4)} — worthless, let expire`);
+          continue;
+        }
 
         db.insertPendingAction({
           rule_id: rule.id,
@@ -3722,7 +3729,7 @@ Rules:
 - Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price
-- For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct
+- For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling a long put does NOT release margin on Derive.
 - For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. Profit capture, genuine assignment risk, and expiry cleanup are good reasons. Price moving against you alone is not — that's panic buying the crowd's fear premium. Set conditions that reflect the position's actual risk profile.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
