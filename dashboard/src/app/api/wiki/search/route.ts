@@ -6,18 +6,18 @@ export const dynamic = 'force-dynamic';
 
 const WIKI_DIR = process.env.WIKI_DIR || path.join(process.cwd(), '..', 'knowledge');
 
-const WIKI_PAGES = [
-  'regimes/current.md',
-  'regimes/history.md',
-  'protection/pricing.md',
-  'protection/windows.md',
-  'protection/convexity.md',
-  'indicators/leading.md',
-  'indicators/correlations.md',
-  'indicators/divergences.md',
-  'strategy/lessons.md',
-  'strategy/mistakes.md',
-  'strategy/playbook.md',
+const WIKI_PAGES: { path: string; title: string }[] = [
+  { path: 'regimes/current.md', title: 'Current Regime' },
+  { path: 'regimes/history.md', title: 'Regime History' },
+  { path: 'protection/pricing.md', title: 'Protection Pricing' },
+  { path: 'protection/windows.md', title: 'Protection Windows' },
+  { path: 'protection/convexity.md', title: 'Convexity Map' },
+  { path: 'indicators/leading.md', title: 'Leading Indicators' },
+  { path: 'indicators/correlations.md', title: 'Correlations' },
+  { path: 'indicators/divergences.md', title: 'Divergences' },
+  { path: 'strategy/lessons.md', title: 'Strategy Lessons' },
+  { path: 'strategy/mistakes.md', title: 'Mistakes & Anti-Patterns' },
+  { path: 'strategy/playbook.md', title: 'Strategy Playbook' },
 ];
 
 interface SearchResult {
@@ -35,8 +35,8 @@ export function GET(request: NextRequest) {
 
     const results: SearchResult[] = [];
 
-    for (const pagePath of WIKI_PAGES) {
-      const fullPath = path.join(WIKI_DIR, pagePath);
+    for (const page of WIKI_PAGES) {
+      const fullPath = path.join(WIKI_DIR, page.path);
       let content = '';
       try {
         content = fs.readFileSync(fullPath, 'utf-8');
@@ -47,16 +47,11 @@ export function GET(request: NextRequest) {
       const lowerContent = content.toLowerCase();
       if (!lowerContent.includes(q)) continue;
 
-      // Extract title
-      const titleMatch = content.match(/^#\s+(.+)/m);
-      const title = titleMatch ? titleMatch[1] : pagePath.replace('.md', '');
-
       // Extract context snippets around matches
       const snippets: string[] = [];
       const lines = content.split('\n');
       for (let i = 0; i < lines.length; i++) {
         if (lines[i].toLowerCase().includes(q)) {
-          // Get surrounding context (1 line before + match + 1 line after)
           const start = Math.max(0, i - 1);
           const end = Math.min(lines.length - 1, i + 1);
           const snippet = lines.slice(start, end + 1).join('\n').trim();
@@ -66,7 +61,7 @@ export function GET(request: NextRequest) {
         }
       }
 
-      results.push({ path: pagePath, title, snippets });
+      results.push({ path: page.path, title: page.title, snippets });
     }
 
     return NextResponse.json({ query: q, results });

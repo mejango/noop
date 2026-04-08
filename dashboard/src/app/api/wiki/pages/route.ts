@@ -6,18 +6,18 @@ export const dynamic = 'force-dynamic';
 
 const WIKI_DIR = process.env.WIKI_DIR || path.join(process.cwd(), '..', 'knowledge');
 
-const WIKI_PAGES = [
-  'regimes/current.md',
-  'regimes/history.md',
-  'protection/pricing.md',
-  'protection/windows.md',
-  'protection/convexity.md',
-  'indicators/leading.md',
-  'indicators/correlations.md',
-  'indicators/divergences.md',
-  'strategy/lessons.md',
-  'strategy/mistakes.md',
-  'strategy/playbook.md',
+const WIKI_PAGES: { path: string; title: string }[] = [
+  { path: 'regimes/current.md', title: 'Current Regime' },
+  { path: 'regimes/history.md', title: 'Regime History' },
+  { path: 'protection/pricing.md', title: 'Protection Pricing' },
+  { path: 'protection/windows.md', title: 'Protection Windows' },
+  { path: 'protection/convexity.md', title: 'Convexity Map' },
+  { path: 'indicators/leading.md', title: 'Leading Indicators' },
+  { path: 'indicators/correlations.md', title: 'Correlations' },
+  { path: 'indicators/divergences.md', title: 'Divergences' },
+  { path: 'strategy/lessons.md', title: 'Strategy Lessons' },
+  { path: 'strategy/mistakes.md', title: 'Mistakes & Anti-Patterns' },
+  { path: 'strategy/playbook.md', title: 'Strategy Playbook' },
 ];
 
 interface WikiPageMeta {
@@ -34,8 +34,8 @@ export function GET() {
     const STALE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
     const now = Date.now();
 
-    const pages: WikiPageMeta[] = WIKI_PAGES.map((pagePath) => {
-      const fullPath = path.join(WIKI_DIR, pagePath);
+    const pages: WikiPageMeta[] = WIKI_PAGES.map((page) => {
+      const fullPath = path.join(WIKI_DIR, page.path);
       let content = '';
       let lastModified = new Date().toISOString();
 
@@ -47,15 +47,11 @@ export function GET() {
         // File doesn't exist yet
       }
 
-      // Extract title from first heading
-      const titleMatch = content.match(/^#\s+(.+)/m);
-      const title = titleMatch ? titleMatch[1] : pagePath.replace('.md', '');
-
       const wordCount = content.split(/\s+/).filter(Boolean).length;
       const stale = now - new Date(lastModified).getTime() > STALE_THRESHOLD_MS;
-      const category = pagePath.split('/')[0];
+      const category = page.path.split('/')[0];
 
-      return { path: pagePath, title, category, wordCount, lastModified, stale };
+      return { path: page.path, title: page.title, category, wordCount, lastModified, stale };
     });
 
     // Read meta for additional info
