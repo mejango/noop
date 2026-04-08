@@ -8,8 +8,7 @@ const DB_PATH = path.join(DATA_DIR, 'noop.db');
 // Bot constants (single source of truth: bot/config.json)
 const CONFIG_PATH = process.env.BOT_CONFIG_PATH || path.join(process.cwd(), '..', 'bot', 'config.json');
 const BOT_CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-const PUT_BUYING_BASE_FUNDING_LIMIT = BOT_CONFIG.PUT_BUYING_BASE_FUNDING_LIMIT;
-const CALL_SELLING_BASE_FUNDING_LIMIT = BOT_CONFIG.CALL_SELLING_BASE_FUNDING_LIMIT;
+// Budget is now dynamic (calculated per cycle in bot_state), not static config constants
 const PERIOD_MS = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 const MEASUREMENT_WINDOW_DAYS = 6.2;
 
@@ -760,6 +759,7 @@ export function getBotBudget() {
   try {
     const row = getStmts().getBotState.get() as {
       put_cycle_start: number | null;
+      put_budget_for_cycle: number;
       put_net_bought: number;
       put_unspent_buy_limit: number;
       call_cycle_start: number | null;
@@ -771,16 +771,16 @@ export function getBotBudget() {
 
     const now = Date.now();
 
-    const putTotalBudget = PUT_BUYING_BASE_FUNDING_LIMIT + (row.put_unspent_buy_limit || 0);
+    const putTotalBudget = (row.put_budget_for_cycle || 0) + (row.put_unspent_buy_limit || 0);
     const putSpent = row.put_net_bought || 0;
     const putRemaining = Math.max(0, putTotalBudget - putSpent);
     const putCycleStart = row.put_cycle_start || now;
     const putCycleElapsed = now - putCycleStart;
     const putDaysLeft = Math.max(0, (PERIOD_MS - putCycleElapsed) / (1000 * 60 * 60 * 24));
 
-    const callTotalBudget = CALL_SELLING_BASE_FUNDING_LIMIT + (row.call_unspent_sell_limit || 0);
+    const callTotalBudget = 0; // calls are margin-sized, no fixed budget
     const callSpent = row.call_net_sold || 0;
-    const callRemaining = Math.max(0, callTotalBudget - callSpent);
+    const callRemaining = 0;
     const callCycleStart = row.call_cycle_start || now;
     const callCycleElapsed = now - callCycleStart;
     const callDaysLeft = Math.max(0, (PERIOD_MS - callCycleElapsed) / (1000 * 60 * 60 * 24));

@@ -4642,6 +4642,107 @@ const _bootAdvisory = async () => {
 };
 _bootAdvisory();
 
+// Boot: seed strategy wiki pages if they're still placeholder templates
+const _bootSeedStrategy = async () => {
+  if (!process.env.ANTHROPIC_API_KEY || !db) return;
+  const STRATEGY_PAGES = ['strategy/lessons.md', 'strategy/mistakes.md', 'strategy/playbook.md'];
+  const needsSeed = STRATEGY_PAGES.some(p => {
+    const content = readWikiPage(p);
+    return !content || content.includes('Awaiting initial assessment');
+  });
+  if (!needsSeed) return;
+
+  console.log('📚 Seeding strategy wiki pages...');
+  try {
+    const journalEntries = db.getRecentJournalEntries(200);
+    const reviewedHypotheses = db.getReviewedHypotheses(50);
+    const activeLessons = db.getActiveLessons();
+
+    if (journalEntries.length === 0) { console.log('📚 No journal entries — skipping strategy seed'); return; }
+
+    const schema = fs.readFileSync(path.join(WIKI_DIR, 'schema.md'), 'utf-8');
+    const sample = journalEntries.slice(0, 60);
+    const journalText = sample.map(e => `[${e.entry_type}] (${e.timestamp}) ${e.content.slice(0, 300)}`).join('\n\n');
+    const hypoText = reviewedHypotheses.slice(0, 30).map(h => `#${h.id} [${h.outcome_status}] — ${h.content.slice(0, 200)}... VERDICT: ${h.outcome_verdict || 'none'}`).join('\n');
+    const lessonsText = activeLessons.length > 0 ? activeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None';
+
+    const prompt = `You are populating 3 strategy wiki pages for a Spitznagel-style tail-risk hedging bot (ETH options on Lyra/Derive).
+
+Synthesize the historical data below into these 3 pages. Follow the schema exactly. Be concise but specific — 200-400 words per page. Use actual data values, dates, and outcomes from the entries.
+
+## Wiki Schema (strategy sections only)
+### strategy/lessons.md
+- **TLDR** (bold, 1 line)
+- **Active Lessons** (currently valid actionable insights)
+- **Archived Lessons** (lessons that no longer hold, with reason)
+- **Evidence Tracker** (which lessons have the most supporting evidence)
+
+### strategy/mistakes.md
+- **TLDR** (bold, 1 line)
+- **Costly Patterns** (mistakes that led to disproven_costly outcomes)
+- **Near Misses** (close calls that should inform future behavior)
+- **Anti-Patterns** (conditions where the bot should NOT buy)
+
+### strategy/playbook.md
+- **TLDR** (bold, 1 line)
+- **Core Rules** (distilled actionable rules from all experience)
+- **Regime-Specific Actions** (what to do in each regime)
+- **Sizing Guidelines** (when to increase/decrease position sizes)
+- **Timing Rules** (when in the cycle to be aggressive vs patient)
+
+## Update Rules
+- Bold TLDR first line
+- Evidence required — claims must reference specific data values
+- Date format: YYYY-MM-DD
+- Today's date: ${new Date().toISOString().split('T')[0]}
+
+## Historical Journal Entries (${journalEntries.length} total, showing ${sample.length})
+${journalText}
+
+## Reviewed Hypotheses (${reviewedHypotheses.length} with verdicts)
+${hypoText}
+
+## Active Lessons
+${lessonsText}
+
+Output each page as:
+<wiki_page path="strategy/lessons.md">
+[full page content]
+</wiki_page>
+
+Generate ALL 3 pages: ${STRATEGY_PAGES.join(', ')}`;
+
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4096,
+      messages: [{ role: 'user', content: prompt }],
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      timeout: 120000,
+    });
+
+    const text = response.data?.content?.[0]?.text || '';
+    const pageRegex = /<wiki_page\s+path="([^"]+)">([\s\S]*?)<\/wiki_page>/g;
+    let match;
+    let writeCount = 0;
+
+    while ((match = pageRegex.exec(text)) !== null) {
+      const pagePath = match[1];
+      const content = match[2].trim();
+      if (!STRATEGY_PAGES.includes(pagePath) || content.length < 50) continue;
+      fs.writeFileSync(path.join(WIKI_DIR, pagePath), content);
+      writeCount++;
+      console.log(`  📚 ${pagePath} (${content.length} chars)`);
+    }
+    console.log(`📚 Strategy wiki seeded: ${writeCount}/3 pages`);
+  } catch (e) { console.log('📚 Strategy seed failed (non-fatal):', e.message); }
+};
+_bootSeedStrategy();
+
 sendTelegram('🔄 *NOOP Bot restarted*');
 
 // Defer first run if the bot ran recently (prevents premature runs on redeploy)
