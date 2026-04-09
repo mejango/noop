@@ -1171,7 +1171,8 @@ const fetchFundingRates = async () => {
     const response = await axios.post(API_URL.GET_TICKERS, {
       instrument_type: 'perp', currency: 'ETH',
     }, { timeout: 5000 });
-    const tickers = response.data?.result || [];
+    const raw = response.data?.result;
+    const tickers = Array.isArray(raw) ? raw : [];
     const ethPerp = tickers.find(t => t.instrument_name === 'ETH-PERP');
     if (ethPerp?.funding_rate_info?.funding_rate != null) {
       return [{
@@ -1315,7 +1316,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         limit_price: price.toString(),
         amount: amount.toString(),
         signature_expiry_sec: Math.floor((Date.now() / 1000) + 600), // must be >5min from now
-        max_fee: (0.08 * price * amount).toFixed(2).toString(), // Max fee as 8% of limit price
+        max_fee: Math.max(0.08 * price, 10.0).toFixed(2).toString(), // Max fee per unit of volume (USDC). Generous ceiling — actual fee is much lower (~0.1% of notional)
         mmp: direction === 'sell', // Market maker protection during selling
         nonce: parseInt(`${timestamp}${Math.floor(Math.random() * 1000)}`),
         signer: wallet.address,
