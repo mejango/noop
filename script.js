@@ -13,7 +13,7 @@
  * (1) Put Accumulation (Long Puts)
  *   • Targets: out-of-the-money ETH puts
  *     – Delta between -0.08 and -0.02
- *     – 50–90 days to expiry
+ *     – 45–75 days to expiry
  *     – Strike < 0.8 × current index price
  *   • Entry Conditions:
  *     – Standard Entry: buy best option if medium-term ≠ upward AND short-term ≠ upward
@@ -211,7 +211,7 @@ const BOT_DATA_PATH = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'bo
 const PERIOD = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 
 // Trading parameters - PUTS
-const PUT_EXPIRATION_RANGE = [50, 90];
+const PUT_EXPIRATION_RANGE = [45, 75];
 const PUT_DELTA_RANGE = [-0.12, -0.02]; // Negative delta for puts
 
 // Trading parameters - CALLS  
@@ -3774,7 +3774,7 @@ CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: op
 Rules:
 - Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, max_cost (for buys), min_bid (for sells), market_conditions.
 - Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
-- For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-80 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 80].
+- For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
 - For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling a long put does NOT release margin on Derive.
@@ -3890,7 +3890,7 @@ You think like Nassim Taleb. You believe in:
 - Via negativa. What you DON'T do matters more than what you do. Avoid ruin above all.
 
 ## DTE Discipline (Non-Negotiable)
-- Buy puts at 45-80 DTE. Never below 35 DTE. Short-dated puts bleed theta — you're paying for time decay, not convexity. Veto any buy_put rule with dte_range below [45, 80].
+- Buy puts at 45-75 DTE. Never below 35 DTE. Short-dated puts bleed theta — you're paying for time decay, not convexity. Veto any buy_put rule outside [45, 75].
 - Roll (sell_put exit) at ~25 DTE to avoid terminal theta decay while preserving convexity.
 - Sell calls at 5-12 DTE. Short-dated calls maximize theta harvesting. Veto any sell_call rule with dte above 14.
 
