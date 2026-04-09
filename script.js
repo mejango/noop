@@ -3599,13 +3599,14 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           console.log(`⚠️ Zero fill: ${action.action} ${action.instrument_name} @ $${executionPrice} — will retry`);
         } else if (result && result.resting) {
           // GTC/post-only order is resting on the book
+          const finalOrderPrice = result.price ?? executionPrice;
           db.updatePendingAction(action.id, {
             status: 'executed',
             executed_at: new Date().toISOString(),
-            execution_result: JSON.stringify({ ...result, note: 'Resting on order book' }),
+            execution_result: JSON.stringify({ ...result, price: finalOrderPrice, note: 'Resting on order book' }),
           });
           confirmed++;
-          console.log(`📋 Resting order: ${action.action} ${action.instrument_name} @ $${executionPrice} [${orderType}] | ${reasoning}`);
+          console.log(`📋 Resting order: ${action.action} ${action.instrument_name} @ $${finalOrderPrice} [${orderType}] | ${reasoning}`);
         } else if (result) {
           db.updatePendingAction(action.id, {
             status: 'executed',
