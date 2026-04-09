@@ -168,7 +168,15 @@ const sendTelegram = async (message) => {
       parse_mode: 'Markdown',
     }, { timeout: 5000 });
   } catch (e) {
-    console.log('📱 Telegram failed:', e.message);
+    // Retry without Markdown if parsing fails (unescaped _ * [ etc)
+    try {
+      await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+        chat_id: chatId,
+        text: message,
+      }, { timeout: 5000 });
+    } catch (e2) {
+      console.log('📱 Telegram failed:', e2.message);
+    }
   }
 };
 
