@@ -22,9 +22,6 @@ if [ ! -f "$WIKI_PATH/.meta.json" ] && [ -n "$ANTHROPIC_API_KEY" ]; then
   (node bot/seed-wiki.js && echo "📚 Wiki seed complete" || echo "📚 Wiki seed failed (non-fatal)") &
 fi
 
-echo "Running startup migrations..."
-node scripts/migrate-buy-put-dte-range.js || echo "buy_put DTE migration failed (non-fatal)"
-
 echo "Starting bot..."
 node bot/index.js &
 BOT_PID=$!
