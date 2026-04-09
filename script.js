@@ -1315,7 +1315,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         direction,
         limit_price: price.toString(),
         amount: amount.toString(),
-        signature_expiry_sec: Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 600 : 86400)), // IOC: 10min, GTC/post_only: 24h
+        signature_expiry_sec: Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 300 : 86400)), // IOC: 5min, GTC/post_only: 24h
         max_fee: Math.max(0.08 * price, 10.0).toFixed(2).toString(), // Max fee per unit of volume (USDC). Generous ceiling — actual fee is much lower (~0.1% of notional)
         mmp: direction === 'sell', // Market maker protection during selling
         nonce: parseInt(`${timestamp}${Math.floor(Math.random() * 1000)}`),
