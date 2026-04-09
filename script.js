@@ -2944,6 +2944,28 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         if (candidates.length === 0) {
           const filtered = Object.entries(filterStats).filter(([k, v]) => k !== 'total' && v > 0).map(([k, v]) => `${k}=${v}`).join(', ');
           console.log(`📋 Rule ${rule.id} (${rule.action}): 0 candidates from ${filterStats.total} tickers — filtered by: ${filtered || 'no tickers'}`);
+          if (optionType || dteRange) {
+            const expirySummary = new Map();
+            for (const instrName of Object.keys(tickerMap)) {
+              const instrument = instruments.find(i => i.instrument_name === instrName);
+              if (!instrument) continue;
+              if (optionType && instrument.option_details?.option_type !== optionType) continue;
+              const expiry = parseExpiryFromInstrument(instrName);
+              if (!expiry) continue;
+              const expiryKey = instrName.split('-')[1];
+              const dte = Math.max(0, (expiry.getTime() - Date.now()) / 86400000);
+              const bucket = expirySummary.get(expiryKey) || { count: 0, minDte: dte, maxDte: dte };
+              bucket.count++;
+              bucket.minDte = Math.min(bucket.minDte, dte);
+              bucket.maxDte = Math.max(bucket.maxDte, dte);
+              expirySummary.set(expiryKey, bucket);
+            }
+            const expiryText = [...expirySummary.entries()]
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([expiryKey, info]) => `${expiryKey}:${info.count} (${info.minDte.toFixed(1)}-${info.maxDte.toFixed(1)} DTE)`)
+              .join(', ');
+            console.log(`📋 Rule ${rule.id} criteria: option_type=${optionType || 'any'} dte_range=${JSON.stringify(dteRange || null)} expiries=${expiryText || 'none'}`);
+          }
           continue;
         }
 
