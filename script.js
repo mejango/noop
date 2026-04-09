@@ -2820,7 +2820,7 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         // Put budget discipline: skip if cycle budget exhausted
         if (rule.action === 'buy_put' && botData.putBudgetForCycle > 0) {
           const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
-          if (putRemaining <= 1) continue;
+          if (putRemaining <= 0.20) continue;
         }
 
         // Call exposure cap: skip if short call exposure >= 40% of ETH holdings
