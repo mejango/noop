@@ -11,6 +11,7 @@ RUN npm ci --production
 
 # Copy bot and script files
 COPY bot/ ./bot/
+COPY scripts/ ./scripts/
 COPY script.js ./
 
 # Data directory (Railway volume mount point)

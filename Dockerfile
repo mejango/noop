@@ -24,6 +24,7 @@ RUN npm ci --omit=dev
 
 # Copy bot
 COPY bot/ ./bot/
+COPY scripts/ ./scripts/
 COPY script.js ./
 
 # Copy knowledge wiki templates (used to seed empty volumes on first deploy)
