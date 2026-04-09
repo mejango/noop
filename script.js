@@ -1464,7 +1464,9 @@ const fetchOrderStatus = async (orderId) => {
       cancel_reason: raw.cancel_reason || null,
     };
   } catch (error) {
-    console.error(`❌ fetchOrderStatus ${orderId} failed: ${error.message}`);
+    const errBody = error.response?.data;
+    const bodyStr = errBody ? (typeof errBody === 'string' ? errBody.slice(0, 300) : JSON.stringify(errBody).slice(0, 300)) : 'no body';
+    console.error(`❌ fetchOrderStatus ${orderId} failed: ${error.message} | status: ${error.response?.status || 'N/A'} | body: ${bodyStr}`);
     return null;
   }
 };
