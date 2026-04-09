@@ -1600,6 +1600,7 @@ const fetchSubaccount = async () => {
       subaccount_value: Number(r?.subaccount_value ?? 0),
       positions_value: Number(r?.positions_value ?? 0),
       collaterals_value: Number(r?.collaterals_value ?? 0),
+      collaterals_initial_margin: Number(r?.collaterals_initial_margin ?? 0),
       positions_initial_margin: Number(r?.positions_initial_margin ?? 0),   // margin consumed by positions
       positions_maintenance_margin: Number(r?.positions_maintenance_margin ?? 0),
       open_orders_margin: Number(r?.open_orders_margin ?? 0),
@@ -2760,11 +2761,9 @@ const summarizeReservedEntryCapacity = (restingOrders) => {
   return restingOrders.reduce((acc, order) => {
     if (order.action === 'buy_put') {
       acc.putBudget += (Number(order.amount) || 0) * (Number(order.limit_price) || 0);
-    } else if (order.action === 'sell_call') {
-      acc.callExposure += Math.abs(Number(order.amount) || 0);
     }
     return acc;
-  }, { putBudget: 0, callExposure: 0 });
+  }, { putBudget: 0 });
 };
 
 const restingOrderNeedsAdjustment = (restingOrder, desiredPrice, desiredQty, instrument) => {
@@ -2775,6 +2774,54 @@ const restingOrderNeedsAdjustment = (restingOrder, desiredPrice, desiredQty, ins
   const priceDelta = Math.abs(currentPrice - desiredPrice);
   const qtyDelta = Math.abs(currentQty - desiredQty);
   return priceDelta >= Math.max(priceStep / 2, 0.0001) || qtyDelta >= Math.max(amountStep / 2, 0.0001);
+};
+
+const getMarginCapacityBase = (marginState) => {
+  const collateralMarginBase = Number(marginState?.collaterals_initial_margin ?? 0);
+  if (collateralMarginBase > 0) return collateralMarginBase;
+  const collateralValue = Number(marginState?.collaterals_value ?? 0);
+  if (collateralValue > 0) return collateralValue;
+  return Number(marginState?.subaccount_value ?? 0);
+};
+
+const estimateMarginUtilization = (marginState, additionalOpenOrdersMargin = 0) => {
+  const base = getMarginCapacityBase(marginState);
+  if (!(base > 0)) return null;
+  const usedMargin = Math.max(0, Number(marginState?.positions_initial_margin ?? 0))
+    + Math.max(0, Number(marginState?.open_orders_margin ?? 0))
+    + Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
+  return usedMargin / base;
+};
+
+const estimateStandardShortCallInitialMarginPerUnit = (strike, spotPrice, premium) => {
+  if (!(spotPrice > 0)) return Infinity;
+  const otm = Math.max(0, strike - spotPrice);
+  const otmBuffer = Math.max(0.15 - (otm / spotPrice), 0.13) * spotPrice;
+  // Derive Standard Margin docs express short-call initial margin as collateral credit plus
+  // a negative option-margin term. For sizing we use the positive requirement magnitude.
+  return Math.max(0, otmBuffer - Math.max(0, premium || 0));
+};
+
+const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, spotPrice, strike = 0, premium = 0) => {
+  const documentedEstimate = estimateStandardShortCallInitialMarginPerUnit(strike, spotPrice, premium);
+  if (Number.isFinite(documentedEstimate) && documentedEstimate > 0) {
+    return documentedEstimate;
+  }
+
+  const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
+  const currentShortExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
+  if (currentShortExposure > 0 && Number(marginState?.positions_initial_margin ?? 0) > 0) {
+    return Number(marginState.positions_initial_margin) / currentShortExposure;
+  }
+
+  const restingShortExposure = restingOrders
+    .filter(order => order.action === 'sell_call')
+    .reduce((sum, order) => sum + Math.abs(Number(order.amount) || 0), 0);
+  if (restingShortExposure > 0 && Number(marginState?.open_orders_margin ?? 0) > 0) {
+    return Number(marginState.open_orders_margin) / restingShortExposure;
+  }
+
+  return Math.max((spotPrice || 0) * 0.13, 100);
 };
 
 const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice) => {
@@ -2840,6 +2887,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
   try {
     const entryRules = db.getActiveRulesByType('entry');
     let openRestingEntryOrders = getOpenRestingEntryOrders();
+    let liveMarginState = null;
+    try { liveMarginState = await fetchSubaccount(); } catch { /* ok */ }
+    let provisionalCallOrderMargin = 0;
     for (const rule of entryRules) {
       try {
         let criteria;
@@ -2865,12 +2915,18 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
 
         // Call exposure cap: skip if short call exposure >= 40% of ETH holdings
-        if (rule.action === 'sell_call' && botData.ethBalance > 0) {
-          const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
-          const currentExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
-          const maxExposure = CALL_EXPOSURE_CAP_PCT * botData.ethBalance - reservedCapacity.callExposure;
-          if (currentExposure >= maxExposure) {
-            console.log(`📋 Call cap reached: ${currentExposure.toFixed(2)} >= ${maxExposure.toFixed(2)} (${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ${botData.ethBalance.toFixed(2)} ETH)`);
+        if (rule.action === 'sell_call') {
+          if (!liveMarginState) {
+            console.log(`📋 Skip ${rule.action}: margin state unavailable`);
+            continue;
+          }
+          const currentUtilization = estimateMarginUtilization(liveMarginState, provisionalCallOrderMargin);
+          if (currentUtilization == null) {
+            console.log(`📋 Skip ${rule.action}: unable to compute margin utilization`);
+            continue;
+          }
+          if (currentUtilization >= CALL_EXPOSURE_CAP_PCT) {
+            console.log(`📋 Call margin cap reached: ${(currentUtilization * 100).toFixed(1)}% >= ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(1)}%`);
             continue;
           }
         }
@@ -3013,11 +3069,23 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           maxByBudget = Math.min(maxByBudget, putRemaining / price);
         }
         // For calls: cap by remaining exposure headroom (40% of ETH - current short calls)
-        if (rule.action === 'sell_call' && botData.ethBalance > 0) {
-          const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
-          const currentExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
-          const callHeadroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * botData.ethBalance - currentExposure - reservedCapacity.callExposure);
-          maxByBudget = Math.min(maxByBudget, callHeadroom);
+        if (rule.action === 'sell_call' && liveMarginState) {
+          const marginBase = getMarginCapacityBase(liveMarginState);
+          const marginUsed = Math.max(0, Number(liveMarginState.positions_initial_margin || 0))
+            + Math.max(0, Number(liveMarginState.open_orders_margin || 0))
+            + provisionalCallOrderMargin;
+          const marginHeadroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * marginBase - marginUsed);
+          const marginPerUnit = estimateShortCallMarginPerUnit(
+            liveMarginState,
+            positions,
+            openRestingEntryOrders,
+            spotPrice,
+            best.strike,
+            best.bidPrice
+          );
+          if (marginPerUnit > 0) {
+            maxByBudget = Math.min(maxByBudget, marginHeadroom / marginPerUnit);
+          }
         }
         const bookLiq = optionType === 'P' ? best.askAmount : best.bidAmount;
         const step = best.amountStep || 0.01;
@@ -3070,6 +3138,16 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           amount: qty,
           limit_price: price,
         });
+        if (rule.action === 'sell_call' && liveMarginState) {
+          provisionalCallOrderMargin += qty * estimateShortCallMarginPerUnit(
+            liveMarginState,
+            positions,
+            openRestingEntryOrders,
+            spotPrice,
+            best.strike,
+            best.bidPrice
+          );
+        }
         console.log(`📋 Entry candidate: ${rule.action} ${best.name} score=${best.score.toFixed(6)}`);
       } catch (e) {
         console.log(`📋 Entry rule ${rule.id} error: ${e.message}`);
@@ -3534,7 +3612,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
           max_tokens: 256,
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
-CALL DISCIPLINE: Short call exposure is hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each call trade should put skin in the game — meaningful size, not tiny nibbles. Reject call sells that are too small to matter.
+CALL DISCIPLINE: Short calls are hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. Reject call sells that would push margin usage too high or are too small to matter.
 CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. Buying back a short call because price rose is paying the crowd's fear premium. Ask: is the position genuinely threatened, or does it just feel that way? Confirm buybacks that lock in meaningful profit or exit a position that's truly challenged. Reject buybacks driven by price action alone when theta is still working and the position isn't under real threat. Use the Greeks and remaining DTE to judge the actual risk.
 REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.`,
           messages: [{ role: 'user', content: confirmPrompt }],
@@ -3561,7 +3639,7 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
 2. SELL THE CROWD'S GREED: Selling calls is routine — exploit mispriced optimism to fund insurance. Confirm call sells when the premium is irrational relative to the actual probability, the strike gives real cushion, and exposure is sized to survive the worst case. Reject when the premium doesn't justify the risk or margin can't absorb an adverse move.
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
-CALL DISCIPLINE: Short call exposure is hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each call trade should put skin in the game — meaningful size, not tiny nibbles. Reject call sells that are too small to matter.
+CALL DISCIPLINE: Short calls are hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. Reject call sells that would push margin usage too high or are too small to matter.
 CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous — that's paying a fear premium. Confirm buybacks only when the position is genuinely threatened or profit is worth locking in. Reject buybacks driven by price noise when theta is still working.
 REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV overpays alongside the crowd. Use actual Greeks, DTE, and momentum to judge.
 Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }`,
@@ -3759,23 +3837,24 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     ethBalance,
     usdcBalance,
     shortCallExposure: totalCallExposure,
-    callExposureDiscipline: {
+    callMarginDiscipline: {
       capPct: CALL_EXPOSURE_CAP_PCT,
-      maxExposure: +(CALL_EXPOSURE_CAP_PCT * ethBalance).toFixed(2),
-      currentExposure: +totalCallExposure.toFixed(2),
-      remaining: +Math.max(0, CALL_EXPOSURE_CAP_PCT * ethBalance - totalCallExposure).toFixed(2),
-      note: `Hard cap: ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings. Each trade should be meaningful (~20%+ of cap). Current: ${totalCallExposure.toFixed(2)} / ${(CALL_EXPOSURE_CAP_PCT * ethBalance).toFixed(2)} ETH.`,
+      currentShortExposure: +totalCallExposure.toFixed(2),
+      utilizationPct: marginState ? +(100 * (estimateMarginUtilization(marginState) || 0)).toFixed(1) : null,
+      marginBase: marginState ? +getMarginCapacityBase(marginState).toFixed(2) : null,
+      note: `Hard cap: keep inferred Derive margin utilization below ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}%. We infer utilization conservatively as (positions_initial_margin + open_orders_margin) / collateral margin base.`,
     },
     margin: marginState ? {
       buying_power: +marginState.initial_margin.toFixed(2),              // available margin for new trades
       maintenance_margin: +marginState.maintenance_margin.toFixed(2),    // available before liquidation
       subaccount_value: +marginState.subaccount_value.toFixed(2),
       collaterals_value: +marginState.collaterals_value.toFixed(2),
+      collaterals_initial_margin: +marginState.collaterals_initial_margin.toFixed(2),
       positions_margin: +marginState.positions_initial_margin.toFixed(2), // margin consumed by positions
       open_orders_margin: marginState.open_orders_margin,
       is_under_liquidation: marginState.is_under_liquidation,
-      margin_usage_pct: marginState.collaterals_value > 0
-        ? +((marginState.positions_initial_margin / marginState.collaterals_value) * 100).toFixed(1)
+      margin_usage_pct: getMarginCapacityBase(marginState) > 0
+        ? +((100 * (estimateMarginUtilization(marginState) || 0))).toFixed(1)
         : 0,
     } : null,
     putBudgetDiscipline: {
@@ -3787,7 +3866,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
       cycleDays: BOT_CONFIG.PERIOD_DAYS,
       note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of portfolio value per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once.`,
     },
-    note: 'Account is ETH-collateralized on Derive. buying_power = available margin for new trades (initial_margin from API). margin_usage_pct = positions_margin / collaterals_value. 0% means positions consume no margin (standard long puts). Sizing must respect buying power, put budget discipline, AND call exposure cap.',
+    note: 'Account is ETH-collateralized on Derive. buying_power = available margin for new trades (initial_margin from API). margin_usage_pct is inferred conservatively as (positions_initial_margin + open_orders_margin) / collateral margin base. Sizing must respect buying power, put budget discipline, AND the call margin-utilization cap.',
   };
 
   // Recent orders
@@ -3880,7 +3959,7 @@ There are TWO constraints on put buying:
 1. **Margin**: initial_margin must stay positive. maintenance_margin at zero = liquidation.
 2. **Budget discipline**: We commit to spending 3.33% of portfolio value per year on puts, allocated in 15-day budget windows. The budget for each cycle is calculated from current portfolio value at cycle start. Spend predictably across the cycle. Don't front-load. Don't impulse buy. If nothing is well-priced, let the budget roll over.
 
-For calls: **hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings** in total short call exposure. The bot enforces this — you can't exceed it. Within that cap, put skin in the game: each call trade should be meaningful (roughly 20%+ of the cap), not tiny nibbles. Size against margin headroom, ETH collateral, and remaining cap headroom.
+For calls: **hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization**. The bot enforces this conservatively using documented margin fields. Within that cap, put skin in the game: each call trade should be meaningful, not tiny nibbles. Size against margin headroom, not ETH balance.
 
 ## Call Buyback Philosophy (Spitznagel)
 We sell short-dated calls. The arithmetic of buybacks is simple: don't pay fear premiums to exit positions that are working.
@@ -3950,7 +4029,7 @@ Rules:
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending.
-- For calls: hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ETH holdings in total short call exposure. The code enforces this cap. Size meaningfully — each trade should put skin in the game (~20%+ of the cap), not tiny positions. Consider existing short call exposure and margin headroom.
+- For calls: hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. The code enforces this conservatively from margin fields. Size meaningfully, but do not exceed the margin-utilization cap.
 - Entry rules should target the highest-scoring candidates when possible
 - Exit rules MUST reference specific instrument_name from current positions
 - If the market is unclear, it is ALWAYS correct to produce fewer rules or none
