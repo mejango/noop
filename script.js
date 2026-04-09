@@ -1315,7 +1315,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         direction,
         limit_price: price.toString(),
         amount: amount.toString(),
-        signature_expiry_sec: Math.floor((Date.now() / 1000) + 600), // must be >5min from now
+        signature_expiry_sec: Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 600 : 86400)), // IOC: 10min, GTC/post_only: 24h
         max_fee: Math.max(0.08 * price, 10.0).toFixed(2).toString(), // Max fee per unit of volume (USDC). Generous ceiling — actual fee is much lower (~0.1% of notional)
         mmp: direction === 'sell', // Market maker protection during selling
         nonce: parseInt(`${timestamp}${Math.floor(Math.random() * 1000)}`),
@@ -3033,11 +3033,9 @@ const manageOpenOrders = async (tickerMap) => {
           status = finalStatus.order_status; // 'filled', 'cancelled', 'expired'
           console.log(`📋 Order ${tracked.order_id} status: ${status}, filled=${filledAmt}/${tracked.amount} @ $${fillPrice}`);
         } else {
-          // API failed — fall back to assuming full fill (conservative)
-          filledAmt = tracked.amount;
-          fillPrice = tracked.limit_price;
-          status = 'filled';
-          console.log(`⚠️ Order ${tracked.order_id} status unknown — assuming full fill at $${fillPrice}`);
+          // API failed — skip reconciliation this tick, retry next time
+          console.log(`⚠️ Order ${tracked.order_id} status unknown — skipping, will retry next tick`);
+          continue;
         }
 
         const fillValue = filledAmt * fillPrice;
