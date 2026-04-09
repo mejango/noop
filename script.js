@@ -1391,7 +1391,8 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         return { rejected_post_only: true, error: errStr };
       }
     }
-    console.error(`Error placing limit order for ${name}: ${error.message} | status: ${status || 'N/A'}${status === 429 ? ' (RATE LIMITED)' : ''}`);
+    const bodyStr = errBody ? (typeof errBody === 'string' ? errBody.slice(0, 300) : JSON.stringify(errBody).slice(0, 300)) : 'no body';
+    console.error(`Error placing limit order for ${name}: ${error.message} | status: ${status || 'N/A'} | body: ${bodyStr}`);
     return null;
   }
 };
