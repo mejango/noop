@@ -2858,30 +2858,33 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         }
 
         let candidates = [];
+        let filterStats = { total: 0, noInstrument: 0, wrongType: 0, noExpiry: 0, dteOut: 0, deltaOut: 0, strikeOut: 0, costOut: 0, bidOut: 0, scoreOut: 0 };
         for (const [instrName, ticker] of Object.entries(tickerMap)) {
           try {
+            filterStats.total++;
+
             // Find matching instrument
             const instrument = instruments.find(i => i.instrument_name === instrName);
-            if (!instrument) continue;
+            if (!instrument) { filterStats.noInstrument++; continue; }
 
             // Filter by option type
-            if (optionType && instrument.option_details?.option_type !== optionType) continue;
+            if (optionType && instrument.option_details?.option_type !== optionType) { filterStats.wrongType++; continue; }
 
             // Compute DTE from instrument name
             const expiry = parseExpiryFromInstrument(instrName);
-            if (!expiry) continue;
+            if (!expiry) { filterStats.noExpiry++; continue; }
             const dte = Math.max(0, (expiry.getTime() - Date.now()) / 86400000);
 
             // Filter by DTE range
-            if (dteRange && (dte < dteRange[0] || dte > dteRange[1])) continue;
+            if (dteRange && (dte < dteRange[0] || dte > dteRange[1])) { filterStats.dteOut++; continue; }
 
             // Filter by delta range
             const delta = Number(ticker?.option_pricing?.d) || 0;
-            if (deltaRange && (delta < deltaRange[0] || delta > deltaRange[1])) continue;
+            if (deltaRange && (delta < deltaRange[0] || delta > deltaRange[1])) { filterStats.deltaOut++; continue; }
 
             // Filter by max_strike_pct
             const strike = Number(instrument.option_details?.strike) || 0;
-            if (maxStrikePct && strike >= maxStrikePct * spotPrice) continue;
+            if (maxStrikePct && strike >= maxStrikePct * spotPrice) { filterStats.strikeOut++; continue; }
 
             const askPrice = Number(ticker?.a) || 0;
             const askAmount = Number(ticker?.A) || 0;
@@ -2889,10 +2892,10 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
             const bidAmount = Number(ticker?.B) || 0;
 
             // Filter by max_cost (for buys)
-            if (maxCost != null && askPrice > maxCost) continue;
+            if (maxCost != null && askPrice > maxCost) { filterStats.costOut++; continue; }
 
             // Filter by min_bid (for sells)
-            if (minBid != null && bidPrice < minBid) continue;
+            if (minBid != null && bidPrice < minBid) { filterStats.bidOut++; continue; }
 
             // Score: puts = |delta| / askPrice, calls = bidPrice / |delta|
             const absDelta = Math.abs(delta);
@@ -2903,7 +2906,7 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
               score = absDelta > 0 ? bidPrice / absDelta : 0;
             }
 
-            if (minScore != null && score < minScore) continue;
+            if (minScore != null && score < minScore) { filterStats.scoreOut++; continue; }
 
             const amountStep = instrument.options?.amount_step || 0.01;
 
@@ -2926,7 +2929,11 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
           }
         }
 
-        if (candidates.length === 0) continue;
+        if (candidates.length === 0) {
+          const filtered = Object.entries(filterStats).filter(([k, v]) => k !== 'total' && v > 0).map(([k, v]) => `${k}=${v}`).join(', ');
+          console.log(`📋 Rule ${rule.id} (${rule.action}): 0 candidates from ${filterStats.total} tickers — filtered by: ${filtered || 'no tickers'}`);
+          continue;
+        }
 
         // Pick best candidate (highest score)
         candidates.sort((a, b) => b.score - a.score);
