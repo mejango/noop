@@ -3140,7 +3140,60 @@ const manageOpenOrders = async (tickerMap) => {
 
 // ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
 
-const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc') => {
+const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
+  const configuredStep = Number(
+    instrument?.price_step ??
+    instrument?.options?.price_step ??
+    instrument?.option_details?.price_step ??
+    0
+  );
+  if (configuredStep > 0) return configuredStep;
+  if (fallbackPrice >= 10) return 0.1;
+  if (fallbackPrice >= 1) return 0.05;
+  return 0.01;
+};
+
+const roundToStep = (value, step, mode = 'nearest') => {
+  if (!(step > 0)) return value;
+  const scaled = value / step;
+  if (mode === 'up') return Math.ceil(scaled) * step;
+  if (mode === 'down') return Math.floor(scaled) * step;
+  return Math.round(scaled) * step;
+};
+
+const formatPostOnlyContext = ({ attemptedPrice, retryPrice = null, bidPrice = 0, askPrice = 0, step = 0, reason = null }) => {
+  const parts = [
+    `attempted=$${Number(attemptedPrice || 0).toFixed(4)}`,
+    `bid=$${Number(bidPrice || 0).toFixed(4)}`,
+    `ask=$${Number(askPrice || 0).toFixed(4)}`,
+  ];
+  if (retryPrice != null) parts.push(`retry=$${Number(retryPrice).toFixed(4)}`);
+  if (step > 0) parts.push(`step=$${step.toFixed(4)}`);
+  if (reason) parts.push(`exchange=${reason}`);
+  return parts.join(', ');
+};
+
+const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice) => {
+  const bidPrice = Number(ticker?.b) || 0;
+  const askPrice = Number(ticker?.a) || 0;
+  const step = getInstrumentPriceStep(instrument, attemptedPrice);
+
+  if (direction === 'sell') {
+    const retryPrice = askPrice > bidPrice
+      ? Math.max(roundToStep(askPrice, step, 'up'), roundToStep(bidPrice + step, step, 'up'))
+      : roundToStep(bidPrice + step, step, 'up');
+    return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
+  }
+
+  if (askPrice <= 0) return null;
+  const belowAsk = askPrice - step;
+  const candidate = belowAsk > 0
+    ? roundToStep(belowAsk, step, 'down')
+    : roundToStep(askPrice * 0.99, step, 'down');
+  return candidate > 0 ? { retryPrice: candidate, bidPrice, askPrice, step } : null;
+};
+
+const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc', tickerMap = {}) => {
   // DRY_RUN mode: track budget discipline but skip actual order
   if (process.env.DRY_RUN === '1') {
     const totalValue = amount * price;
@@ -3172,6 +3225,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
 
   const addr = instrument.base_asset_address;
   const subId = instrument.base_asset_sub_id;
+  const ticker = tickerMap?.[instrumentName];
 
   let order;
   try {
@@ -3198,14 +3252,74 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
 
   // Detect post_only rejection (order would cross the book)
   if (order.rejected_post_only) {
-    console.log(`📋 post_only rejected: ${action} ${instrumentName} @ $${price} — would cross book, not retrying as IOC`);
-    if (db) db.insertOrder({
-      action, success: false,
-      reason: `post_only rejected: would cross book at $${price}`,
-      instrument_name: instrumentName, spot_price: spotPrice,
-      price, intended_amount: amount,
+    const retryPlan = orderType === 'post_only' ? computePostOnlyRetryPrice(direction, ticker, instrument, price) : null;
+    const initialContext = formatPostOnlyContext({
+      attemptedPrice: price,
+      retryPrice: retryPlan?.retryPrice ?? null,
+      bidPrice: retryPlan?.bidPrice ?? ticker?.b ?? 0,
+      askPrice: retryPlan?.askPrice ?? ticker?.a ?? 0,
+      step: retryPlan?.step ?? getInstrumentPriceStep(instrument, price),
+      reason: order.error || null,
     });
-    return { postOnlyRejected: true, action, instrumentName, amount, price, orderType };
+
+    if (orderType === 'post_only' && retryPlan && Math.abs(retryPlan.retryPrice - price) > 1e-9) {
+      console.log(`📋 post_only rejected: ${action} ${instrumentName} @ $${price} — retrying maker at $${retryPlan.retryPrice} (${initialContext})`);
+      let retryOrder = null;
+      try {
+        retryOrder = await placeOrder(
+          instrumentName,
+          amount.toFixed(2),
+          direction,
+          retryPlan.retryPrice,
+          addr,
+          subId,
+          reduceOnly,
+          orderType
+        );
+      } catch (error) {
+        console.error(`❌ Error retrying ${action} order for ${instrumentName}:`, error.message);
+      }
+
+      if (retryOrder && !retryOrder.rejected_post_only) {
+        order = retryOrder;
+        price = retryPlan.retryPrice;
+      } else {
+        const finalContext = formatPostOnlyContext({
+          attemptedPrice: price,
+          retryPrice: retryPlan.retryPrice,
+          bidPrice: retryPlan.bidPrice,
+          askPrice: retryPlan.askPrice,
+          step: retryPlan.step,
+          reason: retryOrder?.error || order.error || null,
+        });
+        console.log(`📋 post_only retry failed: ${action} ${instrumentName} — ${finalContext}`);
+        if (db) db.insertOrder({
+          action, success: false,
+          reason: `post_only rejected after maker retry: ${finalContext}`,
+          instrument_name: instrumentName, spot_price: spotPrice,
+          price, intended_amount: amount,
+        });
+        return {
+          postOnlyRejected: true,
+          action,
+          instrumentName,
+          amount,
+          price,
+          orderType,
+          context: finalContext,
+          retryPrice: retryPlan.retryPrice,
+        };
+      }
+    } else {
+      console.log(`📋 post_only rejected: ${action} ${instrumentName} @ $${price} — no maker retry available (${initialContext})`);
+      if (db) db.insertOrder({
+        action, success: false,
+        reason: `post_only rejected without retry: ${initialContext}`,
+        instrument_name: instrumentName, spot_price: spotPrice,
+        price, intended_amount: amount,
+      });
+      return { postOnlyRejected: true, action, instrumentName, amount, price, orderType, context: initialContext };
+    }
   }
 
   // Fill accounting from actual trades
@@ -3465,16 +3579,17 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           executionPrice,
           instruments,
           spotPrice,
-          orderType
+          orderType,
+          tickerMap
         );
 
         if (result && result.postOnlyRejected) {
-          // post_only would cross the book — mark failed, don't retry with same order type
+          // post_only failed even after one maker retry — mark failed, don't retry again this tick
           db.updatePendingAction(action.id, {
             status: 'failed',
-            execution_result: `post_only rejected: would cross book at $${executionPrice}. Price may have moved — will re-evaluate next tick.`,
+            execution_result: `post_only rejected: ${result.context || `would cross book at $${executionPrice}`}. Price may have moved — will re-evaluate next tick.`,
           });
-          console.log(`📋 post_only rejected: ${action.action} ${action.instrument_name} — price crossed book`);
+          console.log(`📋 post_only rejected: ${action.action} ${action.instrument_name} — ${result.context || 'price crossed book'}`);
         } else if (result && result.zeroFill) {
           // IOC got zero fill — mark as failed, will retry next tick
           db.updatePendingAction(action.id, {
