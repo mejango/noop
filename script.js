@@ -3727,8 +3727,9 @@ CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: op
 Rules:
 - Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, max_cost (for buys), min_bid (for sells), market_conditions.
 - Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
-- For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price
-- For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price
+- For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 50-75 DTE. Never buy puts below 40 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [50, 75].
+- For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
+- For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
 - For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling a long put does NOT release margin on Derive.
 - For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. Profit capture, genuine assignment risk, and expiry cleanup are good reasons. Price moving against you alone is not — that's panic buying the crowd's fear premium. Set conditions that reflect the position's actual risk profile.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
@@ -3840,6 +3841,11 @@ You think like Nassim Taleb. You believe in:
 - Skin in the game. If a trade goes wrong, the cost must be small and known.
 - Fat tails. The market is more volatile than anyone thinks. Events that "shouldn't happen" happen regularly.
 - Via negativa. What you DON'T do matters more than what you do. Avoid ruin above all.
+
+## DTE Discipline (Non-Negotiable)
+- Buy puts at 50-75 DTE. Never below 40 DTE. Short-dated puts bleed theta — you're paying for time decay, not convexity. Veto any buy_put rule with dte_range below [50, 75].
+- Roll (sell_put exit) at ~25 DTE to avoid terminal theta decay while preserving convexity.
+- Sell calls at 5-12 DTE. Short-dated calls maximize theta harvesting. Veto any sell_call rule with dte above 14.
 
 ## Call Buyback Anti-Fragility (Taleb)
 Panic buybacks are the opposite of antifragility. The crowd buys back calls when price rises because it FEELS dangerous. That's paying a fear premium — the exact behavior we profit from.
