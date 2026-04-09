@@ -3324,9 +3324,9 @@ Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
 ${advisoryOrderPref ? `Advisory suggested order type: ${advisoryOrderPref}` : ''}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
-- "ioc" (immediate-or-cancel): fill now at market or cancel. Taker fee ~0.06%. Best when the price is great and you want it NOW.
-- "gtc" (good-til-cancelled): rest on the order book at your limit_price until filled. Maker fee ~0.02%. Best when you want a specific price and can wait.
-- "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee ~0.02%). Best for patient limit orders.
+- "ioc" (immediate-or-cancel): fill now at market or cancel. TAKER fee = $0.50 base + 0.03% of notional (~$1/contract for ETH options). Use only when the opportunity is exceptional and might vanish.
+- "gtc" (good-til-cancelled): rest on the order book at your limit_price until filled. MAKER fee = 0.01% of notional (~$0.16/contract). 6x cheaper than IOC. Use when you want a specific price and can wait.
+- "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee 0.01%). 6x cheaper than IOC. Best for patient limit orders.
 
 JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null for market>, "reasoning": "..." }`;
 
@@ -3758,11 +3758,11 @@ Rules:
 - If the market is unclear, it is ALWAYS correct to produce fewer rules or none
 - Maximum 5 entry rules and 5 exit rules
 
-Order type guidance:
-- "ioc" (immediate-or-cancel): fill instantly or cancel. Taker fee ~0.06%. Use when the price is great and you want it NOW.
-- "gtc" (good-til-cancelled): rest on the order book. Maker fee ~0.02%. Use when you want to name your price and wait for fills.
-- "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee). Best for patient entries where you want the cheapest execution.
-- Prefer post_only/gtc when pricing is good but not urgent. Use ioc only when the opportunity is exceptional and might vanish.
+Order type guidance (fee matters — maker is 6x cheaper than taker):
+- "ioc" (immediate-or-cancel): fill instantly or cancel. TAKER fee = $0.50 base + 0.03% of notional (~$1/contract for ETH options). Only use when the opportunity is exceptional and might vanish.
+- "gtc" (good-til-cancelled): rest on the order book. MAKER fee = 0.01% of notional (~$0.16/contract). Use when you want to name your price and wait.
+- "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee 0.01%). Best for patient entries — cheapest execution.
+- DEFAULT to post_only or gtc. Only suggest ioc when urgency genuinely justifies paying 6x more in fees.
 - The confirmation step can override your suggestion, so this is advisory guidance not a hard rule.
 
 - Return ONLY valid JSON, no markdown fences`;
