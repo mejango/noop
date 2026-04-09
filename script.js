@@ -2751,7 +2751,33 @@ const evaluateConditions = (conditions, logic, values) => {
   return logic === 'all' ? results.every(Boolean) : results.some(Boolean);
 };
 
-const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
+const getOpenRestingEntryOrders = () => {
+  if (!db) return [];
+  return db.getOpenRestingOrders().filter(order => order.action === 'buy_put' || order.action === 'sell_call');
+};
+
+const summarizeReservedEntryCapacity = (restingOrders) => {
+  return restingOrders.reduce((acc, order) => {
+    if (order.action === 'buy_put') {
+      acc.putBudget += (Number(order.amount) || 0) * (Number(order.limit_price) || 0);
+    } else if (order.action === 'sell_call') {
+      acc.callExposure += Math.abs(Number(order.amount) || 0);
+    }
+    return acc;
+  }, { putBudget: 0, callExposure: 0 });
+};
+
+const restingOrderNeedsAdjustment = (restingOrder, desiredPrice, desiredQty, instrument) => {
+  const currentPrice = Number(restingOrder?.limit_price) || 0;
+  const currentQty = Number(restingOrder?.amount) || 0;
+  const amountStep = instrument?.options?.amount_step || 0.01;
+  const priceStep = getInstrumentPriceStep(instrument, desiredPrice);
+  const priceDelta = Math.abs(currentPrice - desiredPrice);
+  const qtyDelta = Math.abs(currentQty - desiredQty);
+  return priceDelta >= Math.max(priceStep / 2, 0.0001) || qtyDelta >= Math.max(amountStep / 2, 0.0001);
+};
+
+const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice) => {
   let triggeredCount = 0;
 
   // ── Exit rules ─────────────────────────────────────────────────────────────
@@ -2813,6 +2839,7 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
   // ── Entry rules ────────────────────────────────────────────────────────────
   try {
     const entryRules = db.getActiveRulesByType('entry');
+    let openRestingEntryOrders = getOpenRestingEntryOrders();
     for (const rule of entryRules) {
       try {
         let criteria;
@@ -2829,9 +2856,11 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
           if (elapsed < 3600000) continue; // 1 hour cooldown
         }
 
+        const reservedCapacity = summarizeReservedEntryCapacity(openRestingEntryOrders);
+
         // Put budget discipline: skip if cycle budget exhausted
         if (rule.action === 'buy_put' && botData.putBudgetForCycle > 0) {
-          const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
+          const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought - reservedCapacity.putBudget;
           if (putRemaining <= 0.20) continue;
         }
 
@@ -2839,7 +2868,7 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         if (rule.action === 'sell_call' && botData.ethBalance > 0) {
           const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
           const currentExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
-          const maxExposure = CALL_EXPOSURE_CAP_PCT * botData.ethBalance;
+          const maxExposure = CALL_EXPOSURE_CAP_PCT * botData.ethBalance - reservedCapacity.callExposure;
           if (currentExposure >= maxExposure) {
             console.log(`📋 Call cap reached: ${currentExposure.toFixed(2)} >= ${maxExposure.toFixed(2)} (${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% of ${botData.ethBalance.toFixed(2)} ETH)`);
             continue;
@@ -2973,12 +3002,6 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         candidates.sort((a, b) => b.score - a.score);
         const best = candidates[0];
 
-        // Dedup: skip if we already have a resting GTC/post_only order for this instrument
-        if (db.hasRestingOrderForInstrument(best.name)) {
-          console.log(`📋 Skip ${rule.action} ${best.name}: resting order already on book`);
-          continue;
-        }
-
         // Calculate amount: min of rule budget_limit, put cycle budget remaining, and book liquidity
         const price = optionType === 'P' ? best.askPrice : best.bidPrice;
         if (price <= 0) continue;
@@ -2986,14 +3009,14 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         let maxByBudget = (rule.budget_limit || Infinity) / price;
         // For puts: also cap by cycle budget discipline
         if (rule.action === 'buy_put' && botData.putBudgetForCycle > 0) {
-          const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
+          const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought - reservedCapacity.putBudget;
           maxByBudget = Math.min(maxByBudget, putRemaining / price);
         }
         // For calls: cap by remaining exposure headroom (40% of ETH - current short calls)
         if (rule.action === 'sell_call' && botData.ethBalance > 0) {
           const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
           const currentExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
-          const callHeadroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * botData.ethBalance - currentExposure);
+          const callHeadroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * botData.ethBalance - currentExposure - reservedCapacity.callExposure);
           maxByBudget = Math.min(maxByBudget, callHeadroom);
         }
         const bookLiq = optionType === 'P' ? best.askAmount : best.bidAmount;
@@ -3001,6 +3024,27 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
         const raw = Math.min(maxByBudget, bookLiq, 20);
         const qty = Math.floor(raw / step) * step;
         if (qty < step) continue;
+
+        // If the best instrument already has a resting entry order, decide whether to keep or adjust it.
+        const existingResting = openRestingEntryOrders.find(order => order.instrument_name === best.name && order.action === rule.action);
+        if (existingResting) {
+          if (!restingOrderNeedsAdjustment(existingResting, price, qty, best.instrument)) {
+            console.log(`📋 Keep resting ${rule.action} ${best.name}: existing order already aligned @ $${Number(existingResting.limit_price).toFixed(4)} x ${Number(existingResting.amount).toFixed(2)}`);
+            continue;
+          }
+
+          console.log(`📋 Adjust resting ${rule.action} ${best.name}: cancel ${existingResting.order_id} @ $${Number(existingResting.limit_price).toFixed(4)} x ${Number(existingResting.amount).toFixed(2)} -> target $${price.toFixed(4)} x ${qty.toFixed(2)}`);
+          const cancelled = await cancelOrder(existingResting.order_id, existingResting.instrument_name);
+          if (!cancelled) {
+            console.log(`📋 Keep resting ${rule.action} ${best.name}: cancel failed, re-evaluate next tick`);
+            continue;
+          }
+          db.updateRestingOrder(existingResting.order_id, 'cancelled', existingResting.filled_amount || 0);
+          openRestingEntryOrders = openRestingEntryOrders.filter(order => order.order_id !== existingResting.order_id);
+        } else if (db.hasRestingOrderForInstrument(best.name)) {
+          console.log(`📋 Skip ${rule.action} ${best.name}: another resting order already on book`);
+          continue;
+        }
 
         db.insertPendingAction({
           rule_id: rule.id,
@@ -3018,6 +3062,14 @@ const evaluateTradingRules = (positions, instruments, tickerMap, spotPrice) => {
           },
         });
         triggeredCount++;
+        openRestingEntryOrders.push({
+          order_id: `pending-${rule.id}-${best.name}`,
+          instrument_name: best.name,
+          action: rule.action,
+          direction: rule.action === 'buy_put' ? 'buy' : 'sell',
+          amount: qty,
+          limit_price: price,
+        });
         console.log(`📋 Entry candidate: ${rule.action} ${best.name} score=${best.score.toFixed(6)}`);
       } catch (e) {
         console.log(`📋 Entry rule ${rule.id} error: ${e.message}`);
