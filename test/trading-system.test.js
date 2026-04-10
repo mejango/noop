@@ -3275,6 +3275,41 @@ describe('executeOrder action → direction + reduceOnly mapping', () => {
 });
 
 // ============================================================================
+// 45. Action semantics in advisor/confirmation prompts
+// ============================================================================
+
+describe('action semantics descriptions', () => {
+  const describeActionSemantics = (action) => {
+    if (action === 'sell_put') {
+      return 'Exit-only action: selling an already-owned long put to close or trim it. This is reduce_only=true and cannot create a naked short put.';
+    }
+    if (action === 'buyback_call') {
+      return 'Exit-only action: buying back an already-open short call to close or trim it. This is reduce_only=true and cannot create a new long call exposure beyond the short being closed.';
+    }
+    if (action === 'buy_put') {
+      return 'Entry action: buying a put for tail-risk insurance. Bounded premium outlay, long convexity.';
+    }
+    if (action === 'sell_call') {
+      return 'Entry action: selling a call to open short call exposure against ETH-collateralized account capacity.';
+    }
+    return 'Trade semantics unavailable.';
+  };
+
+  test('sell_put is explicitly described as closing an owned long put', () => {
+    const text = describeActionSemantics('sell_put');
+    assert.ok(text.includes('already-owned long put'));
+    assert.ok(text.includes('reduce_only=true'));
+    assert.ok(text.includes('cannot create a naked short put'));
+  });
+
+  test('buyback_call is explicitly described as closing an open short call', () => {
+    const text = describeActionSemantics('buyback_call');
+    assert.ok(text.includes('already-open short call'));
+    assert.ok(text.includes('reduce_only=true'));
+  });
+});
+
+// ============================================================================
 // 45. Voter limit_price sanity check
 // ============================================================================
 

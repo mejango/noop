@@ -3291,6 +3291,22 @@ const roundToStep = (value, step, mode = 'nearest') => {
   return Math.round(scaled) * step;
 };
 
+const describeActionSemantics = (action) => {
+  if (action === 'sell_put') {
+    return 'Exit-only action: selling an already-owned long put to close or trim it. This is reduce_only=true and cannot create a naked short put.';
+  }
+  if (action === 'buyback_call') {
+    return 'Exit-only action: buying back an already-open short call to close or trim it. This is reduce_only=true and cannot create a new long call exposure beyond the short being closed.';
+  }
+  if (action === 'buy_put') {
+    return 'Entry action: buying a put for tail-risk insurance. Bounded premium outlay, long convexity.';
+  }
+  if (action === 'sell_call') {
+    return 'Entry action: selling a call to open short call exposure against ETH-collateralized account capacity.';
+  }
+  return 'Trade semantics unavailable.';
+};
+
 const formatPostOnlyContext = ({ attemptedPrice, retryPrice = null, bidPrice = 0, askPrice = 0, step = 0, reason = null }) => {
   const parts = [
     `attempted=$${Number(attemptedPrice || 0).toFixed(4)}`,
@@ -3575,11 +3591,11 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       let detailsStr;
       if (action.action === 'sell_put' || action.action === 'buyback_call') {
         // Exit: show position info
-        detailsStr = `Position exit. Trigger: ${action.trigger_details || 'N/A'}`;
+        detailsStr = `Position exit. ${describeActionSemantics(action.action)} Trigger: ${action.trigger_details || 'N/A'}`;
       } else {
         // Entry: show option info
         const delta = ticker ? Number(ticker.option_pricing?.d) : null;
-        detailsStr = `Delta: ${delta?.toFixed(4) || 'N/A'}, Price: $${currentPrice?.toFixed(4) || 'N/A'}`;
+        detailsStr = `${describeActionSemantics(action.action)} Delta: ${delta?.toFixed(4) || 'N/A'}, Price: $${currentPrice?.toFixed(4) || 'N/A'}`;
       }
 
       // Parse trigger details for advisory's preferred order type
@@ -3594,6 +3610,7 @@ Best available price: $${currentPrice || action.price || 'N/A'}
 ${detailsStr}
 Rule reasoning: ${action.rule_reasoning || 'N/A'}
 Triggered because: ${action.trigger_details || 'N/A'}
+Action semantics: ${describeActionSemantics(action.action)}
 Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
 ${advisoryOrderPref ? `Advisory suggested order type: ${advisoryOrderPref}` : ''}
@@ -3611,9 +3628,11 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 256,
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
+EXIT SEMANTICS: sell_put means selling an already-owned long put to close or trim it. It is reduce_only=true. It does NOT open naked short put exposure. buyback_call means buying back an existing short call to close or trim it. It is reduce_only=true.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
 CALL DISCIPLINE: Short calls are hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. Reject call sells that would push margin usage too high or are too small to matter.
 CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. Buying back a short call because price rose is paying the crowd's fear premium. Ask: is the position genuinely threatened, or does it just feel that way? Confirm buybacks that lock in meaningful profit or exit a position that's truly challenged. Reject buybacks driven by price action alone when theta is still working and the position isn't under real threat. Use the Greeks and remaining DTE to judge the actual risk.
+PUT EXIT DISCIPLINE: For sell_put — evaluate it as monetizing or rolling an existing long put. Do not analyze it as short put selling or naked downside exposure. The question is whether closing this owned hedge now is prudent, not whether opening short put risk is acceptable.
 REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.`,
           messages: [{ role: 'user', content: confirmPrompt }],
         }, {
@@ -3637,10 +3656,12 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
           `You are a Taleb-style risk advisor. Your philosophy has TWO sides:
 1. BUY CONVEXITY CHEAP: Long puts are insurance — bounded cost, unbounded upside. Confirm puts that are cheap relative to the tail risk they cover. Reject puts that overpay for protection (high IV, crowd panic).
 2. SELL THE CROWD'S GREED: Selling calls is routine — exploit mispriced optimism to fund insurance. Confirm call sells when the premium is irrational relative to the actual probability, the strike gives real cushion, and exposure is sized to survive the worst case. Reject when the premium doesn't justify the risk or margin can't absorb an adverse move.
+EXIT SEMANTICS: sell_put means selling an already-owned long put to close or trim it. It is reduce_only=true and cannot create a naked short put. buyback_call means buying back an existing short call to close or trim it. It is reduce_only=true.
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
 CALL DISCIPLINE: Short calls are hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. Reject call sells that would push margin usage too high or are too small to matter.
 CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous — that's paying a fear premium. Confirm buybacks only when the position is genuinely threatened or profit is worth locking in. Reject buybacks driven by price noise when theta is still working.
+PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure.
 REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV overpays alongside the crowd. Use actual Greeks, DTE, and momentum to judge.
 Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }`,
           confirmPrompt,
@@ -4024,7 +4045,7 @@ Rules:
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
-- For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling a long put does NOT release margin on Derive.
+- For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling a long put does NOT release margin on Derive.
 - For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. Profit capture, genuine assignment risk, and expiry cleanup are good reasons. Price moving against you alone is not — that's panic buying the crowd's fear premium. Set conditions that reflect the position's actual risk profile.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
