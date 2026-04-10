@@ -820,6 +820,11 @@ const stmts = {
   updateRestingOrder: db.prepare(`
     UPDATE resting_orders SET status = @status, filled_amount = @filled_amount WHERE order_id = @order_id
   `),
+  updateRestingOrderId: db.prepare(`
+    UPDATE resting_orders
+    SET order_id = @new_order_id
+    WHERE order_id = @old_order_id
+  `),
   hasRestingOrderForInstrument: db.prepare(`
     SELECT COUNT(*) as count FROM resting_orders
     WHERE instrument_name = @instrument_name AND status = 'open'
@@ -1292,6 +1297,10 @@ const updateRestingOrder = (orderId, status, filledAmount) => {
   stmts.updateRestingOrder.run({ order_id: orderId, status, filled_amount: filledAmount ?? 0 });
 };
 
+const updateRestingOrderId = (oldOrderId, newOrderId) => {
+  stmts.updateRestingOrderId.run({ old_order_id: oldOrderId, new_order_id: newOrderId });
+};
+
 const hasRestingOrderForInstrument = (instrumentName) => {
   return (stmts.hasRestingOrderForInstrument.get({ instrument_name: instrumentName })?.count || 0) > 0;
 };
@@ -1442,6 +1451,7 @@ module.exports = {
   insertRestingOrder,
   getOpenRestingOrders,
   updateRestingOrder,
+  updateRestingOrderId,
   hasRestingOrderForInstrument,
   // Portfolio P&L
   insertPortfolioSnapshot,

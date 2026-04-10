@@ -1464,6 +1464,38 @@ const extractOrderRecords = (payload) => {
   return single ? [single] : [];
 };
 
+const stringifyApiError = (err) => {
+  if (!err) return 'unknown error';
+  if (typeof err === 'string') return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+};
+
+const getOrderTrades = (payload) => {
+  if (!payload || typeof payload !== 'object') return [];
+  if (Array.isArray(payload.trades)) return payload.trades;
+  if (payload.result && typeof payload.result === 'object') return getOrderTrades(payload.result);
+  if (payload.order && typeof payload.order === 'object') return getOrderTrades(payload.order);
+  return [];
+};
+
+const ordersRoughlyMatch = (tracked, exchange) => {
+  if (!tracked || !exchange) return false;
+  if (tracked.instrument_name !== exchange.instrument_name) return false;
+  if (tracked.direction !== exchange.direction) return false;
+
+  const trackedPrice = Number(tracked.limit_price || 0);
+  const exchangePrice = Number(exchange.limit_price || 0);
+  const trackedAmount = Number(tracked.amount || 0);
+  const exchangeAmount = Number(exchange.amount || 0);
+
+  return Math.abs(trackedPrice - exchangePrice) < 1e-9
+    && Math.abs(trackedAmount - exchangeAmount) < 1e-6;
+};
+
 const fetchOrderHistoryRecord = async (orderId) => {
   try {
     const wallet = createWallet();
@@ -1509,6 +1541,34 @@ const fetchOrderStatus = async (orderId) => {
       },
       timeout: 10000,
     });
+    const errBody = response.data?.error;
+    if (errBody) {
+      const code = Number(errBody?.code);
+      const message = String(errBody?.message || '');
+      if (code === 11006 || message.includes('Does not exist')) {
+        const historyRecord = await fetchOrderHistoryRecord(orderId);
+        if (historyRecord) {
+          return {
+            order_id: historyRecord.order_id,
+            order_status: historyRecord.order_status,
+            amount: Number(historyRecord.amount || 0),
+            filled_amount: Number(historyRecord.filled_amount || 0),
+            average_price: Number(historyRecord.average_price || 0),
+            cancel_reason: historyRecord.cancel_reason || null,
+          };
+        }
+        return {
+          order_id: orderId,
+          order_status: 'cancelled',
+          amount: 0,
+          filled_amount: 0,
+          average_price: 0,
+          cancel_reason: 'venue_missing',
+        };
+      }
+      console.error(`❌ fetchOrderStatus ${orderId} venue error: ${stringifyApiError(errBody)}`);
+      return null;
+    }
     let raw = extractOrderRecord(response.data?.result || response.data);
     if (!raw) {
       raw = await fetchOrderHistoryRecord(orderId);
@@ -1576,13 +1636,15 @@ const cancelOrder = async (orderId, instrumentName) => {
       timeout: 10000,
     });
     if (response.data?.error) {
-      console.error(`❌ cancelOrder ${orderId}: ${response.data.error}`);
+      console.error(`❌ cancelOrder ${orderId}: ${stringifyApiError(response.data.error)}`);
       return null;
     }
     console.log(`🗑️ Cancelled order ${orderId} (${instrumentName})`);
     return response.data?.result;
   } catch (error) {
-    console.error(`❌ cancelOrder ${orderId} failed: ${error.message}`);
+    const errBody = error.response?.data;
+    const bodyStr = errBody ? stringifyApiError(errBody).slice(0, 300) : 'no body';
+    console.error(`❌ cancelOrder ${orderId} failed: ${error.message} | status: ${error.response?.status || 'N/A'} | body: ${bodyStr}`);
     return null;
   }
 };
@@ -3398,6 +3460,14 @@ const manageOpenOrders = async (tickerMap) => {
     const exchangeOrderIds = new Set(openOrders.map(o => o.order_id));
     for (const tracked of trackedResting) {
       if (!exchangeOrderIds.has(tracked.order_id)) {
+        const matchedOpenOrder = openOrders.find((openOrder) => ordersRoughlyMatch(tracked, openOrder));
+        if (matchedOpenOrder) {
+          console.log(`📋 Re-linked resting order ${tracked.order_id} -> ${matchedOpenOrder.order_id} (${tracked.instrument_name})`);
+          db.updateRestingOrderId(tracked.order_id, matchedOpenOrder.order_id);
+          tracked.order_id = matchedOpenOrder.order_id;
+          tracked.filled_amount = Number(matchedOpenOrder.filled_amount || tracked.filled_amount || 0);
+          continue;
+        }
         // Order disappeared from open orders → query its final status
         let finalStatus = null;
         try {
@@ -3745,9 +3815,11 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
 
   // Fill accounting from actual trades
   let filledAmt = 0, avgPx = price, totalValue = 0;
-  if (order.result?.trades?.length) {
+  const orderRecord = extractOrderRecord(order.result || order);
+  const orderTrades = getOrderTrades(order.result || order);
+  if (orderTrades.length) {
     let totAmt = 0, totVal = 0;
-    for (const t of order.result.trades) {
+    for (const t of orderTrades) {
       const ta = Number(t.trade_amount), tp = Number(t.trade_price);
       totAmt += ta; totVal += ta * tp;
     }
@@ -3772,7 +3844,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
 
   // GTC/post-only orders with zero fills are resting on the book — track as open
   if (filledAmt === 0 && (orderType === 'gtc' || orderType === 'post_only')) {
-    const orderId = order.result?.order_id || order.result?.order?.order_id || null;
+    const orderId = orderRecord?.order_id || null;
     console.log(`📋 Order resting: ${action} ${instrumentName} @ $${price} [${orderType}] orderId=${orderId}`);
     if (db) db.insertOrder({
       action, success: true, reason: `Resting ${orderType} order placed`,
