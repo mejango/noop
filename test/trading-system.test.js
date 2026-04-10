@@ -1381,16 +1381,23 @@ describe('placeOrder order construction', () => {
 });
 
 describe('execution order type normalization', () => {
-  const isReduceOnlyExitAction = (action) => action === 'sell_put' || action === 'buyback_call';
+  const ACTION_POLICY = {
+    buy_put: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
+    sell_call: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
+    sell_put: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc'] },
+    buyback_call: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc'] },
+  };
+  const getActionPolicy = (action) => ACTION_POLICY[action] || null;
+  const isReduceOnlyExitAction = (action) => Boolean(getActionPolicy(action)?.reduceOnly);
+  const getAllowedOrderTypesForAction = (action) => getActionPolicy(action)?.allowedOrderTypes || ['ioc', 'gtc', 'post_only'];
   const normalizePreferredOrderType = (action, preferredOrderType) => {
     if (typeof preferredOrderType !== 'string') return null;
     const normalized = preferredOrderType.trim().toLowerCase();
     if (!normalized) return null;
-    if (isReduceOnlyExitAction(action)) return normalized === 'ioc' ? 'ioc' : null;
-    return ['ioc', 'gtc', 'post_only'].includes(normalized) ? normalized : null;
+    return getAllowedOrderTypesForAction(action).includes(normalized) ? normalized : null;
   };
   const isInvalidReduceOnlyOrderType = (action, orderType) => {
-    return isReduceOnlyExitAction(action) && orderType !== 'ioc';
+    return !getAllowedOrderTypesForAction(action).includes(orderType);
   };
 
   test('sell_put rejects gtc for reduce_only exit', () => {
@@ -3332,21 +3339,13 @@ describe('executeOrder action → direction + reduceOnly mapping', () => {
 // ============================================================================
 
 describe('action semantics descriptions', () => {
-  const describeActionSemantics = (action) => {
-    if (action === 'sell_put') {
-      return 'Exit-only action: selling an already-owned long put to close or trim it. This is reduce_only=true and cannot create a naked short put.';
-    }
-    if (action === 'buyback_call') {
-      return 'Exit-only action: buying back an already-open short call to close or trim it. This is reduce_only=true and cannot create a new long call exposure beyond the short being closed.';
-    }
-    if (action === 'buy_put') {
-      return 'Entry action: buying a put for tail-risk insurance. Bounded premium outlay, long convexity.';
-    }
-    if (action === 'sell_call') {
-      return 'Entry action: selling a call to open short call exposure against ETH-collateralized account capacity.';
-    }
-    return 'Trade semantics unavailable.';
+  const ACTION_POLICY = {
+    buy_put: { semantics: 'Entry action: buying a put for tail-risk insurance. Bounded premium outlay, long convexity.' },
+    sell_call: { semantics: 'Entry action: selling a call to open short call exposure against ETH-collateralized account capacity.' },
+    sell_put: { semantics: 'Exit-only action: selling an already-owned long put to close or trim it. This is reduce_only=true and cannot create a naked short put.' },
+    buyback_call: { semantics: 'Exit-only action: buying back an already-open short call to close or trim it. This is reduce_only=true and cannot create a new long call exposure beyond the short being closed.' },
   };
+  const describeActionSemantics = (action) => ACTION_POLICY[action]?.semantics || 'Trade semantics unavailable.';
 
   test('sell_put is explicitly described as closing an owned long put', () => {
     const text = describeActionSemantics('sell_put');
