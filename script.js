@@ -2993,7 +2993,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           trigger_details: {
             conditions_met: criteria.conditions.map(c => ({ field: c.field, op: c.op, threshold: c.value, actual: values[c.field] })),
             current_values: values,
-            preferred_order_type: rule.preferred_order_type || null,
+            preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
           },
         });
         triggeredCount++;
@@ -3249,7 +3249,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             dte: best.dte,
             strike: best.strike,
             candidates_evaluated: candidates.length,
-            preferred_order_type: rule.preferred_order_type || null,
+            preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
           },
         });
         triggeredCount++;
@@ -3431,6 +3431,14 @@ const describeActionSemantics = (action) => {
 };
 
 const isReduceOnlyExitAction = (action) => action === 'sell_put' || action === 'buyback_call';
+
+const normalizePreferredOrderType = (action, preferredOrderType) => {
+  if (typeof preferredOrderType !== 'string') return null;
+  const normalized = preferredOrderType.trim().toLowerCase();
+  if (!normalized) return null;
+  if (isReduceOnlyExitAction(action)) return normalized === 'ioc' ? 'ioc' : null;
+  return ['ioc', 'gtc', 'post_only'].includes(normalized) ? normalized : null;
+};
 
 const formatPostOnlyContext = ({ attemptedPrice, retryPrice = null, bidPrice = 0, askPrice = 0, step = 0, reason = null }) => {
   const parts = [
@@ -3733,7 +3741,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       // Parse trigger details for advisory's preferred order type
       let triggerData = {};
       try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
-      const advisoryOrderPref = triggerData.preferred_order_type;
+      const advisoryOrderPref = normalizePreferredOrderType(action.action, triggerData.preferred_order_type);
 
       const confirmPrompt = `Trade confirmation:
 Action: ${action.action} ${action.instrument_name}
@@ -3745,9 +3753,10 @@ Triggered because: ${action.trigger_details || 'N/A'}
 Action semantics: ${describeActionSemantics(action.action)}
 Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
-${advisoryOrderPref ? `Advisory suggested order type: ${advisoryOrderPref}` : ''}
+${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
 - HARD RULE: if action is sell_put or buyback_call, this is a reduce_only exit. Reduce-only exits must use a non-resting order type. Choose "ioc" only. Never choose "gtc" or "post_only" for reduce_only exits.
+- HARD RULE: if action is buy_put or sell_call, this is an entry. Entry actions are not reduce_only exits, and may validly use "gtc" or "post_only" when patient pricing is preferable.
 - "ioc" (immediate-or-cancel): fill now at market or cancel. TAKER fee = $0.50 base + 0.03% of notional (~$1/contract for ETH options). Use only when the opportunity is exceptional and might vanish.
 - "gtc" (good-til-cancelled): rest on the order book at your limit_price until filled. MAKER fee = 0.01% of notional (~$0.16/contract). 6x cheaper than IOC. Use when you want a specific price and can wait.
 - "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee 0.01%). 6x cheaper than IOC. Best for patient limit orders.
@@ -3763,6 +3772,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
 EXIT SEMANTICS: sell_put means selling an already-owned long put to close or trim it. It is reduce_only=true. It does NOT open naked short put exposure. buyback_call means buying back an existing short call to close or trim it. It is reduce_only=true.
 ORDER-TYPE RULE: reduce_only exits (sell_put, buyback_call) must use IOC/non-resting execution. Never return gtc or post_only for a reduce_only exit.
+ENTRY ORDER-TYPE RULE: buy_put and sell_call are entry actions, not reduce_only exits. Resting order types like gtc and post_only are valid for entries when patience and price improvement matter.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
 CALL DISCIPLINE: Short calls are hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. Reject call sells that would push margin usage too high or are too small to matter.
 CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. Buying back a short call because price rose is paying the crowd's fear premium. Ask: is the position genuinely threatened, or does it just feel that way? Confirm buybacks that lock in meaningful profit or exit a position that's truly challenged. Reject buybacks driven by price action alone when theta is still working and the position isn't under real threat. Use the Greeks and remaining DTE to judge the actual risk.
@@ -3792,6 +3802,7 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
 2. SELL THE CROWD'S GREED: Selling calls is routine — exploit mispriced optimism to fund insurance. Confirm call sells when the premium is irrational relative to the actual probability, the strike gives real cushion, and exposure is sized to survive the worst case. Reject when the premium doesn't justify the risk or margin can't absorb an adverse move.
 EXIT SEMANTICS: sell_put means selling an already-owned long put to close or trim it. It is reduce_only=true and cannot create a naked short put. buyback_call means buying back an existing short call to close or trim it. It is reduce_only=true.
 ORDER-TYPE RULE: reduce_only exits (sell_put, buyback_call) must use IOC/non-resting execution. Never return gtc or post_only for a reduce_only exit.
+ENTRY ORDER-TYPE RULE: buy_put and sell_call are entry actions, not reduce_only exits. Resting order types like gtc and post_only are valid for entries when patience and pricing matter.
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
 CALL DISCIPLINE: Short calls are hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. Reject call sells that would push margin usage too high or are too small to matter.
@@ -4187,7 +4198,7 @@ Given market data, produce a JSON trading agenda with:
         "condition_logic": "any" | "all"
       },
       "priority": "high" | "medium" | "low",
-      "preferred_order_type": "ioc" | "gtc" | "post_only",
+      "preferred_order_type": "ioc",
       "reasoning": "why exit is warranted"
     }
   ]
@@ -4198,6 +4209,7 @@ CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: op
 Rules:
 - Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, max_cost (for buys), min_bid (for sells), market_conditions.
 - Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
+- Entry rules may use preferred_order_type "ioc", "gtc", or "post_only". Exit rules may use preferred_order_type "ioc" only because reduce_only exits cannot rest on the Derive book.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
@@ -4488,7 +4500,7 @@ Synthesize the final agenda now.`;
         priority: rule.priority || 'medium',
         reasoning: rule.reasoning || null,
         advisory_id: advisoryId,
-        preferred_order_type: rule.preferred_order_type || null,
+        preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
       });
     }
   }
@@ -4505,7 +4517,7 @@ Synthesize the final agenda now.`;
         priority: rule.priority || 'medium',
         reasoning: rule.reasoning || null,
         advisory_id: advisoryId,
-        preferred_order_type: rule.preferred_order_type || null,
+        preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
       });
     }
   }

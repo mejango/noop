@@ -16,16 +16,6 @@ if [ ! -f "$WIKI_PATH/schema.md" ]; then
   cp -r knowledge-templates/* "$WIKI_PATH/" 2>/dev/null || true
 fi
 
-# Backfill any newly added wiki template files without overwriting existing content.
-for template in $(find knowledge-templates -type f | sort); do
-  target="${template#knowledge-templates/}"
-  if [ ! -f "$WIKI_PATH/$target" ]; then
-    mkdir -p "$(dirname "$WIKI_PATH/$target")"
-    cp "$template" "$WIKI_PATH/$target"
-    echo "Backfilled missing wiki template: $target"
-  fi
-done
-
 # Auto-seed wiki from journal history if not yet seeded (background, non-blocking)
 if [ ! -f "$WIKI_PATH/.meta.json" ] && [ -n "$ANTHROPIC_API_KEY" ]; then
   echo "Seeding knowledge wiki in background (one-time)..."

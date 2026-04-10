@@ -1382,6 +1382,13 @@ describe('placeOrder order construction', () => {
 
 describe('execution order type normalization', () => {
   const isReduceOnlyExitAction = (action) => action === 'sell_put' || action === 'buyback_call';
+  const normalizePreferredOrderType = (action, preferredOrderType) => {
+    if (typeof preferredOrderType !== 'string') return null;
+    const normalized = preferredOrderType.trim().toLowerCase();
+    if (!normalized) return null;
+    if (isReduceOnlyExitAction(action)) return normalized === 'ioc' ? 'ioc' : null;
+    return ['ioc', 'gtc', 'post_only'].includes(normalized) ? normalized : null;
+  };
   const isInvalidReduceOnlyOrderType = (action, orderType) => {
     return isReduceOnlyExitAction(action) && orderType !== 'ioc';
   };
@@ -1400,6 +1407,18 @@ describe('execution order type normalization', () => {
 
   test('sell_call can still use resting order types', () => {
     assert.strictEqual(isInvalidReduceOnlyOrderType('sell_call', 'post_only'), false);
+  });
+
+  test('stale exit post_only preference is discarded', () => {
+    assert.strictEqual(normalizePreferredOrderType('sell_put', 'post_only'), null);
+  });
+
+  test('sell_call keeps valid resting preference', () => {
+    assert.strictEqual(normalizePreferredOrderType('sell_call', 'post_only'), 'post_only');
+  });
+
+  test('exit preference is normalized case-insensitively', () => {
+    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'IOC'), 'ioc');
   });
 });
 
