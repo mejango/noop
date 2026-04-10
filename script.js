@@ -1383,7 +1383,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
       return null;
     }
     // Check for cancelled IOC (cancel_reason in response indicates immediate cancel)
-    const orderResult = response.data?.result || response.data;
+    const orderResult = extractOrderRecord(response.data?.result || response.data) || response.data?.result || response.data;
     if (orderResult?.order_status === 'cancelled' && orderResult?.cancel_reason) {
       console.log(`📋 Order ${name} immediately cancelled: ${orderResult.cancel_reason}`);
     }
@@ -1444,6 +1444,14 @@ const fetchOpenOrders = async () => {
   }
 };
 
+const extractOrderRecord = (payload) => {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.order && typeof payload.order === 'object') return payload.order;
+  if (payload.result && typeof payload.result === 'object') return extractOrderRecord(payload.result);
+  if (payload.order_id || payload.instrument_name || payload.order_status) return payload;
+  return null;
+};
+
 // Fetch a specific order's final status from Derive (for fill reconciliation)
 const fetchOrderStatus = async (orderId) => {
   try {
@@ -1461,7 +1469,7 @@ const fetchOrderStatus = async (orderId) => {
       },
       timeout: 10000,
     });
-    const raw = response.data?.result;
+    const raw = extractOrderRecord(response.data?.result || response.data);
     if (!raw) return null;
     return {
       order_id: raw.order_id,

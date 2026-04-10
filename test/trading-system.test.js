@@ -73,6 +73,14 @@ const evaluateConditions = (conditions, logic, values) => {
   return logic === 'all' ? results.every(Boolean) : results.some(Boolean);
 };
 
+const extractOrderRecord = (payload) => {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.order && typeof payload.order === 'object') return payload.order;
+  if (payload.result && typeof payload.result === 'object') return extractOrderRecord(payload.result);
+  if (payload.order_id || payload.instrument_name || payload.order_status) return payload;
+  return null;
+};
+
 
 // ============================================================================
 // 1. parseExpiryFromInstrument
@@ -1970,6 +1978,40 @@ describe('Defensive API response parsing', () => {
     const raw = { orders: [{ order_id: 'a' }] };
     const orders = Array.isArray(raw) ? raw : (raw?.orders || []);
     assert.strictEqual(orders.length, 1);
+  });
+
+  test('extractOrderRecord reads nested result.order', () => {
+    const record = extractOrderRecord({
+      result: {
+        order: {
+          order_id: 'ord_123',
+          order_status: 'cancelled',
+          filled_amount: '0',
+          average_price: '0',
+        },
+      },
+    });
+    assert.deepStrictEqual(record, {
+      order_id: 'ord_123',
+      order_status: 'cancelled',
+      filled_amount: '0',
+      average_price: '0',
+    });
+  });
+
+  test('extractOrderRecord reads flat order payload', () => {
+    const record = extractOrderRecord({
+      order_id: 'ord_456',
+      order_status: 'filled',
+      filled_amount: '1.0',
+      average_price: '4.8',
+    });
+    assert.deepStrictEqual(record, {
+      order_id: 'ord_456',
+      order_status: 'filled',
+      filled_amount: '1.0',
+      average_price: '4.8',
+    });
   });
 
   test('result is null → empty array', () => {
