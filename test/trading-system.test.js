@@ -2012,6 +2012,16 @@ describe('Fill reconciliation with order status', () => {
     );
     assert.strictEqual(r.fillPrice, 5.00);
   });
+
+  test('venue missing ghost order is treated as cancelled zero-fill', () => {
+    const r = reconcileOrder(
+      { instrument_name: 'ETH-20260501-2000-C', direction: 'sell', amount: 1.0, limit_price: 2.80 },
+      { order_status: 'cancelled', filled_amount: 0, average_price: 0, cancel_reason: 'venue_missing' }
+    );
+    assert.strictEqual(r.status, 'cancelled');
+    assert.strictEqual(r.filledAmt, 0);
+    assert.strictEqual(r.fillValue, 0);
+  });
 });
 
 // ============================================================================

@@ -1529,6 +1529,29 @@ const fetchOrderStatus = async (orderId) => {
   } catch (error) {
     const errBody = error.response?.data;
     const bodyStr = errBody ? (typeof errBody === 'string' ? errBody.slice(0, 300) : JSON.stringify(errBody).slice(0, 300)) : 'no body';
+    const code = Number(errBody?.error?.code);
+    const message = String(errBody?.error?.message || '');
+    if (code === 11006 || message.includes('Does not exist')) {
+      const historyRecord = await fetchOrderHistoryRecord(orderId);
+      if (historyRecord) {
+        return {
+          order_id: historyRecord.order_id,
+          order_status: historyRecord.order_status,
+          amount: Number(historyRecord.amount || 0),
+          filled_amount: Number(historyRecord.filled_amount || 0),
+          average_price: Number(historyRecord.average_price || 0),
+          cancel_reason: historyRecord.cancel_reason || null,
+        };
+      }
+      return {
+        order_id: orderId,
+        order_status: 'cancelled',
+        amount: 0,
+        filled_amount: 0,
+        average_price: 0,
+        cancel_reason: 'venue_missing',
+      };
+    }
     console.error(`❌ fetchOrderStatus ${orderId} failed: ${error.message} | status: ${error.response?.status || 'N/A'} | body: ${bodyStr}`);
     return null;
   }
