@@ -123,6 +123,7 @@ const API_URL = {
   GET_INSTRUMENTS: 'https://api.lyra.finance/public/get_instruments',
   PLACE_ORDER: 'https://api.lyra.finance/private/order',
   GET_OPEN_ORDERS: 'https://api.lyra.finance/private/get_open_orders',
+  GET_ORDER_HISTORY: 'https://api.lyra.finance/private/get_order_history',
   CANCEL_ORDER: 'https://api.lyra.finance/private/cancel',
   GET_ORDER: 'https://api.lyra.finance/private/get_order',
   GET_SUBACCOUNT: 'https://api.lyra.finance/private/get_subaccount',
@@ -1325,7 +1326,9 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         amount: amount.toString(),
         signature_expiry_sec: Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 300 : 86400)), // IOC: 5min, GTC/post_only: 24h
         max_fee: Math.max(0.08 * price, 10.0).toFixed(2).toString(), // Max fee per unit of volume (USDC). Generous ceiling — actual fee is much lower (~0.1% of notional)
-        mmp: direction === 'sell', // Market maker protection during selling
+        // Noop submits sparse discretionary orders, not continuous maker quotes.
+        // Venue-side MMP has been causing opaque sell-order cancellations and poor reconciliation.
+        mmp: false,
         nonce: parseInt(`${timestamp}${Math.floor(Math.random() * 1000)}`),
         signer: wallet.address,
         order_type: 'limit',
@@ -1452,6 +1455,43 @@ const extractOrderRecord = (payload) => {
   return null;
 };
 
+const extractOrderRecords = (payload) => {
+  if (!payload) return [];
+  if (Array.isArray(payload)) return payload.map(extractOrderRecord).filter(Boolean);
+  if (Array.isArray(payload.orders)) return payload.orders.map(extractOrderRecord).filter(Boolean);
+  if (payload.result && typeof payload.result === 'object') return extractOrderRecords(payload.result);
+  const single = extractOrderRecord(payload);
+  return single ? [single] : [];
+};
+
+const fetchOrderHistoryRecord = async (orderId) => {
+  try {
+    const wallet = createWallet();
+    const timestamp = Date.now();
+    const signature = await signMessage(wallet, timestamp);
+    const response = await axios.post(API_URL.GET_ORDER_HISTORY, {
+      subaccount_id: SUBACCOUNT_ID,
+      from_timestamp: Date.now() - (7 * 24 * 60 * 60 * 1000),
+      page: 1,
+      page_size: 100,
+    }, {
+      headers: {
+        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(),
+        'X-LyraSignature': signature,
+      },
+      timeout: 10000,
+    });
+    const records = extractOrderRecords(response.data?.result || response.data);
+    return records.find((record) => record.order_id === orderId) || null;
+  } catch (error) {
+    const errBody = error.response?.data;
+    const bodyStr = errBody ? (typeof errBody === 'string' ? errBody.slice(0, 300) : JSON.stringify(errBody).slice(0, 300)) : 'no body';
+    console.error(`❌ fetchOrderHistoryRecord ${orderId} failed: ${error.message} | status: ${error.response?.status || 'N/A'} | body: ${bodyStr}`);
+    return null;
+  }
+};
+
 // Fetch a specific order's final status from Derive (for fill reconciliation)
 const fetchOrderStatus = async (orderId) => {
   try {
@@ -1469,8 +1509,15 @@ const fetchOrderStatus = async (orderId) => {
       },
       timeout: 10000,
     });
-    const raw = extractOrderRecord(response.data?.result || response.data);
-    if (!raw) return null;
+    let raw = extractOrderRecord(response.data?.result || response.data);
+    if (!raw) {
+      raw = await fetchOrderHistoryRecord(orderId);
+      if (!raw) {
+        const bodyStr = JSON.stringify(response.data || {}).slice(0, 300);
+        console.warn(`⚠️ fetchOrderStatus ${orderId}: no direct order record; history fallback also empty | body: ${bodyStr}`);
+        return null;
+      }
+    }
     return {
       order_id: raw.order_id,
       order_status: raw.order_status, // 'open'|'filled'|'cancelled'|'expired'
