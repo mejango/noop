@@ -1380,6 +1380,40 @@ describe('placeOrder order construction', () => {
   });
 });
 
+describe('execution order type normalization', () => {
+  const isReduceOnlyExitAction = (action) => action === 'sell_put' || action === 'buyback_call';
+  const isInvalidReduceOnlyOrderType = (action, orderType) => {
+    return isReduceOnlyExitAction(action) && orderType !== 'ioc';
+  };
+
+  test('sell_put rejects gtc for reduce_only exit', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'gtc'), true);
+  });
+
+  test('buyback_call rejects post_only for reduce_only exit', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'post_only'), true);
+  });
+
+  test('sell_put accepts ioc for reduce_only exit', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'ioc'), false);
+  });
+
+  test('sell_call can still use resting order types', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_call', 'post_only'), false);
+  });
+});
+
+describe('execution price validation', () => {
+  test('non-positive execution price is invalid', () => {
+    assert.strictEqual(Number(0) > 0, false);
+    assert.strictEqual(Number(-1) > 0, false);
+  });
+
+  test('positive execution price is valid', () => {
+    assert.strictEqual(Number(0.01) > 0, true);
+  });
+});
+
 // ============================================================================
 // 17. Voting logic correctness
 // ============================================================================

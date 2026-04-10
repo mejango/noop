@@ -3430,6 +3430,8 @@ const describeActionSemantics = (action) => {
   return 'Trade semantics unavailable.';
 };
 
+const isReduceOnlyExitAction = (action) => action === 'sell_put' || action === 'buyback_call';
+
 const formatPostOnlyContext = ({ attemptedPrice, retryPrice = null, bidPrice = 0, askPrice = 0, step = 0, reason = null }) => {
   const parts = [
     `attempted=$${Number(attemptedPrice || 0).toFixed(4)}`,
@@ -3484,6 +3486,13 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   // Determine direction and reduceOnly from action type
   const direction = (action === 'buy_put' || action === 'buyback_call') ? 'buy' : 'sell';
   const reduceOnly = (action === 'sell_put' || action === 'buyback_call');
+
+  if (!(Number(price) > 0)) {
+    const reason = `Invalid execution price for ${action}: ${price}`;
+    console.error(`❌ ${reason}`);
+    if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
+    return null;
+  }
 
   // Find instrument to get base_asset_address and base_asset_sub_id
   const instrument = instruments.find(i => i.instrument_name === instrumentName);
@@ -3738,6 +3747,7 @@ Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
 ${advisoryOrderPref ? `Advisory suggested order type: ${advisoryOrderPref}` : ''}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
+- HARD RULE: if action is sell_put or buyback_call, this is a reduce_only exit. Reduce-only exits must use a non-resting order type. Choose "ioc" only. Never choose "gtc" or "post_only" for reduce_only exits.
 - "ioc" (immediate-or-cancel): fill now at market or cancel. TAKER fee = $0.50 base + 0.03% of notional (~$1/contract for ETH options). Use only when the opportunity is exceptional and might vanish.
 - "gtc" (good-til-cancelled): rest on the order book at your limit_price until filled. MAKER fee = 0.01% of notional (~$0.16/contract). 6x cheaper than IOC. Use when you want a specific price and can wait.
 - "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee 0.01%). 6x cheaper than IOC. Best for patient limit orders.
@@ -3752,6 +3762,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
           max_tokens: 256,
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
 EXIT SEMANTICS: sell_put means selling an already-owned long put to close or trim it. It is reduce_only=true. It does NOT open naked short put exposure. buyback_call means buying back an existing short call to close or trim it. It is reduce_only=true.
+ORDER-TYPE RULE: reduce_only exits (sell_put, buyback_call) must use IOC/non-resting execution. Never return gtc or post_only for a reduce_only exit.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
 CALL DISCIPLINE: Short calls are hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. Reject call sells that would push margin usage too high or are too small to matter.
 CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. Buying back a short call because price rose is paying the crowd's fear premium. Ask: is the position genuinely threatened, or does it just feel that way? Confirm buybacks that lock in meaningful profit or exit a position that's truly challenged. Reject buybacks driven by price action alone when theta is still working and the position isn't under real threat. Use the Greeks and remaining DTE to judge the actual risk.
@@ -3780,6 +3791,7 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
 1. BUY CONVEXITY CHEAP: Long puts are insurance — bounded cost, unbounded upside. Confirm puts that are cheap relative to the tail risk they cover. Reject puts that overpay for protection (high IV, crowd panic).
 2. SELL THE CROWD'S GREED: Selling calls is routine — exploit mispriced optimism to fund insurance. Confirm call sells when the premium is irrational relative to the actual probability, the strike gives real cushion, and exposure is sized to survive the worst case. Reject when the premium doesn't justify the risk or margin can't absorb an adverse move.
 EXIT SEMANTICS: sell_put means selling an already-owned long put to close or trim it. It is reduce_only=true and cannot create a naked short put. buyback_call means buying back an existing short call to close or trim it. It is reduce_only=true.
+ORDER-TYPE RULE: reduce_only exits (sell_put, buyback_call) must use IOC/non-resting execution. Never return gtc or post_only for a reduce_only exit.
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
 CALL DISCIPLINE: Short calls are hard-capped at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. Reject call sells that would push margin usage too high or are too small to matter.
@@ -3824,6 +3836,17 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       const validOrderTypes = ['ioc', 'gtc', 'post_only'];
       const orderType = validOrderTypes.includes(confirmedOrderType) ? confirmedOrderType : 'ioc';
 
+      if (isReduceOnlyExitAction(action.action) && orderType !== 'ioc') {
+        const failureReason = `Invalid LLM order_type for reduce_only exit: ${orderType}. Expected ioc.`;
+        db.updatePendingAction(action.id, {
+          status: 'failed',
+          execution_result: failureReason,
+          confirmation_reasoning: `${reasoning} | invalid_order_type=${orderType}`,
+        });
+        console.log(`⚠️ ${failureReason} ${action.action} ${action.instrument_name}`);
+        continue;
+      }
+
       // Resolve limit price: voter can override, otherwise use current market price
       // Sanity check: voter price must be within 50% of market price (prevents LLM hallucinating insane prices)
       const voterLimitPrice = haikuVote?.limit_price || codexVote?.limit_price;
@@ -3836,6 +3859,16 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         } else {
           console.log(`⚠️ Voter price $${voterLimitPrice} rejected (${(ratio * 100).toFixed(0)}% of market $${marketPrice}) — using market price`);
         }
+      }
+
+      if (!(Number(executionPrice) > 0)) {
+        const failureReason = `No executable market price for ${action.action} ${action.instrument_name}`;
+        db.updatePendingAction(action.id, {
+          status: 'failed',
+          execution_result: failureReason,
+        });
+        console.log(`⚠️ ${failureReason}`);
+        continue;
       }
 
       if (decision === 'confirmed') {
