@@ -1923,9 +1923,132 @@ const saveWikiHistory = (pagePath, content) => {
   }
 };
 
+const isPlaceholderWikiPage = (content) => {
+  return !content || content.includes('Awaiting initial assessment');
+};
+
+const getWikiPagesNeedingSeed = () => {
+  return WIKI_ALL_PAGES.filter((page) => isPlaceholderWikiPage(readWikiPage(page)));
+};
+
+const seedWikiFromHistory = async (incomingEntries = []) => {
+  if (!process.env.ANTHROPIC_API_KEY || !db) return 0;
+
+  const pagesNeedingSeed = getWikiPagesNeedingSeed();
+  if (pagesNeedingSeed.length === 0) {
+    console.log('📚 Wiki seed: skipped — all pages already populated');
+    return 0;
+  }
+
+  console.log(`📚 Wiki seed: bootstrapping ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(', ')}`);
+
+  const historicalJournal = db.getRecentJournalEntries(200) || [];
+  const reviewedHypotheses = db.getReviewedHypotheses(50) || [];
+  const activeLessons = db.getActiveLessons() || [];
+
+  const mergedEntries = [...incomingEntries];
+  for (const entry of historicalJournal) {
+    const key = `${entry.timestamp}|${entry.entry_type}|${entry.content}`;
+    if (!mergedEntries.some(e => `${e.timestamp}|${e.entry_type || e.type}|${e.content}` === key)) {
+      mergedEntries.push(entry);
+    }
+  }
+
+  if (mergedEntries.length === 0) {
+    console.log('📚 Wiki seed: skipped — no journal history available');
+    return 0;
+  }
+
+  const schema = readWikiPage('schema.md');
+  const sampleEntries = mergedEntries.slice(0, 60);
+  const journalText = sampleEntries
+    .map(e => `[${e.entry_type || e.type || 'unknown'}] (${e.timestamp || 'unknown'}) ${String(e.content || '').slice(0, 300)}`)
+    .join('\n\n');
+
+  const hypothesesText = reviewedHypotheses.slice(0, 25)
+    .map(h => `#${h.id} [${h.outcome_status}] — ${h.content.slice(0, 180)}... VERDICT: ${h.outcome_verdict || 'none'}`)
+    .join('\n');
+
+  const lessonsText = activeLessons.length > 0
+    ? activeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')
+    : 'None';
+
+  const prompt = `You are bootstrapping missing knowledge wiki pages for a Spitznagel-style tail-risk hedging bot (ETH options on Lyra/Derive).
+
+Synthesize the historical data below into ${pagesNeedingSeed.length} wiki page(s). Follow the schema. Be concise — each page should be 200-400 words.
+
+## Wiki Schema
+${schema}
+
+## Historical Journal Entries (${mergedEntries.length} total, showing ${sampleEntries.length})
+${journalText}
+
+## Reviewed Hypotheses (${reviewedHypotheses.length} with verdicts)
+${hypothesesText}
+
+## Active Lessons
+${lessonsText}
+
+## Instructions
+1. Generate ONLY the missing or placeholder wiki pages listed below
+2. Use specific data values and dates from the entries as evidence when available
+3. Each page MUST start with a bold TLDR line
+4. Follow the required sections from the schema exactly
+5. Today's date: ${new Date().toISOString().split('T')[0]}
+
+Output each page as:
+<wiki_page path="regimes/current.md">
+[full page content]
+</wiki_page>
+
+Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(', ')}`;
+
+  const response = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: 'claude-sonnet-4-6',
+    max_tokens: 8192,
+    messages: [{ role: 'user', content: prompt }],
+  }, {
+    headers: {
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    timeout: 180000,
+  });
+
+  const text = response.data?.content?.[0]?.text || '';
+  const pageRegex = /<wiki_page\s+path="([^"]+)">([\s\S]*?)<\/wiki_page>/g;
+  let match;
+  let writeCount = 0;
+
+  while ((match = pageRegex.exec(text)) !== null) {
+    const pagePath = match[1];
+    const content = match[2].trim();
+    if (!pagesNeedingSeed.includes(pagePath) || content.length < 50) continue;
+    fs.writeFileSync(path.join(WIKI_DIR, pagePath), content);
+    writeCount++;
+    console.log(`📚 Wiki seed: wrote ${pagePath}`);
+  }
+
+  const meta = readWikiMeta();
+  meta.seeded_at = new Date().toISOString();
+  meta.seeded_pages = writeCount;
+  meta.seeded_targets = pagesNeedingSeed;
+  meta.seed_journal_entries_used = sampleEntries.length;
+  writeWikiMeta(meta);
+
+  console.log(`📚 Wiki seed: ${writeCount}/${pagesNeedingSeed.length} page(s) written`);
+  return writeCount;
+};
+
 const ingestToWiki = async (journalEntries) => {
   if (!journalEntries || journalEntries.length === 0) return;
   if (!process.env.ANTHROPIC_API_KEY) return;
+
+  if (getWikiPagesNeedingSeed().length > 0) {
+    const seeded = await seedWikiFromHistory(journalEntries);
+    if (seeded > 0) return;
+  }
 
   console.log('📚 Wiki ingest: processing', journalEntries.length, 'journal entries...');
 

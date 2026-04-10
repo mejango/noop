@@ -51,6 +51,7 @@ export default function WikiBrowser() {
   const [selectedPage, setSelectedPage] = useState<string | null>(null);
   const [pageDetail, setPageDetail] = useState<WikiPageDetail | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pageError, setPageError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
   const [searching, setSearching] = useState(false);
@@ -67,6 +68,8 @@ export default function WikiBrowser() {
   const loadPage = useCallback(async (pagePath: string) => {
     setSelectedPage(pagePath);
     setSearchResults(null);
+    setPageDetail(null);
+    setPageError(null);
     setLoading(true);
     try {
       const slug = pagePath.replace('.md', '');
@@ -74,8 +77,13 @@ export default function WikiBrowser() {
       if (res.ok) {
         const data = await res.json();
         setPageDetail(data);
+      } else {
+        const data = await res.json().catch(() => ({ error: 'Failed to load page' }));
+        setPageError(data.error || `Failed to load ${pagePath}`);
       }
-    } catch { /* silent */ }
+    } catch {
+      setPageError(`Failed to load ${pagePath}`);
+    }
     setLoading(false);
   }, []);
 
@@ -85,6 +93,7 @@ export default function WikiBrowser() {
     setSearching(true);
     setSelectedPage(null);
     setPageDetail(null);
+    setPageError(null);
     try {
       const res = await fetch(`/api/wiki/search?q=${encodeURIComponent(searchQuery)}`);
       if (res.ok) {
@@ -158,50 +167,64 @@ export default function WikiBrowser() {
         )}
 
         {/* Page detail view */}
-        {selectedPage && pageDetail && !searchResults && (
+        {selectedPage && !searchResults && (
           <div className="px-3 py-2 space-y-2">
             <button
-              onClick={() => { setSelectedPage(null); setPageDetail(null); }}
+              onClick={() => { setSelectedPage(null); setPageDetail(null); setPageError(null); }}
               className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors"
             >
               &larr; Back to pages
             </button>
-            <div className="flex items-center justify-between">
-              <p className="text-xs text-white font-bold">{pageDetail.title}</p>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-gray-600">{pageDetail.wordCount} words</span>
-                <span className={`text-[10px] ${
-                  Date.now() - new Date(pageDetail.lastModified).getTime() > 7 * 24 * 60 * 60 * 1000
-                    ? 'text-amber-400' : 'text-gray-500'
-                }`}>
-                  {timeAgo(pageDetail.lastModified)}
-                </span>
-              </div>
-            </div>
-
-            {/* History dropdown */}
-            {pageDetail.history.length > 0 && (
-              <details className="text-[10px] text-gray-500">
-                <summary className="cursor-pointer hover:text-gray-300 transition-colors">
-                  {pageDetail.history.length} previous version{pageDetail.history.length !== 1 ? 's' : ''}
-                </summary>
-                <div className="mt-1 space-y-0.5 pl-2">
-                  {pageDetail.history.map((v, i) => (
-                    <p key={i} className="text-gray-600">
-                      {new Date(v.timestamp).toLocaleDateString()} {new Date(v.timestamp).toLocaleTimeString()} ({v.size} bytes)
-                    </p>
-                  ))}
+            {pageDetail && (
+              <>
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-white font-bold">{pageDetail.title}</p>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] text-gray-600">{pageDetail.wordCount} words</span>
+                    <span className={`text-[10px] ${
+                      Date.now() - new Date(pageDetail.lastModified).getTime() > 7 * 24 * 60 * 60 * 1000
+                        ? 'text-amber-400' : 'text-gray-500'
+                    }`}>
+                      {timeAgo(pageDetail.lastModified)}
+                    </span>
+                  </div>
                 </div>
-              </details>
+
+                {/* History dropdown */}
+                {pageDetail.history.length > 0 && (
+                  <details className="text-[10px] text-gray-500">
+                    <summary className="cursor-pointer hover:text-gray-300 transition-colors">
+                      {pageDetail.history.length} previous version{pageDetail.history.length !== 1 ? 's' : ''}
+                    </summary>
+                    <div className="mt-1 space-y-0.5 pl-2">
+                      {pageDetail.history.map((v, i) => (
+                        <p key={i} className="text-gray-600">
+                          {new Date(v.timestamp).toLocaleDateString()} {new Date(v.timestamp).toLocaleTimeString()} ({v.size} bytes)
+                        </p>
+                      ))}
+                    </div>
+                  </details>
+                )}
+
+                {/* Page content rendered as markdown */}
+                {loading ? (
+                  <p className="text-[10px] text-gray-500">Loading...</p>
+                ) : (
+                  <div className="prose prose-invert prose-xs max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-sm [&_h1]:font-bold [&_h1]:text-juice-orange [&_h1]:mt-3 [&_h1]:mb-2 [&_h2]:text-xs [&_h2]:font-bold [&_h2]:text-white [&_h2]:mt-3 [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:font-bold [&_h3]:text-gray-300 [&_h3]:mt-2 [&_h3]:mb-1 [&_p]:text-xs [&_p]:leading-relaxed [&_p]:my-1 [&_strong]:text-white [&_ul]:text-xs [&_ul]:my-1 [&_ul]:pl-4 [&_ol]:text-xs [&_ol]:my-1 [&_ol]:pl-4 [&_li]:my-0.5 [&_hr]:border-white/10 [&_hr]:my-2 [&_code]:text-juice-orange [&_code]:text-[11px] [&_code]:bg-white/5 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_table]:w-full [&_table]:text-xs [&_table]:my-2 [&_table]:border-collapse [&_th]:text-left [&_th]:text-gray-400 [&_th]:font-medium [&_th]:border-b [&_th]:border-white/10 [&_th]:px-2 [&_th]:py-1 [&_td]:text-gray-300 [&_td]:border-b [&_td]:border-white/5 [&_td]:px-2 [&_td]:py-1">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{pageDetail.content}</ReactMarkdown>
+                  </div>
+                )}
+              </>
             )}
 
-            {/* Page content rendered as markdown */}
-            {loading ? (
-              <p className="text-[10px] text-gray-500">Loading...</p>
-            ) : (
-              <div className="prose prose-invert prose-xs max-w-none break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:text-sm [&_h1]:font-bold [&_h1]:text-juice-orange [&_h1]:mt-3 [&_h1]:mb-2 [&_h2]:text-xs [&_h2]:font-bold [&_h2]:text-white [&_h2]:mt-3 [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:font-bold [&_h3]:text-gray-300 [&_h3]:mt-2 [&_h3]:mb-1 [&_p]:text-xs [&_p]:leading-relaxed [&_p]:my-1 [&_strong]:text-white [&_ul]:text-xs [&_ul]:my-1 [&_ul]:pl-4 [&_ol]:text-xs [&_ol]:my-1 [&_ol]:pl-4 [&_li]:my-0.5 [&_hr]:border-white/10 [&_hr]:my-2 [&_code]:text-juice-orange [&_code]:text-[11px] [&_code]:bg-white/5 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_table]:w-full [&_table]:text-xs [&_table]:my-2 [&_table]:border-collapse [&_th]:text-left [&_th]:text-gray-400 [&_th]:font-medium [&_th]:border-b [&_th]:border-white/10 [&_th]:px-2 [&_th]:py-1 [&_td]:text-gray-300 [&_td]:border-b [&_td]:border-white/5 [&_td]:px-2 [&_td]:py-1">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{pageDetail.content}</ReactMarkdown>
+            {!loading && pageError && (
+              <div className="border border-red-500/20 bg-red-500/5 px-3 py-2">
+                <p className="text-xs text-red-400">{pageError}</p>
               </div>
+            )}
+
+            {loading && !pageDetail && !pageError && (
+              <p className="text-[10px] text-gray-500">Loading...</p>
             )}
           </div>
         )}

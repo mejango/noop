@@ -25,6 +25,9 @@ const WIKI_ALL_PAGES = [
   'protection/pricing.md',
   'protection/windows.md',
   'protection/convexity.md',
+  'revenue/pricing.md',
+  'revenue/windows.md',
+  'revenue/efficiency.md',
   'indicators/leading.md',
   'indicators/correlations.md',
   'indicators/divergences.md',
@@ -32,6 +35,18 @@ const WIKI_ALL_PAGES = [
   'strategy/mistakes.md',
   'strategy/playbook.md',
 ];
+
+function readWikiPage(pagePath) {
+  try {
+    return fs.readFileSync(path.join(WIKI_DIR, pagePath), 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+function isPlaceholderWikiPage(content) {
+  return !content || content.includes('Awaiting initial assessment');
+}
 
 async function seedWiki() {
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -55,6 +70,12 @@ async function seedWiki() {
     process.exit(0);
   }
 
+  const pagesNeedingSeed = WIKI_ALL_PAGES.filter((page) => isPlaceholderWikiPage(readWikiPage(page)));
+  if (pagesNeedingSeed.length === 0) {
+    console.log('📚 Wiki already populated. No placeholder or missing pages to seed.');
+    process.exit(0);
+  }
+
   // Read schema
   const schema = fs.readFileSync(SCHEMA_PATH, 'utf-8');
 
@@ -72,9 +93,9 @@ async function seedWiki() {
     ? activeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')
     : 'None';
 
-  const prompt = `You are bootstrapping a knowledge wiki for a Spitznagel-style tail-risk hedging bot (ETH options on Lyra/Derive).
+  const prompt = `You are bootstrapping missing knowledge wiki pages for a Spitznagel-style tail-risk hedging bot (ETH options on Lyra/Derive).
 
-Synthesize the historical data below into 11 wiki pages. Follow the schema. Be concise — each page should be 200-400 words.
+Synthesize the historical data below into ${pagesNeedingSeed.length} wiki page(s). Follow the schema. Be concise — each page should be 200-400 words.
 
 ## Wiki Schema
 ${schema}
@@ -89,20 +110,21 @@ ${hypothesesText}
 ${lessonsText}
 
 ## Instructions
-1. Synthesize patterns across ALL entries — don't just summarize recent ones
-2. Use specific data values and dates from the entries as evidence
-3. Identify contradictions or evolving patterns (regime transitions, etc.)
-4. For lessons/mistakes: derive from hypothesis outcomes (disproven_costly = mistake, confirmed_convex = good pattern)
-5. Each page MUST start with a bold TLDR line
-6. Follow the required sections from the schema exactly
-7. Today's date: ${new Date().toISOString().split('T')[0]}
+1. Generate ONLY the missing or placeholder wiki pages listed below
+2. Synthesize patterns across ALL entries — don't just summarize recent ones
+3. Use specific data values and dates from the entries as evidence
+4. Identify contradictions or evolving patterns (regime transitions, etc.)
+5. For lessons/mistakes: derive from hypothesis outcomes (disproven_costly = mistake, confirmed_convex = good pattern)
+6. Each page MUST start with a bold TLDR line
+7. Follow the required sections from the schema exactly
+8. Today's date: ${new Date().toISOString().split('T')[0]}
 
 Output each page as:
 <wiki_page path="regimes/current.md">
 [full page content]
 </wiki_page>
 
-Generate ALL 11 pages: ${WIKI_ALL_PAGES.join(', ')}`;
+Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(', ')}`;
 
   console.log('📚 Sending to Claude for synthesis...');
 
@@ -131,7 +153,7 @@ Generate ALL 11 pages: ${WIKI_ALL_PAGES.join(', ')}`;
       const pagePath = match[1];
       const content = match[2].trim();
 
-      if (!WIKI_ALL_PAGES.includes(pagePath)) {
+      if (!pagesNeedingSeed.includes(pagePath)) {
         console.log(`  ⚠️ Unknown page path: ${pagePath}, skipping`);
         continue;
       }
@@ -155,17 +177,18 @@ Generate ALL 11 pages: ${WIKI_ALL_PAGES.join(', ')}`;
       hypotheses_used: reviewedHypotheses.length,
       lessons_used: activeLessons.length,
       pages_written: writeCount,
+      seeded_targets: pagesNeedingSeed,
     };
     fs.writeFileSync(META_PATH, JSON.stringify(meta, null, 2));
 
-    console.log(`\n📚 Wiki seeded: ${writeCount}/${WIKI_ALL_PAGES.length} pages written`);
+    console.log(`\n📚 Wiki seeded: ${writeCount}/${pagesNeedingSeed.length} pages written`);
 
-    if (writeCount < WIKI_ALL_PAGES.length) {
+    if (writeCount < pagesNeedingSeed.length) {
       const written = [];
       const regex2 = /<wiki_page\s+path="([^"]+)">/g;
       let m;
       while ((m = regex2.exec(text)) !== null) written.push(m[1]);
-      const missing = WIKI_ALL_PAGES.filter(p => !written.includes(p));
+      const missing = pagesNeedingSeed.filter(p => !written.includes(p));
       console.log(`  Missing pages: ${missing.join(', ')}`);
       console.log('  Re-run or manually create these pages.');
     }
