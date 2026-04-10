@@ -2955,6 +2955,23 @@ const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, s
   return Math.max((spotPrice || 0) * 0.13, 100);
 };
 
+const getCallMarginContext = (action, marginState, positions, restingOrders, instruments, spotPrice, instrumentName, amount, limitPrice) => {
+  if (action !== 'sell_call') return 'Call margin utilization: not applicable for this action.';
+  if (!marginState) return 'Call margin utilization: unavailable (margin state unavailable).';
+
+  const currentUtilization = estimateMarginUtilization(marginState);
+  const instrument = instruments.find((item) => item.instrument_name === instrumentName);
+  const strike = Number(instrument?.option_details?.strike || instrumentName?.split('-')?.[2] || 0) || 0;
+  const normalizedAmount = Math.max(0, Number(amount || 0));
+  const normalizedLimitPrice = Number(limitPrice || 0);
+  const marginPerUnit = estimateShortCallMarginPerUnit(marginState, positions, restingOrders, spotPrice, strike, normalizedLimitPrice);
+  const additionalMargin = normalizedAmount * marginPerUnit;
+  const projectedUtilization = estimateMarginUtilization(marginState, additionalMargin);
+  const capPct = CALL_EXPOSURE_CAP_PCT * 100;
+
+  return `Call margin utilization: current=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, cap=${capPct.toFixed(1)}%. Use these exact figures; do not invent utilization numbers.`;
+};
+
 const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice) => {
   let triggeredCount = 0;
 
@@ -3751,6 +3768,9 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
     // Fetch fresh margin state for each confirmation (margin changes between trades)
     let marginState = null;
     try { marginState = await fetchSubaccount(); } catch { /* ok */ }
+    let livePositions = [];
+    try { livePositions = await fetchPositions(); } catch { /* ok */ }
+    const restingOrders = db.getOpenRestingOrders();
     const marginStr = marginState
       ? `Margin: buying_power=$${marginState.initial_margin.toFixed(2)}, account_value=$${marginState.subaccount_value.toFixed(2)}, collateral=$${marginState.collaterals_value.toFixed(2)}${marginState.is_under_liquidation ? ' [UNDER LIQUIDATION]' : ''}`
       : 'Margin: unavailable';
@@ -3790,6 +3810,17 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       let triggerData = {};
       try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
       const advisoryOrderPref = normalizePreferredOrderType(action.action, triggerData.preferred_order_type);
+      const callMarginContext = getCallMarginContext(
+        action.action,
+        marginState,
+        livePositions,
+        restingOrders,
+        instruments,
+        spotPrice,
+        action.instrument_name,
+        action.amount,
+        currentPrice || action.price
+      );
 
       const confirmPrompt = `Trade confirmation:
 Action: ${action.action} ${action.instrument_name}
@@ -3801,6 +3832,7 @@ Triggered because: ${action.trigger_details || 'N/A'}
 Action semantics: ${describeActionSemantics(action.action)}
 Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
+${callMarginContext}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
 ${getActionOrderTypeHardRule(action.action)}
@@ -3812,6 +3844,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limi
 
       // Vote 1: Claude Haiku (Spitznagel temperament)
       let haikuVote = null;
+      let haikuFailure = null;
       try {
         const haikuResp = await axios.post('https://api.anthropic.com/v1/messages', {
           model: 'claude-haiku-4-5-20251001',
@@ -3834,12 +3867,17 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
         });
         const haikuText = haikuResp.data?.content?.[0]?.text || '';
         haikuVote = extractJSON(haikuText);
+        if (!haikuVote) {
+          haikuFailure = 'empty or unparsable response';
+        }
       } catch (e) {
+        haikuFailure = e.message;
         console.log(`⚠️ Haiku confirmation failed: ${e.message}`);
       }
 
       // Vote 2: OpenAI GPT (Taleb temperament)
       let codexVote = null;
+      let codexFailure = null;
       try {
         const codexText = await callOpenAI(
           `You are a Taleb-style risk advisor. Your philosophy has TWO sides:
@@ -3859,7 +3897,11 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         if (codexText) {
           codexVote = extractJSON(codexText);
         }
+        if (!codexVote) {
+          codexFailure = 'empty or unparsable response';
+        }
       } catch (e) {
+        codexFailure = e.message;
         console.log(`⚠️ OpenAI confirmation failed: ${e.message}`);
       }
 
@@ -3881,8 +3923,8 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       }
 
       const reasoning = [
-        haikuVote ? `Haiku: ${haikuVote.confirm ? 'CONFIRM' : 'REJECT'} — ${haikuVote.reasoning || 'no reason'}` : 'Haiku: FAILED',
-        codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : 'OpenAI: FAILED',
+        haikuVote ? `Haiku: ${haikuVote.confirm ? 'CONFIRM' : 'REJECT'} — ${haikuVote.reasoning || 'no reason'}` : `Haiku: FAILED — ${haikuFailure || 'unknown error'}`,
+        codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : `OpenAI: FAILED — ${codexFailure || 'unknown error'}`,
       ].join(' | ');
 
       // Resolve order type from voter consensus (prefer haiku's pick, fallback to codex)

@@ -81,6 +81,57 @@ const extractOrderRecord = (payload) => {
   return null;
 };
 
+const CALL_EXPOSURE_CAP_PCT = 0.40;
+const getMarginCapacityBase = (marginState) => {
+  const collateralMarginBase = Number(marginState?.collaterals_initial_margin ?? 0);
+  if (collateralMarginBase > 0) return collateralMarginBase;
+  const collateralValue = Number(marginState?.collaterals_value ?? 0);
+  if (collateralValue > 0) return collateralValue;
+  return Number(marginState?.subaccount_value ?? 0);
+};
+const estimateMarginUtilization = (marginState, additionalOpenOrdersMargin = 0) => {
+  const base = getMarginCapacityBase(marginState);
+  if (!(base > 0)) return null;
+  const usedMargin = Math.max(0, Number(marginState?.positions_initial_margin ?? 0))
+    + Math.max(0, Number(marginState?.open_orders_margin ?? 0))
+    + Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
+  return usedMargin / base;
+};
+const estimateStandardShortCallInitialMarginPerUnit = (strike, spotPrice, premium) => {
+  if (!(spotPrice > 0)) return Infinity;
+  const otm = Math.max(0, strike - spotPrice);
+  const otmBuffer = Math.max(0.15 - (otm / spotPrice), 0.13) * spotPrice;
+  return Math.max(0, otmBuffer - Math.max(0, premium || 0));
+};
+const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, spotPrice, strike = 0, premium = 0) => {
+  const documentedEstimate = estimateStandardShortCallInitialMarginPerUnit(strike, spotPrice, premium);
+  if (Number.isFinite(documentedEstimate) && documentedEstimate > 0) return documentedEstimate;
+  const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
+  const currentShortExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
+  if (currentShortExposure > 0 && Number(marginState?.positions_initial_margin ?? 0) > 0) {
+    return Number(marginState.positions_initial_margin) / currentShortExposure;
+  }
+  const restingShortExposure = restingOrders.filter(order => order.action === 'sell_call').reduce((sum, order) => sum + Math.abs(Number(order.amount) || 0), 0);
+  if (restingShortExposure > 0 && Number(marginState?.open_orders_margin ?? 0) > 0) {
+    return Number(marginState.open_orders_margin) / restingShortExposure;
+  }
+  return Math.max((spotPrice || 0) * 0.13, 100);
+};
+const getCallMarginContext = (action, marginState, positions, restingOrders, instruments, spotPrice, instrumentName, amount, limitPrice) => {
+  if (action !== 'sell_call') return 'Call margin utilization: not applicable for this action.';
+  if (!marginState) return 'Call margin utilization: unavailable (margin state unavailable).';
+  const currentUtilization = estimateMarginUtilization(marginState);
+  const instrument = instruments.find((item) => item.instrument_name === instrumentName);
+  const strike = Number(instrument?.option_details?.strike || instrumentName?.split('-')?.[2] || 0) || 0;
+  const normalizedAmount = Math.max(0, Number(amount || 0));
+  const normalizedLimitPrice = Number(limitPrice || 0);
+  const marginPerUnit = estimateShortCallMarginPerUnit(marginState, positions, restingOrders, spotPrice, strike, normalizedLimitPrice);
+  const additionalMargin = normalizedAmount * marginPerUnit;
+  const projectedUtilization = estimateMarginUtilization(marginState, additionalMargin);
+  const capPct = CALL_EXPOSURE_CAP_PCT * 100;
+  return `Call margin utilization: current=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, cap=${capPct.toFixed(1)}%. Use these exact figures; do not invent utilization numbers.`;
+};
+
 
 // ============================================================================
 // 1. parseExpiryFromInstrument
@@ -3441,6 +3492,30 @@ describe('Voter limit_price sanity check', () => {
 
   test('voter price zero → use market', () => {
     assert.strictEqual(resolvePrice(0, 5.50), 5.50);
+  });
+});
+
+describe('confirmation prompt margin context', () => {
+  test('sell_call includes concrete current and projected utilization', () => {
+    const context = getCallMarginContext(
+      'sell_call',
+      { collaterals_initial_margin: 5000, positions_initial_margin: 600, open_orders_margin: 200 },
+      [],
+      [],
+      [{ instrument_name: 'ETH-20260417-2600-C', option_details: { strike: 2600 } }],
+      2240,
+      'ETH-20260417-2600-C',
+      5.47,
+      2.8
+    );
+    assert.ok(context.includes('current=16.0%'));
+    assert.ok(context.includes('projected_after_trade=47.6%'));
+    assert.ok(context.includes('cap=40.0%'));
+  });
+
+  test('non-call action says margin context not applicable', () => {
+    const context = getCallMarginContext('buy_put', {}, [], [], [], 2240, 'ETH-20260417-1400-P', 1, 1);
+    assert.strictEqual(context, 'Call margin utilization: not applicable for this action.');
   });
 });
 
