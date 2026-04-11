@@ -92,8 +92,12 @@ function prepareAll(d: Database.Database) {
 
     getBestScoresAgg: d.prepare(`
       SELECT
-        MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
-        MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_score
+        MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
+          AND delta <= -0.02 AND delta >= -0.12
+          THEN ask_delta_value END) as best_put_score,
+        MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
+          AND delta >= 0.04 AND delta <= 0.12
+          THEN bid_delta_value END) as best_call_score
       FROM options_snapshots
       WHERE timestamp > ?
     `),
@@ -101,14 +105,20 @@ function prepareAll(d: Database.Database) {
     getBestPutDetail: d.prepare(`
       SELECT instrument_name, delta, ask_price, strike, expiry
       FROM options_snapshots
-      WHERE timestamp > ? AND (option_type = 'P' OR instrument_name LIKE '%-P') AND ask_delta_value = ?
+      WHERE timestamp > ?
+        AND (option_type = 'P' OR instrument_name LIKE '%-P')
+        AND delta <= -0.02 AND delta >= -0.12
+        AND ask_delta_value = ?
       LIMIT 1
     `),
 
     getBestCallDetail: d.prepare(`
       SELECT instrument_name, delta, bid_price, strike, expiry
       FROM options_snapshots
-      WHERE timestamp > ? AND (option_type = 'C' OR instrument_name LIKE '%-C') AND bid_delta_value = ?
+      WHERE timestamp > ?
+        AND (option_type = 'C' OR instrument_name LIKE '%-C')
+        AND delta >= 0.04 AND delta <= 0.12
+        AND bid_delta_value = ?
       LIMIT 1
     `),
 

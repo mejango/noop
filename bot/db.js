@@ -417,8 +417,12 @@ const stmts = {
 
   getBestScoresAgg: db.prepare(`
     SELECT
-      MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
-      MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_score
+      MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
+        AND delta <= -0.02 AND delta >= -0.12
+        THEN ask_delta_value END) as best_put_score,
+      MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
+        AND delta >= 0.04 AND delta <= 0.12
+        THEN bid_delta_value END) as best_call_score
     FROM options_snapshots
     WHERE timestamp > @since
   `),
@@ -428,6 +432,7 @@ const stmts = {
     FROM options_snapshots
     WHERE timestamp > @since
       AND (option_type = 'P' OR instrument_name LIKE '%-P')
+      AND delta <= -0.02 AND delta >= -0.12
       AND ask_delta_value = @score
     LIMIT 1
   `),
@@ -437,6 +442,7 @@ const stmts = {
     FROM options_snapshots
     WHERE timestamp > @since
       AND (option_type = 'C' OR instrument_name LIKE '%-C')
+      AND delta >= 0.04 AND delta <= 0.12
       AND bid_delta_value = @score
     LIMIT 1
   `),
