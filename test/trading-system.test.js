@@ -106,6 +106,11 @@ const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrde
 const estimateMarginUtilization = (marginState, additionalOpenOrdersMargin = 0) => {
   const base = getMarginCapacityBase(marginState);
   if (!(base > 0)) return null;
+  const availableInitialMargin = Number(marginState?.initial_margin ?? NaN);
+  if (Number.isFinite(availableInitialMargin)) {
+    const projectedAvailable = availableInitialMargin - Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
+    return normalizeMarginUtilizationValue(1 - (projectedAvailable / base));
+  }
 
   const explicitMarginUsage = Number(
     marginState?.margin_usage_pct ??
@@ -114,16 +119,9 @@ const estimateMarginUtilization = (marginState, additionalOpenOrdersMargin = 0) 
     NaN
   );
   const additionalRatio = Math.max(0, Number(additionalOpenOrdersMargin ?? 0)) / base;
-
   if (Number.isFinite(explicitMarginUsage)) {
     const normalized = explicitMarginUsage > 1 ? explicitMarginUsage / 100 : explicitMarginUsage;
     return normalizeMarginUtilizationValue(normalized + additionalRatio);
-  }
-
-  const availableInitialMargin = Number(marginState?.initial_margin ?? NaN);
-  if (Number.isFinite(availableInitialMargin)) {
-    const projectedAvailable = availableInitialMargin - Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
-    return normalizeMarginUtilizationValue(1 - (projectedAvailable / base));
   }
 
   return estimateMarginUtilizationFromComponents(marginState, additionalOpenOrdersMargin);
@@ -2682,13 +2680,13 @@ describe('fetchSubaccount response parsing', () => {
     assert.strictEqual(usage, null);
   });
 
-  test('explicit margin_usage_pct from API takes precedence', () => {
+  test('documented initial-margin formula takes precedence over undocumented usage field', () => {
     const usage = estimateMarginUtilization({
       initial_margin: 675,
       collaterals_initial_margin: 1500,
-      margin_usage_pct: 55.14,
+      margin_usage_pct: 85.7,
     });
-    assert.strictEqual(+((usage || 0) * 100).toFixed(2), 55.14);
+    assert.strictEqual(+((usage || 0) * 100).toFixed(1), 55.0);
   });
 });
 

@@ -149,10 +149,10 @@ export async function getSubaccount(): Promise<{
     result?.margin_utilization ??
     NaN
   );
-  const marginUsagePct = Number.isFinite(explicitUsage)
-    ? +(explicitUsage > 1 ? explicitUsage : explicitUsage * 100).toFixed(1)
-    : collateralsInitialMargin > 0
-      ? +((1 - initialMargin / collateralsInitialMargin) * 100).toFixed(1)
+  const marginUsagePct = collateralsInitialMargin > 0
+    ? +((1 - initialMargin / collateralsInitialMargin) * 100).toFixed(1)
+    : Number.isFinite(explicitUsage)
+      ? +(explicitUsage > 1 ? explicitUsage : explicitUsage * 100).toFixed(1)
       : null;
 
   const subaccount = {
