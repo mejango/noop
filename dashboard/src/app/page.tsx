@@ -275,9 +275,9 @@ const emptyStats: Stats = {
   budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 6.2, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [], sentiment: { fundingRates: [], optionsSkew: [], aggregateOI: [], oiSnapshots: [] } };
+const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 7, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [], sentiment: { fundingRates: [], optionsSkew: [], aggregateOI: [], oiSnapshots: [] } };
 const emptyAccount: AccountData = { collaterals: [], positions: [], trades: [] };
-const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '30d', '90d'] as const;
+const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 0 };
 const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 0 };
@@ -340,7 +340,7 @@ const MQDotShape = ({ cx, cy, payload }: any) => {
 };
 
 export default function OverviewPage() {
-  const [range, setRange] = useState<string>('6h');
+  const [range, setRange] = useState<string>('14d');
   const [posSort, setPosSort] = useState<{ key: string; asc: boolean }>({ key: 'instrument_name', asc: true });
   const mobile = useIsMobile();
   const margins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;

@@ -15,6 +15,7 @@ const BUCKET_MS: Record<string, number> = {
   '3d':   15 * 60 * 1000,        // 15 min
   '6.2d': 30 * 60 * 1000,        // 30 min
   '7d':   30 * 60 * 1000,        // 30 min
+  '14d':  60 * 60 * 1000,        // 1 hour
   '30d':  2 * 60 * 60 * 1000,    // 2 hours
   '90d':  4 * 60 * 60 * 1000,    // 4 hours
   'all':  4 * 60 * 60 * 1000,    // 4 hours
@@ -101,7 +102,7 @@ function downsampleLiquidity(rows: Record<string, any>[], bucketMs: number): Rec
 
 export function GET(request: NextRequest) {
   try {
-    const range = request.nextUrl.searchParams.get('range') || '7d';
+    const range = request.nextUrl.searchParams.get('range') || '14d';
     const rangeMs: Record<string, number> = {
       '1h': 60 * 60 * 1000,
       '6h': 6 * 60 * 60 * 1000,
@@ -109,16 +110,17 @@ export function GET(request: NextRequest) {
       '3d': 3 * 24 * 60 * 60 * 1000,
       '6.2d': 6.2 * 24 * 60 * 60 * 1000,
       '7d': 7 * 24 * 60 * 60 * 1000,
+      '14d': 14 * 24 * 60 * 60 * 1000,
       '30d': 30 * 24 * 60 * 60 * 1000,
       '90d': 90 * 24 * 60 * 60 * 1000,
       'all': 365 * 24 * 60 * 60 * 1000,
     };
-    const ms = rangeMs[range] || rangeMs['7d'];
+    const ms = rangeMs[range] || rangeMs['14d'];
     const since = new Date(Date.now() - ms).toISOString();
     const bestScores = getBestScores();
     const bucketMs = BUCKET_MS[range] || 0;
 
-    const limits = CHART_ROW_LIMITS[range] || CHART_ROW_LIMITS['7d'];
+    const limits = CHART_ROW_LIMITS[range] || CHART_ROW_LIMITS['14d'];
     const prices = getSpotPrices(since, limits.prices);
     const options = getBestOptionsOverTime(since);
     const liquidity = getLiquidityOverTime(since);
