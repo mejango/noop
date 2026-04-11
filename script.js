@@ -3849,6 +3849,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
         });
         return {
           postOnlyRejected: true,
+          postOnlyBlocked: false,
           action,
           instrumentName,
           amount,
@@ -3869,6 +3870,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       });
       return {
         postOnlyRejected: true,
+        postOnlyBlocked: true,
         action,
         instrumentName,
         amount,
@@ -3885,7 +3887,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
         instrument_name: instrumentName, spot_price: spotPrice,
         price, intended_amount: amount,
       });
-      return { postOnlyRejected: true, action, instrumentName, amount, price, orderType, context: initialContext };
+      return { postOnlyRejected: true, postOnlyBlocked: false, action, instrumentName, amount, price, orderType, context: initialContext };
     }
   }
 
@@ -4210,7 +4212,11 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
             status: 'failed',
             execution_result: `post_only rejected: ${result.context || `would cross book at $${executionPrice}`}. Price may have moved — will re-evaluate next tick.`,
           });
-          console.log(`📋 post_only rejected: ${action.action} ${action.instrument_name} — ${result.context || 'price crossed book'}`);
+          if (result.postOnlyBlocked) {
+            console.log(`📋 maker entry skipped: ${action.action} ${action.instrument_name} — ${result.context || 'retry blocked by guard'}`);
+          } else {
+            console.log(`📋 post_only rejected: ${action.action} ${action.instrument_name} — ${result.context || 'price crossed book'}`);
+          }
         } else if (result && result.zeroFill) {
           // IOC got zero fill — mark as failed, will retry next tick
           db.updatePendingAction(action.id, {
