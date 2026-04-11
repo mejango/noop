@@ -146,7 +146,7 @@ export async function getSubaccount(): Promise<{
     subaccount_id: SUBACCOUNT_ID,
   });
   const collateralsInitialMargin = Number(result?.collaterals_initial_margin ?? 0);
-  const collateralsMaintenanceMargin = Number(result?.collaterals_maintenance_margin ?? 0);
+  const collateralsMaintenanceMargin = Math.abs(Number(result?.collaterals_maintenance_margin ?? 0));
   const initialMargin = Number(result?.initial_margin ?? 0);
   const positionsInitialMargin = Number(result?.positions_initial_margin ?? 0);
   const openOrdersMargin = Number(result?.open_orders_margin ?? 0);

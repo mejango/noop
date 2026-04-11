@@ -92,7 +92,7 @@ const getMarginCapacityBase = (marginState) => {
   return Number(marginState?.subaccount_value ?? 0);
 };
 const getMarginUtilizationBase = (marginState) => {
-  const maintenanceBase = Number(marginState?.collaterals_maintenance_margin ?? 0);
+  const maintenanceBase = Math.abs(Number(marginState?.collaterals_maintenance_margin ?? 0));
   if (maintenanceBase > 0) return maintenanceBase;
   return getMarginCapacityBase(marginState);
 };
@@ -2697,6 +2697,15 @@ describe('fetchSubaccount response parsing', () => {
       positions_initial_margin: 2447.6,
       open_orders_margin: 0,
       margin_usage_pct: 85.7,
+    });
+    assert.strictEqual(+((usage || 0) * 100).toFixed(1), 57.1);
+  });
+
+  test('negative maintenance collateral from API is normalized by magnitude', () => {
+    const usage = estimateMarginUtilization({
+      collaterals_maintenance_margin: -4282.9,
+      positions_initial_margin: 2447.6,
+      open_orders_margin: 0,
     });
     assert.strictEqual(+((usage || 0) * 100).toFixed(1), 57.1);
   });

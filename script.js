@@ -3071,7 +3071,7 @@ const getMarginCapacityBase = (marginState) => {
 };
 
 const getMarginUtilizationBase = (marginState) => {
-  const maintenanceBase = Number(marginState?.collaterals_maintenance_margin ?? 0);
+  const maintenanceBase = Math.abs(Number(marginState?.collaterals_maintenance_margin ?? 0));
   if (maintenanceBase > 0) return maintenanceBase;
   return getMarginCapacityBase(marginState);
 };
