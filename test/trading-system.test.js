@@ -140,6 +140,15 @@ const estimateMarginUtilization = (marginState, additionalOpenOrdersMargin = 0) 
 
   return estimateMarginUtilizationFromComponents(marginState, additionalOpenOrdersMargin);
 };
+const estimateDisplayedMarginUtilization = (marginState) => {
+  if (!marginState) return null;
+  const maintenanceBase = getMarginUtilizationBase(marginState);
+  const maintenanceMargin = Number(marginState?.maintenance_margin ?? NaN);
+  if (maintenanceBase > 0 && Number.isFinite(maintenanceMargin)) {
+    return normalizeMarginUtilizationValue(1 - (maintenanceMargin / maintenanceBase));
+  }
+  return estimateMarginUtilization(marginState);
+};
 const estimateStandardShortCallInitialMarginPerUnit = (strike, spotPrice, premium) => {
   if (!(spotPrice > 0)) return Infinity;
   const otm = Math.max(0, strike - spotPrice);
@@ -163,7 +172,7 @@ const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, s
 const getCallMarginContext = (action, marginState, positions, restingOrders, instruments, spotPrice, instrumentName, amount, limitPrice) => {
   if (action !== 'sell_call') return 'Call margin utilization: not applicable for this action.';
   if (!marginState) return 'Call margin utilization: unavailable (margin state unavailable).';
-  const currentUtilization = estimateMarginUtilization(marginState);
+  const currentUtilization = estimateDisplayedMarginUtilization(marginState);
   const instrument = instruments.find((item) => item.instrument_name === instrumentName);
   const strike = Number(instrument?.option_details?.strike || instrumentName?.split('-')?.[2] || 0) || 0;
   const normalizedAmount = Math.max(0, Number(amount || 0));
@@ -173,7 +182,7 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const projectedUtilization = estimateMarginUtilization(marginState, additionalMargin);
   const capPct = CALL_EXPOSURE_CAP_PCT * 100;
   const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
-  return `Call margin utilization: current=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, entry_buffer_cap=${entryCapPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat the hard cap as a ceiling, not a target; new entries should stay below the entry-buffer cap. Use these exact figures; do not invent utilization numbers.`;
+  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_internal=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, entry_buffer_cap=${entryCapPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat the hard cap as a ceiling, not a target; new entries should stay below the entry-buffer cap. Use these exact figures; do not invent utilization numbers.`;
 };
 
 const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
@@ -3638,7 +3647,7 @@ describe('confirmation prompt margin context', () => {
   test('sell_call includes concrete current and projected utilization', () => {
     const context = getCallMarginContext(
       'sell_call',
-      { initial_margin: 4200, collaterals_initial_margin: 5000, collaterals_maintenance_margin: 4200, positions_initial_margin: 600, open_orders_margin: 200 },
+      { initial_margin: 4200, maintenance_margin: 1805.3, collaterals_initial_margin: 5000, collaterals_maintenance_margin: 4200, positions_initial_margin: 600, open_orders_margin: 200 },
       [],
       [],
       [{ instrument_name: 'ETH-20260417-2600-C', option_details: { strike: 2600 } }],
@@ -3647,8 +3656,8 @@ describe('confirmation prompt margin context', () => {
       5.47,
       2.8
     );
-    assert.ok(context.includes('current=19.0%'));
-    assert.ok(context.includes('projected_after_trade=56.6%'));
+    assert.ok(context.includes('current_derive_display=57.0%'));
+    assert.ok(context.includes('projected_after_trade_internal=56.6%'));
     assert.ok(context.includes('entry_buffer_cap=40.0%'));
     assert.ok(context.includes('hard_cap=45.0%'));
   });

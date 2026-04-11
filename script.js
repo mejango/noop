@@ -3133,6 +3133,16 @@ const estimateMarginUtilization = (marginState, additionalOpenOrdersMargin = 0) 
   return estimateMarginUtilizationFromComponents(marginState, additionalOpenOrdersMargin);
 };
 
+const estimateDisplayedMarginUtilization = (marginState) => {
+  if (!marginState) return null;
+  const maintenanceBase = getMarginUtilizationBase(marginState);
+  const maintenanceMargin = Number(marginState?.maintenance_margin ?? NaN);
+  if (maintenanceBase > 0 && Number.isFinite(maintenanceMargin)) {
+    return normalizeMarginUtilizationValue(1 - (maintenanceMargin / maintenanceBase));
+  }
+  return estimateMarginUtilization(marginState);
+};
+
 const estimateStandardShortCallInitialMarginPerUnit = (strike, spotPrice, premium) => {
   if (!(spotPrice > 0)) return Infinity;
   const otm = Math.max(0, strike - spotPrice);
@@ -3168,7 +3178,7 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   if (action !== 'sell_call') return 'Call margin utilization: not applicable for this action.';
   if (!marginState) return 'Call margin utilization: unavailable (margin state unavailable).';
 
-  const currentUtilization = estimateMarginUtilization(marginState);
+  const currentUtilization = estimateDisplayedMarginUtilization(marginState);
   const instrument = instruments.find((item) => item.instrument_name === instrumentName);
   const strike = Number(instrument?.option_details?.strike || instrumentName?.split('-')?.[2] || 0) || 0;
   const normalizedAmount = Math.max(0, Number(amount || 0));
@@ -3179,7 +3189,7 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const capPct = CALL_EXPOSURE_CAP_PCT * 100;
   const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
 
-  return `Call margin utilization: current=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, entry_buffer_cap=${entryCapPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat the hard cap as a ceiling, not a target; new entries should stay below the entry-buffer cap. Use these exact figures; do not invent utilization numbers.`;
+  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_internal=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, entry_buffer_cap=${entryCapPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat the hard cap as a ceiling, not a target; new entries should stay below the entry-buffer cap. Use these exact figures; do not invent utilization numbers.`;
 };
 
 const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice, instruments, spotPrice }) => {
@@ -4057,8 +4067,9 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
     let livePositions = [];
     try { livePositions = await fetchPositions(); } catch { /* ok */ }
     const restingOrders = db.getOpenRestingOrders();
+    const displayedMarginUtilization = estimateDisplayedMarginUtilization(marginState);
     const marginStr = marginState
-      ? `Margin: buying_power=$${marginState.initial_margin.toFixed(2)}, account_value=$${marginState.subaccount_value.toFixed(2)}, collateral=$${marginState.collaterals_value.toFixed(2)}${marginState.is_under_liquidation ? ' [UNDER LIQUIDATION]' : ''}`
+      ? `Margin: buying_power=$${marginState.initial_margin.toFixed(2)}, account_value=$${marginState.subaccount_value.toFixed(2)}, collateral=$${marginState.collaterals_value.toFixed(2)}, derive_display_utilization=${displayedMarginUtilization != null ? `${(displayedMarginUtilization * 100).toFixed(1)}%` : 'N/A'}${marginState.is_under_liquidation ? ' [UNDER LIQUIDATION]' : ''}`
       : 'Margin: unavailable';
     try {
       // Auto-reject after 3 retries
@@ -4403,9 +4414,9 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     callMarginDiscipline: {
       capPct: CALL_EXPOSURE_CAP_PCT,
       currentShortExposure: +totalCallExposure.toFixed(2),
-      utilizationPct: marginState ? +(100 * (estimateMarginUtilization(marginState) || 0)).toFixed(1) : null,
+      utilizationPct: marginState ? +(100 * (estimateDisplayedMarginUtilization(marginState) || 0)).toFixed(1) : null,
       marginBase: marginState ? +getMarginCapacityBase(marginState).toFixed(2) : null,
-      note: `Hard cap: keep Derive margin utilization below ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}%. New short-call entries should stay below the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% entry buffer. Utilization is computed from remaining initial margin versus collateral margin base, matching Derive margin semantics.`,
+      note: `Hard cap: keep Derive-displayed margin utilization below ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}%. New short-call entries should stay below the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% entry buffer. utilizationPct mirrors the Derive display metric; projected trade sizing still uses the internal margin estimate.`,
     },
     margin: marginState ? {
       buying_power: +marginState.initial_margin.toFixed(2),              // available margin for new trades
@@ -4417,7 +4428,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
       open_orders_margin: marginState.open_orders_margin,
       is_under_liquidation: marginState.is_under_liquidation,
       margin_usage_pct: getMarginCapacityBase(marginState) > 0
-        ? +((100 * (estimateMarginUtilization(marginState) || 0))).toFixed(1)
+        ? +((100 * (estimateDisplayedMarginUtilization(marginState) || 0))).toFixed(1)
         : 0,
     } : null,
     putBudgetDiscipline: {
@@ -4429,7 +4440,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
       cycleDays: BOT_CONFIG.PERIOD_DAYS,
       note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of portfolio value per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once.`,
     },
-    note: 'Account is ETH-collateralized on Derive. buying_power = available initial margin for new trades. margin_usage_pct is computed from remaining initial margin versus collateral margin base, with a components fallback only if those fields are unavailable. Sizing must respect buying power, put budget discipline, AND the call margin-utilization cap.',
+    note: 'Account is ETH-collateralized on Derive. buying_power = available initial margin for new trades. margin_usage_pct mirrors the Derive display metric. Projected trade sizing still uses the bot internal margin estimate. Sizing must respect buying power, put budget discipline, AND the call margin-utilization cap.',
   };
 
   // Recent orders
