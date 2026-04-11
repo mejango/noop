@@ -152,9 +152,9 @@ const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'confi
 // allocated in PERIOD_DAYS windows. Budget recalculated at each cycle start.
 // Formula: portfolioValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
 const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
-// Call exposure discipline: never exceed 40% of ETH holdings in short calls.
+// Call exposure discipline: never exceed 45% of ETH holdings in short calls.
 // This is a hard cap — enforced in monitoring before queuing sell_call actions.
-const CALL_EXPOSURE_CAP_PCT = BOT_CONFIG.CALL_EXPOSURE_CAP_PCT || 0.40;
+const CALL_EXPOSURE_CAP_PCT = BOT_CONFIG.CALL_EXPOSURE_CAP_PCT || 0.45;
 const CALL_ENTRY_BUFFER_PCT = BOT_CONFIG.CALL_ENTRY_BUFFER_PCT || 0.05;
 const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
 const SUBACCOUNT_ID = 25923;
@@ -3284,7 +3284,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           if (putRemaining <= 0.20) continue;
         }
 
-        // Call exposure cap: skip if short call exposure >= 40% of ETH holdings
+        // Call exposure cap: skip if short call exposure reaches the 40% entry buffer
         if (rule.action === 'sell_call') {
           if (!liveMarginState) {
             console.log(`📋 Skip ${rule.action}: margin state unavailable`);
@@ -3438,7 +3438,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought - reservedCapacity.putBudget;
           maxByBudget = Math.min(maxByBudget, putRemaining / price);
         }
-        // For calls: cap by remaining exposure headroom (40% of ETH - current short calls)
+        // For calls: cap by remaining exposure headroom under the entry buffer
         if (rule.action === 'sell_call' && liveMarginState) {
           const marginBase = getMarginCapacityBase(liveMarginState);
           const marginUsed = Math.max(0, Number(liveMarginState.positions_initial_margin || 0))

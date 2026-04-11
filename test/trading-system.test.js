@@ -81,7 +81,7 @@ const extractOrderRecord = (payload) => {
   return null;
 };
 
-const CALL_EXPOSURE_CAP_PCT = 0.40;
+const CALL_EXPOSURE_CAP_PCT = 0.45;
 const CALL_ENTRY_BUFFER_PCT = 0.05;
 const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
 const getMarginCapacityBase = (marginState) => {
@@ -3604,8 +3604,8 @@ describe('confirmation prompt margin context', () => {
     );
     assert.ok(context.includes('current=16.0%'));
     assert.ok(context.includes('projected_after_trade=47.6%'));
-    assert.ok(context.includes('entry_buffer_cap=35.0%'));
-    assert.ok(context.includes('hard_cap=40.0%'));
+    assert.ok(context.includes('entry_buffer_cap=40.0%'));
+    assert.ok(context.includes('hard_cap=45.0%'));
   });
 
   test('non-call action says margin context not applicable', () => {
@@ -3640,33 +3640,33 @@ describe('post_only retry price discipline', () => {
 });
 
 // ============================================================================
-// 46. Call exposure cap: 40% of ETH holdings
+// 46. Call exposure cap: 45% hard cap, 40% entry buffer
 // ============================================================================
 
 describe('Call exposure cap discipline', () => {
-  const CALL_EXPOSURE_CAP_PCT = 0.40;
-  const CALL_ENTRY_CAP_PCT = 0.35;
+  const CALL_EXPOSURE_CAP_PCT = 0.45;
+  const CALL_ENTRY_CAP_PCT = 0.40;
 
   test('no short calls → full headroom available', () => {
     const ethBalance = 5.0;
     const currentExposure = 0;
-    const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance; // 2.0 ETH
+    const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance; // 2.25 ETH
     const headroom = maxExposure - currentExposure;
-    assert.strictEqual(maxExposure, 2.0);
-    assert.strictEqual(headroom, 2.0);
+    assert.strictEqual(maxExposure, 2.25);
+    assert.strictEqual(headroom, 2.25);
   });
 
-  test('existing 1.5 ETH short calls with 5 ETH → 0.5 headroom', () => {
+  test('existing 1.5 ETH short calls with 5 ETH → 0.75 headroom', () => {
     const ethBalance = 5.0;
     const currentExposure = 1.5;
-    const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance; // 2.0
+    const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance; // 2.25
     const headroom = Math.max(0, maxExposure - currentExposure);
-    assert.strictEqual(headroom, 0.5);
+    assert.strictEqual(headroom, 0.75);
   });
 
   test('at cap → sell_call blocked', () => {
     const ethBalance = 5.0;
-    const currentExposure = 2.0; // exactly at 40%
+    const currentExposure = 2.25; // exactly at 45%
     const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance;
     const blocked = currentExposure >= maxExposure;
     assert.strictEqual(blocked, true, 'Should block at cap');
@@ -3674,7 +3674,7 @@ describe('Call exposure cap discipline', () => {
 
   test('over cap → sell_call blocked', () => {
     const ethBalance = 5.0;
-    const currentExposure = 2.5; // over 40%
+    const currentExposure = 2.5; // over 45%
     const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance;
     const blocked = currentExposure >= maxExposure;
     assert.strictEqual(blocked, true, 'Should block over cap');
@@ -3688,11 +3688,11 @@ describe('Call exposure cap discipline', () => {
     assert.strictEqual(blocked, false, 'Should allow under cap');
   });
 
-  test('above entry buffer but below hard cap → new sell_call blocked', () => {
+  test('at entry buffer but below hard cap → new sell_call blocked', () => {
     const marginBase = 5000;
-    const currentUsed = 1800; // 36%
+    const currentUsed = 2000; // 40%
     const blocked = (currentUsed / marginBase) >= CALL_ENTRY_CAP_PCT;
-    assert.strictEqual(blocked, true, 'Should block once the 35% entry buffer is reached');
+    assert.strictEqual(blocked, true, 'Should block once the 40% entry buffer is reached');
   });
 
   test('zero ETH balance → ethBalance guard prevents division issues', () => {
@@ -3705,11 +3705,11 @@ describe('Call exposure cap discipline', () => {
   test('amount sizing capped by remaining headroom', () => {
     const ethBalance = 5.0;
     const currentExposure = 1.5;
-    const headroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * ethBalance - currentExposure); // 0.5
+    const headroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * ethBalance - currentExposure); // 0.75
     const ruleBudgetMax = 10.0; // rule allows 10 ETH worth
     const bookLiquidity = 3.0;
     const raw = Math.min(ruleBudgetMax, headroom, bookLiquidity);
-    assert.strictEqual(raw, 0.5, 'Should be capped by headroom, not rule or book');
+    assert.strictEqual(raw, 0.75, 'Should be capped by headroom, not rule or book');
   });
 
   test('buy_put is NOT affected by call cap', () => {
@@ -3720,10 +3720,10 @@ describe('Call exposure cap discipline', () => {
 
   test('cap scales with ETH holdings', () => {
     // More ETH = more room to sell calls
-    const small = CALL_EXPOSURE_CAP_PCT * 2.0; // 0.8 ETH
-    const large = CALL_EXPOSURE_CAP_PCT * 10.0; // 4.0 ETH
-    assert.strictEqual(small, 0.8);
-    assert.strictEqual(large, 4.0);
+    const small = CALL_EXPOSURE_CAP_PCT * 2.0; // 0.9 ETH
+    const large = CALL_EXPOSURE_CAP_PCT * 10.0; // 4.5 ETH
+    assert.strictEqual(small, 0.9);
+    assert.strictEqual(large, 4.5);
     assert.ok(large > small, 'More ETH = bigger cap');
   });
 });
