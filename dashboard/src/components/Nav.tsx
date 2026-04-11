@@ -18,6 +18,7 @@ interface NavStats {
   last_price: number;
   last_price_time: string;
   lyra_spot: number | null;
+  margin_usage_pct: number | null;
   budget: Budget;
 }
 
@@ -31,7 +32,7 @@ interface AccountData {
 }
 
 const emptyBudget: Budget = { putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0, cycleDays: CYCLE_DAYS };
-const emptyStats: NavStats = { last_price: 0, last_price_time: '', lyra_spot: null, budget: emptyBudget };
+const emptyStats: NavStats = { last_price: 0, last_price_time: '', lyra_spot: null, margin_usage_pct: null, budget: emptyBudget };
 const emptyAccount: AccountData = { collaterals: [] };
 
 export default function Nav() {
@@ -84,6 +85,12 @@ export default function Nav() {
             </>
           )}
           <span className="text-gray-600 hidden md:inline">|</span>
+          {stats.margin_usage_pct != null && (
+            <>
+              <span className="text-gray-400 hidden md:inline">MARGIN <span className="text-white">{stats.margin_usage_pct.toFixed(1)}%</span></span>
+              <span className="text-gray-600 hidden md:inline">|</span>
+            </>
+          )}
           <span className="text-gray-400 hidden md:inline">PUT <span className="text-white">{formatUSD(putRemaining)}</span>/<span className="text-gray-500">{formatUSD(putTotalBudget)}</span></span>
           <span className="text-gray-500 text-xs hidden md:inline">{b.putDaysLeft > 0 ? `${b.putDaysLeft}d left` : 'cycle ended'}</span>
         </div>

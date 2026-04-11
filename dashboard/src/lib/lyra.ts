@@ -117,3 +117,53 @@ export async function getTradeHistory(fromMs: number, toMs?: number): Promise<an
   setCache(cacheKey, trades);
   return trades as unknown[];
 }
+
+export async function getSubaccount(): Promise<{
+  initial_margin: number;
+  maintenance_margin: number;
+  subaccount_value: number;
+  collaterals_value: number;
+  collaterals_initial_margin: number;
+  open_orders_margin: number;
+  margin_usage_pct: number | null;
+}> {
+  const cached = getCached<{
+    initial_margin: number;
+    maintenance_margin: number;
+    subaccount_value: number;
+    collaterals_value: number;
+    collaterals_initial_margin: number;
+    open_orders_margin: number;
+    margin_usage_pct: number | null;
+  }>('subaccount');
+  if (cached) return cached;
+
+  const result = await lyraPost<Record<string, unknown>>('/private/get_subaccount', {
+    subaccount_id: SUBACCOUNT_ID,
+  });
+  const collateralsInitialMargin = Number(result?.collaterals_initial_margin ?? 0);
+  const initialMargin = Number(result?.initial_margin ?? 0);
+  const explicitUsage = Number(
+    result?.margin_usage_pct ??
+    result?.margin_utilization_pct ??
+    result?.margin_utilization ??
+    NaN
+  );
+  const marginUsagePct = Number.isFinite(explicitUsage)
+    ? +(explicitUsage > 1 ? explicitUsage : explicitUsage * 100).toFixed(1)
+    : collateralsInitialMargin > 0
+      ? +((1 - initialMargin / collateralsInitialMargin) * 100).toFixed(1)
+      : null;
+
+  const subaccount = {
+    initial_margin: initialMargin,
+    maintenance_margin: Number(result?.maintenance_margin ?? 0),
+    subaccount_value: Number(result?.subaccount_value ?? 0),
+    collaterals_value: Number(result?.collaterals_value ?? 0),
+    collaterals_initial_margin: collateralsInitialMargin,
+    open_orders_margin: Number(result?.open_orders_margin ?? 0),
+    margin_usage_pct: marginUsagePct,
+  };
+  setCache('subaccount', subaccount);
+  return subaccount;
+}
