@@ -189,7 +189,7 @@ const PRIORITY_STYLES: Record<string, { color: string }> = {
 
 export default function AdvisorDrawer() {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<'chat' | 'journal' | 'wiki' | 'ops'>('chat');
+  const [tab, setTab] = useState<'chat' | 'journal' | 'wiki' | 'ops'>('journal');
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState('');
@@ -503,24 +503,8 @@ export default function AdvisorDrawer() {
         <div className="px-4 py-3 border-b border-white/10 shrink-0">
           <div className="flex items-center justify-between">
             <span className="text-sm font-bold text-juice-orange tracking-wide">SPITZNAGEL BOT</span>
-            <button
-              onClick={createNewChat}
-              className="text-xs text-gray-500 hover:text-white transition-colors"
-            >
-              + New Chat
-            </button>
           </div>
           <div className="flex gap-1 mt-2">
-            <button
-              onClick={() => setTab('chat')}
-              className={`text-xs px-3 py-1 transition-colors ${
-                tab === 'chat'
-                  ? 'bg-white/10 text-white'
-                  : 'text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              Chat
-            </button>
             <button
               onClick={() => setTab('journal')}
               className={`text-xs px-3 py-1 transition-colors ${
