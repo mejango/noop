@@ -3070,13 +3070,19 @@ const getMarginCapacityBase = (marginState) => {
   return Number(marginState?.subaccount_value ?? 0);
 };
 
+const getMarginUtilizationBase = (marginState) => {
+  const maintenanceBase = Number(marginState?.collaterals_maintenance_margin ?? 0);
+  if (maintenanceBase > 0) return maintenanceBase;
+  return getMarginCapacityBase(marginState);
+};
+
 const normalizeMarginUtilizationValue = (value) => {
   if (!Number.isFinite(value)) return null;
   return Math.max(0, Math.min(1, value));
 };
 
 const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrdersMargin = 0) => {
-  const base = getMarginCapacityBase(marginState);
+  const base = getMarginUtilizationBase(marginState);
   if (!(base > 0)) return null;
   const usedMargin = Math.max(0, Number(marginState?.positions_initial_margin ?? 0))
     + Math.max(0, Number(marginState?.open_orders_margin ?? 0))
@@ -3085,6 +3091,9 @@ const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrde
 };
 
 const estimateMarginUtilization = (marginState, additionalOpenOrdersMargin = 0) => {
+  const componentUtilization = estimateMarginUtilizationFromComponents(marginState, additionalOpenOrdersMargin);
+  if (componentUtilization != null) return componentUtilization;
+
   const base = getMarginCapacityBase(marginState);
   if (!(base > 0)) return null;
   const availableInitialMargin = Number(marginState?.initial_margin ?? NaN);

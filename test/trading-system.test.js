@@ -91,12 +91,17 @@ const getMarginCapacityBase = (marginState) => {
   if (collateralValue > 0) return collateralValue;
   return Number(marginState?.subaccount_value ?? 0);
 };
+const getMarginUtilizationBase = (marginState) => {
+  const maintenanceBase = Number(marginState?.collaterals_maintenance_margin ?? 0);
+  if (maintenanceBase > 0) return maintenanceBase;
+  return getMarginCapacityBase(marginState);
+};
 const normalizeMarginUtilizationValue = (value) => {
   if (!Number.isFinite(value)) return null;
   return Math.max(0, Math.min(1, value));
 };
 const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrdersMargin = 0) => {
-  const base = getMarginCapacityBase(marginState);
+  const base = getMarginUtilizationBase(marginState);
   if (!(base > 0)) return null;
   const usedMargin = Math.max(0, Number(marginState?.positions_initial_margin ?? 0))
     + Math.max(0, Number(marginState?.open_orders_margin ?? 0))
@@ -104,6 +109,9 @@ const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrde
   return normalizeMarginUtilizationValue(usedMargin / base);
 };
 const estimateMarginUtilization = (marginState, additionalOpenOrdersMargin = 0) => {
+  const componentUtilization = estimateMarginUtilizationFromComponents(marginState, additionalOpenOrdersMargin);
+  if (componentUtilization != null) return componentUtilization;
+
   const base = getMarginCapacityBase(marginState);
   if (!(base > 0)) return null;
   const availableInitialMargin = Number(marginState?.initial_margin ?? NaN);
@@ -2665,10 +2673,11 @@ describe('fetchSubaccount response parsing', () => {
   });
 
   test('margin_usage_pct calculation', () => {
-    const collaterals_initial_margin = 1500;
-    const initial_margin = 675;
-    const usage = +((1 - initial_margin / collaterals_initial_margin) * 100).toFixed(1);
-    assert.strictEqual(usage, 55.0);
+    const collateralsMaintenanceMargin = 4282.9;
+    const positionsInitialMargin = 2447.6;
+    const openOrdersMargin = 0;
+    const usage = +(((positionsInitialMargin + openOrdersMargin) / collateralsMaintenanceMargin) * 100).toFixed(1);
+    assert.strictEqual(usage, 57.1);
   });
 
   test('margin_usage_pct with zero collateral margin base → null', () => {
@@ -2680,13 +2689,16 @@ describe('fetchSubaccount response parsing', () => {
     assert.strictEqual(usage, null);
   });
 
-  test('documented initial-margin formula takes precedence over undocumented usage field', () => {
+  test('maintenance-collateral utilization takes precedence over undocumented usage field', () => {
     const usage = estimateMarginUtilization({
       initial_margin: 675,
       collaterals_initial_margin: 1500,
+      collaterals_maintenance_margin: 4282.9,
+      positions_initial_margin: 2447.6,
+      open_orders_margin: 0,
       margin_usage_pct: 85.7,
     });
-    assert.strictEqual(+((usage || 0) * 100).toFixed(1), 55.0);
+    assert.strictEqual(+((usage || 0) * 100).toFixed(1), 57.1);
   });
 });
 
@@ -3591,7 +3603,7 @@ describe('confirmation prompt margin context', () => {
   test('sell_call includes concrete current and projected utilization', () => {
     const context = getCallMarginContext(
       'sell_call',
-      { initial_margin: 4200, collaterals_initial_margin: 5000, positions_initial_margin: 600, open_orders_margin: 200 },
+      { initial_margin: 4200, collaterals_initial_margin: 5000, collaterals_maintenance_margin: 4200, positions_initial_margin: 600, open_orders_margin: 200 },
       [],
       [],
       [{ instrument_name: 'ETH-20260417-2600-C', option_details: { strike: 2600 } }],
@@ -3600,8 +3612,8 @@ describe('confirmation prompt margin context', () => {
       5.47,
       2.8
     );
-    assert.ok(context.includes('current=16.0%'));
-    assert.ok(context.includes('projected_after_trade=47.6%'));
+    assert.ok(context.includes('current=19.0%'));
+    assert.ok(context.includes('projected_after_trade=56.6%'));
     assert.ok(context.includes('entry_buffer_cap=40.0%'));
     assert.ok(context.includes('hard_cap=45.0%'));
   });

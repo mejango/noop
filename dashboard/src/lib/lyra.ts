@@ -124,6 +124,8 @@ export async function getSubaccount(): Promise<{
   subaccount_value: number;
   collaterals_value: number;
   collaterals_initial_margin: number;
+  collaterals_maintenance_margin: number;
+  positions_initial_margin: number;
   open_orders_margin: number;
   margin_usage_pct: number | null;
 }> {
@@ -133,6 +135,8 @@ export async function getSubaccount(): Promise<{
     subaccount_value: number;
     collaterals_value: number;
     collaterals_initial_margin: number;
+    collaterals_maintenance_margin: number;
+    positions_initial_margin: number;
     open_orders_margin: number;
     margin_usage_pct: number | null;
   }>('subaccount');
@@ -142,15 +146,20 @@ export async function getSubaccount(): Promise<{
     subaccount_id: SUBACCOUNT_ID,
   });
   const collateralsInitialMargin = Number(result?.collaterals_initial_margin ?? 0);
+  const collateralsMaintenanceMargin = Number(result?.collaterals_maintenance_margin ?? 0);
   const initialMargin = Number(result?.initial_margin ?? 0);
+  const positionsInitialMargin = Number(result?.positions_initial_margin ?? 0);
+  const openOrdersMargin = Number(result?.open_orders_margin ?? 0);
   const explicitUsage = Number(
     result?.margin_usage_pct ??
     result?.margin_utilization_pct ??
     result?.margin_utilization ??
     NaN
   );
-  const marginUsagePct = collateralsInitialMargin > 0
-    ? +((1 - initialMargin / collateralsInitialMargin) * 100).toFixed(1)
+  const marginUsagePct = collateralsMaintenanceMargin > 0
+    ? +(((positionsInitialMargin + openOrdersMargin) / collateralsMaintenanceMargin) * 100).toFixed(1)
+    : collateralsInitialMargin > 0
+      ? +((1 - initialMargin / collateralsInitialMargin) * 100).toFixed(1)
     : Number.isFinite(explicitUsage)
       ? +(explicitUsage > 1 ? explicitUsage : explicitUsage * 100).toFixed(1)
       : null;
@@ -161,7 +170,9 @@ export async function getSubaccount(): Promise<{
     subaccount_value: Number(result?.subaccount_value ?? 0),
     collaterals_value: Number(result?.collaterals_value ?? 0),
     collaterals_initial_margin: collateralsInitialMargin,
-    open_orders_margin: Number(result?.open_orders_margin ?? 0),
+    collaterals_maintenance_margin: collateralsMaintenanceMargin,
+    positions_initial_margin: positionsInitialMargin,
+    open_orders_margin: openOrdersMargin,
     margin_usage_pct: marginUsagePct,
   };
   setCache('subaccount', subaccount);
