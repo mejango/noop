@@ -1750,6 +1750,14 @@ const fetchSubaccount = async () => {
       timeout: 10000,
     });
     const r = response.data?.result;
+    const collateralRows = Array.isArray(r?.collaterals) ? r.collaterals : [];
+    const positionRows = Array.isArray(r?.positions) ? r.positions : [];
+    const aggregatedCollateralsMaintenanceMargin = collateralRows.reduce((sum, row) => (
+      sum + Math.abs(Number(row?.maintenance_margin ?? 0))
+    ), 0);
+    const aggregatedPositionsInitialMargin = positionRows.reduce((sum, row) => (
+      sum + Math.abs(Number(row?.initial_margin ?? 0))
+    ), 0);
     return {
       initial_margin: Number(r?.initial_margin ?? 0),        // available margin (≈ buying power)
       maintenance_margin: Number(r?.maintenance_margin ?? 0), // available before liquidation
@@ -1758,7 +1766,9 @@ const fetchSubaccount = async () => {
       collaterals_value: Number(r?.collaterals_value ?? 0),
       collaterals_initial_margin: Number(r?.collaterals_initial_margin ?? 0),
       collaterals_maintenance_margin: Number(r?.collaterals_maintenance_margin ?? 0),
+      aggregated_collaterals_maintenance_margin: aggregatedCollateralsMaintenanceMargin,
       positions_initial_margin: Number(r?.positions_initial_margin ?? 0),   // margin consumed by positions
+      aggregated_positions_initial_margin: aggregatedPositionsInitialMargin,
       positions_maintenance_margin: Number(r?.positions_maintenance_margin ?? 0),
       open_orders_margin: Number(r?.open_orders_margin ?? 0),
       margin_usage_pct: Number(
@@ -3071,6 +3081,8 @@ const getMarginCapacityBase = (marginState) => {
 };
 
 const getMarginUtilizationBase = (marginState) => {
+  const aggregatedMaintenanceBase = Math.abs(Number(marginState?.aggregated_collaterals_maintenance_margin ?? 0));
+  if (aggregatedMaintenanceBase > 0) return aggregatedMaintenanceBase;
   const maintenanceBase = Math.abs(Number(marginState?.collaterals_maintenance_margin ?? 0));
   if (maintenanceBase > 0) return maintenanceBase;
   return getMarginCapacityBase(marginState);
@@ -3084,7 +3096,11 @@ const normalizeMarginUtilizationValue = (value) => {
 const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrdersMargin = 0) => {
   const base = getMarginUtilizationBase(marginState);
   if (!(base > 0)) return null;
-  const usedMargin = Math.abs(Number(marginState?.positions_initial_margin ?? 0))
+  const usedMargin = Math.abs(Number(
+      marginState?.aggregated_positions_initial_margin ??
+      marginState?.positions_initial_margin ??
+      0
+    ))
     + Math.abs(Number(marginState?.open_orders_margin ?? 0))
     + Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
   return normalizeMarginUtilizationValue(usedMargin / base);

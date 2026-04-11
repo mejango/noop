@@ -125,7 +125,9 @@ export async function getSubaccount(): Promise<{
   collaterals_value: number;
   collaterals_initial_margin: number;
   collaterals_maintenance_margin: number;
+  aggregated_collaterals_maintenance_margin: number;
   positions_initial_margin: number;
+  aggregated_positions_initial_margin: number;
   open_orders_margin: number;
   margin_usage_pct: number | null;
 }> {
@@ -137,6 +139,8 @@ export async function getSubaccount(): Promise<{
     collaterals_initial_margin: number;
     collaterals_maintenance_margin: number;
     positions_initial_margin: number;
+    aggregated_collaterals_maintenance_margin: number;
+    aggregated_positions_initial_margin: number;
     open_orders_margin: number;
     margin_usage_pct: number | null;
   }>('subaccount');
@@ -145,10 +149,18 @@ export async function getSubaccount(): Promise<{
   const result = await lyraPost<Record<string, unknown>>('/private/get_subaccount', {
     subaccount_id: SUBACCOUNT_ID,
   });
+  const collateralRows = Array.isArray(result?.collaterals) ? result.collaterals as Record<string, unknown>[] : [];
+  const positionRows = Array.isArray(result?.positions) ? result.positions as Record<string, unknown>[] : [];
   const collateralsInitialMargin = Number(result?.collaterals_initial_margin ?? 0);
   const collateralsMaintenanceMargin = Math.abs(Number(result?.collaterals_maintenance_margin ?? 0));
   const initialMargin = Number(result?.initial_margin ?? 0);
   const positionsInitialMargin = Math.abs(Number(result?.positions_initial_margin ?? 0));
+  const aggregatedCollateralsMaintenanceMargin = collateralRows.reduce((sum, row) => (
+    sum + Math.abs(Number(row?.maintenance_margin ?? 0))
+  ), 0);
+  const aggregatedPositionsInitialMargin = positionRows.reduce((sum, row) => (
+    sum + Math.abs(Number(row?.initial_margin ?? 0))
+  ), 0);
   const openOrdersMargin = Math.abs(Number(result?.open_orders_margin ?? 0));
   const explicitUsage = Number(
     result?.margin_usage_pct ??
@@ -156,8 +168,10 @@ export async function getSubaccount(): Promise<{
     result?.margin_utilization ??
     NaN
   );
-  const marginUsagePct = collateralsMaintenanceMargin > 0
-    ? +(((positionsInitialMargin + openOrdersMargin) / collateralsMaintenanceMargin) * 100).toFixed(1)
+  const maintenanceBase = aggregatedCollateralsMaintenanceMargin || collateralsMaintenanceMargin;
+  const positionsBase = aggregatedPositionsInitialMargin || positionsInitialMargin;
+  const marginUsagePct = maintenanceBase > 0
+    ? +(((positionsBase + openOrdersMargin) / maintenanceBase) * 100).toFixed(1)
     : collateralsInitialMargin > 0
       ? +((1 - initialMargin / collateralsInitialMargin) * 100).toFixed(1)
     : Number.isFinite(explicitUsage)
@@ -171,7 +185,9 @@ export async function getSubaccount(): Promise<{
     collaterals_value: Number(result?.collaterals_value ?? 0),
     collaterals_initial_margin: collateralsInitialMargin,
     collaterals_maintenance_margin: collateralsMaintenanceMargin,
+    aggregated_collaterals_maintenance_margin: aggregatedCollateralsMaintenanceMargin,
     positions_initial_margin: positionsInitialMargin,
+    aggregated_positions_initial_margin: aggregatedPositionsInitialMargin,
     open_orders_margin: openOrdersMargin,
     margin_usage_pct: marginUsagePct,
   };

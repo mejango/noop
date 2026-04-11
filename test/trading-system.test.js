@@ -92,6 +92,8 @@ const getMarginCapacityBase = (marginState) => {
   return Number(marginState?.subaccount_value ?? 0);
 };
 const getMarginUtilizationBase = (marginState) => {
+  const aggregatedMaintenanceBase = Math.abs(Number(marginState?.aggregated_collaterals_maintenance_margin ?? 0));
+  if (aggregatedMaintenanceBase > 0) return aggregatedMaintenanceBase;
   const maintenanceBase = Math.abs(Number(marginState?.collaterals_maintenance_margin ?? 0));
   if (maintenanceBase > 0) return maintenanceBase;
   return getMarginCapacityBase(marginState);
@@ -103,7 +105,11 @@ const normalizeMarginUtilizationValue = (value) => {
 const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrdersMargin = 0) => {
   const base = getMarginUtilizationBase(marginState);
   if (!(base > 0)) return null;
-  const usedMargin = Math.abs(Number(marginState?.positions_initial_margin ?? 0))
+  const usedMargin = Math.abs(Number(
+      marginState?.aggregated_positions_initial_margin ??
+      marginState?.positions_initial_margin ??
+      0
+    ))
     + Math.abs(Number(marginState?.open_orders_margin ?? 0))
     + Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
   return normalizeMarginUtilizationValue(usedMargin / base);
@@ -2714,6 +2720,17 @@ describe('fetchSubaccount response parsing', () => {
     const usage = estimateMarginUtilization({
       collaterals_maintenance_margin: 4282.9,
       positions_initial_margin: -2447.6,
+      open_orders_margin: 0,
+    });
+    assert.strictEqual(+((usage || 0) * 100).toFixed(1), 57.1);
+  });
+
+  test('aggregated collateral and position margins are used when top-level fields are weak', () => {
+    const usage = estimateMarginUtilization({
+      collaterals_maintenance_margin: 0,
+      aggregated_collaterals_maintenance_margin: 4282.9,
+      positions_initial_margin: 0,
+      aggregated_positions_initial_margin: 2447.6,
       open_orders_margin: 0,
     });
     assert.strictEqual(+((usage || 0) * 100).toFixed(1), 57.1);
