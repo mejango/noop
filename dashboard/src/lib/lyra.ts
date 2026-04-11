@@ -154,6 +154,7 @@ export async function getSubaccount(): Promise<{
   const collateralsInitialMargin = Number(result?.collaterals_initial_margin ?? 0);
   const collateralsMaintenanceMargin = Math.abs(Number(result?.collaterals_maintenance_margin ?? 0));
   const initialMargin = Number(result?.initial_margin ?? 0);
+  const maintenanceMargin = Number(result?.maintenance_margin ?? 0);
   const positionsInitialMargin = Math.abs(Number(result?.positions_initial_margin ?? 0));
   const aggregatedCollateralsMaintenanceMargin = collateralRows.reduce((sum, row) => (
     sum + Math.abs(Number(row?.maintenance_margin ?? 0))
@@ -170,8 +171,10 @@ export async function getSubaccount(): Promise<{
   );
   const maintenanceBase = aggregatedCollateralsMaintenanceMargin || collateralsMaintenanceMargin;
   const positionsBase = aggregatedPositionsInitialMargin || positionsInitialMargin;
-  const marginUsagePct = maintenanceBase > 0
-    ? +(((positionsBase + openOrdersMargin) / maintenanceBase) * 100).toFixed(1)
+  const marginUsagePct = maintenanceBase > 0 && Number.isFinite(maintenanceMargin)
+    ? +((1 - (maintenanceMargin / maintenanceBase)) * 100).toFixed(1)
+    : maintenanceBase > 0
+      ? +(((positionsBase + openOrdersMargin) / maintenanceBase) * 100).toFixed(1)
     : collateralsInitialMargin > 0
       ? +((1 - initialMargin / collateralsInitialMargin) * 100).toFixed(1)
     : Number.isFinite(explicitUsage)
@@ -180,7 +183,7 @@ export async function getSubaccount(): Promise<{
 
   const subaccount = {
     initial_margin: initialMargin,
-    maintenance_margin: Number(result?.maintenance_margin ?? 0),
+    maintenance_margin: maintenanceMargin,
     subaccount_value: Number(result?.subaccount_value ?? 0),
     collaterals_value: Number(result?.collaterals_value ?? 0),
     collaterals_initial_margin: collateralsInitialMargin,
