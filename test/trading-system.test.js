@@ -103,8 +103,8 @@ const normalizeMarginUtilizationValue = (value) => {
 const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrdersMargin = 0) => {
   const base = getMarginUtilizationBase(marginState);
   if (!(base > 0)) return null;
-  const usedMargin = Math.max(0, Number(marginState?.positions_initial_margin ?? 0))
-    + Math.max(0, Number(marginState?.open_orders_margin ?? 0))
+  const usedMargin = Math.abs(Number(marginState?.positions_initial_margin ?? 0))
+    + Math.abs(Number(marginState?.open_orders_margin ?? 0))
     + Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
   return normalizeMarginUtilizationValue(usedMargin / base);
 };
@@ -2705,6 +2705,15 @@ describe('fetchSubaccount response parsing', () => {
     const usage = estimateMarginUtilization({
       collaterals_maintenance_margin: -4282.9,
       positions_initial_margin: 2447.6,
+      open_orders_margin: 0,
+    });
+    assert.strictEqual(+((usage || 0) * 100).toFixed(1), 57.1);
+  });
+
+  test('negative positions margin from API is normalized by magnitude', () => {
+    const usage = estimateMarginUtilization({
+      collaterals_maintenance_margin: 4282.9,
+      positions_initial_margin: -2447.6,
       open_orders_margin: 0,
     });
     assert.strictEqual(+((usage || 0) * 100).toFixed(1), 57.1);

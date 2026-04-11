@@ -3084,8 +3084,8 @@ const normalizeMarginUtilizationValue = (value) => {
 const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrdersMargin = 0) => {
   const base = getMarginUtilizationBase(marginState);
   if (!(base > 0)) return null;
-  const usedMargin = Math.max(0, Number(marginState?.positions_initial_margin ?? 0))
-    + Math.max(0, Number(marginState?.open_orders_margin ?? 0))
+  const usedMargin = Math.abs(Number(marginState?.positions_initial_margin ?? 0))
+    + Math.abs(Number(marginState?.open_orders_margin ?? 0))
     + Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
   return normalizeMarginUtilizationValue(usedMargin / base);
 };

@@ -148,8 +148,8 @@ export async function getSubaccount(): Promise<{
   const collateralsInitialMargin = Number(result?.collaterals_initial_margin ?? 0);
   const collateralsMaintenanceMargin = Math.abs(Number(result?.collaterals_maintenance_margin ?? 0));
   const initialMargin = Number(result?.initial_margin ?? 0);
-  const positionsInitialMargin = Number(result?.positions_initial_margin ?? 0);
-  const openOrdersMargin = Number(result?.open_orders_margin ?? 0);
+  const positionsInitialMargin = Math.abs(Number(result?.positions_initial_margin ?? 0));
+  const openOrdersMargin = Math.abs(Number(result?.open_orders_margin ?? 0));
   const explicitUsage = Number(
     result?.margin_usage_pct ??
     result?.margin_utilization_pct ??
