@@ -1253,6 +1253,20 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
   };
 };
 
+const summarizeBestCandidate = (candidate, type) => {
+  if (!candidate?.details) return null;
+  return {
+    score: type === 'put' ? Number(candidate.details.askDeltaValue || 0) : Number(candidate.details.bidDeltaValue || 0),
+    detail: {
+      delta: Number(candidate.details.delta ?? 0),
+      price: type === 'put' ? Number(candidate.details.askPrice ?? 0) : Number(candidate.details.bidPrice ?? 0),
+      strike: Number(candidate.option_details?.strike ?? 0),
+      expiry: Number(candidate.option_details?.expiry ?? 0),
+      instrument: candidate.instrument_name || null,
+    },
+  };
+};
+
 // Load private key (prefer env var, fallback to file)
 const loadPrivateKey = () => {
   if (process.env.PRIVATE_KEY) {
@@ -5219,6 +5233,23 @@ const runBot = async () => {
     if (db) {
       let tickSummary;
       try {
+        const enrichedPutCandidates = (putCandidates || [])
+          .map((inst) => {
+            const ticker = tickerMap[inst.instrument_name];
+            return ticker ? enrichCandidateFromTicker(inst, ticker, spotPrice) : null;
+          })
+          .filter(Boolean);
+        const enrichedCallCandidates = (callCandidates || [])
+          .map((inst) => {
+            const ticker = tickerMap[inst.instrument_name];
+            return ticker ? enrichCandidateFromTicker(inst, ticker, spotPrice) : null;
+          })
+          .filter(Boolean);
+        const bestCurrentPut = enrichedPutCandidates.sort((a, b) => (b?.details?.askDeltaValue || 0) - (a?.details?.askDeltaValue || 0))[0] || null;
+        const bestCurrentCall = enrichedCallCandidates.sort((a, b) => (b?.details?.bidDeltaValue || 0) - (a?.details?.bidDeltaValue || 0))[0] || null;
+        const bestPutSummary = summarizeBestCandidate(bestCurrentPut, 'put');
+        const bestCallSummary = summarizeBestCandidate(bestCurrentCall, 'call');
+
         tickSummary = {
           price: spotPrice,
           medium_momentum: botData.mediumTermMomentum,
@@ -5231,10 +5262,20 @@ const runBot = async () => {
             put_candidates: putCandidates.length,
             call_candidates: callCandidates.length,
           },
+          historical: {
+            total_data_points: enrichedPutCandidates.length + enrichedCallCandidates.length,
+            filtered_data_points: enrichedPutCandidates.length + enrichedCallCandidates.length,
+            best_put_score: bestPutSummary?.score ?? 0,
+            best_call_score: bestCallSummary?.score ?? 0,
+          },
           strategy: {
             mode: 'llm_driven',
             active_rules: db ? db.getActiveRules().length : 0,
           },
+          current_best_put: bestPutSummary?.score ?? 0,
+          current_best_call: bestCallSummary?.score ?? 0,
+          best_put_detail: bestPutSummary?.detail ?? null,
+          best_call_detail: bestCallSummary?.detail ?? null,
           next_check_minutes: checkInterval / (1000 * 60),
         };
         db.insertTick(tickTimestamp, JSON.stringify(tickSummary));
