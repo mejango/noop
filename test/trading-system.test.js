@@ -82,6 +82,8 @@ const extractOrderRecord = (payload) => {
 };
 
 const CALL_EXPOSURE_CAP_PCT = 0.40;
+const CALL_ENTRY_BUFFER_PCT = 0.05;
+const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
 const getMarginCapacityBase = (marginState) => {
   const collateralMarginBase = Number(marginState?.collaterals_initial_margin ?? 0);
   if (collateralMarginBase > 0) return collateralMarginBase;
@@ -129,7 +131,48 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const additionalMargin = normalizedAmount * marginPerUnit;
   const projectedUtilization = estimateMarginUtilization(marginState, additionalMargin);
   const capPct = CALL_EXPOSURE_CAP_PCT * 100;
-  return `Call margin utilization: current=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, cap=${capPct.toFixed(1)}%. Use these exact figures; do not invent utilization numbers.`;
+  const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
+  return `Call margin utilization: current=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, entry_buffer_cap=${entryCapPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat the hard cap as a ceiling, not a target; new entries should stay below the entry-buffer cap. Use these exact figures; do not invent utilization numbers.`;
+};
+
+const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
+  const configuredStep = Number(
+    instrument?.price_step ??
+    instrument?.options?.price_step ??
+    instrument?.option_details?.price_step ??
+    0
+  );
+  if (configuredStep > 0) return configuredStep;
+  if (fallbackPrice >= 10) return 0.1;
+  if (fallbackPrice >= 1) return 0.05;
+  return 0.01;
+};
+
+const roundToStep = (value, step, mode = 'nearest') => {
+  if (!(step > 0)) return value;
+  const scaled = value / step;
+  if (mode === 'up') return Math.ceil(scaled) * step;
+  if (mode === 'down') return Math.floor(scaled) * step;
+  return Math.round(scaled) * step;
+};
+
+const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice) => {
+  const bidPrice = Number(ticker?.b) || 0;
+  const askPrice = Number(ticker?.a) || 0;
+  const step = getInstrumentPriceStep(instrument, attemptedPrice);
+
+  if (direction === 'sell') {
+    const retryBase = bidPrice > 0 ? bidPrice + step : attemptedPrice + step;
+    const retryPrice = roundToStep(retryBase, step, 'up');
+    return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
+  }
+
+  if (askPrice <= 0) return null;
+  const belowAsk = askPrice - step;
+  const candidate = belowAsk > 0
+    ? roundToStep(belowAsk, step, 'down')
+    : roundToStep(askPrice * 0.99, step, 'down');
+  return candidate > 0 ? { retryPrice: candidate, bidPrice, askPrice, step } : null;
 };
 
 
@@ -3520,12 +3563,38 @@ describe('confirmation prompt margin context', () => {
     );
     assert.ok(context.includes('current=16.0%'));
     assert.ok(context.includes('projected_after_trade=47.6%'));
-    assert.ok(context.includes('cap=40.0%'));
+    assert.ok(context.includes('entry_buffer_cap=35.0%'));
+    assert.ok(context.includes('hard_cap=40.0%'));
   });
 
   test('non-call action says margin context not applicable', () => {
     const context = getCallMarginContext('buy_put', {}, [], [], [], 2240, 'ETH-20260417-1400-P', 1, 1);
     assert.strictEqual(context, 'Call margin utilization: not applicable for this action.');
+  });
+});
+
+describe('post_only retry price discipline', () => {
+  test('sell retry moves one tick above bid, not to the ask', () => {
+    const retry = computePostOnlyRetryPrice(
+      'sell',
+      { b: 4.9, a: 7.6 },
+      { option_details: { price_step: 0.05 } },
+      4.9
+    );
+    assert.ok(retry);
+    assert.strictEqual(retry.retryPrice, 4.95);
+    assert.strictEqual(retry.askPrice, 7.6);
+  });
+
+  test('sell retry falls back to attempted price when bid is unavailable', () => {
+    const retry = computePostOnlyRetryPrice(
+      'sell',
+      { b: 0, a: 7.6 },
+      { option_details: { price_step: 0.05 } },
+      4.9
+    );
+    assert.ok(retry);
+    assert.strictEqual(retry.retryPrice, 4.95);
   });
 });
 
@@ -3535,6 +3604,7 @@ describe('confirmation prompt margin context', () => {
 
 describe('Call exposure cap discipline', () => {
   const CALL_EXPOSURE_CAP_PCT = 0.40;
+  const CALL_ENTRY_CAP_PCT = 0.35;
 
   test('no short calls → full headroom available', () => {
     const ethBalance = 5.0;
@@ -3575,6 +3645,13 @@ describe('Call exposure cap discipline', () => {
     const maxExposure = CALL_EXPOSURE_CAP_PCT * ethBalance;
     const blocked = currentExposure >= maxExposure;
     assert.strictEqual(blocked, false, 'Should allow under cap');
+  });
+
+  test('above entry buffer but below hard cap → new sell_call blocked', () => {
+    const marginBase = 5000;
+    const currentUsed = 1800; // 36%
+    const blocked = (currentUsed / marginBase) >= CALL_ENTRY_CAP_PCT;
+    assert.strictEqual(blocked, true, 'Should block once the 35% entry buffer is reached');
   });
 
   test('zero ETH balance → ethBalance guard prevents division issues', () => {
