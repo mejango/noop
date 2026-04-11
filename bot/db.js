@@ -412,7 +412,33 @@ const stmts = {
   `),
 
   getRecentTicks: db.prepare(`
-    SELECT id, timestamp, summary FROM bot_ticks ORDER BY timestamp DESC LIMIT @limit
+      SELECT id, timestamp, summary FROM bot_ticks ORDER BY timestamp DESC LIMIT @limit
+  `),
+
+  getBestScoresAgg: db.prepare(`
+    SELECT
+      MAX(CASE WHEN option_type = 'P' OR instrument_name LIKE '%-P' THEN ask_delta_value END) as best_put_score,
+      MAX(CASE WHEN option_type = 'C' OR instrument_name LIKE '%-C' THEN bid_delta_value END) as best_call_score
+    FROM options_snapshots
+    WHERE timestamp > @since
+  `),
+
+  getBestPutDetail: db.prepare(`
+    SELECT instrument_name, delta, ask_price, strike, expiry
+    FROM options_snapshots
+    WHERE timestamp > @since
+      AND (option_type = 'P' OR instrument_name LIKE '%-P')
+      AND ask_delta_value = @score
+    LIMIT 1
+  `),
+
+  getBestCallDetail: db.prepare(`
+    SELECT instrument_name, delta, bid_price, strike, expiry
+    FROM options_snapshots
+    WHERE timestamp > @since
+      AND (option_type = 'C' OR instrument_name LIKE '%-C')
+      AND bid_delta_value = @score
+    LIMIT 1
   `),
 
   // AI journal
@@ -1042,6 +1068,35 @@ const insertTick = (timestamp, summary) => {
   stmts.insertTick.run({ timestamp, summary: typeof summary === 'string' ? summary : JSON.stringify(summary) });
 };
 const getRecentTicks = (limit = 50) => stmts.getRecentTicks.all({ limit });
+const getBestScores = (windowDays = 7) => {
+  const since = new Date(Date.now() - windowDays * 86400000).toISOString();
+  const row = stmts.getBestScoresAgg.get({ since }) || {};
+  const bestPutDetail = row.best_put_score != null
+    ? stmts.getBestPutDetail.get({ since, score: row.best_put_score })
+    : null;
+  const bestCallDetail = row.best_call_score != null
+    ? stmts.getBestCallDetail.get({ since, score: row.best_call_score })
+    : null;
+  return {
+    bestPutScore: row.best_put_score || 0,
+    bestCallScore: row.best_call_score || 0,
+    windowDays,
+    bestPutDetail: bestPutDetail ? {
+      delta: bestPutDetail.delta,
+      price: bestPutDetail.ask_price,
+      strike: bestPutDetail.strike,
+      expiry: bestPutDetail.expiry,
+      instrument: bestPutDetail.instrument_name,
+    } : null,
+    bestCallDetail: bestCallDetail ? {
+      delta: bestCallDetail.delta,
+      price: bestCallDetail.bid_price,
+      strike: bestCallDetail.strike,
+      expiry: bestCallDetail.expiry,
+      instrument: bestCallDetail.instrument_name,
+    } : null,
+  };
+};
 
 const getOptionsDistribution = (since) => stmts.getOptionsDistribution.all({ since });
 
@@ -1411,6 +1466,7 @@ module.exports = {
   getImpliedVolHourly,
   insertTick,
   getRecentTicks,
+  getBestScores,
   insertOrder,
   getRecentOrders,
   insertJournalEntry,

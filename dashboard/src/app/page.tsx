@@ -210,6 +210,8 @@ interface TickData {
   current_best_call: number;
   best_put_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
   best_call_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
+  historical_best_put_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
+  historical_best_call_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
   next_check_minutes: number;
 }
 
@@ -2011,15 +2013,15 @@ export default function OverviewPage() {
                       <span className="text-gray-600"> / </span>
                       <span className="relative inline-block group/pb">
                         <span className="text-gray-500 cursor-help">{Number(d.historical?.best_put_score) > 0 ? Number(d.historical.best_put_score).toFixed(6) : '--'}</span>
-                        {chart.bestScores.bestPutDetail && (
+                        {(d.historical_best_put_detail || chart.bestScores.bestPutDetail) && (
                           <div className="absolute right-0 top-full mt-1 hidden group-hover/pb:block z-20 pointer-events-none">
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                               <div className="text-gray-400 mb-1">Best PUT ({chart.bestScores.windowDays}d)</div>
-                              <div>Delta: <span className="text-white">{Number(chart.bestScores.bestPutDetail.delta).toFixed(4)}</span></div>
-                              <div>Price: <span className="text-white">${Number(chart.bestScores.bestPutDetail.price).toFixed(6)}</span></div>
-                              <div>Strike: <span className="text-white">${Number(chart.bestScores.bestPutDetail.strike).toFixed(0)}</span></div>
-                              <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestPutDetail.expiry) ?? 'N/A'}</span></div>
-                              {chart.bestScores.bestPutDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestPutDetail.instrument}</div>}
+                              <div>Delta: <span className="text-white">{Number((d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.delta).toFixed(4)}</span></div>
+                              <div>Price: <span className="text-white">${Number((d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.price).toFixed(6)}</span></div>
+                              <div>Strike: <span className="text-white">${Number((d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.strike).toFixed(0)}</span></div>
+                              <div>DTE: <span className="text-white">{dteDays((d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.expiry) ?? 'N/A'}</span></div>
+                              {(d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.instrument && <div className="text-gray-400 mt-1">{(d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.instrument}</div>}
                             </div>
                           </div>
                         )}
@@ -2044,15 +2046,15 @@ export default function OverviewPage() {
                       <span className="text-gray-600"> / </span>
                       <span className="relative inline-block group/cb">
                         <span className="text-gray-500 cursor-help">{Number(d.historical?.best_call_score) > 0 ? Number(d.historical.best_call_score).toFixed(2) : '--'}</span>
-                        {chart.bestScores.bestCallDetail && (
+                        {(d.historical_best_call_detail || chart.bestScores.bestCallDetail) && (
                           <div className="absolute right-0 top-full mt-1 hidden group-hover/cb:block z-20 pointer-events-none">
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                               <div className="text-gray-400 mb-1">Best CALL ({chart.bestScores.windowDays}d)</div>
-                              <div>Delta: <span className="text-white">{Number(chart.bestScores.bestCallDetail.delta).toFixed(4)}</span></div>
-                              <div>Price: <span className="text-white">${Number(chart.bestScores.bestCallDetail.price).toFixed(6)}</span></div>
-                              <div>Strike: <span className="text-white">${Number(chart.bestScores.bestCallDetail.strike).toFixed(0)}</span></div>
-                              <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestCallDetail.expiry) ?? 'N/A'}</span></div>
-                              {chart.bestScores.bestCallDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestCallDetail.instrument}</div>}
+                              <div>Delta: <span className="text-white">{Number((d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.delta).toFixed(4)}</span></div>
+                              <div>Price: <span className="text-white">${Number((d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.price).toFixed(6)}</span></div>
+                              <div>Strike: <span className="text-white">${Number((d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.strike).toFixed(0)}</span></div>
+                              <div>DTE: <span className="text-white">{dteDays((d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.expiry) ?? 'N/A'}</span></div>
+                              {(d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.instrument && <div className="text-gray-400 mt-1">{(d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.instrument}</div>}
                             </div>
                           </div>
                         )}

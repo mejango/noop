@@ -3118,6 +3118,38 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   return `Call margin utilization: current=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, cap=${capPct.toFixed(1)}%. Use these exact figures; do not invent utilization numbers.`;
 };
 
+const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice, instruments, spotPrice }) => {
+  let marginState = null;
+  try { marginState = await fetchSubaccount(); } catch { /* ok */ }
+  if (!marginState) return { allowed: true, reason: 'margin state unavailable' };
+
+  let positions = [];
+  try { positions = await fetchPositions(); } catch { /* ok */ }
+  const restingOrders = db ? db.getOpenRestingOrders() : [];
+  const instrument = instruments.find((item) => item.instrument_name === instrumentName);
+  const strike = Number(instrument?.option_details?.strike || instrumentName?.split('-')?.[2] || 0) || 0;
+  const normalizedAmount = Math.max(0, Number(amount || 0));
+  const normalizedRetryPrice = Number(retryPrice || 0);
+  const additionalMargin = normalizedAmount * estimateShortCallMarginPerUnit(
+    marginState,
+    positions,
+    restingOrders,
+    spotPrice,
+    strike,
+    normalizedRetryPrice
+  );
+  const currentUsed = Math.max(0, Number(marginState?.positions_initial_margin || 0))
+    + Math.max(0, Number(marginState?.open_orders_margin || 0));
+  const marginBase = getMarginCapacityBase(marginState);
+  const capHeadroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * marginBase - currentUsed);
+  const buyingPowerHeadroom = Math.max(0, Number(marginState?.initial_margin || 0));
+  const allowed = additionalMargin <= capHeadroom && additionalMargin <= buyingPowerHeadroom;
+  return {
+    allowed,
+    reason: `retry_margin=$${additionalMargin.toFixed(2)}, cap_headroom=$${capHeadroom.toFixed(2)}, buying_power=$${buyingPowerHeadroom.toFixed(2)}`,
+  };
+};
+
 const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice) => {
   let triggeredCount = 0;
 
@@ -3767,7 +3799,18 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       reason: order.error || null,
     });
 
-    if (orderType === 'post_only' && retryPlan && Math.abs(retryPlan.retryPrice - price) > 1e-9) {
+    let retryMarginCheck = { allowed: true, reason: null };
+    if (orderType === 'post_only' && retryPlan && action === 'sell_call') {
+      retryMarginCheck = await evaluateSellCallRetryMargin({
+        instrumentName,
+        amount,
+        retryPrice: retryPlan.retryPrice,
+        instruments,
+        spotPrice,
+      });
+    }
+
+    if (orderType === 'post_only' && retryPlan && Math.abs(retryPlan.retryPrice - price) > 1e-9 && retryMarginCheck.allowed) {
       console.log(`📋 post_only rejected: ${action} ${instrumentName} @ $${price} — retrying maker at $${retryPlan.retryPrice} (${initialContext})`);
       let retryOrder = null;
       try {
@@ -3815,6 +3858,25 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
           retryPrice: retryPlan.retryPrice,
         };
       }
+    } else if (orderType === 'post_only' && retryPlan && !retryMarginCheck.allowed) {
+      const blockedContext = `${initialContext}, margin_guard=${retryMarginCheck.reason}`;
+      console.log(`📋 post_only retry blocked: ${action} ${instrumentName} — ${blockedContext}`);
+      if (db) db.insertOrder({
+        action, success: false,
+        reason: `post_only retry blocked by margin guard: ${blockedContext}`,
+        instrument_name: instrumentName, spot_price: spotPrice,
+        price, intended_amount: amount,
+      });
+      return {
+        postOnlyRejected: true,
+        action,
+        instrumentName,
+        amount,
+        price,
+        orderType,
+        context: blockedContext,
+        retryPrice: retryPlan.retryPrice,
+      };
     } else {
       console.log(`📋 post_only rejected: ${action} ${instrumentName} @ $${price} — no maker retry available (${initialContext})`);
       if (db) db.insertOrder({
@@ -5245,10 +5307,11 @@ const runBot = async () => {
             return ticker ? enrichCandidateFromTicker(inst, ticker, spotPrice) : null;
           })
           .filter(Boolean);
-        const bestCurrentPut = enrichedPutCandidates.sort((a, b) => (b?.details?.askDeltaValue || 0) - (a?.details?.askDeltaValue || 0))[0] || null;
-        const bestCurrentCall = enrichedCallCandidates.sort((a, b) => (b?.details?.bidDeltaValue || 0) - (a?.details?.bidDeltaValue || 0))[0] || null;
+        const bestCurrentPut = [...enrichedPutCandidates].sort((a, b) => (b?.details?.askDeltaValue || 0) - (a?.details?.askDeltaValue || 0))[0] || null;
+        const bestCurrentCall = [...enrichedCallCandidates].sort((a, b) => (b?.details?.bidDeltaValue || 0) - (a?.details?.bidDeltaValue || 0))[0] || null;
         const bestPutSummary = summarizeBestCandidate(bestCurrentPut, 'put');
         const bestCallSummary = summarizeBestCandidate(bestCurrentCall, 'call');
+        const historicalBestScores = typeof db.getBestScores === 'function' ? db.getBestScores(7) : null;
 
         tickSummary = {
           price: spotPrice,
@@ -5265,8 +5328,8 @@ const runBot = async () => {
           historical: {
             total_data_points: enrichedPutCandidates.length + enrichedCallCandidates.length,
             filtered_data_points: enrichedPutCandidates.length + enrichedCallCandidates.length,
-            best_put_score: bestPutSummary?.score ?? 0,
-            best_call_score: bestCallSummary?.score ?? 0,
+            best_put_score: historicalBestScores?.bestPutScore ?? 0,
+            best_call_score: historicalBestScores?.bestCallScore ?? 0,
           },
           strategy: {
             mode: 'llm_driven',
@@ -5276,6 +5339,8 @@ const runBot = async () => {
           current_best_call: bestCallSummary?.score ?? 0,
           best_put_detail: bestPutSummary?.detail ?? null,
           best_call_detail: bestCallSummary?.detail ?? null,
+          historical_best_put_detail: historicalBestScores?.bestPutDetail ?? null,
+          historical_best_call_detail: historicalBestScores?.bestCallDetail ?? null,
           next_check_minutes: checkInterval / (1000 * 60),
         };
         db.insertTick(tickTimestamp, JSON.stringify(tickSummary));
