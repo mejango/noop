@@ -11,5 +11,6 @@ export const CHART_ROW_LIMITS: Record<string, { prices: number; heatmap: number 
   '14d': { prices: 16_000, heatmap: 18_000 },
   '30d': { prices: 20_000, heatmap: 15_000 },
   '90d': { prices: 30_000, heatmap: 18_000 },
+  '365d': { prices: 12_000, heatmap: 30_000 },
   'all': { prices: 40_000, heatmap: 20_000 },
 };

@@ -305,7 +305,7 @@ const emptyChart: ChartData = {
   sentiment: { fundingRates: [], optionsSkew: [], aggregateOI: [], oiSnapshots: [] },
 };
 const emptyAccount: AccountData = { collaterals: [], positions: [], trades: [] };
-const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d'] as const;
+const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d', '365d'] as const;
 
 const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 0 };
 const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 0 };
@@ -964,7 +964,13 @@ export default function OverviewPage() {
             P&amp;L Report
           </Link>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH CG</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: '#ffffff', opacity: 0.5 }} /> ETH L</span>
+          <span className="flex items-center gap-1">
+            <span
+              className="w-3 h-0.5 inline-block"
+              style={{ background: 'repeating-linear-gradient(to right, rgba(255,255,255,0.9) 0 4px, transparent 4px 6px)' }}
+            />
+            ETH L
+          </span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
           {account.trades.length > 0 && <span className="flex items-center gap-1"><span className="inline-block" style={{ width: 0, height: 0, borderLeft: '4px solid transparent', borderRight: '4px solid transparent', borderBottom: `6px solid ${chartColors.trade}` }} /> Trade</span>}
@@ -1057,7 +1063,18 @@ export default function OverviewPage() {
               {/* ETH price line */}
               <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls isAnimationActive={false} />
               {/* Lyra spot price line */}
-              <Line yAxisId="price" type="monotone" dataKey="lyraSpot" stroke="#ffffff" strokeOpacity={0.4} dot={false} strokeWidth={1} connectNulls isAnimationActive={false} />
+              <Line
+                yAxisId="price"
+                type="monotone"
+                dataKey="lyraSpot"
+                stroke="#ffffff"
+                strokeOpacity={0.9}
+                strokeDasharray="5 4"
+                dot={false}
+                strokeWidth={1.5}
+                connectNulls
+                isAnimationActive={false}
+              />
               {/* PUT/CALL value overlays */}
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />

@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap,
-  getFundingRates, getOptionsSkew, getAggregateOI, getOISnapshots, getOptionsCoverage,
+  getFundingRates, getFundingRatesHourlySeries, getOISnapshots, getOISnapshotsBucketed,
+  getOptionsCoverage, getSpotPricesHourly_rollup, getBestOptionsHourly_rollup, getLiquidityHourly_rollup,
 } from '@/lib/db';
 import { CHART_ROW_LIMITS } from '@/lib/limits';
 
@@ -18,6 +19,7 @@ const BUCKET_MS: Record<string, number> = {
   '14d':  60 * 60 * 1000,        // 1 hour
   '30d':  2 * 60 * 60 * 1000,    // 2 hours
   '90d':  4 * 60 * 60 * 1000,    // 4 hours
+  '365d': 24 * 60 * 60 * 1000,   // 1 day
   'all':  4 * 60 * 60 * 1000,    // 4 hours
 };
 
@@ -52,25 +54,6 @@ function downsample<T extends Record<string, any>>(
     result.push(out);
   });
   return result;
-}
-
-// Downsample heatmap: keep one snapshot per instrument per time bucket (the last one)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function downsampleHeatmap(rows: Record<string, any>[], bucketMs: number): Record<string, any>[] {
-  if (rows.length === 0 || bucketMs <= 0) return rows;
-  const seen = new Set<string>();
-  const result: typeof rows = [];
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const row = rows[i];
-    const t = new Date(row.timestamp).getTime();
-    const bucket = Math.floor(t / bucketMs) * bucketMs;
-    const key = `${bucket}|${row.instrument_name}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      result.push({ ...row, timestamp: new Date(bucket).toISOString() });
-    }
-  }
-  return result.reverse();
 }
 
 // Downsample liquidity rows (dynamic keys per dex)
@@ -113,6 +96,7 @@ export function GET(request: NextRequest) {
       '14d': 14 * 24 * 60 * 60 * 1000,
       '30d': 30 * 24 * 60 * 60 * 1000,
       '90d': 90 * 24 * 60 * 60 * 1000,
+      '365d': 365 * 24 * 60 * 60 * 1000,
       'all': 365 * 24 * 60 * 60 * 1000,
     };
     const ms = rangeMs[range] || rangeMs['14d'];
@@ -120,18 +104,26 @@ export function GET(request: NextRequest) {
     const bestScores = getBestScores();
     const bucketMs = BUCKET_MS[range] || 0;
     const optionsCoverage = getOptionsCoverage(since);
+    const useRollups = range === '90d' || range === '365d' || range === 'all';
 
     const limits = CHART_ROW_LIMITS[range] || CHART_ROW_LIMITS['14d'];
-    const prices = getSpotPrices(since, limits.prices);
-    const options = getBestOptionsOverTime(since);
-    const liquidity = getLiquidityOverTime(since);
-    const optionsHeatmap = getOptionsHeatmap(since, limits.heatmap);
+    const prices = useRollups ? getSpotPricesHourly_rollup(since) : getSpotPrices(since, limits.prices);
+    const options = useRollups ? getBestOptionsHourly_rollup(since) : getBestOptionsOverTime(since);
+    const liquidity = useRollups ? getLiquidityHourly_rollup(since) : getLiquidityOverTime(since);
+    const optionsHeatmap = getOptionsHeatmap(since, limits.heatmap, bucketMs);
 
     // Sentiment data
-    const fundingRates = getFundingRates(since);
-    const optionsSkew = getOptionsSkew(since);
-    const aggregateOI = getAggregateOI(since);
-    const oiSnapshots = getOISnapshots(since);
+    const fundingRates = useRollups ? getFundingRatesHourlySeries(since) : getFundingRates(since);
+    const oiSnapshots = useRollups ? getOISnapshotsBucketed(since, bucketMs) : getOISnapshots(since);
+    const optionsSkew = oiSnapshots.map((row) => ({
+      timestamp: row.timestamp,
+      avg_put_iv: row.avg_put_iv ?? null,
+      avg_call_iv: row.avg_call_iv ?? null,
+    }));
+    const aggregateOI = oiSnapshots.map((row) => ({
+      timestamp: row.timestamp,
+      total_oi: row.total_oi,
+    }));
 
     const sentiment = { fundingRates, optionsSkew, aggregateOI, oiSnapshots };
 
@@ -166,13 +158,9 @@ export function GET(request: NextRequest) {
         ['put_oi', 'call_oi', 'near_put_oi', 'near_call_oi', 'far_put_oi', 'far_call_oi', 'total_oi', 'pc_ratio'],
         ['expiry_count'],
       );
-      const dsHeatmap = downsampleHeatmap(
-        optionsHeatmap as Record<string, unknown>[],
-        bucketMs,
-      );
       return NextResponse.json({
         prices: dsPrices, options: dsOptions, liquidity: dsLiquidity,
-        bestScores, optionsHeatmap: dsHeatmap,
+        bestScores, optionsHeatmap,
         sentiment: { fundingRates: dsFunding, optionsSkew: dsSkew, aggregateOI: dsOI, oiSnapshots: dsOISnapshots },
         optionsCoverage: {
           ...optionsCoverage,

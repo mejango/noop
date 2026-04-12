@@ -5390,8 +5390,10 @@ const runBot = async () => {
             return ticker ? enrichCandidateFromTicker(inst, ticker, spotPrice) : null;
           })
           .filter(Boolean);
-        const bestCurrentPut = [...enrichedPutCandidates].sort((a, b) => (b?.details?.askDeltaValue || 0) - (a?.details?.askDeltaValue || 0))[0] || null;
-        const bestCurrentCall = [...enrichedCallCandidates].sort((a, b) => (b?.details?.bidDeltaValue || 0) - (a?.details?.bidDeltaValue || 0))[0] || null;
+        const displayPutCandidates = filterValidOptions(enrichedPutCandidates, PUT_DELTA_RANGE[0], PUT_DELTA_RANGE[1]);
+        const displayCallCandidates = filterValidOptions(enrichedCallCandidates, CALL_DELTA_RANGE[0], CALL_DELTA_RANGE[1]);
+        const bestCurrentPut = [...displayPutCandidates].sort((a, b) => (b?.details?.askDeltaValue || 0) - (a?.details?.askDeltaValue || 0))[0] || null;
+        const bestCurrentCall = [...displayCallCandidates].sort((a, b) => (b?.details?.bidDeltaValue || 0) - (a?.details?.bidDeltaValue || 0))[0] || null;
         const bestPutSummary = summarizeBestCandidate(bestCurrentPut, 'put');
         const bestCallSummary = summarizeBestCandidate(bestCurrentCall, 'call');
         const historicalBestScores = typeof db.getBestScores === 'function' ? db.getBestScores(7) : null;
@@ -5410,7 +5412,7 @@ const runBot = async () => {
           },
           historical: {
             total_data_points: enrichedPutCandidates.length + enrichedCallCandidates.length,
-            filtered_data_points: enrichedPutCandidates.length + enrichedCallCandidates.length,
+            filtered_data_points: displayPutCandidates.length + displayCallCandidates.length,
             best_put_score: historicalBestScores?.bestPutScore ?? 0,
             best_call_score: historicalBestScores?.bestCallScore ?? 0,
           },

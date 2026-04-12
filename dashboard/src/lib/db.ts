@@ -353,6 +353,13 @@ function prepareAll(d: Database.Database) {
       WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1
     `),
 
+    getFundingRatesHourly: d.prepare(`
+      SELECT hour as timestamp, avg_rate as rate
+      FROM funding_rates_hourly
+      WHERE hour > ? AND symbol = ?
+      ORDER BY hour ASC
+    `),
+
     getFundingRateAvg24h: d.prepare(`
       SELECT AVG(rate) as avg_rate FROM funding_rates
       WHERE symbol = ? AND timestamp > ?
@@ -525,8 +532,62 @@ export function getSpotPrices(since: string, limit = 2000) {
   return getStmts().getSpotPrices.all(since, limit);
 }
 
-export function getOptionsHeatmap(since: string, limit = 12000) {
-  return getStmts().getOptionsHeatmap.all(since, limit);
+export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
+  if (!(bucketMs > 0)) {
+    return getStmts().getOptionsHeatmap.all(since, limit);
+  }
+  const bucketSeconds = Math.max(1, Math.floor(bucketMs / 1000));
+  return getDb().prepare(`
+    WITH bucketed AS (
+      SELECT
+        timestamp,
+        option_type,
+        instrument_name,
+        strike,
+        delta,
+        ask_price,
+        bid_price,
+        index_price,
+        expiry,
+        ask_delta_value,
+        bid_delta_value,
+        mark_price,
+        implied_vol,
+        ask_amount,
+        bid_amount,
+        (CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds) * @bucket_seconds AS bucket_epoch,
+        ROW_NUMBER() OVER (
+          PARTITION BY instrument_name, (CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds)
+          ORDER BY timestamp DESC
+        ) AS rn
+      FROM options_snapshots
+      WHERE timestamp > @since
+    )
+    SELECT
+      datetime(bucket_epoch, 'unixepoch') || 'Z' AS timestamp,
+      option_type,
+      instrument_name,
+      strike,
+      delta,
+      ask_price,
+      bid_price,
+      index_price,
+      expiry,
+      ask_delta_value,
+      bid_delta_value,
+      mark_price,
+      implied_vol,
+      ask_amount,
+      bid_amount
+    FROM bucketed
+    WHERE rn = 1
+    ORDER BY timestamp ASC
+    LIMIT @limit
+  `).all({
+    since,
+    bucket_seconds: bucketSeconds,
+    limit,
+  });
 }
 
 export function getOptionsCoverage(since: string) {
@@ -772,6 +833,14 @@ export function getFundingRates(since: string, symbol = 'ETHUSDT') {
   } catch { return []; }
 }
 
+export function getFundingRatesHourlySeries(since: string, symbol = 'ETHUSDT') {
+  try {
+    return getStmts().getFundingRatesHourly.all(since, symbol) as {
+      timestamp: string; rate: number;
+    }[];
+  } catch { return []; }
+}
+
 export function getFundingRateLatest(symbol = 'ETHUSDT') {
   try {
     return getStmts().getFundingRatesLatest.get(symbol) as { rate: number; timestamp: string } | undefined;
@@ -809,6 +878,61 @@ export function getOISnapshots(since: string) {
       far_put_oi: number; far_call_oi: number;
       total_oi: number; pc_ratio: number | null;
       expiry_count: number;
+      avg_put_iv: number | null; avg_call_iv: number | null;
+    }[];
+  } catch { return []; }
+}
+
+export function getOISnapshotsBucketed(since: string, bucketMs: number) {
+  if (!(bucketMs > 0)) return getOISnapshots(since);
+  const bucketSeconds = Math.max(1, Math.floor(bucketMs / 1000));
+  try {
+    return getDb().prepare(`
+      WITH bucketed AS (
+        SELECT
+          timestamp,
+          put_oi,
+          call_oi,
+          near_put_oi,
+          near_call_oi,
+          far_put_oi,
+          far_call_oi,
+          total_oi,
+          pc_ratio,
+          expiry_count,
+          avg_put_iv,
+          avg_call_iv,
+          (CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds) * @bucket_seconds AS bucket_epoch,
+          ROW_NUMBER() OVER (
+            PARTITION BY (CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds)
+            ORDER BY timestamp DESC
+          ) AS rn
+        FROM oi_snapshots
+        WHERE timestamp > @since
+      )
+      SELECT
+        datetime(bucket_epoch, 'unixepoch') || 'Z' AS timestamp,
+        put_oi,
+        call_oi,
+        near_put_oi,
+        near_call_oi,
+        far_put_oi,
+        far_call_oi,
+        total_oi,
+        pc_ratio,
+        expiry_count,
+        avg_put_iv,
+        avg_call_iv
+      FROM bucketed
+      WHERE rn = 1
+      ORDER BY timestamp ASC
+    `).all({ since, bucket_seconds: bucketSeconds }) as {
+      timestamp: string; put_oi: number; call_oi: number;
+      near_put_oi: number; near_call_oi: number;
+      far_put_oi: number; far_call_oi: number;
+      total_oi: number; pc_ratio: number | null;
+      expiry_count: number;
+      avg_put_iv: number | null; avg_call_iv: number | null;
     }[];
   } catch { return []; }
 }
