@@ -58,6 +58,7 @@ interface Budget {
 interface Stats {
   last_price: number;
   last_price_time: string;
+  lyra_spot?: number | null;
   short_momentum: string;
   short_derivative: string;
   medium_momentum: string;
@@ -283,6 +284,7 @@ const emptyStats: Stats = {
   last_price: 0, last_price_time: '', short_momentum: '', short_derivative: '',
   medium_momentum: '', medium_derivative: '', three_day_high: 0, three_day_low: 0,
   seven_day_high: 0, seven_day_low: 0,
+  lyra_spot: null,
   budget: emptyBudget,
 };
 
@@ -525,8 +527,56 @@ export default function OverviewPage() {
       if (callSnap) rows[idx].bestCallDetail = makeDetail(callSnap, false);
     }
 
+    const liveTs = stats.last_price_time ? new Date(stats.last_price_time).getTime() : null;
+    if (liveTs && Number.isFinite(liveTs)) {
+      const liveRow: Row = {
+        ts: liveTs,
+        price: stats.last_price || undefined,
+        lyraSpot: stats.lyra_spot != null ? Number(stats.lyra_spot) : undefined,
+        momentum: stats.medium_momentum || 'neutral',
+        shortMomentum: stats.short_momentum || 'neutral',
+        mediumDerivative: stats.medium_derivative || undefined,
+        shortDerivative: stats.short_derivative || undefined,
+        momentumVal: 1,
+        bestPut: latestTick?.current_best_put ?? undefined,
+        bestCall: latestTick?.current_best_call ?? undefined,
+        bestPutDetail: latestTick?.best_put_detail
+          ? {
+              delta: latestTick.best_put_detail.delta,
+              price: latestTick.best_put_detail.price,
+              strike: Number(latestTick.best_put_detail.strike ?? 0),
+              expiry: latestTick.best_put_detail.expiry,
+              dte: dteDays(latestTick.best_put_detail.expiry),
+            }
+          : undefined,
+        bestCallDetail: latestTick?.best_call_detail
+          ? {
+              delta: latestTick.best_call_detail.delta,
+              price: latestTick.best_call_detail.price,
+              strike: Number(latestTick.best_call_detail.strike ?? 0),
+              expiry: latestTick.best_call_detail.expiry,
+              dte: dteDays(latestTick.best_call_detail.expiry),
+            }
+          : undefined,
+      };
+
+      const last = rows[rows.length - 1];
+      if (!last) {
+        rows.push(liveRow);
+      } else if (liveTs >= last.ts - 1_000) {
+        rows[rows.length - 1] = {
+          ...last,
+          ...liveRow,
+          ts: Math.max(last.ts, liveTs),
+        };
+      } else {
+        rows.push(liveRow);
+      }
+      rows.sort((a, b) => a.ts - b.ts);
+    }
+
     return rows;
-  }, [chart]);
+  }, [chart, latestTick, stats]);
 
   // Data for momentum bar (only points with momentum data)
   const momentumData = useMemo(() =>

@@ -562,9 +562,31 @@ export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
         ) AS rn
       FROM options_snapshots
       WHERE timestamp > @since
+    ),
+    limited AS (
+      SELECT
+        datetime(bucket_epoch, 'unixepoch') || 'Z' AS timestamp,
+        option_type,
+        instrument_name,
+        strike,
+        delta,
+        ask_price,
+        bid_price,
+        index_price,
+        expiry,
+        ask_delta_value,
+        bid_delta_value,
+        mark_price,
+        implied_vol,
+        ask_amount,
+        bid_amount
+      FROM bucketed
+      WHERE rn = 1
+      ORDER BY bucket_epoch DESC, instrument_name ASC
+      LIMIT @limit
     )
     SELECT
-      datetime(bucket_epoch, 'unixepoch') || 'Z' AS timestamp,
+      timestamp,
       option_type,
       instrument_name,
       strike,
@@ -579,10 +601,8 @@ export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
       implied_vol,
       ask_amount,
       bid_amount
-    FROM bucketed
-    WHERE rn = 1
+    FROM limited
     ORDER BY timestamp ASC
-    LIMIT @limit
   `).all({
     since,
     bucket_seconds: bucketSeconds,
