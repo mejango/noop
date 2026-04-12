@@ -1013,7 +1013,8 @@ export default function OverviewPage() {
                   const bestCall = row.bestCall;
                   const fmtPut = bestPut != null && Number(bestPut) > 0 ? Number(bestPut).toFixed(6) : 'N/A';
                   const fmtCall = bestCall != null && Number(bestCall) > 0 ? Number(bestCall).toFixed(2) : 'N/A';
-                  const { bestPutScore, bestCallScore, windowDays } = chart.bestScores;
+                  const { windowDays } = chart.bestScores;
+                  const { bestPutScore, bestCallScore } = displayedBestScores;
                   const pd = row.bestPutDetail;
                   const cd = row.bestCallDetail;
                   return pinPrice.wrap(
@@ -1046,11 +1047,11 @@ export default function OverviewPage() {
               <Legend content={() => null} />
 
               {/* Best historical PUT/CALL score reference lines (6.2d window) */}
-              {chart.bestScores.bestPutScore > 0 && (
-                <ReferenceLine yAxisId="putVal" y={chart.bestScores.bestPutScore} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.5} />
+              {displayedBestScores.bestPutScore > 0 && (
+                <ReferenceLine yAxisId="putVal" y={displayedBestScores.bestPutScore} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.5} />
               )}
-              {chart.bestScores.bestCallScore > 0 && (
-                <ReferenceLine yAxisId="callVal" y={chart.bestScores.bestCallScore} stroke={chartColors.secondary} strokeDasharray="4 4" strokeOpacity={0.5} />
+              {displayedBestScores.bestCallScore > 0 && (
+                <ReferenceLine yAxisId="callVal" y={displayedBestScores.bestCallScore} stroke={chartColors.secondary} strokeDasharray="4 4" strokeOpacity={0.5} />
               )}
 
               {/* ETH price line */}
