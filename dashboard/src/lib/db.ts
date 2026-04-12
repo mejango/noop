@@ -62,6 +62,11 @@ function prepareAll(d: Database.Database) {
           mark_price, implied_vol, ask_amount, bid_amount
         FROM options_snapshots
         WHERE timestamp > ?
+          AND (
+            ((option_type = 'P' OR instrument_name LIKE '%-P') AND delta <= -0.02 AND delta >= -0.12)
+            OR
+            ((option_type = 'C' OR instrument_name LIKE '%-C') AND delta >= 0.04 AND delta <= 0.12)
+          )
         ORDER BY timestamp DESC
         LIMIT ?
       )
@@ -562,8 +567,13 @@ export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
         ) AS rn
       FROM options_snapshots
       WHERE timestamp > @since
+        AND (
+          ((option_type = 'P' OR instrument_name LIKE '%-P') AND delta <= -0.02 AND delta >= -0.12)
+          OR
+          ((option_type = 'C' OR instrument_name LIKE '%-C') AND delta >= 0.04 AND delta <= 0.12)
+        )
     ),
-    limited AS (
+    normalized AS (
       SELECT
         datetime(bucket_epoch, 'unixepoch') || 'Z' AS timestamp,
         option_type,
@@ -582,8 +592,6 @@ export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
         bid_amount
       FROM bucketed
       WHERE rn = 1
-      ORDER BY bucket_epoch DESC, instrument_name ASC
-      LIMIT @limit
     )
     SELECT
       timestamp,
@@ -601,12 +609,11 @@ export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
       implied_vol,
       ask_amount,
       bid_amount
-    FROM limited
-    ORDER BY timestamp ASC
+    FROM normalized
+    ORDER BY timestamp ASC, instrument_name ASC
   `).all({
     since,
     bucket_seconds: bucketSeconds,
-    limit,
   });
 }
 

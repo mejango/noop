@@ -275,6 +275,86 @@ interface ChartData {
   tier?: string;
 }
 
+interface PnlBucketPoint {
+  timestamp: string;
+  tradeCashflow: number;
+  putCashflow: number;
+  callCashflow: number;
+  orderCount: number;
+  endPortfolioValue: number | null;
+  endUnrealizedPnl: number | null;
+}
+
+interface PnlReportData {
+  meta: {
+    range: string;
+    from: string;
+    to: string;
+    generatedAt: string;
+    snapshotCount: number;
+    orderCount: number;
+    hasBaseline: boolean;
+    bucketMs: number;
+  };
+  summary: {
+    openingValue: number;
+    closingValue: number;
+    portfolioChange: number;
+    portfolioReturnPct: number;
+    openingUnrealized: number;
+    closingUnrealized: number;
+    unrealizedChange: number;
+    netTradeCashflow: number;
+    putNetCashflow: number;
+    callNetCashflow: number;
+    openingSpot: number;
+    closingSpot: number;
+    spotChangePct: number;
+    highWatermark: number;
+    lowWatermark: number;
+    maxDrawdown: number;
+    maxDrawdownPct: number;
+  };
+  series: {
+    portfolio: Array<{
+      timestamp: string;
+      ts: number;
+      portfolioValue: number;
+      unrealizedPnl: number;
+      realizedTotal: number;
+      spotPrice: number;
+      usdcBalance: number;
+      ethBalance: number;
+    }>;
+    buckets: PnlBucketPoint[];
+  };
+  actionBreakdown: Array<{
+    action: string;
+    count: number;
+    grossValue: number;
+    cashflow: number;
+    filledAmount: number;
+  }>;
+  orders: Array<{
+    id: number;
+    timestamp: string;
+    action: string;
+    success: number;
+    reason: string | null;
+    instrument_name: string | null;
+    strike: number | null;
+    expiry: string | null;
+    delta: number | null;
+    price: number | null;
+    intended_amount: number | null;
+    filled_amount: number | null;
+    fill_price: number | null;
+    total_value: number | null;
+    spot_price: number | null;
+    cashflow: number;
+  }>;
+}
+
 const emptyBudget: Budget = {
   putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0,
   callTotalBudget: 0, callSpent: 0, callRemaining: 0, callDaysLeft: 0, cycleDays: 10,
@@ -305,6 +385,43 @@ const emptyChart: ChartData = {
     hasGapBeforeRange: false,
   },
   sentiment: { fundingRates: [], optionsSkew: [], aggregateOI: [], oiSnapshots: [] },
+};
+const emptyPnlReport: PnlReportData = {
+  meta: {
+    range: '14d',
+    from: '',
+    to: '',
+    generatedAt: '',
+    snapshotCount: 0,
+    orderCount: 0,
+    hasBaseline: false,
+    bucketMs: 0,
+  },
+  summary: {
+    openingValue: 0,
+    closingValue: 0,
+    portfolioChange: 0,
+    portfolioReturnPct: 0,
+    openingUnrealized: 0,
+    closingUnrealized: 0,
+    unrealizedChange: 0,
+    netTradeCashflow: 0,
+    putNetCashflow: 0,
+    callNetCashflow: 0,
+    openingSpot: 0,
+    closingSpot: 0,
+    spotChangePct: 0,
+    highWatermark: 0,
+    lowWatermark: 0,
+    maxDrawdown: 0,
+    maxDrawdownPct: 0,
+  },
+  series: {
+    portfolio: [],
+    buckets: [],
+  },
+  actionBreakdown: [],
+  orders: [],
 };
 const emptyAccount: AccountData = { collaterals: [], positions: [], trades: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d', '365d'] as const;
@@ -369,6 +486,31 @@ const MQDotShape = ({ cx, cy, payload }: any) => {
   return <circle cx={cx} cy={cy} r={r} fill={fill} fillOpacity={0.7 + t * 0.3} />;
 };
 
+function rangeToWindow(range: string) {
+  const now = Date.now();
+  const hour = 60 * 60 * 1000;
+  const day = 24 * hour;
+  const durationMs = (() => {
+    switch (range) {
+      case '1h': return hour;
+      case '6h': return 6 * hour;
+      case '24h': return 24 * hour;
+      case '3d': return 3 * day;
+      case '6.2d': return Math.round(6.2 * day);
+      case '7d': return 7 * day;
+      case '14d': return 14 * day;
+      case '30d': return 30 * day;
+      case '90d': return 90 * day;
+      case '365d': return 365 * day;
+      default: return 14 * day;
+    }
+  })();
+  return {
+    from: new Date(now - durationMs).toISOString(),
+    to: new Date(now).toISOString(),
+  };
+}
+
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('14d');
   const [posSort, setPosSort] = useState<{ key: string; asc: boolean }>({ key: 'instrument_name', asc: true });
@@ -378,6 +520,12 @@ export default function OverviewPage() {
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart, 90_000);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
   const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
+  const pnlWindow = useMemo(() => rangeToWindow(range), [range]);
+  const pnlQuery = useMemo(
+    () => `/api/pnl-report?range=${encodeURIComponent(range)}&from=${encodeURIComponent(pnlWindow.from)}&to=${encodeURIComponent(pnlWindow.to)}`,
+    [pnlWindow.from, pnlWindow.to, range]
+  );
+  const { data: pnlReport } = usePolling<PnlReportData>(pnlQuery, emptyPnlReport, 90_000);
   const pinPrice = usePinnableTooltip();
   const pinLiquidity = usePinnableTooltip();
   const pinPut = usePinnableTooltip();
@@ -417,6 +565,36 @@ export default function OverviewPage() {
     }
     return `coverage through ${new Date(coverage.lastInRange || coverage.firstInRange).toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
   }, [chart.optionsCoverage]);
+
+  const pnlChartData = useMemo(() => {
+    let cumulativeRevenue = 0;
+    let cumulativeExpenses = 0;
+    return pnlReport.series.buckets.map((bucket) => {
+      const net = Number(bucket.tradeCashflow ?? 0);
+      const periodRevenue = net > 0 ? net : 0;
+      const periodExpenses = net < 0 ? Math.abs(net) : 0;
+      cumulativeRevenue += periodRevenue;
+      cumulativeExpenses += periodExpenses;
+      const profit = cumulativeRevenue - cumulativeExpenses;
+      return {
+        ts: new Date(bucket.timestamp).getTime(),
+        cumulativeRevenue,
+        cumulativeExpenses,
+        cumulativeProfit: profit,
+        periodRevenue,
+        periodExpenses,
+        periodNet: net,
+        orderCount: bucket.orderCount,
+      };
+    });
+  }, [pnlReport.series.buckets]);
+
+  const pnlCoverageLabel = useMemo(() => {
+    if (!pnlReport.meta.from || !pnlReport.meta.to) return null;
+    const from = new Date(pnlReport.meta.from).toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const to = new Date(pnlReport.meta.to).toLocaleDateString([], { month: 'short', day: 'numeric' });
+    return `${from} -> ${to} | ${pnlReport.meta.orderCount} fills`;
+  }, [pnlReport.meta.from, pnlReport.meta.orderCount, pnlReport.meta.to]);
 
   // Shared X-axis tick formatter
   const xTickFormatter = useCallback((ts: number) => {
@@ -1976,6 +2154,74 @@ export default function OverviewPage() {
       )}
 
       {/* Positions Table */}
+      {pnlChartData.length > 0 && (
+        <Card title="P&L" subtitle={pnlCoverageLabel ?? `${range} trade flow`}>
+          <ResponsiveContainer width="100%" height={320}>
+            <ComposedChart data={pnlChartData} margin={margins} barGap={0} barCategoryGap="25%">
+              <XAxis
+                dataKey="ts"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                tickFormatter={xTickFormatter}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+              />
+              <YAxis
+                yAxisId="bars"
+                orientation="left"
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={mobile ? 42 : 56}
+                tickFormatter={(v) => `$${Math.round(Math.abs(v))}`}
+              />
+              <YAxis
+                yAxisId="lines"
+                orientation="right"
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={mobile ? 48 : 64}
+                tickFormatter={(v) => `$${Math.round(v)}`}
+              />
+              <Tooltip
+                {...chartTooltip}
+                formatter={(value: number | string | undefined, name: string | undefined) => {
+                  const labels: Record<string, string> = {
+                    cumulativeRevenue: 'Cum Revenue',
+                    cumulativeExpenses: 'Cum Expenses',
+                    cumulativeProfit: 'Cum Profit',
+                    periodRevenue: 'Revenue',
+                    periodExpenses: 'Expenses',
+                  };
+                  const numericValue = typeof value === 'number' ? value : Number(value ?? 0);
+                  const key = name ?? '';
+                  return [formatUSD(numericValue), labels[key] ?? key];
+                }}
+                labelFormatter={(label) => new Date(Number(label)).toLocaleString()}
+              />
+              <Legend
+                wrapperStyle={{ fontSize: 11, color: '#9ca3af' }}
+                formatter={(value) => (
+                  <span style={{ color: '#9ca3af' }}>
+                    {value === 'cumulativeRevenue' ? 'revenue' :
+                     value === 'cumulativeExpenses' ? 'expenses' :
+                     value === 'cumulativeProfit' ? 'profit' :
+                     value === 'periodRevenue' ? 'rev bars' :
+                     value === 'periodExpenses' ? 'exp bars' : value}
+                  </span>
+                )}
+              />
+              <ReferenceLine yAxisId="lines" y={0} stroke="rgba(255,255,255,0.12)" />
+              <ReferenceLine yAxisId="bars" y={0} stroke="rgba(255,255,255,0.08)" />
+              <Bar yAxisId="bars" dataKey="periodRevenue" name="periodRevenue" fill="rgba(74, 222, 128, 0.45)" radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="bars" dataKey="periodExpenses" name="periodExpenses" fill="rgba(248, 113, 113, 0.4)" radius={[2, 2, 0, 0]} />
+              <Line yAxisId="lines" type="monotone" dataKey="cumulativeRevenue" name="cumulativeRevenue" stroke="#4ade80" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line yAxisId="lines" type="monotone" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line yAxisId="lines" type="monotone" dataKey="cumulativeProfit" name="cumulativeProfit" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
       {account.positions.length > 0 && (() => {
         const posCols: { key: string; label: string; align: 'left' | 'right' }[] = [
           { key: 'instrument_name', label: 'Instrument', align: 'left' },
