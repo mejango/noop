@@ -454,8 +454,31 @@ function prepareAll(d: Database.Database) {
       WHERE timestamp > ?
       ORDER BY timestamp ASC
     `),
+    getPortfolioSnapshotsInRange: d.prepare(`
+      SELECT timestamp, spot_price, usdc_balance, eth_balance,
+        total_unrealized_pnl, total_realized_pnl, portfolio_value_usd
+      FROM portfolio_snapshots
+      WHERE timestamp >= ? AND timestamp <= ?
+      ORDER BY timestamp ASC
+    `),
+    getPortfolioSnapshotBefore: d.prepare(`
+      SELECT timestamp, spot_price, usdc_balance, eth_balance,
+        total_unrealized_pnl, total_realized_pnl, portfolio_value_usd
+      FROM portfolio_snapshots
+      WHERE timestamp < ?
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `),
     getLatestPortfolioSnapshot: d.prepare(`
       SELECT * FROM portfolio_snapshots ORDER BY id DESC LIMIT 1
+    `),
+    getOrdersInRange: d.prepare(`
+      SELECT id, timestamp, action, success, reason, instrument_name,
+        strike, expiry, delta, price, intended_amount, filled_amount,
+        fill_price, total_value, spot_price
+      FROM orders
+      WHERE timestamp >= ? AND timestamp <= ?
+      ORDER BY timestamp ASC
     `),
     getRealizedPnL: d.prepare(`
       SELECT
@@ -905,6 +928,24 @@ export function getPortfolioHistory(since: string) {
   } catch { return []; }
 }
 
+export function getPortfolioSnapshotsInRange(from: string, to: string) {
+  try {
+    return getStmts().getPortfolioSnapshotsInRange.all(from, to) as {
+      timestamp: string; spot_price: number; usdc_balance: number; eth_balance: number;
+      total_unrealized_pnl: number; total_realized_pnl: number; portfolio_value_usd: number;
+    }[];
+  } catch { return []; }
+}
+
+export function getPortfolioSnapshotBefore(ts: string) {
+  try {
+    return getStmts().getPortfolioSnapshotBefore.get(ts) as {
+      timestamp: string; spot_price: number; usdc_balance: number; eth_balance: number;
+      total_unrealized_pnl: number; total_realized_pnl: number; portfolio_value_usd: number;
+    } | undefined;
+  } catch { return undefined; }
+}
+
 export function getLatestPortfolioSnapshot() {
   try {
     return getStmts().getLatestPortfolioSnapshot.get() as {
@@ -913,6 +954,18 @@ export function getLatestPortfolioSnapshot() {
       positions_json: string;
     } | undefined;
   } catch { return undefined; }
+}
+
+export function getOrdersInRange(from: string, to: string) {
+  try {
+    return getStmts().getOrdersInRange.all(from, to) as {
+      id: number; timestamp: string; action: string; success: number;
+      reason: string | null; instrument_name: string | null;
+      strike: number | null; expiry: string | null; delta: number | null;
+      price: number | null; intended_amount: number | null; filled_amount: number | null;
+      fill_price: number | null; total_value: number | null; spot_price: number | null;
+    }[];
+  } catch { return []; }
 }
 
 export function getRealizedPnL() {

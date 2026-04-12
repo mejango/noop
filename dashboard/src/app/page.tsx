@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useState, useMemo, useCallback, useEffect, useRef, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { usePolling, useIsMobile } from '@/lib/hooks';
@@ -902,7 +903,13 @@ export default function OverviewPage() {
             </button>
           ))}
         </div>
-        <div className="flex gap-3 text-xs text-gray-500">
+        <div className="flex items-center gap-3 text-xs text-gray-500">
+          <Link
+            href="/pnl"
+            className="px-2.5 py-1 border border-white/15 text-gray-300 hover:bg-white/10 hover:text-white transition-colors"
+          >
+            P&amp;L Report
+          </Link>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH CG</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: '#ffffff', opacity: 0.5 }} /> ETH L</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
