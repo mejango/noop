@@ -23,6 +23,21 @@ const BUCKET_MS: Record<string, number> = {
   'all':  4 * 60 * 60 * 1000,    // 4 hours
 };
 
+// Heavier scatter plots need more aggressive quantization than line charts.
+const HEATMAP_BUCKET_MS: Record<string, number> = {
+  '1h':   0,
+  '6h':   15 * 60 * 1000,        // 15 min
+  '24h':  30 * 60 * 1000,        // 30 min
+  '3d':   60 * 60 * 1000,        // 1 hour
+  '6.2d': 2 * 60 * 60 * 1000,    // 2 hours
+  '7d':   2 * 60 * 60 * 1000,    // 2 hours
+  '14d':  4 * 60 * 60 * 1000,    // 4 hours
+  '30d':  6 * 60 * 60 * 1000,    // 6 hours
+  '90d':  12 * 60 * 60 * 1000,   // 12 hours
+  '365d': 2 * 24 * 60 * 60 * 1000, // 2 days
+  'all':  2 * 24 * 60 * 60 * 1000, // 2 days
+};
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function downsample<T extends Record<string, any>>(
   rows: T[],
@@ -103,6 +118,7 @@ export function GET(request: NextRequest) {
     const since = new Date(Date.now() - ms).toISOString();
     const bestScores = getBestScores();
     const bucketMs = BUCKET_MS[range] || 0;
+    const heatmapBucketMs = HEATMAP_BUCKET_MS[range] || bucketMs;
     const optionsCoverage = getOptionsCoverage(since);
     const useRollups = range === '90d' || range === '365d' || range === 'all';
 
@@ -110,7 +126,7 @@ export function GET(request: NextRequest) {
     const prices = useRollups ? getSpotPricesHourly_rollup(since) : getSpotPrices(since, limits.prices);
     const options = useRollups ? getBestOptionsHourly_rollup(since) : getBestOptionsOverTime(since);
     const liquidity = useRollups ? getLiquidityHourly_rollup(since) : getLiquidityOverTime(since);
-    const optionsHeatmap = getOptionsHeatmap(since, limits.heatmap, bucketMs);
+    const optionsHeatmap = getOptionsHeatmap(since, limits.heatmap, heatmapBucketMs);
 
     // Sentiment data
     const fundingRates = useRollups ? getFundingRatesHourlySeries(since) : getFundingRates(since);
