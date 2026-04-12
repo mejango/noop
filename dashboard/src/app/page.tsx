@@ -1,6 +1,5 @@
 'use client';
 
-import Link from 'next/link';
 import { useState, useMemo, useCallback, useEffect, useRef, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { usePolling, useIsMobile } from '@/lib/hooks';
@@ -516,6 +515,7 @@ export default function OverviewPage() {
   const [posSort, setPosSort] = useState<{ key: string; asc: boolean }>({ key: 'instrument_name', asc: true });
   const mobile = useIsMobile();
   const margins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
+  const primaryYAxisWidth = mobile ? 45 : 70;
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart, 90_000);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
@@ -569,7 +569,7 @@ export default function OverviewPage() {
   const pnlChartData = useMemo(() => {
     let cumulativeRevenue = 0;
     let cumulativeExpenses = 0;
-    return pnlReport.series.buckets.map((bucket) => {
+    const rows = pnlReport.series.buckets.map((bucket) => {
       const net = Number(bucket.tradeCashflow ?? 0);
       const periodRevenue = net > 0 ? net : 0;
       const periodExpenses = net < 0 ? Math.abs(net) : 0;
@@ -587,7 +587,49 @@ export default function OverviewPage() {
         orderCount: bucket.orderCount,
       };
     });
-  }, [pnlReport.series.buckets]);
+    const fromTs = pnlReport.meta.from ? new Date(pnlReport.meta.from).getTime() : null;
+    const toTs = pnlReport.meta.to ? new Date(pnlReport.meta.to).getTime() : null;
+    const padded = [...rows];
+    if (fromTs != null && Number.isFinite(fromTs) && (padded.length === 0 || padded[0].ts > fromTs)) {
+      padded.unshift({
+        ts: fromTs,
+        cumulativeRevenue: 0,
+        cumulativeExpenses: 0,
+        cumulativeProfit: 0,
+        periodRevenue: 0,
+        periodExpenses: 0,
+        periodNet: 0,
+        orderCount: 0,
+      });
+    }
+    if (toTs != null && Number.isFinite(toTs) && (padded.length === 0 || padded[padded.length - 1].ts < toTs)) {
+      const last = padded[padded.length - 1];
+      padded.push({
+        ts: toTs,
+        cumulativeRevenue: last?.cumulativeRevenue ?? 0,
+        cumulativeExpenses: last?.cumulativeExpenses ?? 0,
+        cumulativeProfit: last?.cumulativeProfit ?? 0,
+        periodRevenue: 0,
+        periodExpenses: 0,
+        periodNet: 0,
+        orderCount: 0,
+      });
+    }
+    return padded;
+  }, [pnlReport.meta.from, pnlReport.meta.to, pnlReport.series.buckets]);
+
+  const pnlXDomain = useMemo(() => {
+    const fromTs = pnlReport.meta.from ? new Date(pnlReport.meta.from).getTime() : null;
+    const toTs = pnlReport.meta.to ? new Date(pnlReport.meta.to).getTime() : null;
+    if (fromTs != null && toTs != null && Number.isFinite(fromTs) && Number.isFinite(toTs)) {
+      return [fromTs, toTs] as [number, number];
+    }
+    if (pnlChartData.length > 0) {
+      return [pnlChartData[0].ts, pnlChartData[pnlChartData.length - 1].ts] as [number, number];
+    }
+    const now = Date.now();
+    return [now - 14 * 24 * 60 * 60 * 1000, now] as [number, number];
+  }, [pnlChartData, pnlReport.meta.from, pnlReport.meta.to]);
 
   const pnlCoverageLabel = useMemo(() => {
     if (!pnlReport.meta.from || !pnlReport.meta.to) return null;
@@ -1185,12 +1227,6 @@ export default function OverviewPage() {
           ))}
         </div>
         <div className="flex items-center gap-3 text-xs text-gray-500">
-          <Link
-            href="/pnl"
-            className="px-2.5 py-1 border border-white/15 text-gray-300 hover:bg-white/10 hover:text-white transition-colors"
-          >
-            P&amp;L Report
-          </Link>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH CG</span>
           <span className="flex items-center gap-1">
             <span
@@ -1218,7 +1254,7 @@ export default function OverviewPage() {
               <XAxis
                 dataKey="ts"
                 type="number"
-                domain={['dataMin', 'dataMax']}
+                domain={pnlXDomain}
                 tickFormatter={xTickFormatter}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
@@ -1230,7 +1266,7 @@ export default function OverviewPage() {
                 tickFormatter={(v) => `$${v}`}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={mobile ? 45 : 70}
+                width={primaryYAxisWidth}
               />
               {/* Hidden axes for PUT/CALL overlay */}
               <YAxis yAxisId="putVal" orientation="right" hide domain={['auto', 'auto']} />
@@ -1282,10 +1318,10 @@ export default function OverviewPage() {
 
               {/* Best historical PUT/CALL score reference lines (6.2d window) */}
               {displayedBestScores.bestPutScore > 0 && (
-                <ReferenceLine yAxisId="putVal" y={displayedBestScores.bestPutScore} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.5} />
+                <ReferenceLine yAxisId="putVal" y={displayedBestScores.bestPutScore} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.5} ifOverflow="extendDomain" />
               )}
               {displayedBestScores.bestCallScore > 0 && (
-                <ReferenceLine yAxisId="callVal" y={displayedBestScores.bestCallScore} stroke={chartColors.secondary} strokeDasharray="4 4" strokeOpacity={0.5} />
+                <ReferenceLine yAxisId="callVal" y={displayedBestScores.bestCallScore} stroke={chartColors.secondary} strokeDasharray="4 4" strokeOpacity={0.5} ifOverflow="extendDomain" />
               )}
 
               {/* ETH price line */}
@@ -1359,8 +1395,7 @@ export default function OverviewPage() {
             if (pinned) { setPinned(null); } else { setPinned({ idx: i, x: e.clientX, y: e.clientY }); }
           };
 
-          const yAxisWidth = mobile ? 45 : 70;
-          const leftPad = margins.left + yAxisWidth;
+          const leftPad = margins.left + primaryYAxisWidth;
 
           return (
             <div style={{ paddingLeft: leftPad, paddingRight: margins.right }}>
@@ -1437,7 +1472,7 @@ export default function OverviewPage() {
           <div>
             <MomentumTooltipBar data={momentumData} />
             {/* Time axis */}
-            <div style={{ paddingLeft: margins.left + (mobile ? 45 : 70), paddingRight: margins.right }}>
+            <div style={{ paddingLeft: margins.left + primaryYAxisWidth, paddingRight: margins.right }}>
               <div className="flex justify-between mt-1">
                 {(() => {
                   const tickCount = mobile ? 4 : 6;
@@ -1595,7 +1630,7 @@ export default function OverviewPage() {
                   tickFormatter={(v) => `${v > 0 ? '+' : ''}${v.toFixed(1)}%`}
                   stroke={chartAxis.stroke}
                   tick={chartAxis.tick}
-                  width={mobile ? 40 : 55}
+                  width={primaryYAxisWidth}
                 />
                 {hasVolume && <YAxis yAxisId="vol" orientation="right" hide domain={[0, 1]} />}
                 <Tooltip
@@ -1756,7 +1791,7 @@ export default function OverviewPage() {
                     <YAxis
                       {...chartAxis}
                       tickFormatter={(v: number) => `${v.toFixed(3)}%`}
-                      width={55}
+                      width={primaryYAxisWidth}
                       domain={['auto', 'auto']}
                     />
                     <ReferenceLine y={0} stroke="#555" strokeWidth={1} />
@@ -1792,7 +1827,7 @@ export default function OverviewPage() {
                     <YAxis
                       {...chartAxis}
                       tickFormatter={(v: number) => `${v.toFixed(1)}%`}
-                      width={55}
+                      width={primaryYAxisWidth}
                       domain={['auto', 'auto']}
                     />
                     {/* Median reference line */}
@@ -1830,7 +1865,7 @@ export default function OverviewPage() {
                     <YAxis
                       {...chartAxis}
                       tickFormatter={(v: number) => v.toFixed(2)}
-                      width={55}
+                      width={primaryYAxisWidth}
                       domain={['auto', 'auto']}
                     />
                     {/* Bullish zone (below 0.7) */}
@@ -1868,7 +1903,7 @@ export default function OverviewPage() {
                     <YAxis
                       {...chartAxis}
                       tickFormatter={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(0)}K` : String(Math.round(v))}
-                      width={55}
+                      width={primaryYAxisWidth}
                       domain={['auto', 'auto']}
                     />
                     <Line
@@ -1922,7 +1957,7 @@ export default function OverviewPage() {
                 tickFormatter={(v) => v.toFixed(2)}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={mobile ? 35 : 55}
+                width={primaryYAxisWidth}
               />
               <Tooltip
                                 {...chartTooltip}
@@ -1990,7 +2025,7 @@ export default function OverviewPage() {
                 tickFormatter={(v) => v.toFixed(2)}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={mobile ? 35 : 55}
+                width={primaryYAxisWidth}
               />
               <Tooltip
                                 {...chartTooltip}
@@ -2052,7 +2087,7 @@ export default function OverviewPage() {
                 tickFormatter={(v) => v.toFixed(2)}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={mobile ? 35 : 55}
+                width={primaryYAxisWidth}
               />
               <Tooltip
                 {...chartTooltip}
@@ -2115,7 +2150,7 @@ export default function OverviewPage() {
                 tickFormatter={(v) => v.toFixed(2)}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={mobile ? 35 : 55}
+                width={primaryYAxisWidth}
               />
               <Tooltip
                 {...chartTooltip}
@@ -2161,7 +2196,7 @@ export default function OverviewPage() {
               <XAxis
                 dataKey="ts"
                 type="number"
-                domain={['dataMin', 'dataMax']}
+                domain={pnlXDomain}
                 tickFormatter={xTickFormatter}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
@@ -2171,16 +2206,14 @@ export default function OverviewPage() {
                 orientation="left"
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
-                width={mobile ? 42 : 56}
+                width={primaryYAxisWidth}
                 tickFormatter={(v) => `$${Math.round(Math.abs(v))}`}
               />
               <YAxis
                 yAxisId="lines"
                 orientation="right"
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tick}
-                width={mobile ? 48 : 64}
-                tickFormatter={(v) => `$${Math.round(v)}`}
+                hide
+                domain={['auto', 'auto']}
               />
               <Tooltip
                 {...chartTooltip}
