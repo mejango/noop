@@ -67,6 +67,21 @@ function prepareAll(d: Database.Database) {
       )
       ORDER BY timestamp ASC
     `),
+    getOptionsCoverageAll: d.prepare(`
+      SELECT
+        MIN(timestamp) as first_timestamp,
+        MAX(timestamp) as last_timestamp,
+        COUNT(*) as total_rows
+      FROM options_snapshots
+    `),
+    getOptionsCoverageSince: d.prepare(`
+      SELECT
+        MIN(timestamp) as first_timestamp,
+        MAX(timestamp) as last_timestamp,
+        COUNT(*) as total_rows
+      FROM options_snapshots
+      WHERE timestamp >= ?
+    `),
 
     getBestOptionsOverTime: d.prepare(`
       SELECT timestamp,
@@ -512,6 +527,27 @@ export function getSpotPrices(since: string, limit = 2000) {
 
 export function getOptionsHeatmap(since: string, limit = 12000) {
   return getStmts().getOptionsHeatmap.all(since, limit);
+}
+
+export function getOptionsCoverage(since: string) {
+  const all = getStmts().getOptionsCoverageAll.get() as {
+    first_timestamp: string | null;
+    last_timestamp: string | null;
+    total_rows: number;
+  } | undefined;
+  const window = getStmts().getOptionsCoverageSince.get(since) as {
+    first_timestamp: string | null;
+    last_timestamp: string | null;
+    total_rows: number;
+  } | undefined;
+  return {
+    firstTimestamp: all?.first_timestamp ?? null,
+    lastTimestamp: all?.last_timestamp ?? null,
+    totalRows: all?.total_rows ?? 0,
+    firstInRange: window?.first_timestamp ?? null,
+    lastInRange: window?.last_timestamp ?? null,
+    rowsInRange: window?.total_rows ?? 0,
+  };
 }
 
 export function getBestOptionsOverTime(since: string) {

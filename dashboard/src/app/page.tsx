@@ -260,6 +260,16 @@ interface ChartData {
   liquidity: LiquidityPoint[];
   bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
+  optionsCoverage?: {
+    firstTimestamp: string | null;
+    lastTimestamp: string | null;
+    totalRows: number;
+    firstInRange: string | null;
+    lastInRange: string | null;
+    rowsInRange: number;
+    requestedSince: string;
+    hasGapBeforeRange: boolean;
+  };
   sentiment?: SentimentData;
   tier?: string;
 }
@@ -276,7 +286,24 @@ const emptyStats: Stats = {
   budget: emptyBudget,
 };
 
-const emptyChart: ChartData = { prices: [], options: [], liquidity: [], bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 7, bestPutDetail: null, bestCallDetail: null }, optionsHeatmap: [], sentiment: { fundingRates: [], optionsSkew: [], aggregateOI: [], oiSnapshots: [] } };
+const emptyChart: ChartData = {
+  prices: [],
+  options: [],
+  liquidity: [],
+  bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 7, bestPutDetail: null, bestCallDetail: null },
+  optionsHeatmap: [],
+  optionsCoverage: {
+    firstTimestamp: null,
+    lastTimestamp: null,
+    totalRows: 0,
+    firstInRange: null,
+    lastInRange: null,
+    rowsInRange: 0,
+    requestedSince: '',
+    hasGapBeforeRange: false,
+  },
+  sentiment: { fundingRates: [], optionsSkew: [], aggregateOI: [], oiSnapshots: [] },
+};
 const emptyAccount: AccountData = { collaterals: [], positions: [], trades: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d'] as const;
 
@@ -362,6 +389,32 @@ export default function OverviewPage() {
     if (ticks.length === 0) return null;
     try { return JSON.parse(ticks[0].summary); } catch { return null; }
   }, [ticks]);
+
+  const displayedBestScores = useMemo(() => {
+    const currentPut = Number(latestTick?.current_best_put ?? 0);
+    const currentCall = Number(latestTick?.current_best_call ?? 0);
+    const bestPutScore = Math.max(Number(chart.bestScores.bestPutScore ?? 0), currentPut);
+    const bestCallScore = Math.max(Number(chart.bestScores.bestCallScore ?? 0), currentCall);
+    return {
+      bestPutScore,
+      bestCallScore,
+      bestPutDetail: bestPutScore === currentPut && latestTick?.best_put_detail
+        ? latestTick.best_put_detail
+        : chart.bestScores.bestPutDetail,
+      bestCallDetail: bestCallScore === currentCall && latestTick?.best_call_detail
+        ? latestTick.best_call_detail
+        : chart.bestScores.bestCallDetail,
+    };
+  }, [chart.bestScores, latestTick]);
+
+  const optionsCoverageLabel = useMemo(() => {
+    const coverage = chart.optionsCoverage;
+    if (!coverage?.firstInRange) return null;
+    if (coverage.hasGapBeforeRange) {
+      return `coverage starts ${new Date(coverage.firstInRange).toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
+    }
+    return `coverage through ${new Date(coverage.lastInRange || coverage.firstInRange).toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
+  }, [chart.optionsCoverage]);
 
   // Shared X-axis tick formatter
   const xTickFormatter = useCallback((ts: number) => {
@@ -798,16 +851,16 @@ export default function OverviewPage() {
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">PUT</span>
               <span className="relative group/pb">
-                <span className="text-red-400 font-medium cursor-help">{Number(chart.bestScores.bestPutScore) > 0 ? Number(chart.bestScores.bestPutScore).toFixed(6) : '--'}</span>
-                {chart.bestScores.bestPutDetail && (
+                <span className="text-red-400 font-medium cursor-help">{Number(displayedBestScores.bestPutScore) > 0 ? Number(displayedBestScores.bestPutScore).toFixed(6) : '--'}</span>
+                {displayedBestScores.bestPutDetail && (
                   <div className="absolute left-0 bottom-full mb-1 hidden group-hover/pb:block z-20 pointer-events-none">
                     <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                       <div className="text-gray-400 mb-1">Best PUT ({chart.bestScores.windowDays}d)</div>
-                      <div>Delta: <span className="text-white">{chart.bestScores.bestPutDetail.delta != null ? Number(chart.bestScores.bestPutDetail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">${chart.bestScores.bestPutDetail.price != null ? Number(chart.bestScores.bestPutDetail.price).toFixed(6) : 'N/A'}</span></div>
-                      <div>Strike: <span className="text-white">{chart.bestScores.bestPutDetail.strike != null ? `$${Number(chart.bestScores.bestPutDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                      <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestPutDetail.expiry) ?? 'N/A'}</span></div>
-                      {chart.bestScores.bestPutDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestPutDetail.instrument}</div>}
+                      <div>Delta: <span className="text-white">{displayedBestScores.bestPutDetail.delta != null ? Number(displayedBestScores.bestPutDetail.delta).toFixed(4) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">${displayedBestScores.bestPutDetail.price != null ? Number(displayedBestScores.bestPutDetail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Strike: <span className="text-white">{displayedBestScores.bestPutDetail.strike != null ? `$${Number(displayedBestScores.bestPutDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                      <div>DTE: <span className="text-white">{dteDays(displayedBestScores.bestPutDetail.expiry) ?? 'N/A'}</span></div>
+                      {displayedBestScores.bestPutDetail.instrument && <div className="text-gray-400 mt-1">{displayedBestScores.bestPutDetail.instrument}</div>}
                     </div>
                   </div>
                 )}
@@ -832,16 +885,16 @@ export default function OverviewPage() {
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
               <span className="relative group/cb">
-                <span className="text-cyan-400 font-medium cursor-help">{Number(chart.bestScores.bestCallScore) > 0 ? Number(chart.bestScores.bestCallScore).toFixed(2) : '--'}</span>
-                {chart.bestScores.bestCallDetail && (
+                <span className="text-cyan-400 font-medium cursor-help">{Number(displayedBestScores.bestCallScore) > 0 ? Number(displayedBestScores.bestCallScore).toFixed(2) : '--'}</span>
+                {displayedBestScores.bestCallDetail && (
                   <div className="absolute left-0 bottom-full mb-1 hidden group-hover/cb:block z-20 pointer-events-none">
                     <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
                       <div className="text-gray-400 mb-1">Best CALL ({chart.bestScores.windowDays}d)</div>
-                      <div>Delta: <span className="text-white">{chart.bestScores.bestCallDetail.delta != null ? Number(chart.bestScores.bestCallDetail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">${chart.bestScores.bestCallDetail.price != null ? Number(chart.bestScores.bestCallDetail.price).toFixed(6) : 'N/A'}</span></div>
-                      <div>Strike: <span className="text-white">{chart.bestScores.bestCallDetail.strike != null ? `$${Number(chart.bestScores.bestCallDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                      <div>DTE: <span className="text-white">{dteDays(chart.bestScores.bestCallDetail.expiry) ?? 'N/A'}</span></div>
-                      {chart.bestScores.bestCallDetail.instrument && <div className="text-gray-400 mt-1">{chart.bestScores.bestCallDetail.instrument}</div>}
+                      <div>Delta: <span className="text-white">{displayedBestScores.bestCallDetail.delta != null ? Number(displayedBestScores.bestCallDetail.delta).toFixed(4) : 'N/A'}</span></div>
+                      <div>Price: <span className="text-white">${displayedBestScores.bestCallDetail.price != null ? Number(displayedBestScores.bestCallDetail.price).toFixed(6) : 'N/A'}</span></div>
+                      <div>Strike: <span className="text-white">{displayedBestScores.bestCallDetail.strike != null ? `$${Number(displayedBestScores.bestCallDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                      <div>DTE: <span className="text-white">{dteDays(displayedBestScores.bestCallDetail.expiry) ?? 'N/A'}</span></div>
+                      {displayedBestScores.bestCallDetail.instrument && <div className="text-gray-400 mt-1">{displayedBestScores.bestCallDetail.instrument}</div>}
                     </div>
                   </div>
                 )}
@@ -1596,7 +1649,10 @@ export default function OverviewPage() {
       {filteredPutHeatmap.length > 0 && (
         <Card>
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
-            <span className="text-xs font-medium text-gray-400">Put Market</span>
+            <div>
+              <span className="text-xs font-medium text-gray-400">Put Market</span>
+              {optionsCoverageLabel && <p className="text-[10px] text-gray-600 mt-0.5">{optionsCoverageLabel}</p>}
+            </div>
             <div className="flex gap-3 text-xs text-gray-500">
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.8) }} /> better buy</span>
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(putColorDim, putColorBright, 0.2) }} /> worse buy</span>
@@ -1661,7 +1717,10 @@ export default function OverviewPage() {
       {filteredCallHeatmap.length > 0 && (
         <Card>
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
-            <span className="text-xs font-medium text-gray-400">Call Market</span>
+            <div>
+              <span className="text-xs font-medium text-gray-400">Call Market</span>
+              {optionsCoverageLabel && <p className="text-[10px] text-gray-600 mt-0.5">{optionsCoverageLabel}</p>}
+            </div>
             <div className="flex gap-3 text-xs text-gray-500">
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.8) }} /> better sell</span>
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: lerpColor(callColorDim, callColorBright, 0.2) }} /> worse sell</span>
@@ -1726,7 +1785,10 @@ export default function OverviewPage() {
       {filteredPutMQ.length > 0 && (
         <Card>
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
-            <span className="text-xs font-medium text-gray-400">Put Market Quality</span>
+            <div>
+              <span className="text-xs font-medium text-gray-400">Put Market Quality</span>
+              {optionsCoverageLabel && <p className="text-[10px] text-gray-600 mt-0.5">{optionsCoverageLabel}</p>}
+            </div>
             <div className="flex gap-3 text-xs text-gray-500">
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.9) }} /> tight spread</span>
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.1) }} /> wide spread</span>
@@ -1786,7 +1848,10 @@ export default function OverviewPage() {
       {filteredCallMQ.length > 0 && (
         <Card>
           <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
-            <span className="text-xs font-medium text-gray-400">Call Market Quality</span>
+            <div>
+              <span className="text-xs font-medium text-gray-400">Call Market Quality</span>
+              {optionsCoverageLabel && <p className="text-[10px] text-gray-600 mt-0.5">{optionsCoverageLabel}</p>}
+            </div>
             <div className="flex gap-3 text-xs text-gray-500">
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.9) }} /> tight spread</span>
               <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-full inline-block" style={{ background: lerpColor(mqBadColor, mqGoodColor, 0.1) }} /> wide spread</span>

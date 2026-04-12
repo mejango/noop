@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap,
-  getFundingRates, getOptionsSkew, getAggregateOI, getOISnapshots,
+  getFundingRates, getOptionsSkew, getAggregateOI, getOISnapshots, getOptionsCoverage,
 } from '@/lib/db';
 import { CHART_ROW_LIMITS } from '@/lib/limits';
 
@@ -119,6 +119,7 @@ export function GET(request: NextRequest) {
     const since = new Date(Date.now() - ms).toISOString();
     const bestScores = getBestScores();
     const bucketMs = BUCKET_MS[range] || 0;
+    const optionsCoverage = getOptionsCoverage(since);
 
     const limits = CHART_ROW_LIMITS[range] || CHART_ROW_LIMITS['14d'];
     const prices = getSpotPrices(since, limits.prices);
@@ -173,11 +174,24 @@ export function GET(request: NextRequest) {
         prices: dsPrices, options: dsOptions, liquidity: dsLiquidity,
         bestScores, optionsHeatmap: dsHeatmap,
         sentiment: { fundingRates: dsFunding, optionsSkew: dsSkew, aggregateOI: dsOI, oiSnapshots: dsOISnapshots },
+        optionsCoverage: {
+          ...optionsCoverage,
+          requestedSince: since,
+          hasGapBeforeRange: Boolean(optionsCoverage.firstInRange && new Date(optionsCoverage.firstInRange).getTime() - new Date(since).getTime() > 6 * 60 * 60 * 1000),
+        },
         tier: 'downsampled',
       });
     }
 
-    return NextResponse.json({ prices, options, liquidity, bestScores, optionsHeatmap, sentiment, tier: 'raw' });
+    return NextResponse.json({
+      prices, options, liquidity, bestScores, optionsHeatmap, sentiment,
+      optionsCoverage: {
+        ...optionsCoverage,
+        requestedSince: since,
+        hasGapBeforeRange: Boolean(optionsCoverage.firstInRange && new Date(optionsCoverage.firstInRange).getTime() - new Date(since).getTime() > 6 * 60 * 60 * 1000),
+      },
+      tier: 'raw',
+    });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });
