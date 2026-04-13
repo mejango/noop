@@ -488,7 +488,7 @@ const MQDotShape = ({ cx, cy, payload }: any) => {
 function InstrumentPathOverlay({
   data,
   stroke,
-  strokeOpacity = 0.18,
+  strokeOpacity = 0.24,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ...chartProps
 }: {
@@ -498,7 +498,7 @@ function InstrumentPathOverlay({
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [key: string]: any;
 }) {
-  const clipId = useId();
+  const clipId = useId().replace(/[:]/g, '');
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const xAxis = Object.values((chartProps.xAxisMap ?? {}))[0] as any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -513,33 +513,42 @@ function InstrumentPathOverlay({
     groups.get(dot.instrument)!.push({ ts: dot.ts, absDelta: dot.absDelta });
   }
 
-  const paths: string[] = [];
+  const segments: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
   for (const group of Array.from(groups.values())) {
     if (group.length < 2) continue;
     group.sort((a, b) => a.ts - b.ts);
-    const d = group
-      .map((point, index) => `${index === 0 ? 'M' : 'L'}${xAxis.scale(point.ts)},${yAxis.scale(point.absDelta)}`)
-      .join(' ');
-    if (d) paths.push(d);
+    for (let i = 1; i < group.length; i++) {
+      const prev = group[i - 1];
+      const next = group[i];
+      segments.push({
+        x1: xAxis.scale(prev.ts),
+        y1: yAxis.scale(prev.absDelta),
+        x2: xAxis.scale(next.ts),
+        y2: yAxis.scale(next.absDelta),
+      });
+    }
   }
-  if (paths.length === 0) return null;
+  if (segments.length === 0) return null;
 
   return (
     <g pointerEvents="none">
-      <clipPath id={clipId}>
-        <rect x={offset.left} y={offset.top} width={offset.width} height={offset.height} />
-      </clipPath>
+      <defs>
+        <clipPath id={clipId}>
+          <rect x={offset.left} y={offset.top} width={offset.width} height={offset.height} />
+        </clipPath>
+      </defs>
       <g clipPath={`url(#${clipId})`}>
-        {paths.map((d, index) => (
-          <path
+        {segments.map((segment, index) => (
+          <line
             key={index}
-            d={d}
-            fill="none"
+            x1={segment.x1}
+            y1={segment.y1}
+            x2={segment.x2}
+            y2={segment.y2}
             stroke={stroke}
             strokeOpacity={strokeOpacity}
-            strokeWidth={1}
+            strokeWidth={1.1}
             strokeLinecap="round"
-            strokeLinejoin="round"
           />
         ))}
       </g>
