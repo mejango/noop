@@ -485,6 +485,70 @@ const MQDotShape = ({ cx, cy, payload }: any) => {
   return <circle cx={cx} cy={cy} r={r} fill={fill} fillOpacity={0.7 + t * 0.3} />;
 };
 
+function getScatterTimeBucketMs(range: string): number {
+  switch (range) {
+    case '1h': return 5 * 60 * 1000;
+    case '6h': return 15 * 60 * 1000;
+    case '24h': return 30 * 60 * 1000;
+    case '3d': return 60 * 60 * 1000;
+    case '6.2d':
+    case '7d': return 2 * 60 * 60 * 1000;
+    case '14d': return 6 * 60 * 60 * 1000;
+    case '30d': return 12 * 60 * 60 * 1000;
+    case '90d': return 24 * 60 * 60 * 1000;
+    case '365d': return 3 * 24 * 60 * 60 * 1000;
+    default: return 6 * 60 * 60 * 1000;
+  }
+}
+
+function getScatterPointBudget(range: string): number {
+  switch (range) {
+    case '1h': return 220;
+    case '6h': return 260;
+    case '24h': return 320;
+    case '3d': return 360;
+    case '6.2d':
+    case '7d': return 380;
+    case '14d': return 220;
+    case '30d': return 240;
+    case '90d': return 260;
+    case '365d': return 280;
+    default: return 220;
+  }
+}
+
+function quantizeScatterDots<T extends HeatmapDot>(dots: T[], range: string): T[] {
+  const target = getScatterPointBudget(range);
+  if (dots.length <= target) return dots;
+
+  let timeBucketMs = getScatterTimeBucketMs(range);
+  let deltaBucketSize = ['14d', '30d', '90d', '365d'].includes(range) ? 0.01 : 0.005;
+  let quantized = dots;
+
+  for (let pass = 0; pass < 6; pass++) {
+    const buckets = new Map<string, T>();
+    for (const dot of dots) {
+      const timeBucket = Math.floor(dot.ts / timeBucketMs) * timeBucketMs;
+      const deltaBucket = Math.floor(dot.absDelta / deltaBucketSize) * deltaBucketSize;
+      const key = `${timeBucket}:${deltaBucket.toFixed(3)}`;
+      const existing = buckets.get(key);
+      if (!existing || (dot.globalIntensity ?? 0) > (existing.globalIntensity ?? 0)) {
+        buckets.set(key, dot);
+      }
+    }
+    quantized = Array.from(buckets.values()).sort((a, b) => a.ts - b.ts || a.absDelta - b.absDelta);
+    if (quantized.length <= target) return quantized;
+    timeBucketMs *= 2;
+    deltaBucketSize = Math.min(0.03, deltaBucketSize * 1.5);
+  }
+
+  return quantized.length <= target
+    ? quantized
+    : quantized
+        .filter((_, index) => index % Math.ceil(quantized.length / target) === 0)
+        .slice(0, target);
+}
+
 function rangeToWindow(range: string) {
   const now = Date.now();
   const hour = 60 * 60 * 1000;
@@ -955,8 +1019,11 @@ export default function OverviewPage() {
     normalizeGlobal(calls);
     normalizeGlobal(puts);
 
-    return { callHeatmap: calls, putHeatmap: puts };
-  }, [chart.optionsHeatmap, merged]);
+    return {
+      callHeatmap: quantizeScatterDots(calls, range),
+      putHeatmap: quantizeScatterDots(puts, range),
+    };
+  }, [chart.optionsHeatmap, merged, range]);
 
   // Market quality dots: filter heatmap dots to bot's delta range and normalize spread/depth
   const { putMQ, callMQ } = useMemo(() => {
@@ -979,14 +1046,17 @@ export default function OverviewPage() {
       const maxDepth = depths.length > 0 ? Math.max(...depths) : 1;
       const depthRange = maxDepth - minDepth || 1;
 
-      return eligible.map(d => ({
-        ...d,
-        spreadIntensity: 1 - ((d.spreadPct! - minSpread) / spreadRange), // invert: tight=1
-        depthIntensity: d.depth != null ? (d.depth - minDepth) / depthRange : 0.3,
-      }));
+      return quantizeScatterDots(
+        eligible.map(d => ({
+          ...d,
+          spreadIntensity: 1 - ((d.spreadPct! - minSpread) / spreadRange), // invert: tight=1
+          depthIntensity: d.depth != null ? (d.depth - minDepth) / depthRange : 0.3,
+        })),
+        range
+      );
     };
     return { putMQ: buildMQ(putHeatmap), callMQ: buildMQ(callHeatmap) };
-  }, [putHeatmap, callHeatmap]);
+  }, [putHeatmap, callHeatmap, range]);
 
   // Shared X-axis domain from main chart's time range
   const xDomain = useMemo(() =>
