@@ -802,6 +802,17 @@ const stmts = {
     SELECT * FROM trading_rules WHERE is_active = 1 AND rule_type = @rule_type ORDER BY priority DESC, id ASC
   `),
 
+  deactivateStaleEmergencyBuybackRules: db.prepare(`
+    UPDATE trading_rules
+    SET is_active = 0
+    WHERE is_active = 1
+      AND action = 'buyback_call'
+      AND (
+        reasoning LIKE '%margin emergency%'
+        OR reasoning LIKE '%MUST execute before any other portfolio action%'
+      )
+  `),
+
   insertPendingAction: db.prepare(`
     INSERT INTO pending_actions (rule_id, action, instrument_name, amount, price, trigger_details, status)
     VALUES (@rule_id, @action, @instrument_name, @amount, @price, @trigger_details, 'pending')
@@ -1334,6 +1345,7 @@ const updatePendingAction = (id, fields) => {
 
 const getActiveRules = () => stmts.getActiveRules.all();
 const getActiveRulesByType = (ruleType) => stmts.getActiveRulesByType.all({ rule_type: ruleType });
+const deactivateStaleEmergencyBuybackRules = () => stmts.deactivateStaleEmergencyBuybackRules.run().changes || 0;
 const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ status });
 const getRecentPendingActions = (limit = 20) => stmts.getRecentPendingActions.all({ limit });
 const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
@@ -1505,6 +1517,7 @@ module.exports = {
   updatePendingAction,
   getActiveRules,
   getActiveRulesByType,
+  deactivateStaleEmergencyBuybackRules,
   getPendingActions,
   getRecentPendingActions,
   hasPendingActionForRule,

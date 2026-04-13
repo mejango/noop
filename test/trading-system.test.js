@@ -3707,6 +3707,49 @@ describe('post_only retry price discipline', () => {
   });
 });
 
+describe('order signature expiry buffer', () => {
+  const computeSignatureExpirySec = (nowMs, timeInForce) =>
+    Math.floor((nowMs / 1000) + (timeInForce === 'ioc' ? 900 : 86400));
+
+  test('ioc orders get a 15 minute signature buffer', () => {
+    const nowMs = 1_700_000_000_000;
+    const expiry = computeSignatureExpirySec(nowMs, 'ioc');
+    assert.strictEqual(expiry - Math.floor(nowMs / 1000), 900);
+  });
+
+  test('resting orders keep a 24 hour signature buffer', () => {
+    const nowMs = 1_700_000_000_000;
+    const expiry = computeSignatureExpirySec(nowMs, 'post_only');
+    assert.strictEqual(expiry - Math.floor(nowMs / 1000), 86400);
+  });
+});
+
+describe('stale emergency buyback rule scrub', () => {
+  const shouldDeactivate = (rule) =>
+    rule?.is_active === 1
+    && rule?.action === 'buyback_call'
+    && (String(rule.reasoning || '').includes('margin emergency')
+      || String(rule.reasoning || '').includes('MUST execute before any other portfolio action'));
+
+  test('deactivates stale emergency-style buyback rule', () => {
+    const rule = {
+      is_active: 1,
+      action: 'buyback_call',
+      reasoning: 'This is a margin emergency. MUST execute before any other portfolio action.',
+    };
+    assert.strictEqual(shouldDeactivate(rule), true);
+  });
+
+  test('keeps non-emergency buyback rule active', () => {
+    const rule = {
+      is_active: 1,
+      action: 'buyback_call',
+      reasoning: 'Buy back only if the position is genuinely threatened near expiry.',
+    };
+    assert.strictEqual(shouldDeactivate(rule), false);
+  });
+});
+
 // ============================================================================
 // 46. Call exposure cap: 45% hard cap, 40% entry buffer
 // ============================================================================

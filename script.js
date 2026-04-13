@@ -1333,6 +1333,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     const wallet = createWallet();
     const timestamp = Date.now(); // Current UTC timestamp in ms
     const signature = await signMessage(wallet, timestamp);
+    const signatureExpirySec = Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 900 : 86400));
 
     const order = {
         instrument_name: name,
@@ -1340,7 +1341,8 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         direction,
         limit_price: price.toString(),
         amount: amount.toString(),
-        signature_expiry_sec: Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 300 : 86400)), // IOC: 5min, GTC/post_only: 24h
+        // Give IOC orders extra buffer for signer/exchange clock skew. Derive rejects borderline 300s expiries.
+        signature_expiry_sec: signatureExpirySec, // IOC: 15min, GTC/post_only: 24h
         max_fee: Math.max(0.08 * price, 10.0).toFixed(2).toString(), // Max fee per unit of volume (USDC). Generous ceiling — actual fee is much lower (~0.1% of notional)
         // Noop submits sparse discretionary orders, not continuous maker quotes.
         // Venue-side MMP has been causing opaque sell-order cancellations and poor reconciliation.
@@ -5580,6 +5582,17 @@ console.log(`ETH-collateralized. Put budget: ${(PUT_ANNUAL_RATE * 100).toFixed(2
 console.log('='.repeat(70));
 console.log(' ');
 loadData();
+
+if (db?.deactivateStaleEmergencyBuybackRules) {
+  try {
+    const removed = db.deactivateStaleEmergencyBuybackRules();
+    if (removed > 0) {
+      console.log(`🧹 Deactivated ${removed} stale emergency buyback rule(s)`);
+    }
+  } catch (e) {
+    console.log('🧹 Failed to scrub stale emergency buyback rules:', e.message);
+  }
+}
 
 // First-boot: generate advisory if no active rules exist
 const _bootAdvisory = async () => {
