@@ -509,7 +509,7 @@ function getScatterPointBudget(range: string): number {
     case '3d': return 360;
     case '6.2d':
     case '7d': return 380;
-    case '14d': return 220;
+    case '14d': return 520;
     case '30d': return 240;
     case '90d': return 260;
     case '365d': return 280;
