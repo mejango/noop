@@ -3602,10 +3602,11 @@ describe('action semantics descriptions', () => {
   });
 
   test('sell_put guidance treats the exit as capital-releasing, not margin-consuming', () => {
-    const guidance = 'Selling an owned long put is capital-releasing: it returns cash/premium recovery and reduces the hedge position. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself consumes more margin.';
+    const guidance = 'Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.';
     assert.ok(guidance.includes('capital-releasing'));
     assert.ok(guidance.includes('returns cash'));
-    assert.ok(guidance.includes('not because the exit itself consumes more margin'));
+    assert.ok(guidance.includes('does NOT consume more margin'));
+    assert.ok(guidance.includes('improve headroom'));
   });
 });
 
