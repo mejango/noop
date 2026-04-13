@@ -522,15 +522,13 @@ function quantizeScatterDots<T extends HeatmapDot>(dots: T[], range: string): T[
   if (dots.length <= target) return dots;
 
   let timeBucketMs = getScatterTimeBucketMs(range);
-  let deltaBucketSize = ['14d', '30d', '90d', '365d'].includes(range) ? 0.01 : 0.005;
   let quantized = dots;
 
   for (let pass = 0; pass < 6; pass++) {
     const buckets = new Map<string, T>();
     for (const dot of dots) {
       const timeBucket = Math.floor(dot.ts / timeBucketMs) * timeBucketMs;
-      const deltaBucket = Math.floor(dot.absDelta / deltaBucketSize) * deltaBucketSize;
-      const key = `${timeBucket}:${deltaBucket.toFixed(3)}`;
+      const key = `${dot.instrument}:${timeBucket}`;
       const existing = buckets.get(key);
       if (!existing || (dot.globalIntensity ?? 0) > (existing.globalIntensity ?? 0)) {
         buckets.set(key, dot);
@@ -539,7 +537,6 @@ function quantizeScatterDots<T extends HeatmapDot>(dots: T[], range: string): T[
     quantized = Array.from(buckets.values()).sort((a, b) => a.ts - b.ts || a.absDelta - b.absDelta);
     if (quantized.length <= target) return quantized;
     timeBucketMs *= 2;
-    deltaBucketSize = Math.min(0.03, deltaBucketSize * 1.5);
   }
 
   return quantized.length <= target
