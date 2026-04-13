@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback, useEffect, useRef, ReactNode, useId } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, momentumColor, dteDays } from '@/lib/format';
@@ -10,7 +10,7 @@ import { Bot, User } from 'lucide-react';
 import {
   ComposedChart, Line, Bar, Scatter, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
-  ReferenceDot, Customized,
+  ReferenceDot,
 } from 'recharts';
 
 /** Hook: hover shows tooltip, click pins it, next click anywhere unpins */
@@ -485,75 +485,16 @@ const MQDotShape = ({ cx, cy, payload }: any) => {
   return <circle cx={cx} cy={cy} r={r} fill={fill} fillOpacity={0.7 + t * 0.3} />;
 };
 
-function InstrumentPathOverlay({
-  data,
-  stroke,
-  strokeOpacity = 0.24,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ...chartProps
-}: {
-  data: Array<{ instrument: string; ts: number; absDelta: number }>;
-  stroke: string;
-  strokeOpacity?: number;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  [key: string]: any;
-}) {
-  const clipId = useId().replace(/[:]/g, '');
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const xAxis = Object.values((chartProps.xAxisMap ?? {}))[0] as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const yAxis = Object.values((chartProps.yAxisMap ?? {}))[0] as any;
-  const offset = chartProps.offset as { left: number; top: number; width: number; height: number } | undefined;
-  if (!xAxis?.scale || !yAxis?.scale || !offset) return null;
-
-  const groups = new Map<string, Array<{ ts: number; absDelta: number }>>();
-  for (const dot of data) {
-    if (!dot.instrument) continue;
-    if (!groups.has(dot.instrument)) groups.set(dot.instrument, []);
-    groups.get(dot.instrument)!.push({ ts: dot.ts, absDelta: dot.absDelta });
+function buildInstrumentSeries<T extends { instrument: string; ts: number }>(data: T[]): T[][] {
+  const groups = new Map<string, T[]>();
+  for (const point of data) {
+    if (!point.instrument) continue;
+    if (!groups.has(point.instrument)) groups.set(point.instrument, []);
+    groups.get(point.instrument)!.push(point);
   }
-
-  const segments: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
-  for (const group of Array.from(groups.values())) {
-    if (group.length < 2) continue;
-    group.sort((a, b) => a.ts - b.ts);
-    for (let i = 1; i < group.length; i++) {
-      const prev = group[i - 1];
-      const next = group[i];
-      segments.push({
-        x1: xAxis.scale(prev.ts),
-        y1: yAxis.scale(prev.absDelta),
-        x2: xAxis.scale(next.ts),
-        y2: yAxis.scale(next.absDelta),
-      });
-    }
-  }
-  if (segments.length === 0) return null;
-
-  return (
-    <g pointerEvents="none">
-      <defs>
-        <clipPath id={clipId}>
-          <rect x={offset.left} y={offset.top} width={offset.width} height={offset.height} />
-        </clipPath>
-      </defs>
-      <g clipPath={`url(#${clipId})`}>
-        {segments.map((segment, index) => (
-          <line
-            key={index}
-            x1={segment.x1}
-            y1={segment.y1}
-            x2={segment.x2}
-            y2={segment.y2}
-            stroke={stroke}
-            strokeOpacity={strokeOpacity}
-            strokeWidth={1.1}
-            strokeLinecap="round"
-          />
-        ))}
-      </g>
-    </g>
-  );
+  return Array.from(groups.values())
+    .map(group => group.sort((a, b) => a.ts - b.ts))
+    .filter(group => group.length > 1);
 }
 
 function getScatterTimeBucketMs(range: string): number {
@@ -1145,6 +1086,11 @@ export default function OverviewPage() {
       filteredCallMQ: callMQ.filter(d => d.ts >= lo && d.ts <= hi),
     };
   }, [liquidityData, callHeatmap, putHeatmap, putMQ, callMQ, xDomain]);
+
+  const putHeatmapSeries = useMemo(() => buildInstrumentSeries(filteredPutHeatmap), [filteredPutHeatmap]);
+  const callHeatmapSeries = useMemo(() => buildInstrumentSeries(filteredCallHeatmap), [filteredCallHeatmap]);
+  const putMQSeries = useMemo(() => buildInstrumentSeries(filteredPutMQ), [filteredPutMQ]);
+  const callMQSeries = useMemo(() => buildInstrumentSeries(filteredCallMQ), [filteredCallMQ]);
 
   // Build sentiment chart data: merge funding rates, options skew, and OI on shared timestamps
   // Build sentiment chart data with smoothing to eliminate snapshot noise
@@ -2120,7 +2066,17 @@ export default function OverviewPage() {
               />
               {/* Band showing bot's active put delta range: 0.02–0.12 (abs) */}
               <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.12} stroke="#FFA032" strokeOpacity={0.15} ifOverflow="extendDomain" />
-              <Customized component={(props: unknown) => <InstrumentPathOverlay {...(props as Record<string, unknown>)} data={filteredPutHeatmap} stroke="rgb(255,160,50)" />} />
+              {putHeatmapSeries.map((series, index) => (
+                <Scatter
+                  key={`put-line-${index}`}
+                  data={series}
+                  line={{ stroke: 'rgb(255,160,50)', strokeOpacity: 0.28, strokeWidth: 1.1 }}
+                  lineType="joint"
+                  shape={() => null}
+                  legendType="none"
+                  isAnimationActive={false}
+                />
+              ))}
               <Scatter
                 data={filteredPutHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2189,7 +2145,17 @@ export default function OverviewPage() {
               />
               {/* Band showing bot's active call delta range: 0.04–0.12 */}
               <ReferenceArea y1={0.04} y2={0.12} fill="#64A0FF" fillOpacity={0.12} stroke="#64A0FF" strokeOpacity={0.15} />
-              <Customized component={(props: unknown) => <InstrumentPathOverlay {...(props as Record<string, unknown>)} data={filteredCallHeatmap} stroke="rgb(100,160,255)" />} />
+              {callHeatmapSeries.map((series, index) => (
+                <Scatter
+                  key={`call-line-${index}`}
+                  data={series}
+                  line={{ stroke: 'rgb(100,160,255)', strokeOpacity: 0.28, strokeWidth: 1.1 }}
+                  lineType="joint"
+                  shape={() => null}
+                  legendType="none"
+                  isAnimationActive={false}
+                />
+              ))}
               <Scatter
                 data={filteredCallHeatmap}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2253,7 +2219,17 @@ export default function OverviewPage() {
                 }}
               />
               <ReferenceArea y1={0.02} y2={0.12} fill="#FFA032" fillOpacity={0.08} stroke="#FFA032" strokeOpacity={0.1} ifOverflow="extendDomain" />
-              <Customized component={(props: unknown) => <InstrumentPathOverlay {...(props as Record<string, unknown>)} data={filteredPutMQ} stroke="rgb(120,220,140)" strokeOpacity={0.12} />} />
+              {putMQSeries.map((series, index) => (
+                <Scatter
+                  key={`put-mq-line-${index}`}
+                  data={series}
+                  line={{ stroke: 'rgb(120,220,140)', strokeOpacity: 0.16, strokeWidth: 1.05 }}
+                  lineType="joint"
+                  shape={() => null}
+                  legendType="none"
+                  isAnimationActive={false}
+                />
+              ))}
               <Scatter
                 data={filteredPutMQ}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2317,7 +2293,17 @@ export default function OverviewPage() {
                 }}
               />
               <ReferenceArea y1={0.04} y2={0.12} fill="#64A0FF" fillOpacity={0.08} stroke="#64A0FF" strokeOpacity={0.1} />
-              <Customized component={(props: unknown) => <InstrumentPathOverlay {...(props as Record<string, unknown>)} data={filteredCallMQ} stroke="rgb(120,220,140)" strokeOpacity={0.12} />} />
+              {callMQSeries.map((series, index) => (
+                <Scatter
+                  key={`call-mq-line-${index}`}
+                  data={series}
+                  line={{ stroke: 'rgb(120,220,140)', strokeOpacity: 0.16, strokeWidth: 1.05 }}
+                  lineType="joint"
+                  shape={() => null}
+                  legendType="none"
+                  isAnimationActive={false}
+                />
+              ))}
               <Scatter
                 data={filteredCallMQ}
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
