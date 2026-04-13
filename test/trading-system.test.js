@@ -3674,6 +3674,12 @@ describe('confirmation prompt margin context', () => {
     const context = getCallMarginContext('buy_put', {}, [], [], [], 2240, 'ETH-20260417-1400-P', 1, 1);
     assert.strictEqual(context, 'Call margin utilization: not applicable for this action.');
   });
+
+  test('call discipline wording distinguishes entry caps from true emergencies', () => {
+    const text = 'These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe 40-45% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization.';
+    assert.ok(text.includes('not margin-emergency thresholds'));
+    assert.ok(text.includes('near-liquidation / ~100% utilization'));
+  });
 });
 
 describe('post_only retry price discipline', () => {
