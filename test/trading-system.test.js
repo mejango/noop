@@ -3600,6 +3600,13 @@ describe('action semantics descriptions', () => {
     assert.ok(text.includes('already-open short call'));
     assert.ok(text.includes('reduce_only=true'));
   });
+
+  test('sell_put guidance treats the exit as capital-releasing, not margin-consuming', () => {
+    const guidance = 'Selling an owned long put is capital-releasing: it returns cash/premium recovery and reduces the hedge position. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself consumes more margin.';
+    assert.ok(guidance.includes('capital-releasing'));
+    assert.ok(guidance.includes('returns cash'));
+    assert.ok(guidance.includes('not because the exit itself consumes more margin'));
+  });
 });
 
 // ============================================================================
