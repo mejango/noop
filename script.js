@@ -3145,6 +3145,42 @@ const estimateDisplayedMarginUtilization = (marginState) => {
   return estimateMarginUtilization(marginState);
 };
 
+const clampSellCallQtyToEntryCap = ({
+  desiredQty,
+  amountStep,
+  marginState,
+  marginPerUnit,
+}) => {
+  const step = amountStep > 0 ? amountStep : 0.01;
+  const desired = Math.max(0, Number(desiredQty) || 0);
+  if (!(desired >= step)) {
+    return { qty: 0, projectedUtilization: estimateMarginUtilization(marginState, 0) };
+  }
+  if (!marginState || !(marginPerUnit > 0)) {
+    return { qty: Math.floor(desired / step) * step, projectedUtilization: null };
+  }
+
+  const currentUsedMargin = Math.abs(Number(
+      marginState?.aggregated_positions_initial_margin ??
+      marginState?.positions_initial_margin ??
+      0
+    ))
+    + Math.abs(Number(marginState?.open_orders_margin ?? 0));
+  const marginBase = getMarginUtilizationBase(marginState);
+  if (!(marginBase > 0)) {
+    return { qty: Math.floor(desired / step) * step, projectedUtilization: null };
+  }
+
+  const maxAdditionalMargin = Math.max(0, CALL_ENTRY_CAP_PCT * marginBase - currentUsedMargin);
+  const maxQtyAtCap = maxAdditionalMargin / marginPerUnit;
+  const clampedQty = Math.floor(Math.min(desired, maxQtyAtCap) / step) * step;
+  const finalQty = clampedQty >= step ? clampedQty : 0;
+  return {
+    qty: finalQty,
+    projectedUtilization: estimateMarginUtilization(marginState, finalQty * marginPerUnit),
+  };
+};
+
 const estimateStandardShortCallInitialMarginPerUnit = (strike, spotPrice, premium) => {
   if (!(spotPrice > 0)) return Infinity;
   const otm = Math.max(0, strike - spotPrice);
@@ -3495,7 +3531,29 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const bookLiq = optionType === 'P' ? best.askAmount : best.bidAmount;
         const step = best.amountStep || 0.01;
         const raw = Math.min(maxByBudget, bookLiq, 20);
-        const qty = Math.floor(raw / step) * step;
+        let qty = Math.floor(raw / step) * step;
+        let clampedProjectedUtilization = null;
+        if (rule.action === 'sell_call' && liveMarginState) {
+          const marginPerUnit = estimateShortCallMarginPerUnit(
+            liveMarginState,
+            positions,
+            openRestingEntryOrders,
+            spotPrice,
+            best.strike,
+            best.bidPrice
+          );
+          const clamped = clampSellCallQtyToEntryCap({
+            desiredQty: qty,
+            amountStep: step,
+            marginState: liveMarginState,
+            marginPerUnit,
+          });
+          if (clamped.qty < qty) {
+            console.log(`📋 Clamp ${rule.action} ${best.name}: ${qty.toFixed(2)} -> ${clamped.qty.toFixed(2)} to stay within ${(CALL_ENTRY_CAP_PCT * 100).toFixed(1)}% entry cap${clamped.projectedUtilization != null ? ` (projected ${(clamped.projectedUtilization * 100).toFixed(1)}%)` : ''}`);
+          }
+          qty = clamped.qty;
+          clampedProjectedUtilization = clamped.projectedUtilization;
+        }
         if (qty < step) continue;
 
         // If the best instrument already has a resting entry order, decide whether to keep or adjust it.
@@ -3531,6 +3589,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             dte: best.dte,
             strike: best.strike,
             candidates_evaluated: candidates.length,
+            projected_utilization: clampedProjectedUtilization,
             preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
           },
         });

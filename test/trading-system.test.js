@@ -185,6 +185,42 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_internal=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, entry_buffer_cap=${entryCapPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat the hard cap as a ceiling, not a target; new entries should stay below the entry-buffer cap. Use these exact figures; do not invent utilization numbers.`;
 };
 
+const clampSellCallQtyToEntryCap = ({
+  desiredQty,
+  amountStep,
+  marginState,
+  marginPerUnit,
+}) => {
+  const step = amountStep > 0 ? amountStep : 0.01;
+  const desired = Math.max(0, Number(desiredQty) || 0);
+  if (!(desired >= step)) {
+    return { qty: 0, projectedUtilization: estimateMarginUtilization(marginState, 0) };
+  }
+  if (!marginState || !(marginPerUnit > 0)) {
+    return { qty: Math.floor(desired / step) * step, projectedUtilization: null };
+  }
+
+  const currentUsedMargin = Math.abs(Number(
+      marginState?.aggregated_positions_initial_margin ??
+      marginState?.positions_initial_margin ??
+      0
+    ))
+    + Math.abs(Number(marginState?.open_orders_margin ?? 0));
+  const marginBase = getMarginUtilizationBase(marginState);
+  if (!(marginBase > 0)) {
+    return { qty: Math.floor(desired / step) * step, projectedUtilization: null };
+  }
+
+  const maxAdditionalMargin = Math.max(0, CALL_ENTRY_CAP_PCT * marginBase - currentUsedMargin);
+  const maxQtyAtCap = maxAdditionalMargin / marginPerUnit;
+  const clampedQty = Math.floor(Math.min(desired, maxQtyAtCap) / step) * step;
+  const finalQty = clampedQty >= step ? clampedQty : 0;
+  return {
+    qty: finalQty,
+    projectedUtilization: estimateMarginUtilization(marginState, finalQty * marginPerUnit),
+  };
+};
+
 const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
   const configuredStep = Number(
     instrument?.price_step ??
@@ -3804,6 +3840,23 @@ describe('Call exposure cap discipline', () => {
     const currentUsed = 2000; // 40%
     const blocked = (currentUsed / marginBase) >= CALL_ENTRY_CAP_PCT;
     assert.strictEqual(blocked, true, 'Should block once the 40% entry buffer is reached');
+  });
+
+  test('oversized sell_call is clamped down to the entry cap instead of rejected outright', () => {
+    const marginState = {
+      collaterals_maintenance_margin: 5000,
+      positions_initial_margin: 0,
+      open_orders_margin: 0,
+    };
+    const clamped = clampSellCallQtyToEntryCap({
+      desiredQty: 4.4,
+      amountStep: 0.01,
+      marginState,
+      marginPerUnit: 750,
+    });
+    assert.strictEqual(clamped.qty, 2.66);
+    assert.ok(clamped.projectedUtilization != null);
+    assert.ok(clamped.projectedUtilization <= CALL_ENTRY_CAP_PCT);
   });
 
   test('zero ETH balance → ethBalance guard prevents division issues', () => {
