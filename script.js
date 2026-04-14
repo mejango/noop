@@ -3191,15 +3191,15 @@ const estimateStandardShortCallInitialMarginPerUnit = (strike, spotPrice, premiu
 };
 
 const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, spotPrice, strike = 0, premium = 0) => {
-  const documentedEstimate = estimateStandardShortCallInitialMarginPerUnit(strike, spotPrice, premium);
-  if (Number.isFinite(documentedEstimate) && documentedEstimate > 0) {
-    return documentedEstimate;
-  }
-
   const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
   const currentShortExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
-  if (currentShortExposure > 0 && Number(marginState?.positions_initial_margin ?? 0) > 0) {
-    return Number(marginState.positions_initial_margin) / currentShortExposure;
+  const empiricalPositionsMargin = Math.abs(Number(
+    marginState?.aggregated_positions_initial_margin ??
+    marginState?.positions_initial_margin ??
+    0
+  ));
+  if (currentShortExposure > 0 && empiricalPositionsMargin > 0) {
+    return empiricalPositionsMargin / currentShortExposure;
   }
 
   const restingShortExposure = restingOrders
@@ -3207,6 +3207,11 @@ const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, s
     .reduce((sum, order) => sum + Math.abs(Number(order.amount) || 0), 0);
   if (restingShortExposure > 0 && Number(marginState?.open_orders_margin ?? 0) > 0) {
     return Number(marginState.open_orders_margin) / restingShortExposure;
+  }
+
+  const documentedEstimate = estimateStandardShortCallInitialMarginPerUnit(strike, spotPrice, premium);
+  if (Number.isFinite(documentedEstimate) && documentedEstimate > 0) {
+    return documentedEstimate;
   }
 
   return Math.max((spotPrice || 0) * 0.13, 100);

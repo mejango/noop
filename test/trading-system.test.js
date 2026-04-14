@@ -156,17 +156,22 @@ const estimateStandardShortCallInitialMarginPerUnit = (strike, spotPrice, premiu
   return Math.max(0, otmBuffer - Math.max(0, premium || 0));
 };
 const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, spotPrice, strike = 0, premium = 0) => {
-  const documentedEstimate = estimateStandardShortCallInitialMarginPerUnit(strike, spotPrice, premium);
-  if (Number.isFinite(documentedEstimate) && documentedEstimate > 0) return documentedEstimate;
   const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
   const currentShortExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
-  if (currentShortExposure > 0 && Number(marginState?.positions_initial_margin ?? 0) > 0) {
-    return Number(marginState.positions_initial_margin) / currentShortExposure;
+  const empiricalPositionsMargin = Math.abs(Number(
+      marginState?.aggregated_positions_initial_margin ??
+      marginState?.positions_initial_margin ??
+      0
+    ));
+  if (currentShortExposure > 0 && empiricalPositionsMargin > 0) {
+    return empiricalPositionsMargin / currentShortExposure;
   }
   const restingShortExposure = restingOrders.filter(order => order.action === 'sell_call').reduce((sum, order) => sum + Math.abs(Number(order.amount) || 0), 0);
   if (restingShortExposure > 0 && Number(marginState?.open_orders_margin ?? 0) > 0) {
     return Number(marginState.open_orders_margin) / restingShortExposure;
   }
+  const documentedEstimate = estimateStandardShortCallInitialMarginPerUnit(strike, spotPrice, premium);
+  if (Number.isFinite(documentedEstimate) && documentedEstimate > 0) return documentedEstimate;
   return Math.max((spotPrice || 0) * 0.13, 100);
 };
 const getCallMarginContext = (action, marginState, positions, restingOrders, instruments, spotPrice, instrumentName, amount, limitPrice) => {
@@ -3793,6 +3798,17 @@ describe('stale emergency buyback rule scrub', () => {
 describe('Call exposure cap discipline', () => {
   const CALL_EXPOSURE_CAP_PCT = 0.45;
   const CALL_ENTRY_CAP_PCT = 0.40;
+
+  test('existing short-call margin uses empirical account ratio before theoretical estimate', () => {
+    const marginState = {
+      positions_initial_margin: 201.16,
+    };
+    const positions = [
+      { instrument_name: 'ETH-20260424-3000-C', direction: 'short', amount: 0.95 },
+    ];
+    const estimated = estimateShortCallMarginPerUnit(marginState, positions, [], 2320, 3000, 1.1);
+    assert.ok(Math.abs(estimated - (201.16 / 0.95)) < 0.01);
+  });
 
   test('no short calls → full headroom available', () => {
     const ethBalance = 5.0;
