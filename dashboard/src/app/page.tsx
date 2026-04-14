@@ -645,9 +645,9 @@ export default function OverviewPage() {
     const rows = pnlReport.series.buckets.map((bucket) => {
       const net = Number(bucket.tradeCashflow ?? 0);
       const periodRevenue = net > 0 ? net : 0;
-      const periodExpenses = net < 0 ? Math.abs(net) : 0;
+      const periodExpenses = net < 0 ? net : 0;
       cumulativeRevenue += periodRevenue;
-      cumulativeExpenses += periodExpenses;
+      cumulativeExpenses += Math.abs(periodExpenses);
       const profit = cumulativeRevenue - cumulativeExpenses;
       return {
         ts: new Date(bucket.timestamp).getTime(),
@@ -690,6 +690,27 @@ export default function OverviewPage() {
     }
     return padded;
   }, [pnlReport.meta.from, pnlReport.meta.to, pnlReport.series.buckets]);
+
+  const pnlLineDomain = useMemo<[number, number]>(() => {
+    const values = pnlChartData.flatMap((row) => [
+      row.cumulativeRevenue,
+      row.cumulativeExpenses,
+      row.cumulativeProfit,
+    ]).filter((value) => Number.isFinite(value));
+    if (values.length === 0) return [-1, 1];
+    const min = Math.min(...values, 0);
+    const max = Math.max(...values, 0);
+    const pad = Math.max(1, (max - min) * 0.08);
+    return [min - pad, max + pad];
+  }, [pnlChartData]);
+
+  const pnlBarDomain = useMemo<[number, number]>(() => {
+    const flows = pnlChartData.flatMap((row) => [row.periodRevenue, row.periodExpenses]).filter((value) => Number.isFinite(value));
+    if (flows.length === 0) return [-1, 1];
+    const absMax = Math.max(...flows.map((value) => Math.abs(value)), 1);
+    const pad = absMax * 0.12;
+    return [-(absMax + pad), absMax + pad];
+  }, [pnlChartData]);
 
   const pnlXDomain = useMemo(() => {
     const fromTs = pnlReport.meta.from ? new Date(pnlReport.meta.from).getTime() : null;
@@ -2330,18 +2351,19 @@ export default function OverviewPage() {
                 tick={chartAxis.tick}
               />
               <YAxis
-                yAxisId="bars"
+                yAxisId="lines"
                 orientation="left"
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
                 width={primaryYAxisWidth}
-                tickFormatter={(v) => `$${Math.round(Math.abs(v))}`}
+                domain={pnlLineDomain}
+                tickFormatter={(v) => `${v < 0 ? '-' : ''}$${Math.round(Math.abs(v))}`}
               />
               <YAxis
-                yAxisId="lines"
+                yAxisId="bars"
                 orientation="right"
                 hide
-                domain={['auto', 'auto']}
+                domain={pnlBarDomain}
               />
               <Tooltip
                 {...chartTooltip}
@@ -2374,7 +2396,7 @@ export default function OverviewPage() {
               <ReferenceLine yAxisId="lines" y={0} stroke="rgba(255,255,255,0.12)" />
               <ReferenceLine yAxisId="bars" y={0} stroke="rgba(255,255,255,0.08)" />
               <Bar yAxisId="bars" dataKey="periodRevenue" name="periodRevenue" fill="rgba(74, 222, 128, 0.45)" radius={[2, 2, 0, 0]} />
-              <Bar yAxisId="bars" dataKey="periodExpenses" name="periodExpenses" fill="rgba(248, 113, 113, 0.4)" radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="bars" dataKey="periodExpenses" name="periodExpenses" fill="rgba(248, 113, 113, 0.4)" radius={[0, 0, 2, 2]} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeRevenue" name="cumulativeRevenue" stroke="#4ade80" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeProfit" name="cumulativeProfit" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
