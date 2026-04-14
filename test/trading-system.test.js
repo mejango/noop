@@ -211,7 +211,7 @@ const clampSellCallQtyToEntryCap = ({
     return { qty: Math.floor(desired / step) * step, projectedUtilization: null };
   }
 
-  const maxAdditionalMargin = Math.max(0, CALL_ENTRY_CAP_PCT * marginBase - currentUsedMargin);
+  const maxAdditionalMargin = Math.max(0, CALL_EXPOSURE_CAP_PCT * marginBase - currentUsedMargin);
   const maxQtyAtCap = maxAdditionalMargin / marginPerUnit;
   const clampedQty = Math.floor(Math.min(desired, maxQtyAtCap) / step) * step;
   const finalQty = clampedQty >= step ? clampedQty : 0;
@@ -3835,11 +3835,11 @@ describe('Call exposure cap discipline', () => {
     assert.strictEqual(blocked, false, 'Should allow under cap');
   });
 
-  test('at entry buffer but below hard cap → new sell_call blocked', () => {
+  test('at caution threshold but below hard cap → new sell_call still allowed', () => {
     const marginBase = 5000;
     const currentUsed = 2000; // 40%
-    const blocked = (currentUsed / marginBase) >= CALL_ENTRY_CAP_PCT;
-    assert.strictEqual(blocked, true, 'Should block once the 40% entry buffer is reached');
+    const blocked = (currentUsed / marginBase) >= CALL_EXPOSURE_CAP_PCT;
+    assert.strictEqual(blocked, false, '40% is caution, not a hard rejection line');
   });
 
   test('oversized sell_call is clamped down to the entry cap instead of rejected outright', () => {
@@ -3854,9 +3854,9 @@ describe('Call exposure cap discipline', () => {
       marginState,
       marginPerUnit: 750,
     });
-    assert.strictEqual(clamped.qty, 2.66);
+    assert.strictEqual(clamped.qty, 3);
     assert.ok(clamped.projectedUtilization != null);
-    assert.ok(clamped.projectedUtilization <= CALL_ENTRY_CAP_PCT);
+    assert.ok(clamped.projectedUtilization <= CALL_EXPOSURE_CAP_PCT);
   });
 
   test('zero ETH balance → ethBalance guard prevents division issues', () => {
