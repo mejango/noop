@@ -3145,6 +3145,16 @@ const estimateDisplayedMarginUtilization = (marginState) => {
   return estimateMarginUtilization(marginState);
 };
 
+const estimateProjectedDisplayedMarginUtilization = (marginState, additionalMargin = 0) => {
+  if (!marginState) return null;
+  const currentDisplayed = estimateDisplayedMarginUtilization(marginState);
+  const maintenanceBase = getMarginUtilizationBase(marginState);
+  if (currentDisplayed != null && maintenanceBase > 0) {
+    return normalizeMarginUtilizationValue(currentDisplayed + (Math.max(0, Number(additionalMargin ?? 0)) / maintenanceBase));
+  }
+  return estimateMarginUtilization(marginState, additionalMargin);
+};
+
 const clampSellCallQtyToEntryCap = ({
   desiredQty,
   amountStep,
@@ -3177,7 +3187,7 @@ const clampSellCallQtyToEntryCap = ({
   const finalQty = clampedQty >= step ? clampedQty : 0;
   return {
     qty: finalQty,
-    projectedUtilization: estimateMarginUtilization(marginState, finalQty * marginPerUnit),
+    projectedUtilization: estimateProjectedDisplayedMarginUtilization(marginState, finalQty * marginPerUnit),
   };
 };
 
@@ -3228,11 +3238,11 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const normalizedLimitPrice = Number(limitPrice || 0);
   const marginPerUnit = estimateShortCallMarginPerUnit(marginState, positions, restingOrders, spotPrice, strike, normalizedLimitPrice);
   const additionalMargin = normalizedAmount * marginPerUnit;
-  const projectedUtilization = estimateMarginUtilization(marginState, additionalMargin);
+  const projectedUtilization = estimateProjectedDisplayedMarginUtilization(marginState, additionalMargin);
   const capPct = CALL_EXPOSURE_CAP_PCT * 100;
   const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
 
-  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_internal=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the actual ceiling; if the initial size is too large, reduce size down toward the hard cap before rejecting. Use these exact figures; do not invent utilization numbers.`;
+  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the actual ceiling; if the initial size is too large, reduce size down toward the hard cap before rejecting. Use these exact figures; do not invent utilization numbers.`;
 };
 
 const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice, instruments, spotPrice }) => {
@@ -3257,8 +3267,8 @@ const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice,
   );
   const marginBase = getMarginCapacityBase(marginState);
   const buyingPowerHeadroom = Math.max(0, Number(marginState?.initial_margin || 0));
-  const currentUtilization = estimateMarginUtilization(marginState);
-  const projectedUtilization = estimateMarginUtilization(marginState, additionalMargin);
+  const currentUtilization = estimateDisplayedMarginUtilization(marginState);
+  const projectedUtilization = estimateProjectedDisplayedMarginUtilization(marginState, additionalMargin);
   const requiredBuyingPowerAtCap = marginBase > 0 ? Math.max(0, (1 - CALL_EXPOSURE_CAP_PCT) * marginBase) : 0;
   const hardCapHeadroom = buyingPowerHeadroom - requiredBuyingPowerAtCap;
   const allowed = additionalMargin <= buyingPowerHeadroom
@@ -3266,7 +3276,7 @@ const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice,
     && projectedUtilization <= CALL_EXPOSURE_CAP_PCT;
   return {
     allowed,
-    reason: `retry_margin=$${additionalMargin.toFixed(2)}, current_utilization=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_utilization=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, hard_cap_headroom=$${hardCapHeadroom.toFixed(2)}, buying_power=$${buyingPowerHeadroom.toFixed(2)}`,
+    reason: `retry_margin=$${additionalMargin.toFixed(2)}, current_display_utilization=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_display_utilization=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, hard_cap_headroom=$${hardCapHeadroom.toFixed(2)}, buying_power=$${buyingPowerHeadroom.toFixed(2)}`,
   };
 };
 
@@ -3366,7 +3376,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             console.log(`📋 Skip ${rule.action}: margin state unavailable`);
             continue;
           }
-          const currentUtilization = estimateMarginUtilization(liveMarginState, provisionalCallOrderMargin);
+          const currentUtilization = estimateProjectedDisplayedMarginUtilization(liveMarginState, provisionalCallOrderMargin);
           if (currentUtilization == null) {
             console.log(`📋 Skip ${rule.action}: unable to compute margin utilization`);
             continue;

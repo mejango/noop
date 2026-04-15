@@ -149,6 +149,15 @@ const estimateDisplayedMarginUtilization = (marginState) => {
   }
   return estimateMarginUtilization(marginState);
 };
+const estimateProjectedDisplayedMarginUtilization = (marginState, additionalMargin = 0) => {
+  if (!marginState) return null;
+  const currentDisplayed = estimateDisplayedMarginUtilization(marginState);
+  const maintenanceBase = getMarginUtilizationBase(marginState);
+  if (currentDisplayed != null && maintenanceBase > 0) {
+    return normalizeMarginUtilizationValue(currentDisplayed + (Math.max(0, Number(additionalMargin ?? 0)) / maintenanceBase));
+  }
+  return estimateMarginUtilization(marginState, additionalMargin);
+};
 const estimateStandardShortCallInitialMarginPerUnit = (strike, spotPrice, premium) => {
   if (!(spotPrice > 0)) return Infinity;
   const otm = Math.max(0, strike - spotPrice);
@@ -184,10 +193,10 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const normalizedLimitPrice = Number(limitPrice || 0);
   const marginPerUnit = estimateShortCallMarginPerUnit(marginState, positions, restingOrders, spotPrice, strike, normalizedLimitPrice);
   const additionalMargin = normalizedAmount * marginPerUnit;
-  const projectedUtilization = estimateMarginUtilization(marginState, additionalMargin);
+  const projectedUtilization = estimateProjectedDisplayedMarginUtilization(marginState, additionalMargin);
   const capPct = CALL_EXPOSURE_CAP_PCT * 100;
   const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
-  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_internal=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, entry_buffer_cap=${entryCapPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat the hard cap as a ceiling, not a target; new entries should stay below the entry-buffer cap. Use these exact figures; do not invent utilization numbers.`;
+  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the actual ceiling; if the initial size is too large, reduce size down toward the hard cap before rejecting. Use these exact figures; do not invent utilization numbers.`;
 };
 
 const clampSellCallQtyToEntryCap = ({
@@ -222,7 +231,7 @@ const clampSellCallQtyToEntryCap = ({
   const finalQty = clampedQty >= step ? clampedQty : 0;
   return {
     qty: finalQty,
-    projectedUtilization: estimateMarginUtilization(marginState, finalQty * marginPerUnit),
+    projectedUtilization: estimateProjectedDisplayedMarginUtilization(marginState, finalQty * marginPerUnit),
   };
 };
 
@@ -3706,8 +3715,8 @@ describe('confirmation prompt margin context', () => {
       2.8
     );
     assert.ok(context.includes('current_derive_display=57.0%'));
-    assert.ok(context.includes('projected_after_trade_internal=56.6%'));
-    assert.ok(context.includes('entry_buffer_cap=40.0%'));
+    assert.ok(context.includes('projected_after_trade_display='));
+    assert.ok(context.includes('caution_zone=40.0%-45.0%'));
     assert.ok(context.includes('hard_cap=45.0%'));
   });
 
