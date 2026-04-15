@@ -4517,13 +4517,23 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
           timeout: 15000,
         });
         const haikuText = haikuResp.data?.content?.[0]?.text || '';
-        haikuVote = extractJSON(haikuText);
-        if (!haikuVote) {
-          haikuFailure = 'empty or unparsable response';
+        if (!haikuText.trim()) {
+          haikuFailure = 'empty response';
+        } else {
+          haikuVote = extractJSON(haikuText);
+          if (!haikuVote) {
+            haikuFailure = `parse error (len=${haikuText.length})`;
+          }
         }
       } catch (e) {
-        haikuFailure = e.message;
-        console.log(`⚠️ Haiku confirmation failed: ${e.message}`);
+        if (e.code === 'ECONNABORTED') {
+          haikuFailure = 'timeout';
+        } else if (e.response?.status) {
+          haikuFailure = `http ${e.response.status}`;
+        } else {
+          haikuFailure = e.message;
+        }
+        console.log(`⚠️ Haiku confirmation failed: ${haikuFailure}`);
       }
 
       // Vote 2: OpenAI GPT (Taleb temperament)
