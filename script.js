@@ -5858,7 +5858,9 @@ const runBot = async () => {
           try { await generateTradingAdvisory(positions, spotPrice, tickerMap); }
           catch (e) { console.log('📋 Advisory failed (non-fatal):', e.message); }
           // Extract lessons after successful journal generation (not every tick)
-          return extractHypothesisLessons();
+          await extractHypothesisLessons();
+          await reviewClosedTrades();
+          await extractTradeLessons();
         }).catch(e => {
           // Roll back so it retries next tick
           botData.lastJournalGeneration = prevJournalTs;
@@ -5871,9 +5873,6 @@ const runBot = async () => {
       if (process.env.ANTHROPIC_API_KEY) {
         reviewExpiredHypotheses().catch(e => {
           console.log('📊 Hypothesis review failed:', e.message);
-        });
-        reviewClosedTrades().then(() => extractTradeLessons()).catch(e => {
-          console.log('🧾 Trade review pipeline failed:', e.message);
         });
       }
     }
