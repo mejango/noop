@@ -642,10 +642,15 @@ export default function OverviewPage() {
   const pnlChartData = useMemo(() => {
     let cumulativeRevenue = 0;
     let cumulativeExpenses = 0;
+    let lastPortfolioValue = Number.isFinite(pnlReport.summary.openingValue) ? pnlReport.summary.openingValue : 0;
     const rows = pnlReport.series.buckets.map((bucket) => {
       const net = Number(bucket.tradeCashflow ?? 0);
       const periodRevenue = net > 0 ? net : 0;
       const periodExpenses = net < 0 ? net : 0;
+      const bucketPortfolioValue = Number(bucket.endPortfolioValue);
+      if (Number.isFinite(bucketPortfolioValue) && bucketPortfolioValue > 0) {
+        lastPortfolioValue = bucketPortfolioValue;
+      }
       cumulativeRevenue += periodRevenue;
       cumulativeExpenses += Math.abs(periodExpenses);
       const profit = cumulativeRevenue - cumulativeExpenses;
@@ -658,6 +663,7 @@ export default function OverviewPage() {
         periodExpenses,
         periodNet: net,
         orderCount: bucket.orderCount,
+        portfolioValueUsd: lastPortfolioValue,
       };
     });
     const fromTs = pnlReport.meta.from ? new Date(pnlReport.meta.from).getTime() : null;
@@ -673,6 +679,7 @@ export default function OverviewPage() {
         periodExpenses: 0,
         periodNet: 0,
         orderCount: 0,
+        portfolioValueUsd: pnlReport.summary.openingValue,
       });
     }
     if (toTs != null && Number.isFinite(toTs) && (padded.length === 0 || padded[padded.length - 1].ts < toTs)) {
@@ -686,10 +693,17 @@ export default function OverviewPage() {
         periodExpenses: 0,
         periodNet: 0,
         orderCount: 0,
+        portfolioValueUsd: last?.portfolioValueUsd ?? pnlReport.summary.closingValue,
       });
     }
     return padded;
-  }, [pnlReport.meta.from, pnlReport.meta.to, pnlReport.series.buckets]);
+  }, [
+    pnlReport.meta.from,
+    pnlReport.meta.to,
+    pnlReport.series.buckets,
+    pnlReport.summary.closingValue,
+    pnlReport.summary.openingValue,
+  ]);
 
   const pnlLineDomain = useMemo<[number, number]>(() => {
     const values = pnlChartData.flatMap((row) => [
@@ -710,6 +724,17 @@ export default function OverviewPage() {
     const absMax = Math.max(...flows.map((value) => Math.abs(value)), 1);
     const pad = absMax * 0.12;
     return [-(absMax + pad), absMax + pad];
+  }, [pnlChartData]);
+
+  const pnlPortfolioDomain = useMemo<[number, number]>(() => {
+    const values = pnlChartData
+      .map((row) => row.portfolioValueUsd)
+      .filter((value) => Number.isFinite(value) && value > 0);
+    if (values.length === 0) return [0, 1];
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const pad = Math.max(25, (max - min) * 0.08);
+    return [Math.max(0, min - pad), max + pad];
   }, [pnlChartData]);
 
   const pnlXDomain = useMemo(() => {
@@ -2365,6 +2390,15 @@ export default function OverviewPage() {
                 hide
                 domain={pnlBarDomain}
               />
+              <YAxis
+                yAxisId="portfolio"
+                orientation="right"
+                stroke="rgba(125, 211, 252, 0.55)"
+                tick={chartAxis.tick}
+                width={primaryYAxisWidth}
+                domain={pnlPortfolioDomain}
+                tickFormatter={(v) => `$${Math.round(v)}`}
+              />
               <Tooltip
                 {...chartTooltip}
                 formatter={(value: number | string | undefined, name: string | undefined) => {
@@ -2374,6 +2408,7 @@ export default function OverviewPage() {
                     cumulativeProfit: 'Cum Profit',
                     periodRevenue: 'Revenue',
                     periodExpenses: 'Expenses',
+                    portfolioValueUsd: 'Portfolio USD',
                   };
                   const numericValue = typeof value === 'number' ? value : Number(value ?? 0);
                   const key = name ?? '';
@@ -2389,7 +2424,8 @@ export default function OverviewPage() {
                      value === 'cumulativeExpenses' ? 'expenses' :
                      value === 'cumulativeProfit' ? 'profit' :
                      value === 'periodRevenue' ? 'rev bars' :
-                     value === 'periodExpenses' ? 'exp bars' : value}
+                     value === 'periodExpenses' ? 'exp bars' :
+                     value === 'portfolioValueUsd' ? 'portfolio usd' : value}
                   </span>
                 )}
               />
@@ -2400,6 +2436,7 @@ export default function OverviewPage() {
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeRevenue" name="cumulativeRevenue" stroke="#4ade80" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeProfit" name="cumulativeProfit" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
+              <Line yAxisId="portfolio" type="monotone" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={2} dot={false} strokeDasharray="5 4" isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </Card>
