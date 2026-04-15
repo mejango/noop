@@ -4523,6 +4523,8 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
           haikuVote = extractJSON(haikuText);
           if (!haikuVote) {
             haikuFailure = `parse error (len=${haikuText.length})`;
+            const preview = haikuText.replace(/\s+/g, ' ').trim().slice(0, 200);
+            console.log(`⚠️ Haiku confirmation parse preview: ${preview}`);
           }
         }
       } catch (e) {
