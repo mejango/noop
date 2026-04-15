@@ -195,6 +195,22 @@ interface TradeReview {
   created_at: string;
 }
 
+interface LearningStatus {
+  hasTradeReviewsTable: boolean;
+  hasTradeLessonsTable: boolean;
+  recentOrderStats: {
+    total_orders: number;
+    instrument_count: number;
+    first_timestamp: string | null;
+    last_timestamp: string | null;
+  };
+  reviewSummary: {
+    review_count: number;
+    instrument_count: number;
+    last_created_at: string | null;
+  };
+}
+
 const ACTION_STYLES: Record<string, { label: string; color: string }> = {
   buy_put: { label: 'BUY PUT', color: 'bg-red-500/20 text-red-400' },
   sell_put: { label: 'SELL PUT', color: 'bg-green-500/20 text-green-400' },
@@ -230,7 +246,7 @@ export default function AdvisorDrawer() {
   const [journalFilter, setJournalFilter] = useState<string | null>(null);
   const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null });
   const [opsLoading, setOpsLoading] = useState(false);
-  const [learningData, setLearningData] = useState<{ lessons: TradeLesson[]; reviews: TradeReview[] }>({ lessons: [], reviews: [] });
+  const [learningData, setLearningData] = useState<{ lessons: TradeLesson[]; reviews: TradeReview[]; status: LearningStatus | null; error?: string | null }>({ lessons: [], reviews: [], status: null, error: null });
   const [learningLoading, setLearningLoading] = useState(false);
   const [hypStats, setHypStats] = useState<{
     total: number; reviewed: number; pending: number;
@@ -359,6 +375,8 @@ export default function AdvisorDrawer() {
         setLearningData({
           lessons: data.lessons || [],
           reviews: data.reviews || [],
+          status: data.status || null,
+          error: data.error || null,
         });
       }
     } catch { /* silent */ }
@@ -820,6 +838,30 @@ export default function AdvisorDrawer() {
 
             {learningLoading && learningData.lessons.length === 0 && learningData.reviews.length === 0 && (
               <p className="text-gray-500 text-xs">Loading trade learning...</p>
+            )}
+
+            {learningData.status && (
+              <div className="border border-white/10 bg-white/5 px-3 py-2 space-y-1">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Pipeline Status</p>
+                <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-400">
+                  <p>reviews table: <span className={learningData.status.hasTradeReviewsTable ? 'text-green-400' : 'text-red-400'}>{learningData.status.hasTradeReviewsTable ? 'present' : 'missing'}</span></p>
+                  <p>lessons table: <span className={learningData.status.hasTradeLessonsTable ? 'text-green-400' : 'text-red-400'}>{learningData.status.hasTradeLessonsTable ? 'present' : 'missing'}</span></p>
+                  <p>recent trade orders: <span className="text-gray-300">{learningData.status.recentOrderStats.total_orders}</span></p>
+                  <p>recent instruments: <span className="text-gray-300">{learningData.status.recentOrderStats.instrument_count}</span></p>
+                  <p>stored reviews: <span className="text-gray-300">{learningData.status.reviewSummary.review_count}</span></p>
+                  <p>reviewed instruments: <span className="text-gray-300">{learningData.status.reviewSummary.instrument_count}</span></p>
+                </div>
+                <div className="flex flex-wrap gap-3 text-[10px] text-gray-600">
+                  <span>recent order window: {learningData.status.recentOrderStats.first_timestamp ? `${timeAgo(learningData.status.recentOrderStats.first_timestamp)} → ${timeAgo(learningData.status.recentOrderStats.last_timestamp || learningData.status.recentOrderStats.first_timestamp)}` : 'none'}</span>
+                  <span>last review: {learningData.status.reviewSummary.last_created_at ? timeAgo(learningData.status.reviewSummary.last_created_at) : 'none'}</span>
+                </div>
+              </div>
+            )}
+
+            {learningData.error && (
+              <div className="border border-red-500/20 bg-red-500/5 px-3 py-2">
+                <p className="text-xs text-red-400">{learningData.error}</p>
+              </div>
             )}
 
             {learningData.lessons.length > 0 && (

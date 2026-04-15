@@ -492,6 +492,34 @@ function prepareAll(d: Database.Database) {
       ORDER BY created_at DESC
     `),
 
+    getTableExists: d.prepare(`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table' AND name = ?
+      LIMIT 1
+    `),
+
+    getRecentTradeOrderStats: d.prepare(`
+      SELECT
+        COUNT(*) as total_orders,
+        COUNT(DISTINCT instrument_name) as instrument_count,
+        MIN(timestamp) as first_timestamp,
+        MAX(timestamp) as last_timestamp
+      FROM orders
+      WHERE success = 1
+        AND action IN ('sell_call', 'buyback_call', 'buy_put', 'sell_put')
+        AND timestamp > datetime('now', '-21 days')
+    `),
+
+    getTradeReviewSummary: d.prepare(`
+      SELECT
+        COUNT(*) as review_count,
+        COUNT(DISTINCT instrument_name) as instrument_count,
+        MAX(created_at) as last_created_at
+      FROM trade_reviews
+      WHERE is_active = 1
+    `),
+
     // Portfolio P&L
     getPortfolioHistory: d.prepare(`
       SELECT timestamp, spot_price, usdc_balance, eth_balance,
@@ -1163,6 +1191,33 @@ export function getActiveTradeLessons() {
       created_at: string;
     }[];
   } catch { return []; }
+}
+
+export function hasTable(name: string) {
+  try {
+    return !!getStmts().getTableExists.get(name);
+  } catch { return false; }
+}
+
+export function getRecentTradeOrderStats() {
+  try {
+    return getStmts().getRecentTradeOrderStats.get() as {
+      total_orders: number;
+      instrument_count: number;
+      first_timestamp: string | null;
+      last_timestamp: string | null;
+    } | undefined;
+  } catch { return undefined; }
+}
+
+export function getTradeReviewSummary() {
+  try {
+    return getStmts().getTradeReviewSummary.get() as {
+      review_count: number;
+      instrument_count: number;
+      last_created_at: string | null;
+    } | undefined;
+  } catch { return undefined; }
 }
 
 export function getPortfolioHistory(since: string) {
