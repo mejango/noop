@@ -29,13 +29,17 @@ interface WikiPageMeta {
   category: string;
   wordCount: number;
   lastModified: string;
-  stale: boolean;
+  lastReviewed: string | null;
 }
 
 export function GET() {
   try {
-    const STALE_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-    const now = Date.now();
+    let meta: Record<string, unknown> = {};
+    try {
+      meta = JSON.parse(fs.readFileSync(path.join(WIKI_DIR, '.meta.json'), 'utf-8'));
+    } catch { /* no meta yet */ }
+
+    const lastReviewed = typeof meta.last_lint === 'string' ? meta.last_lint : null;
 
     const pages: WikiPageMeta[] = WIKI_PAGES.map((page) => {
       const fullPath = path.join(WIKI_DIR, page.path);
@@ -51,17 +55,10 @@ export function GET() {
       }
 
       const wordCount = content.split(/\s+/).filter(Boolean).length;
-      const stale = now - new Date(lastModified).getTime() > STALE_THRESHOLD_MS;
       const category = page.path.split('/')[0];
 
-      return { path: page.path, title: page.title, category, wordCount, lastModified, stale };
+      return { path: page.path, title: page.title, category, wordCount, lastModified, lastReviewed };
     });
-
-    // Read meta for additional info
-    let meta = {};
-    try {
-      meta = JSON.parse(fs.readFileSync(path.join(WIKI_DIR, '.meta.json'), 'utf-8'));
-    } catch { /* no meta yet */ }
 
     return NextResponse.json({ pages, meta });
   } catch (e: unknown) {

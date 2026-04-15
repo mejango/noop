@@ -10,7 +10,7 @@ interface WikiPageMeta {
   category: string;
   wordCount: number;
   lastModified: string;
-  stale: boolean;
+  lastReviewed: string | null;
 }
 
 interface WikiPageDetail {
@@ -19,6 +19,7 @@ interface WikiPageDetail {
   content: string;
   wordCount: number;
   lastModified: string;
+  lastReviewed?: string | null;
   history: { timestamp: string; size: number }[];
 }
 
@@ -44,6 +45,10 @@ function timeAgo(ts: string): string {
   if (hrs < 24) return `${hrs}h ago`;
   const days = Math.floor(hrs / 24);
   return `${days}d ago`;
+}
+
+function formatRelative(ts: string | null | undefined): string {
+  return ts ? timeAgo(ts) : 'never';
 }
 
 export default function WikiBrowser() {
@@ -76,7 +81,8 @@ export default function WikiBrowser() {
       const res = await fetch(`/api/wiki/${slug}`);
       if (res.ok) {
         const data = await res.json();
-        setPageDetail(data);
+        const pageMeta = pages.find((page) => page.path === pagePath);
+        setPageDetail({ ...data, lastReviewed: pageMeta?.lastReviewed ?? null });
       } else {
         const data = await res.json().catch(() => ({ error: 'Failed to load page' }));
         setPageError(data.error || `Failed to load ${pagePath}`);
@@ -85,7 +91,7 @@ export default function WikiBrowser() {
       setPageError(`Failed to load ${pagePath}`);
     }
     setLoading(false);
-  }, []);
+  }, [pages]);
 
   // Search
   const handleSearch = useCallback(async () => {
@@ -181,12 +187,8 @@ export default function WikiBrowser() {
                   <p className="text-xs text-white font-bold">{pageDetail.title}</p>
                   <div className="flex items-center gap-2">
                     <span className="text-[10px] text-gray-600">{pageDetail.wordCount} words</span>
-                    <span className={`text-[10px] ${
-                      Date.now() - new Date(pageDetail.lastModified).getTime() > 7 * 24 * 60 * 60 * 1000
-                        ? 'text-amber-400' : 'text-gray-500'
-                    }`}>
-                      {timeAgo(pageDetail.lastModified)}
-                    </span>
+                    <span className="text-[10px] text-gray-500">updated {formatRelative(pageDetail.lastModified)}</span>
+                    <span className="text-[10px] text-gray-600">reviewed {formatRelative(pageDetail.lastReviewed)}</span>
                   </div>
                 </div>
 
@@ -250,15 +252,11 @@ export default function WikiBrowser() {
                           <span className="text-xs text-gray-300 group-hover:text-white truncate">
                             {page.title}
                           </span>
-                          {page.stale && (
-                            <span className="text-[9px] text-amber-400 bg-amber-500/10 px-1 py-0.5 shrink-0">
-                              STALE
-                            </span>
-                          )}
                         </div>
                         <div className="flex items-center gap-2 shrink-0 ml-2">
                           <span className="text-[10px] text-gray-600">{page.wordCount}w</span>
-                          <span className="text-[10px] text-gray-600">{timeAgo(page.lastModified)}</span>
+                          <span className="text-[10px] text-gray-500">upd {formatRelative(page.lastModified)}</span>
+                          <span className="text-[10px] text-gray-600">rev {formatRelative(page.lastReviewed)}</span>
                         </div>
                       </button>
                     ))}
