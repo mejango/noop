@@ -6,6 +6,7 @@ import {
   getOnchainData,
   getSignals,
   getJournalEntries,
+  getRecentOrders,
   getOptionsDistribution,
   getAvgCallPremium7d,
   getLatestOnchainRawData,
@@ -55,6 +56,7 @@ async function _buildUncached() {
   const onchain = getOnchainData(since24h) as Record<string, unknown>[];
   const latestRawRow = getLatestOnchainRawData(since24h);
   const signals = getSignals(since7d, 30) as Record<string, unknown>[];
+  const recentOrders = getRecentOrders(40) as Record<string, unknown>[];
 
   // bot_ticks may not exist yet — handle gracefully
   let ticks: Record<string, unknown>[] = [];
@@ -238,6 +240,25 @@ async function _buildUncached() {
       })),
       total_position_value: positions.reduce((s: number, p: Record<string, unknown>) => s + Number(p.mark_value ?? 0), 0),
       total_unrealized_pnl: positions.reduce((s: number, p: Record<string, unknown>) => s + Number(p.unrealized_pnl ?? 0), 0),
+    },
+
+    recent_execution_history: {
+      _description: 'Recent successful executed orders. Read-only chat should use this to reason about recently opened or closed positions, including buybacks and exits.',
+      orders: recentOrders
+        .filter((o) => Number(o.success ?? 0) === 1)
+        .map((o) => ({
+          timestamp: o.timestamp ?? null,
+          action: o.action ?? null,
+          instrument: o.instrument_name ?? null,
+          strike: o.strike != null ? Number(o.strike) : null,
+          expiry: o.expiry ?? null,
+          delta: o.delta != null ? Number(o.delta) : null,
+          limit_price: o.price != null ? Number(o.price) : null,
+          filled_amount: o.filled_amount != null ? Number(o.filled_amount) : null,
+          fill_price: o.fill_price != null ? Number(o.fill_price) : null,
+          total_value: o.total_value != null ? Number(o.total_value) : null,
+          spot_price: o.spot_price != null ? Number(o.spot_price) : null,
+        })),
     },
 
     market_sentiment: (() => {

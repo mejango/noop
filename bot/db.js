@@ -296,7 +296,46 @@ db.exec(`
     expiry_count INTEGER
   );
   CREATE INDEX IF NOT EXISTS idx_oi_snapshots_timestamp ON oi_snapshots(timestamp);
+
+  CREATE TABLE IF NOT EXISTS trade_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument_name TEXT NOT NULL,
+    action_family TEXT NOT NULL,
+    opened_at TEXT,
+    closed_at TEXT NOT NULL,
+    review_window_days INTEGER NOT NULL DEFAULT 1,
+    horizon_end_at TEXT,
+    order_ids TEXT NOT NULL,
+    review_status TEXT NOT NULL,
+    review_confidence REAL,
+    summary TEXT NOT NULL,
+    lessons TEXT,
+    pnl_realized REAL,
+    premium_opened REAL,
+    premium_closed REAL,
+    spot_open REAL,
+    spot_close REAL,
+    spot_min_while_open REAL,
+    spot_max_while_open REAL,
+    spot_min_after_close REAL,
+    spot_max_after_close REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    is_active INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(instrument_name, closed_at, review_window_days)
+  );
+  CREATE INDEX IF NOT EXISTS idx_trade_reviews_closed_at ON trade_reviews(closed_at);
+
+  CREATE TABLE IF NOT EXISTS trade_lessons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lesson TEXT NOT NULL,
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    archived_at TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1
+  );
 `);
+try { db.exec('ALTER TABLE trade_reviews ADD COLUMN review_window_days INTEGER NOT NULL DEFAULT 1'); } catch {}
+try { db.exec('ALTER TABLE trade_reviews ADD COLUMN horizon_end_at TEXT'); } catch {}
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
 
@@ -548,6 +587,65 @@ const stmts = {
       AND outcome_status != 'pending'
       AND outcome_reviewed_at > COALESCE(
         (SELECT MAX(created_at) FROM hypothesis_lessons), '1970-01-01')
+  `),
+
+  getTradeReviewByInstrumentClosedAt: db.prepare(`
+    SELECT id
+    FROM trade_reviews
+    WHERE instrument_name = @instrument_name
+      AND closed_at = @closed_at
+      AND review_window_days = @review_window_days
+    LIMIT 1
+  `),
+
+  insertTradeReview: db.prepare(`
+    INSERT INTO trade_reviews (
+      instrument_name, action_family, opened_at, closed_at, review_window_days, horizon_end_at, order_ids,
+      review_status, review_confidence, summary, lessons, pnl_realized,
+      premium_opened, premium_closed, spot_open, spot_close,
+      spot_min_while_open, spot_max_while_open, spot_min_after_close, spot_max_after_close
+    ) VALUES (
+      @instrument_name, @action_family, @opened_at, @closed_at, @review_window_days, @horizon_end_at, @order_ids,
+      @review_status, @review_confidence, @summary, @lessons, @pnl_realized,
+      @premium_opened, @premium_closed, @spot_open, @spot_close,
+      @spot_min_while_open, @spot_max_while_open, @spot_min_after_close, @spot_max_after_close
+    )
+  `),
+
+  getRecentTradeReviews: db.prepare(`
+    SELECT id, instrument_name, action_family, opened_at, closed_at, review_window_days, horizon_end_at, order_ids,
+      review_status, review_confidence, summary, lessons, pnl_realized,
+      premium_opened, premium_closed, spot_open, spot_close,
+      spot_min_while_open, spot_max_while_open, spot_min_after_close, spot_max_after_close,
+      created_at
+    FROM trade_reviews
+    WHERE is_active = 1
+    ORDER BY closed_at DESC
+    LIMIT @limit
+  `),
+
+  countReviewedSinceLastTradeLesson: db.prepare(`
+    SELECT COUNT(*) as count
+    FROM trade_reviews
+    WHERE created_at > COALESCE(
+      (SELECT MAX(created_at) FROM trade_lessons), '1970-01-01')
+  `),
+
+  insertTradeLesson: db.prepare(`
+    INSERT INTO trade_lessons (lesson, evidence_count)
+    VALUES (@lesson, @evidence_count)
+  `),
+
+  getActiveTradeLessons: db.prepare(`
+    SELECT id, lesson, evidence_count, created_at
+    FROM trade_lessons
+    WHERE is_active = 1
+    ORDER BY created_at DESC
+  `),
+
+  archiveTradeLesson: db.prepare(`
+    UPDATE trade_lessons SET is_active = 0, archived_at = datetime('now')
+    WHERE id = @id
   `),
 
   getOptionsDistribution: db.prepare(`
@@ -1298,6 +1396,59 @@ const countReviewedSinceLastLesson = () => {
   return stmts.countReviewedSinceLastLesson.get()?.count || 0;
 };
 
+const hasTradeReview = (instrumentName, closedAt, reviewWindowDays) => {
+  return !!stmts.getTradeReviewByInstrumentClosedAt.get({
+    instrument_name: instrumentName,
+    closed_at: closedAt,
+    review_window_days: reviewWindowDays,
+  });
+};
+
+const insertTradeReview = (review) => {
+  stmts.insertTradeReview.run({
+    instrument_name: review.instrument_name,
+    action_family: review.action_family,
+    opened_at: review.opened_at || null,
+    closed_at: review.closed_at,
+    review_window_days: review.review_window_days || 1,
+    horizon_end_at: review.horizon_end_at || null,
+    order_ids: JSON.stringify(review.order_ids || []),
+    review_status: review.review_status,
+    review_confidence: review.review_confidence ?? null,
+    summary: review.summary,
+    lessons: review.lessons ? JSON.stringify(review.lessons) : null,
+    pnl_realized: review.pnl_realized ?? null,
+    premium_opened: review.premium_opened ?? null,
+    premium_closed: review.premium_closed ?? null,
+    spot_open: review.spot_open ?? null,
+    spot_close: review.spot_close ?? null,
+    spot_min_while_open: review.spot_min_while_open ?? null,
+    spot_max_while_open: review.spot_max_while_open ?? null,
+    spot_min_after_close: review.spot_min_after_close ?? null,
+    spot_max_after_close: review.spot_max_after_close ?? null,
+  });
+};
+
+const getRecentTradeReviews = (limit = 20) => {
+  return stmts.getRecentTradeReviews.all({ limit });
+};
+
+const countReviewedSinceLastTradeLesson = () => {
+  return stmts.countReviewedSinceLastTradeLesson.get()?.count || 0;
+};
+
+const insertTradeLesson = (lesson, evidenceCount) => {
+  stmts.insertTradeLesson.run({ lesson, evidence_count: evidenceCount });
+};
+
+const getActiveTradeLessons = () => {
+  return stmts.getActiveTradeLessons.all();
+};
+
+const archiveTradeLesson = (id) => {
+  stmts.archiveTradeLesson.run({ id });
+};
+
 // ─── Trading Rules & Pending Actions Helpers ─────────────────────────────────
 
 const replaceActiveRules = (advisoryId, rules) => {
@@ -1499,6 +1650,13 @@ module.exports = {
   getActiveLessons,
   archiveLesson,
   countReviewedSinceLastLesson,
+  hasTradeReview,
+  insertTradeReview,
+  getRecentTradeReviews,
+  countReviewedSinceLastTradeLesson,
+  insertTradeLesson,
+  getActiveTradeLessons,
+  archiveTradeLesson,
   saveBotState,
   loadBotState,
   loadPriceHistoryFromDb,

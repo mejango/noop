@@ -2015,6 +2015,276 @@ Output JSON:
   }
 };
 
+const getTradeCashflow = (order) => {
+  const totalValue = Number(order.total_value || 0);
+  if (order.action === 'sell_call' || order.action === 'sell_put') return totalValue;
+  if (order.action === 'buy_put' || order.action === 'buyback_call') return -totalValue;
+  return 0;
+};
+
+const getTradeActionFamily = (action) => {
+  if (action === 'sell_call' || action === 'buyback_call') return 'short_call_campaign';
+  if (action === 'buy_put' || action === 'sell_put') return 'long_put_campaign';
+  return null;
+};
+
+const deriveClosedTradeCampaigns = (orders) => {
+  const byInstrument = new Map();
+  for (const order of orders) {
+    if (!order?.instrument_name || Number(order?.success || 0) !== 1) continue;
+    const family = getTradeActionFamily(order.action);
+    if (!family) continue;
+    const list = byInstrument.get(order.instrument_name) || [];
+    list.push({ ...order, family });
+    byInstrument.set(order.instrument_name, list);
+  }
+
+  const campaigns = [];
+  const EPS = 1e-9;
+
+  for (const [instrumentName, instrumentOrders] of byInstrument.entries()) {
+    instrumentOrders.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    let netExposure = 0;
+    let active = null;
+
+    for (const order of instrumentOrders) {
+      const qty = Math.abs(Number(order.filled_amount || order.intended_amount || 0));
+      if (!(qty > 0)) continue;
+
+      const isOpen = order.action === 'sell_call' || order.action === 'buy_put';
+      const exposureDelta = isOpen ? qty : -qty;
+
+      if (!active && isOpen) {
+        active = {
+          instrument_name: instrumentName,
+          action_family: order.family,
+          opened_at: order.timestamp,
+          closed_at: null,
+          order_ids: [],
+          orders: [],
+          open_orders: [],
+          close_orders: [],
+          premium_opened: 0,
+          premium_closed: 0,
+          pnl_realized: 0,
+          spot_open: Number(order.spot_price || 0) || null,
+          spot_close: null,
+        };
+      }
+
+      if (!active) continue;
+
+      active.order_ids.push(order.id);
+      active.orders.push(order);
+      active.pnl_realized += getTradeCashflow(order);
+      if (isOpen) {
+        active.open_orders.push(order);
+        active.premium_opened += Number(order.total_value || 0);
+      } else {
+        active.close_orders.push(order);
+        active.premium_closed += Number(order.total_value || 0);
+      }
+
+      netExposure += exposureDelta;
+
+      if (netExposure <= EPS) {
+        active.closed_at = order.timestamp;
+        active.spot_close = Number(order.spot_price || 0) || null;
+        campaigns.push(active);
+        active = null;
+        netExposure = 0;
+      }
+    }
+  }
+
+  return campaigns;
+};
+
+const TRADE_REVIEW_WINDOWS_DAYS = [1, 3, 7];
+
+let _tradeReviewInFlight = false;
+const reviewClosedTrades = async () => {
+  if (_tradeReviewInFlight || !process.env.ANTHROPIC_API_KEY || !db) return;
+  _tradeReviewInFlight = true;
+  try {
+    const since = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString();
+    const recentOrders = db.getRecentOrders(since, 250) || [];
+    const now = Date.now();
+    const campaigns = deriveClosedTradeCampaigns(recentOrders);
+    const pendingReviews = [];
+    for (const campaign of campaigns) {
+      const closedAtMs = new Date(campaign.closed_at).getTime();
+      for (const reviewWindowDays of TRADE_REVIEW_WINDOWS_DAYS) {
+        const horizonEndMs = closedAtMs + reviewWindowDays * 24 * 60 * 60 * 1000;
+        if (now < horizonEndMs) continue;
+        if (db.hasTradeReview(campaign.instrument_name, campaign.closed_at, reviewWindowDays)) continue;
+        pendingReviews.push({
+          ...campaign,
+          review_window_days: reviewWindowDays,
+          horizon_end_at: new Date(horizonEndMs).toISOString(),
+        });
+      }
+    }
+    if (pendingReviews.length === 0) return;
+
+    console.log(`🧾 Reviewing ${pendingReviews.length} closed trade window(s)...`);
+
+    for (const campaign of pendingReviews.slice(0, 4)) {
+      try {
+        const priceWindow = db.getRecentSpotPrices(campaign.opened_at) || [];
+        const whileOpen = priceWindow.filter(p => p.timestamp >= campaign.opened_at && p.timestamp <= campaign.closed_at);
+        const afterClose = priceWindow.filter(p => p.timestamp > campaign.closed_at && p.timestamp <= campaign.horizon_end_at);
+
+        const reviewPrompt = `You are reviewing a CLOSED options trade campaign for a Spitznagel-style ETH tail-hedging bot.
+
+Your job is not to judge by P&L alone. Use hindsight carefully:
+- A losing trade can still have been the right decision at the time.
+- A profitable trade can still have been the wrong decision if it violated discipline.
+- Distinguish execution error, sizing error, strike-selection error, and acceptable arithmetic bleed.
+- This is a staged hindsight review. Only use post-close information through the specified horizon, not beyond it.
+
+Campaign:
+- Instrument: ${campaign.instrument_name}
+- Family: ${campaign.action_family}
+- Opened: ${campaign.opened_at}
+- Closed: ${campaign.closed_at}
+- Review horizon: ${campaign.review_window_days} day(s) after close, through ${campaign.horizon_end_at}
+- Realized campaign cashflow: $${campaign.pnl_realized.toFixed(4)}
+- Premium opened: $${campaign.premium_opened.toFixed(4)}
+- Premium closed: $${campaign.premium_closed.toFixed(4)}
+- Spot at open: ${campaign.spot_open != null ? `$${campaign.spot_open}` : 'N/A'}
+- Spot at close: ${campaign.spot_close != null ? `$${campaign.spot_close}` : 'N/A'}
+- Spot range while open: ${whileOpen.length > 0 ? `$${Math.min(...whileOpen.map(p => p.price)).toFixed(2)} -> $${Math.max(...whileOpen.map(p => p.price)).toFixed(2)}` : 'N/A'}
+- Spot range after close through horizon: ${afterClose.length > 0 ? `$${Math.min(...afterClose.map(p => p.price)).toFixed(2)} -> $${Math.max(...afterClose.map(p => p.price)).toFixed(2)}` : 'N/A'}
+
+Orders:
+${campaign.orders.map(o => `${o.timestamp} | ${o.action} ${o.instrument_name} | qty=${o.filled_amount || o.intended_amount} | fill=$${o.fill_price || o.price || 0} | total=$${o.total_value || 0} | spot=$${o.spot_price || 0}`).join('\n')}
+
+Review categories:
+- disciplined_win: good decision and good execution
+- disciplined_loss: good decision at the time, outcome unfavorable or bleed acceptable
+- execution_mistake: thesis may have been fine, but execution quality was poor
+- risk_mistake: strike, timing, sizing, or exit logic was wrong
+
+Output JSON only:
+{
+  "status":"disciplined_win|disciplined_loss|execution_mistake|risk_mistake",
+  "confidence":0.0,
+  "summary":"2-4 sentence review that explicitly says whether the decision was right at the time",
+  "lessons":["short durable lesson 1","short durable lesson 2"]
+}`;
+
+        const response = await axios.post('https://api.anthropic.com/v1/messages', {
+          model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
+          max_tokens: 700,
+          messages: [{ role: 'user', content: reviewPrompt }],
+        }, {
+          headers: {
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+          timeout: 30000,
+        });
+
+        const text = response.data?.content?.[0]?.text || '';
+        const result = extractJSON(text);
+        if (!result?.status || !result?.summary) {
+          console.log(`🧾 Trade review parse failed for ${campaign.instrument_name}`);
+          continue;
+        }
+
+        db.insertTradeReview({
+          instrument_name: campaign.instrument_name,
+          action_family: campaign.action_family,
+          opened_at: campaign.opened_at,
+          closed_at: campaign.closed_at,
+          review_window_days: campaign.review_window_days,
+          horizon_end_at: campaign.horizon_end_at,
+          order_ids: campaign.order_ids,
+          review_status: result.status,
+          review_confidence: result.confidence || null,
+          summary: result.summary,
+          lessons: Array.isArray(result.lessons) ? result.lessons.slice(0, 3) : [],
+          pnl_realized: campaign.pnl_realized,
+          premium_opened: campaign.premium_opened,
+          premium_closed: campaign.premium_closed,
+          spot_open: campaign.spot_open,
+          spot_close: campaign.spot_close,
+          spot_min_while_open: whileOpen.length > 0 ? Math.min(...whileOpen.map(p => p.price)) : null,
+          spot_max_while_open: whileOpen.length > 0 ? Math.max(...whileOpen.map(p => p.price)) : null,
+          spot_min_after_close: afterClose.length > 0 ? Math.min(...afterClose.map(p => p.price)) : null,
+          spot_max_after_close: afterClose.length > 0 ? Math.max(...afterClose.map(p => p.price)) : null,
+        });
+        console.log(`🧾 Trade review stored for ${campaign.instrument_name} [${campaign.review_window_days}d]: ${result.status}`);
+      } catch (e) {
+        console.log(`🧾 Trade review failed for ${campaign.instrument_name} [${campaign.review_window_days}d]: ${e.message}`);
+      }
+    }
+  } finally {
+    _tradeReviewInFlight = false;
+  }
+};
+
+const extractTradeLessons = async () => {
+  if (!process.env.ANTHROPIC_API_KEY || !db) return;
+  const reviewedCount = db.countReviewedSinceLastTradeLesson();
+  if (reviewedCount < 2) return;
+
+  console.log(`🧠 Extracting trade lessons from ${reviewedCount} new trade review(s)...`);
+
+  const reviews = db.getRecentTradeReviews(30) || [];
+  const currentTradeLessons = db.getActiveTradeLessons() || [];
+
+  const prompt = `You are extracting reusable lessons from reviewed trade campaigns for a Spitznagel-style ETH options bot.
+
+Recent trade reviews:
+${reviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] pnl=$${Number(r.pnl_realized || 0).toFixed(2)} summary=${r.summary}`).join('\n')}
+
+Current active trade lessons:
+${currentTradeLessons.length > 0 ? currentTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
+
+Extract 2-4 durable lessons about:
+- strike selection
+- exit timing
+- execution quality
+- when a losing trade was still the right decision
+
+Archive current lessons that no longer hold.
+
+Output JSON:
+{"new_lessons":[{"lesson":"<text>","evidence_count":<number>}],"archive_ids":[<ids>]}`;
+
+  try {
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
+      max_tokens: 800,
+      messages: [{ role: 'user', content: prompt }],
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      timeout: 30000,
+    });
+
+    const text = response.data?.content?.[0]?.text || '';
+    const result = extractJSON(text);
+    if (!result) return;
+
+    for (const lesson of (result.new_lessons || [])) {
+      if (lesson?.lesson) db.insertTradeLesson(lesson.lesson, lesson.evidence_count || 0);
+    }
+    for (const id of (result.archive_ids || [])) {
+      db.archiveTradeLesson(id);
+    }
+    console.log(`🧠 Trade lessons extracted: ${result.new_lessons?.length || 0} new, ${result.archive_ids?.length || 0} archived`);
+  } catch (e) {
+    console.log('🧠 Trade lesson extraction failed:', e.message);
+  }
+};
+
 // ─── Wiki Knowledge System ──────────────────────────────────────────────────
 
 const WIKI_DIR = process.env.WIKI_DIR || path.join(__dirname, 'knowledge');
@@ -2120,6 +2390,8 @@ const seedWikiFromHistory = async (incomingEntries = []) => {
   const historicalJournal = db.getRecentJournalEntries(200) || [];
   const reviewedHypotheses = db.getReviewedHypotheses(50) || [];
   const activeLessons = db.getActiveLessons() || [];
+  const recentTradeReviews = db.getRecentTradeReviews(20) || [];
+  const activeTradeLessons = db.getActiveTradeLessons() || [];
 
   const mergedEntries = [...incomingEntries];
   for (const entry of historicalJournal) {
@@ -2163,6 +2435,12 @@ ${hypothesesText}
 
 ## Active Lessons
 ${lessonsText}
+
+## Reviewed Trade Campaigns (${recentTradeReviews.length})
+${recentTradeReviews.slice(0, 12).map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] ${r.summary}`).join('\n') || 'None'}
+
+## Active Trade Lessons
+${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
 
 ## Instructions
 1. Generate ONLY the missing or placeholder wiki pages listed below
@@ -2237,6 +2515,8 @@ const ingestToWiki = async (journalEntries) => {
   const pagesContext = Object.entries(pages)
     .map(([p, content]) => `--- ${p} ---\n${content}`)
     .join('\n\n');
+  const recentTradeReviews = db.getRecentTradeReviews(20) || [];
+  const activeTradeLessons = db.getActiveTradeLessons() || [];
 
   const entriesText = journalEntries
     .map(e => `[${e.type || e.entry_type || 'unknown'}] ${e.content}`)
@@ -2252,6 +2532,12 @@ ${pagesContext}
 
 ## New Journal Entries
 ${entriesText}
+
+## Reviewed Trade Campaigns
+${recentTradeReviews.length > 0 ? recentTradeReviews.slice(0, 10).map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] ${r.summary}`).join('\n') : 'None'}
+
+## Active Trade Lessons
+${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
 
 ## Instructions
 1. Analyze which wiki pages need updating based on the new journal entries
@@ -2797,10 +3083,13 @@ const generateJournalEntries = async (tickSummary, botData) => {
 
     // Build hypothesis performance summary for prompt injection
     let hypothesisPerformance = '';
+    let tradeLearningContext = '';
     try {
       const hypStats = db.getHypothesisStats(30);
       const lessons = db.getActiveLessons();
       const recentVerdicts = db.getReviewedHypotheses(5);
+      const tradeLessons = db.getActiveTradeLessons();
+      const recentTradeReviews = db.getRecentTradeReviews(5);
 
       if (hypStats && hypStats.total > 0) {
         const reviewed = hypStats.total - (hypStats.pending || 0);
@@ -2823,6 +3112,17 @@ ${recentVerdicts.map(v => `#${v.id} [${v.outcome_status}]: ${v.outcome_verdict |
 ${lessons.length > 0 ? `Active lessons:\n${lessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}` : ''}
 
 IMPORTANT: A high disproven_bounded rate means the bot is buying cheap insurance that expires worthless — that IS the strategy working. Focus on reducing disproven_costly rate (buying expensive protection), not on increasing prediction accuracy. The best hypothesis identifies when protection is cheap, not where price goes. Each hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity?`;
+      }
+
+      if (tradeLessons.length > 0 || recentTradeReviews.length > 0) {
+        tradeLearningContext = `\n\n=== TRADE LEARNING ===
+Recent trade reviews:
+${recentTradeReviews.length > 0 ? recentTradeReviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n') : 'None'}
+
+Active trade lessons:
+${tradeLessons.length > 0 ? tradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
+
+Use these trade lessons to improve strike selection, execution, and exit timing. Judge whether past losing trades were still correct at the time, and whether profitable trades were actually disciplined.`;
       }
     } catch (e) {
       console.log('📓 Failed to build hypothesis performance summary:', e.message);
@@ -2897,7 +3197,7 @@ The snapshot includes a put_price_divergence section that detects when put optio
 
 This is critical for the Spitznagel strategy: we want to buy puts when they're CHEAP (before the market prices in risk), not after a spike. If put spikes reliably lead price drops, the bot should be accumulating protection during PUT_CHEAP_PRICE_STABLE windows.
 
-Ground everything in the data. Focus on: cost of protection (put pricing), revenue opportunity (call premium), crash probability (flow reversals), and portfolio geometry (how put+call positions work together).${hypothesisPerformance}`;
+Ground everything in the data. Focus on: cost of protection (put pricing), revenue opportunity (call premium), crash probability (flow reversals), and portfolio geometry (how put+call positions work together).${hypothesisPerformance}${tradeLearningContext}`;
 
     // Inject wiki context if available
     const wikiContext = queryWikiContext();
@@ -4143,6 +4443,8 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
     let livePositions = [];
     try { livePositions = await fetchPositions(); } catch { /* ok */ }
     const restingOrders = db.getOpenRestingOrders();
+    const activeTradeLessons = db.getActiveTradeLessons();
+    const recentTradeReviews = db.getRecentTradeReviews(3);
     const displayedMarginUtilization = estimateDisplayedMarginUtilization(marginState);
     const marginStr = marginState
       ? `Margin: buying_power=$${marginState.initial_margin.toFixed(2)}, account_value=$${marginState.subaccount_value.toFixed(2)}, collateral=$${marginState.collaterals_value.toFixed(2)}, derive_display_utilization=${displayedMarginUtilization != null ? `${(displayedMarginUtilization * 100).toFixed(1)}%` : 'N/A'}${marginState.is_under_liquidation ? ' [UNDER LIQUIDATION]' : ''}`
@@ -4207,6 +4509,8 @@ Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
 ${callMarginContext}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
+${recentTradeReviews.length > 0 ? `Recent trade reviews:\n${recentTradeReviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}` : ''}
+${activeTradeLessons.length > 0 ? `Active trade lessons:\n${activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}` : ''}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
 ${getActionOrderTypeHardRule(action.action)}
 - "ioc" (immediate-or-cancel): fill now at market or cancel. TAKER fee = $0.50 base + 0.03% of notional (~$1/contract for ETH options). Use only when the opportunity is exceptional and might vanish.
@@ -4525,6 +4829,12 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
   if (db) {
     try { recentOrders = db.getRecentOrders(since7d, 10); } catch { /* ok */ }
   }
+  let recentTradeReviews = [];
+  let activeTradeLessons = [];
+  if (db) {
+    try { recentTradeReviews = db.getRecentTradeReviews(6); } catch { /* ok */ }
+    try { activeTradeLessons = db.getActiveTradeLessons(); } catch { /* ok */ }
+  }
 
   // Current active rules + recent pending actions
   let activeRules = [];
@@ -4721,6 +5031,12 @@ ${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${
 
 === RECENT ORDERS (last 7d) ===
 ${recentOrders.length > 0 ? recentOrders.map(o => `${o.timestamp} | ${o.action} ${o.instrument_name} | ${o.success ? 'OK' : 'FAIL'} | $${o.total_value || '?'}`).join('\n') : 'No recent orders'}
+
+=== TRADE REVIEWS (closed campaigns) ===
+${recentTradeReviews.length > 0 ? recentTradeReviews.map(r => `${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] | pnl=$${Number(r.pnl_realized || 0).toFixed(2)} | ${r.summary}`).join('\n') : 'No trade reviews yet'}
+
+=== ACTIVE TRADE LESSONS ===
+${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
 
 === CURRENT ACTIVE RULES ===
 ${activeRules.length > 0 ? JSON.stringify(activeRules.map(r => ({ type: r.rule_type, action: r.action, criteria: r.criteria, priority: r.priority })), null, 1) : 'No active rules'}
@@ -5555,6 +5871,9 @@ const runBot = async () => {
       if (process.env.ANTHROPIC_API_KEY) {
         reviewExpiredHypotheses().catch(e => {
           console.log('📊 Hypothesis review failed:', e.message);
+        });
+        reviewClosedTrades().then(() => extractTradeLessons()).catch(e => {
+          console.log('🧾 Trade review pipeline failed:', e.message);
         });
       }
     }
