@@ -2106,6 +2106,32 @@ const deriveClosedTradeCampaigns = (orders) => {
 
 const TRADE_REVIEW_WINDOWS_DAYS = [1, 3, 7];
 const DEBUG_TRADE_REVIEW_ON_BOOT = process.env.DEBUG_TRADE_REVIEW_ON_BOOT === '1';
+const DEBUG_TRADE_REVIEW_INSTRUMENT = (process.env.DEBUG_TRADE_REVIEW_INSTRUMENT || '').trim();
+
+const logTradeReviewDebugOrders = (orders) => {
+  if (!DEBUG_TRADE_REVIEW_INSTRUMENT) return;
+  const matchingOrders = orders
+    .filter((order) => order?.instrument_name === DEBUG_TRADE_REVIEW_INSTRUMENT)
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  console.log(
+    `🧾 Trade review debug instrument=${DEBUG_TRADE_REVIEW_INSTRUMENT} ` +
+    `local_matches=${matchingOrders.length}`
+  );
+
+  if (matchingOrders.length === 0) {
+    console.log('🧾 Trade review debug: no local persisted orders matched target instrument');
+    return;
+  }
+
+  for (const order of matchingOrders) {
+    console.log(
+      `🧾 Local order ${order.timestamp} | action=${order.action} | success=${order.success} ` +
+      `| qty=${order.filled_amount || order.intended_amount || 0} | total=${order.total_value || 0} ` +
+      `| fill=${order.fill_price || order.price || 0} | instrument=${order.instrument_name}`
+    );
+  }
+};
 
 const collectPendingTradeReviews = (campaigns, now, debug = false) => {
   const pendingReviews = [];
@@ -2141,6 +2167,9 @@ const reviewClosedTrades = async ({ debug = false } = {}) => {
     const since = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString();
     const recentOrders = db.getRecentOrders(since, 250) || [];
     const now = Date.now();
+    if (debug) {
+      logTradeReviewDebugOrders(recentOrders);
+    }
     const campaigns = deriveClosedTradeCampaigns(recentOrders);
     if (debug) {
       console.log(`🧾 Trade review debug: ${recentOrders.length} recent orders, ${campaigns.length} closed campaigns`);
