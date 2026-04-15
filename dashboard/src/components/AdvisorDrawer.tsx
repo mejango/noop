@@ -195,6 +195,23 @@ interface TradeReview {
   created_at: string;
 }
 
+interface PendingTradeCampaign {
+  id: string;
+  instrument_name: string;
+  action_family: string;
+  opened_at: string | null;
+  closed_at: string;
+  order_ids: number[];
+  pnl_realized: number;
+  premium_opened: number;
+  premium_closed: number;
+  spot_open: number | null;
+  spot_close: number | null;
+  review_state: 'awaiting_horizon' | 'ready_for_review' | 'reviewed';
+  next_review_at: string | null;
+  review_window_days: number;
+}
+
 interface LearningStatus {
   hasTradeReviewsTable: boolean;
   hasTradeLessonsTable: boolean;
@@ -208,6 +225,10 @@ interface LearningStatus {
     review_count: number;
     instrument_count: number;
     last_created_at: string | null;
+  };
+  pendingCampaignSummary?: {
+    closed_count: number;
+    ready_count: number;
   };
 }
 
@@ -246,7 +267,7 @@ export default function AdvisorDrawer() {
   const [journalFilter, setJournalFilter] = useState<string | null>(null);
   const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null });
   const [opsLoading, setOpsLoading] = useState(false);
-  const [learningData, setLearningData] = useState<{ lessons: TradeLesson[]; reviews: TradeReview[]; status: LearningStatus | null; error?: string | null }>({ lessons: [], reviews: [], status: null, error: null });
+  const [learningData, setLearningData] = useState<{ lessons: TradeLesson[]; reviews: TradeReview[]; pendingCampaigns: PendingTradeCampaign[]; status: LearningStatus | null; error?: string | null }>({ lessons: [], reviews: [], pendingCampaigns: [], status: null, error: null });
   const [learningLoading, setLearningLoading] = useState(false);
   const [hypStats, setHypStats] = useState<{
     total: number; reviewed: number; pending: number;
@@ -375,6 +396,7 @@ export default function AdvisorDrawer() {
         setLearningData({
           lessons: data.lessons || [],
           reviews: data.reviews || [],
+          pendingCampaigns: data.pendingCampaigns || [],
           status: data.status || null,
           error: data.error || null,
         });
@@ -836,7 +858,7 @@ export default function AdvisorDrawer() {
               </button>
             </div>
 
-            {learningLoading && learningData.lessons.length === 0 && learningData.reviews.length === 0 && (
+            {learningLoading && learningData.lessons.length === 0 && learningData.reviews.length === 0 && learningData.pendingCampaigns.length === 0 && (
               <p className="text-gray-500 text-xs">Loading trade learning...</p>
             )}
 
@@ -850,6 +872,8 @@ export default function AdvisorDrawer() {
                   <p>recent instruments: <span className="text-gray-300">{learningData.status.recentOrderStats.instrument_count}</span></p>
                   <p>stored reviews: <span className="text-gray-300">{learningData.status.reviewSummary.review_count}</span></p>
                   <p>reviewed instruments: <span className="text-gray-300">{learningData.status.reviewSummary.instrument_count}</span></p>
+                  <p>closed campaigns: <span className="text-gray-300">{learningData.status.pendingCampaignSummary?.closed_count ?? 0}</span></p>
+                  <p>review ready: <span className="text-gray-300">{learningData.status.pendingCampaignSummary?.ready_count ?? 0}</span></p>
                 </div>
                 <div className="flex flex-wrap gap-3 text-[10px] text-gray-600">
                   <span>recent order window: {learningData.status.recentOrderStats.first_timestamp ? `${timeAgo(learningData.status.recentOrderStats.first_timestamp)} → ${timeAgo(learningData.status.recentOrderStats.last_timestamp || learningData.status.recentOrderStats.first_timestamp)}` : 'none'}</span>
@@ -861,6 +885,44 @@ export default function AdvisorDrawer() {
             {learningData.error && (
               <div className="border border-red-500/20 bg-red-500/5 px-3 py-2">
                 <p className="text-xs text-red-400">{learningData.error}</p>
+              </div>
+            )}
+
+            {learningData.pendingCampaigns.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Closed Campaigns Awaiting Learning</p>
+                {learningData.pendingCampaigns.map((campaign) => (
+                  <div key={campaign.id} className="border border-white/5 px-3 py-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs text-white font-medium truncate">{campaign.instrument_name}</p>
+                        <p className="text-[10px] text-gray-600">
+                          {campaign.action_family} &middot; closed {timeAgo(campaign.closed_at)} &middot; {campaign.order_ids.length} fills
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className={`text-[10px] ${campaign.review_state === 'ready_for_review' ? 'text-amber-300' : 'text-blue-300'}`}>
+                          {campaign.review_state === 'ready_for_review' ? 'review ready' : `awaiting ${campaign.review_window_days}d`}
+                        </p>
+                        {campaign.next_review_at && (
+                          <p className="text-[10px] text-gray-600">
+                            {campaign.review_state === 'ready_for_review' ? `since ${timeAgo(campaign.next_review_at)}` : `at ${timeAgo(campaign.next_review_at)}`}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-3 text-[10px] text-gray-500">
+                      <span className={campaign.pnl_realized >= 0 ? 'text-green-400' : 'text-red-400'}>
+                        pnl {campaign.pnl_realized >= 0 ? '+' : ''}{campaign.pnl_realized.toFixed(2)}
+                      </span>
+                      <span>open ${campaign.premium_opened.toFixed(2)}</span>
+                      <span>close ${campaign.premium_closed.toFixed(2)}</span>
+                      {campaign.spot_open != null && campaign.spot_close != null && (
+                        <span>spot ${campaign.spot_open.toFixed(0)} → ${campaign.spot_close.toFixed(0)}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
 
@@ -924,7 +986,7 @@ export default function AdvisorDrawer() {
               </div>
             )}
 
-            {!learningLoading && learningData.lessons.length === 0 && learningData.reviews.length === 0 && (
+            {!learningLoading && learningData.lessons.length === 0 && learningData.reviews.length === 0 && learningData.pendingCampaigns.length === 0 && (
               <p className="text-gray-500 text-xs">No trade reviews or lessons yet.</p>
             )}
           </div>

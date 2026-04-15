@@ -2105,9 +2105,36 @@ const deriveClosedTradeCampaigns = (orders) => {
 };
 
 const TRADE_REVIEW_WINDOWS_DAYS = [1, 3, 7];
+const DEBUG_TRADE_REVIEW_ON_BOOT = process.env.DEBUG_TRADE_REVIEW_ON_BOOT === '1';
+
+const collectPendingTradeReviews = (campaigns, now, debug = false) => {
+  const pendingReviews = [];
+  for (const campaign of campaigns) {
+    const closedAtMs = new Date(campaign.closed_at).getTime();
+    for (const reviewWindowDays of TRADE_REVIEW_WINDOWS_DAYS) {
+      const horizonEndMs = closedAtMs + reviewWindowDays * 24 * 60 * 60 * 1000;
+      const eligible = now >= horizonEndMs;
+      const alreadyReviewed = db.hasTradeReview(campaign.instrument_name, campaign.closed_at, reviewWindowDays);
+      if (debug) {
+        console.log(
+          `🧾 Review gate ${campaign.instrument_name} [${reviewWindowDays}d] ` +
+          `closed=${campaign.closed_at} eligible=${eligible} reviewed=${alreadyReviewed} ` +
+          `horizon=${new Date(horizonEndMs).toISOString()}`
+        );
+      }
+      if (!eligible || alreadyReviewed) continue;
+      pendingReviews.push({
+        ...campaign,
+        review_window_days: reviewWindowDays,
+        horizon_end_at: new Date(horizonEndMs).toISOString(),
+      });
+    }
+  }
+  return pendingReviews;
+};
 
 let _tradeReviewInFlight = false;
-const reviewClosedTrades = async () => {
+const reviewClosedTrades = async ({ debug = false } = {}) => {
   if (_tradeReviewInFlight || !process.env.ANTHROPIC_API_KEY || !db) return;
   _tradeReviewInFlight = true;
   try {
@@ -2115,21 +2142,14 @@ const reviewClosedTrades = async () => {
     const recentOrders = db.getRecentOrders(since, 250) || [];
     const now = Date.now();
     const campaigns = deriveClosedTradeCampaigns(recentOrders);
-    const pendingReviews = [];
-    for (const campaign of campaigns) {
-      const closedAtMs = new Date(campaign.closed_at).getTime();
-      for (const reviewWindowDays of TRADE_REVIEW_WINDOWS_DAYS) {
-        const horizonEndMs = closedAtMs + reviewWindowDays * 24 * 60 * 60 * 1000;
-        if (now < horizonEndMs) continue;
-        if (db.hasTradeReview(campaign.instrument_name, campaign.closed_at, reviewWindowDays)) continue;
-        pendingReviews.push({
-          ...campaign,
-          review_window_days: reviewWindowDays,
-          horizon_end_at: new Date(horizonEndMs).toISOString(),
-        });
-      }
+    if (debug) {
+      console.log(`🧾 Trade review debug: ${recentOrders.length} recent orders, ${campaigns.length} closed campaigns`);
     }
-    if (pendingReviews.length === 0) return;
+    const pendingReviews = collectPendingTradeReviews(campaigns, now, debug);
+    if (pendingReviews.length === 0) {
+      if (debug) console.log('🧾 Trade review debug: no eligible pending reviews');
+      return;
+    }
 
     console.log(`🧾 Reviewing ${pendingReviews.length} closed trade window(s)...`);
 
@@ -3306,6 +3326,155 @@ const callOpenAI = async (systemPrompt, userPrompt, { maxTokens = 2048, timeout 
     return response.data?.choices?.[0]?.message?.content || '';
   } catch (e) {
     console.log(`⚠️ OpenAI API call failed: ${e.message}`);
+    return null;
+  }
+};
+
+const summarizeSentimentForLLM = (sentiment) => {
+  const skewRows = Array.isArray(sentiment?.optionsSkew) ? sentiment.optionsSkew : [];
+  const latestSkew = skewRows.length > 0 ? skewRows[skewRows.length - 1] : null;
+  const validSkewRows = skewRows.filter(r => r.avg_put_iv != null && r.avg_call_iv != null);
+  const currentSkewPct = latestSkew?.avg_put_iv != null && latestSkew?.avg_call_iv != null
+    ? +(((latestSkew.avg_put_iv - latestSkew.avg_call_iv) * 100).toFixed(2))
+    : null;
+  const avgSkew24hPct = validSkewRows.length > 0
+    ? +((validSkewRows.reduce((sum, row) => sum + (row.avg_put_iv - row.avg_call_iv), 0) / validSkewRows.length) * 100).toFixed(2)
+    : null;
+
+  let skewDirection = 'unknown';
+  if (currentSkewPct != null && avgSkew24hPct != null) {
+    skewDirection = currentSkewPct > avgSkew24hPct ? 'widening' : currentSkewPct < avgSkew24hPct ? 'narrowing' : 'stable';
+  }
+
+  const oiRows = Array.isArray(sentiment?.aggregateOI) ? sentiment.aggregateOI : [];
+  const currentOI = oiRows.length > 0 ? Number(oiRows[oiRows.length - 1].total_oi) : null;
+  const firstOI = oiRows.length > 1 ? Number(oiRows[0].total_oi) : null;
+  const oiChange24hPct = currentOI != null && firstOI > 0
+    ? +((((currentOI - firstOI) / firstOI) * 100).toFixed(1))
+    : null;
+
+  const fundingCurrent = sentiment?.fundingRate?.rate ?? null;
+  const fundingAvg24h = sentiment?.fundingAvg24h ?? null;
+  let fundingTrend = 'unknown';
+  if (fundingCurrent != null && fundingAvg24h != null) {
+    fundingTrend = fundingCurrent > fundingAvg24h ? 'rising' : fundingCurrent < fundingAvg24h ? 'declining' : 'stable';
+  }
+
+  const marketQuality = Array.isArray(sentiment?.marketQuality) ? sentiment.marketQuality : [];
+  const marketQualitySummary = marketQuality.map(row => ({
+    option_type: row.option_type,
+    count: row.count,
+    avg_spread_pct: row.avg_spread != null ? +(row.avg_spread * 100).toFixed(2) : null,
+    avg_iv_pct: row.avg_iv != null ? +(row.avg_iv * 100).toFixed(1) : null,
+    avg_depth: row.avg_depth != null ? +Number(row.avg_depth).toFixed(2) : null,
+  }));
+
+  return {
+    funding_rate: {
+      current: fundingCurrent,
+      avg_24h: fundingAvg24h,
+      trend: fundingTrend,
+    },
+    options_skew: {
+      current_pct: currentSkewPct,
+      avg_24h_pct: avgSkew24hPct,
+      direction: skewDirection,
+    },
+    aggregate_oi: {
+      current: currentOI,
+      change_24h_pct: oiChange24hPct,
+    },
+    market_quality: marketQualitySummary,
+  };
+};
+
+const buildMandelbrotContextBlock = (mandelbrotContext) => {
+  if (!mandelbrotContext) return 'No Mandelbrot regime context available.';
+  return JSON.stringify(mandelbrotContext, null, 2);
+};
+
+const generateMandelbrotRegimeContext = async ({
+  spotPrice,
+  momentum,
+  accountHealth,
+  sentiment,
+  topPuts,
+  topCalls,
+  positions,
+  wikiSignals,
+}) => {
+  if (!process.env.OPENAI_API_KEY) return null;
+
+  const systemPrompt = `You are a Mandelbrot-style market structure analyst for an ETH options tail-hedging system.
+
+You do NOT propose trades directly. You do NOT predict price direction.
+Your job is to assess whether current market behavior looks calm, transitional, clustered-stress, or cascade-risk.
+
+Focus on:
+- volatility clustering and repeated bursts
+- fat-tail / discontinuity risk
+- whether skew, funding, open interest, and option pricing suggest unstable distribution geometry
+- whether current conditions argue for patience or urgency in tail hedging
+
+Be skeptical of Gaussian assumptions. Use only the supplied data. Do not invent measurements.
+
+Return JSON only:
+{
+  "regime": "calm" | "transitional" | "clustered_stress" | "cascade_risk",
+  "confidence": 0.0,
+  "roughness_score": 0.0,
+  "tail_instability_score": 0.0,
+  "vol_clustering_score": 0.0,
+  "distribution_notes": ["..."],
+  "advisory_adjustments": {
+    "buy_put_aggressiveness": "increase" | "hold" | "decrease",
+    "sell_call_aggressiveness": "increase" | "hold" | "decrease",
+    "prefer_longer_put_dte_within_band": true,
+    "tighten_call_entry_delta": true,
+    "require_extra_margin_buffer": true
+  },
+  "invalidations": ["..."]
+}`;
+
+  const userPrompt = `Assess the market structure from a Mandelbrot lens.
+
+=== MARKET ===
+Spot: $${spotPrice}
+Momentum: ${JSON.stringify(momentum, null, 2)}
+
+=== ACCOUNT HEALTH ===
+${JSON.stringify({
+    margin: accountHealth?.margin ?? null,
+    callMarginDiscipline: accountHealth?.callMarginDiscipline ?? null,
+    putBudgetDiscipline: accountHealth?.putBudgetDiscipline ?? null,
+  }, null, 2)}
+
+=== SENTIMENT / DISTRIBUTION ===
+${JSON.stringify(summarizeSentimentForLLM(sentiment), null, 2)}
+
+=== BEST PUT CANDIDATES ===
+${JSON.stringify(topPuts, null, 2)}
+
+=== BEST CALL CANDIDATES ===
+${JSON.stringify(topCalls, null, 2)}
+
+=== CURRENT POSITIONS ===
+${JSON.stringify((positions || []).slice(0, 8), null, 2)}
+
+=== WIKI SIGNALS ===
+${JSON.stringify(wikiSignals || null, null, 2)}
+
+Return JSON only.`;
+
+  try {
+    const text = await callOpenAI(systemPrompt, userPrompt, { maxTokens: 1200, timeout: 45000, model: 'gpt-4o' });
+    if (!text) return null;
+    const parsed = extractJSON(text);
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!['calm', 'transitional', 'clustered_stress', 'cascade_risk'].includes(parsed.regime)) return null;
+    return parsed;
+  } catch (e) {
+    console.log(`📋 Mandelbrot regime context failed (non-fatal): ${e.message}`);
     return null;
   }
 };
@@ -4889,6 +5058,30 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
   const top5Puts = scoredPuts.slice(0, 8);
   const top5Calls = scoredCalls.slice(0, 8);
 
+  // ── Step 0: Regime Examiner (OpenAI, Mandelbrot temperament) ──────────────
+
+  console.log('📋 Advisory Step 0: Mandelbrot regime context (OpenAI GPT)...');
+  let mandelbrotContext = null;
+  try {
+    mandelbrotContext = await generateMandelbrotRegimeContext({
+      spotPrice,
+      momentum,
+      accountHealth,
+      sentiment,
+      topPuts: top5Puts,
+      topCalls: top5Calls,
+      positions,
+      wikiSignals,
+    });
+    if (mandelbrotContext) {
+      console.log(`📋 Mandelbrot regime: ${mandelbrotContext.regime} @ ${(Number(mandelbrotContext.confidence || 0) * 100).toFixed(0)}% confidence`);
+    } else {
+      console.log('📋 Mandelbrot regime unavailable; continuing without it');
+    }
+  } catch (e) {
+    console.log(`📋 Advisory Step 0 failed (non-fatal): ${e.message}`);
+  }
+
   // ── Step 1: Primary Advisor (Claude Opus, Spitznagel temperament) ───────────
 
   console.log('📋 Advisory Step 1: Primary advisor (Claude Opus)...');
@@ -5041,6 +5234,8 @@ Regime: ${wikiSignals.regime || 'unknown'} (confidence: ${wikiSignals.regimeConf
 Protection cost: ${wikiSignals.protectionAssessment || 'unknown'}
 Call premium: ${wikiSignals.revenueAssessment || 'unknown'}
 ${wikiSignals.playbookRules.length > 0 ? `Playbook rules:\n${wikiSignals.playbookRules.map(r => `- ${r}`).join('\n')}` : ''}` : ''}
+=== MANDELBROT REGIME CONTEXT ===
+${buildMandelbrotContextBlock(mandelbrotContext)}
 ${wikiContext ? `\n=== KNOWLEDGE WIKI (cumulative bot knowledge) ===\n${wikiContext}` : ''}
 
 Produce your trading agenda JSON now.`;
@@ -5119,6 +5314,7 @@ ${JSON.stringify(primaryAgenda)}
 ## Market Context
 Spot: $${spotPrice}, Positions: ${JSON.stringify(positions.slice(0, 5))}, Momentum: ${JSON.stringify(momentum)}
 Account: ETH-collateralized. ${marginState ? `Initial margin: $${marginState.initial_margin.toFixed(2)}, Maintenance: $${marginState.maintenance_margin.toFixed(2)}, Account value: $${marginState.subaccount_value.toFixed(2)}` : 'Margin data unavailable'}
+Mandelbrot regime context: ${buildMandelbrotContextBlock(mandelbrotContext)}
 
 ## Your Task
 Critique the agenda. For each rule, ask:
@@ -5195,9 +5391,13 @@ ${JSON.stringify(primaryAgenda, null, 2)}
 ## Taleb Advisor's Review
 ${JSON.stringify(secondOpinion, null, 2)}
 
+## Mandelbrot Regime Context
+${buildMandelbrotContextBlock(mandelbrotContext)}
+
 ## Rules for Synthesis:
 - VETOES are binding: if Taleb vetoes a rule, remove it
 - AMENDMENTS are suggestions: apply if they improve convexity without breaking margin discipline
+- Mandelbrot context is non-binding market-structure evidence: use it to tighten or reduce aggression, not to invent new trade types
 - The Spitznagel advisor's sizing limits take precedence (arithmetic discipline)
 - Taleb's concerns about fat-tail exposure should be taken seriously
 - When advisors agree, high confidence. When they disagree, reduce priority or tighten conditions.
@@ -5213,6 +5413,9 @@ ${JSON.stringify(primaryAgenda, null, 2)}
 
 === SECOND OPINION ===
 Not available (OpenAI key not set or call failed). Validate and pass through the primary agenda.
+
+=== MANDELBROT REGIME CONTEXT ===
+${buildMandelbrotContextBlock(mandelbrotContext)}
 
 === ACCOUNT HEALTH ===
 ${JSON.stringify(accountHealth, null, 2)}
@@ -5990,6 +6193,21 @@ const _bootAdvisory = async () => {
   }
 };
 _bootAdvisory();
+
+const _bootTradeReviewDebug = async () => {
+  if (!DEBUG_TRADE_REVIEW_ON_BOOT) return;
+  console.log('🧾 Boot trade-review debug enabled');
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log('🧾 Boot trade-review debug skipped: ANTHROPIC_API_KEY missing');
+    return;
+  }
+  try {
+    await reviewClosedTrades({ debug: true });
+  } catch (e) {
+    console.log(`🧾 Boot trade-review debug failed: ${e.message}`);
+  }
+};
+_bootTradeReviewDebug();
 
 sendTelegram('🔄 *NOOP Bot restarted*');
 
