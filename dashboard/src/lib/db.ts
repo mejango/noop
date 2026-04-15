@@ -473,6 +473,25 @@ function prepareAll(d: Database.Database) {
       ORDER BY timestamp DESC LIMIT 1
     `),
 
+    getRecentTradeReviews: d.prepare(`
+      SELECT id, instrument_name, action_family, opened_at, closed_at, review_window_days, horizon_end_at, order_ids,
+        review_status, review_confidence, summary, lessons, pnl_realized,
+        premium_opened, premium_closed, spot_open, spot_close,
+        spot_min_while_open, spot_max_while_open, spot_min_after_close, spot_max_after_close,
+        created_at
+      FROM trade_reviews
+      WHERE is_active = 1
+      ORDER BY closed_at DESC
+      LIMIT ?
+    `),
+
+    getActiveTradeLessons: d.prepare(`
+      SELECT id, lesson, evidence_count, created_at
+      FROM trade_lessons
+      WHERE is_active = 1
+      ORDER BY created_at DESC
+    `),
+
     // Portfolio P&L
     getPortfolioHistory: d.prepare(`
       SELECT timestamp, spot_price, usdc_balance, eth_balance,
@@ -1104,6 +1123,46 @@ export function getBudgetCycleState() {
       last_advisory_timestamp: number;
     } | undefined;
   } catch { return undefined; }
+}
+
+export function getRecentTradeReviews(limit = 20) {
+  try {
+    return getStmts().getRecentTradeReviews.all(limit) as {
+      id: number;
+      instrument_name: string;
+      action_family: string | null;
+      opened_at: string | null;
+      closed_at: string;
+      review_window_days: number;
+      horizon_end_at: string | null;
+      order_ids: string | null;
+      review_status: string;
+      review_confidence: number | null;
+      summary: string;
+      lessons: string | null;
+      pnl_realized: number | null;
+      premium_opened: number | null;
+      premium_closed: number | null;
+      spot_open: number | null;
+      spot_close: number | null;
+      spot_min_while_open: number | null;
+      spot_max_while_open: number | null;
+      spot_min_after_close: number | null;
+      spot_max_after_close: number | null;
+      created_at: string;
+    }[];
+  } catch { return []; }
+}
+
+export function getActiveTradeLessons() {
+  try {
+    return getStmts().getActiveTradeLessons.all() as {
+      id: number;
+      lesson: string;
+      evidence_count: number;
+      created_at: string;
+    }[];
+  } catch { return []; }
 }
 
 export function getPortfolioHistory(since: string) {

@@ -163,6 +163,38 @@ interface OpsData {
   pnl?: RealizedPnL | null;
 }
 
+interface TradeLesson {
+  id: number;
+  lesson: string;
+  evidence_count: number;
+  created_at: string;
+}
+
+interface TradeReview {
+  id: number;
+  instrument_name: string;
+  action_family: string | null;
+  opened_at: string | null;
+  closed_at: string;
+  review_window_days: number;
+  horizon_end_at: string | null;
+  order_ids: string[];
+  review_status: string;
+  review_confidence: number | null;
+  summary: string;
+  lessons: string[];
+  pnl_realized: number | null;
+  premium_opened: number | null;
+  premium_closed: number | null;
+  spot_open: number | null;
+  spot_close: number | null;
+  spot_min_while_open: number | null;
+  spot_max_while_open: number | null;
+  spot_min_after_close: number | null;
+  spot_max_after_close: number | null;
+  created_at: string;
+}
+
 const ACTION_STYLES: Record<string, { label: string; color: string }> = {
   buy_put: { label: 'BUY PUT', color: 'bg-red-500/20 text-red-400' },
   sell_put: { label: 'SELL PUT', color: 'bg-green-500/20 text-green-400' },
@@ -187,7 +219,7 @@ const PRIORITY_STYLES: Record<string, { color: string }> = {
 
 export default function AdvisorDrawer() {
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<'chat' | 'journal' | 'wiki' | 'ops'>('journal');
+  const [tab, setTab] = useState<'chat' | 'journal' | 'wiki' | 'ops' | 'learning'>('journal');
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
   const [input, setInput] = useState('');
@@ -198,6 +230,8 @@ export default function AdvisorDrawer() {
   const [journalFilter, setJournalFilter] = useState<string | null>(null);
   const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null });
   const [opsLoading, setOpsLoading] = useState(false);
+  const [learningData, setLearningData] = useState<{ lessons: TradeLesson[]; reviews: TradeReview[] }>({ lessons: [], reviews: [] });
+  const [learningLoading, setLearningLoading] = useState(false);
   const [hypStats, setHypStats] = useState<{
     total: number; reviewed: number; pending: number;
     confirmed_convex: number; confirmed_linear: number;
@@ -316,6 +350,21 @@ export default function AdvisorDrawer() {
     setOpsLoading(false);
   }, []);
 
+  const fetchLearning = useCallback(async () => {
+    setLearningLoading(true);
+    try {
+      const res = await fetch('/api/learning');
+      if (res.ok) {
+        const data = await res.json();
+        setLearningData({
+          lessons: data.lessons || [],
+          reviews: data.reviews || [],
+        });
+      }
+    } catch { /* silent */ }
+    setLearningLoading(false);
+  }, []);
+
   useEffect(() => {
     if (open && tab === 'ops') {
       fetchOps();
@@ -323,6 +372,14 @@ export default function AdvisorDrawer() {
       return () => clearInterval(id);
     }
   }, [open, tab, fetchOps]);
+
+  useEffect(() => {
+    if (open && tab === 'learning') {
+      fetchLearning();
+      const id = setInterval(fetchLearning, 60_000);
+      return () => clearInterval(id);
+    }
+  }, [open, tab, fetchLearning]);
 
   useEffect(() => {
     if (open && tab === 'chat' && inputRef.current) {
@@ -521,6 +578,16 @@ export default function AdvisorDrawer() {
               }`}
             >
               Wiki
+            </button>
+            <button
+              onClick={() => setTab('learning')}
+              className={`text-xs px-3 py-1 transition-colors ${
+                tab === 'learning'
+                  ? 'bg-white/10 text-white'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Learning
             </button>
           </div>
           {/* Chat list chips */}
@@ -736,6 +803,88 @@ export default function AdvisorDrawer() {
         {tab === 'wiki' && (
           <div className="flex-1 overflow-y-auto">
             <WikiBrowser />
+          </div>
+        )}
+
+        {tab === 'learning' && (
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+            <div className="flex items-center border-b border-white/5 pb-2">
+              <span className="text-[10px] text-gray-500 uppercase tracking-wider">Trade Learning</span>
+              <button
+                onClick={fetchLearning}
+                className="text-[11px] px-2.5 py-1 text-gray-600 hover:text-gray-300 transition-colors ml-auto"
+              >
+                refresh
+              </button>
+            </div>
+
+            {learningLoading && learningData.lessons.length === 0 && learningData.reviews.length === 0 && (
+              <p className="text-gray-500 text-xs">Loading trade learning...</p>
+            )}
+
+            {learningData.lessons.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Active Trade Lessons</p>
+                {learningData.lessons.map((lesson) => (
+                  <div key={lesson.id} className="border border-white/5 px-3 py-2">
+                    <p className="text-xs text-gray-300">{lesson.lesson}</p>
+                    <p className="text-[10px] text-gray-600 mt-1">
+                      {lesson.evidence_count} evidence point{lesson.evidence_count !== 1 ? 's' : ''} &middot; {timeAgo(lesson.created_at)}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {learningData.reviews.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Recent Trade Reviews</p>
+                {learningData.reviews.map((review) => (
+                  <div key={review.id} className="border border-white/5 px-3 py-2.5 space-y-1.5">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs text-white font-medium truncate">{review.instrument_name}</p>
+                        <p className="text-[10px] text-gray-600">
+                          {review.action_family || 'campaign'} &middot; {review.review_window_days}d review &middot; closed {timeAgo(review.closed_at)}
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className="text-[10px] text-gray-500">{review.review_status}</p>
+                        {review.review_confidence != null && (
+                          <p className="text-[10px] text-gray-600">{(review.review_confidence * 100).toFixed(0)}%</p>
+                        )}
+                      </div>
+                    </div>
+                    <p className="text-xs text-gray-300 leading-relaxed">{review.summary}</p>
+                    <div className="flex flex-wrap gap-3 text-[10px] text-gray-500">
+                      {review.pnl_realized != null && (
+                        <span className={review.pnl_realized >= 0 ? 'text-green-400' : 'text-red-400'}>
+                          pnl {review.pnl_realized >= 0 ? '+' : ''}{review.pnl_realized.toFixed(2)}
+                        </span>
+                      )}
+                      {review.premium_opened != null && <span>open ${review.premium_opened.toFixed(2)}</span>}
+                      {review.premium_closed != null && <span>close ${review.premium_closed.toFixed(2)}</span>}
+                      {review.spot_open != null && review.spot_close != null && (
+                        <span>spot ${review.spot_open.toFixed(0)} → ${review.spot_close.toFixed(0)}</span>
+                      )}
+                    </div>
+                    {review.lessons.length > 0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {review.lessons.map((lesson, idx) => (
+                          <span key={`${review.id}-${idx}`} className="text-[10px] text-juice-orange bg-white/5 px-1.5 py-0.5">
+                            {lesson}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!learningLoading && learningData.lessons.length === 0 && learningData.reviews.length === 0 && (
+              <p className="text-gray-500 text-xs">No trade reviews or lessons yet.</p>
+            )}
           </div>
         )}
 
