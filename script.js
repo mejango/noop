@@ -3437,31 +3437,27 @@ const generateMandelbrotRegimeContext = async ({
   const systemPrompt = `You are a Mandelbrot-style market structure analyst for an ETH options tail-hedging system.
 
 You do NOT propose trades directly. You do NOT predict price direction.
-Your job is to assess whether current market behavior looks calm, transitional, clustered-stress, or cascade-risk.
+Your job is to synthesize current market structure in a Mandelbrotian way and classify whether current behavior looks calm, transitional, clustered-stress, or cascade-risk.
 
 Focus on:
+- roughness versus smoothness of the recent path
 - volatility clustering and repeated bursts
-- fat-tail / discontinuity risk
+- whether movement is concentrated into bursts rather than dispersed smoothly
 - whether skew, funding, open interest, and option pricing suggest unstable distribution geometry
-- whether current conditions argue for patience or urgency in tail hedging
+- whether the process appears mild or wild, smooth or discontinuous
 
-Be skeptical of Gaussian assumptions. Use only the supplied data. Do not invent measurements.
+Be skeptical of Gaussian assumptions. Prefer describing geometry, clustering, scaling instability, and persistence over forecasting direction.
+Use only the supplied data. Do not invent measurements. Do not suggest trades, thresholds, or portfolio actions.
 
 Return JSON only:
 {
   "regime": "calm" | "transitional" | "clustered_stress" | "cascade_risk",
   "confidence": 0.0,
   "roughness_score": 0.0,
-  "tail_instability_score": 0.0,
+  "wildness_score": 0.0,
   "vol_clustering_score": 0.0,
-  "distribution_notes": ["..."],
-  "advisory_adjustments": {
-    "buy_put_aggressiveness": "increase" | "hold" | "decrease",
-    "sell_call_aggressiveness": "increase" | "hold" | "decrease",
-    "prefer_longer_put_dte_within_band": true,
-    "tighten_call_entry_delta": true,
-    "require_extra_margin_buffer": true
-  },
+  "scaling_instability_score": 0.0,
+  "geometry_notes": ["..."],
   "invalidations": ["..."]
 }`;
 
@@ -3493,7 +3489,7 @@ ${JSON.stringify((positions || []).slice(0, 8), null, 2)}
 === WIKI SIGNALS ===
 ${JSON.stringify(wikiSignals || null, null, 2)}
 
-Return JSON only.`;
+Return JSON only. Synthesize market characteristics; do not include trading recommendations.`;
 
   try {
     const text = await callOpenAI(systemPrompt, userPrompt, { maxTokens: 1200, timeout: 45000, model: 'gpt-4o' });
@@ -5263,7 +5259,7 @@ Regime: ${wikiSignals.regime || 'unknown'} (confidence: ${wikiSignals.regimeConf
 Protection cost: ${wikiSignals.protectionAssessment || 'unknown'}
 Call premium: ${wikiSignals.revenueAssessment || 'unknown'}
 ${wikiSignals.playbookRules.length > 0 ? `Playbook rules:\n${wikiSignals.playbookRules.map(r => `- ${r}`).join('\n')}` : ''}` : ''}
-=== MANDELBROT REGIME CONTEXT ===
+=== MANDELBROT MARKET STRUCTURE ARCHIVE ===
 ${buildMandelbrotContextBlock(mandelbrotContext)}
 ${wikiContext ? `\n=== KNOWLEDGE WIKI (cumulative bot knowledge) ===\n${wikiContext}` : ''}
 
@@ -5343,7 +5339,7 @@ ${JSON.stringify(primaryAgenda)}
 ## Market Context
 Spot: $${spotPrice}, Positions: ${JSON.stringify(positions.slice(0, 5))}, Momentum: ${JSON.stringify(momentum)}
 Account: ETH-collateralized. ${marginState ? `Initial margin: $${marginState.initial_margin.toFixed(2)}, Maintenance: $${marginState.maintenance_margin.toFixed(2)}, Account value: $${marginState.subaccount_value.toFixed(2)}` : 'Margin data unavailable'}
-Mandelbrot regime context: ${buildMandelbrotContextBlock(mandelbrotContext)}
+Mandelbrot market-structure archive: ${buildMandelbrotContextBlock(mandelbrotContext)}
 
 ## Your Task
 Critique the agenda. For each rule, ask:
@@ -5420,13 +5416,13 @@ ${JSON.stringify(primaryAgenda, null, 2)}
 ## Taleb Advisor's Review
 ${JSON.stringify(secondOpinion, null, 2)}
 
-## Mandelbrot Regime Context
+## Mandelbrot Market-Structure Archive
 ${buildMandelbrotContextBlock(mandelbrotContext)}
 
 ## Rules for Synthesis:
 - VETOES are binding: if Taleb vetoes a rule, remove it
 - AMENDMENTS are suggestions: apply if they improve convexity without breaking margin discipline
-- Mandelbrot context is non-binding market-structure evidence: use it to tighten or reduce aggression, not to invent new trade types
+- Mandelbrot archive is descriptive context only. It characterizes market structure and regime shape; it does not prescribe trade ideas or rule translations.
 - The Spitznagel advisor's sizing limits take precedence (arithmetic discipline)
 - Taleb's concerns about fat-tail exposure should be taken seriously
 - When advisors agree, high confidence. When they disagree, reduce priority or tighten conditions.
@@ -5443,7 +5439,7 @@ ${JSON.stringify(primaryAgenda, null, 2)}
 === SECOND OPINION ===
 Not available (OpenAI key not set or call failed). Validate and pass through the primary agenda.
 
-=== MANDELBROT REGIME CONTEXT ===
+=== MANDELBROT MARKET STRUCTURE ARCHIVE ===
 ${buildMandelbrotContextBlock(mandelbrotContext)}
 
 === ACCOUNT HEALTH ===

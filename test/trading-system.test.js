@@ -81,6 +81,64 @@ const extractOrderRecord = (payload) => {
   return null;
 };
 
+const summarizeSentimentForLLM = (sentiment) => {
+  const skewRows = Array.isArray(sentiment?.optionsSkew) ? sentiment.optionsSkew : [];
+  const latestSkew = skewRows.length > 0 ? skewRows[skewRows.length - 1] : null;
+  const validSkewRows = skewRows.filter(r => r.avg_put_iv != null && r.avg_call_iv != null);
+  const currentSkewPct = latestSkew?.avg_put_iv != null && latestSkew?.avg_call_iv != null
+    ? +(((latestSkew.avg_put_iv - latestSkew.avg_call_iv) * 100).toFixed(2))
+    : null;
+  const avgSkew24hPct = validSkewRows.length > 0
+    ? +((validSkewRows.reduce((sum, row) => sum + (row.avg_put_iv - row.avg_call_iv), 0) / validSkewRows.length) * 100).toFixed(2)
+    : null;
+
+  let skewDirection = 'unknown';
+  if (currentSkewPct != null && avgSkew24hPct != null) {
+    skewDirection = currentSkewPct > avgSkew24hPct ? 'widening' : currentSkewPct < avgSkew24hPct ? 'narrowing' : 'stable';
+  }
+
+  const oiRows = Array.isArray(sentiment?.aggregateOI) ? sentiment.aggregateOI : [];
+  const currentOI = oiRows.length > 0 ? Number(oiRows[oiRows.length - 1].total_oi) : null;
+  const firstOI = oiRows.length > 1 ? Number(oiRows[0].total_oi) : null;
+  const oiChange24hPct = currentOI != null && firstOI > 0
+    ? +((((currentOI - firstOI) / firstOI) * 100).toFixed(1))
+    : null;
+
+  const fundingCurrent = sentiment?.fundingRate?.rate ?? null;
+  const fundingAvg24h = sentiment?.fundingAvg24h ?? null;
+  let fundingTrend = 'unknown';
+  if (fundingCurrent != null && fundingAvg24h != null) {
+    fundingTrend = fundingCurrent > fundingAvg24h ? 'rising' : fundingCurrent < fundingAvg24h ? 'declining' : 'stable';
+  }
+
+  const marketQuality = Array.isArray(sentiment?.marketQuality) ? sentiment.marketQuality : [];
+  const marketQualitySummary = marketQuality.map(row => ({
+    option_type: row.option_type,
+    count: row.count,
+    avg_spread_pct: row.avg_spread != null ? +(row.avg_spread * 100).toFixed(2) : null,
+    avg_iv_pct: row.avg_iv != null ? +(row.avg_iv * 100).toFixed(1) : null,
+    avg_depth: row.avg_depth != null ? +Number(row.avg_depth).toFixed(2) : null,
+  }));
+
+  return {
+    funding_rate: {
+      current: fundingCurrent,
+      avg_24h: fundingAvg24h,
+      trend: fundingTrend,
+    },
+    options_skew: {
+      current_pct: currentSkewPct,
+      avg_24h_pct: avgSkew24hPct,
+      direction: skewDirection,
+    },
+    aggregate_oi: {
+      current: currentOI,
+      change_24h_pct: oiChange24hPct,
+    },
+    market_quality: marketQualitySummary,
+  };
+};
+
 const CALL_EXPOSURE_CAP_PCT = 0.45;
 const CALL_ENTRY_BUFFER_PCT = 0.05;
 const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
@@ -422,6 +480,51 @@ describe('evaluateConditions', () => {
   test('unknown operator returns false', () => {
     const conds = [{ field: 'delta', op: 'eq', value: 0.5 }];
     assert.strictEqual(evaluateConditions(conds, 'all', { delta: 0.5 }), false);
+  });
+});
+
+
+// ============================================================================
+// 2b. summarizeSentimentForLLM
+// ============================================================================
+
+describe('summarizeSentimentForLLM', () => {
+  test('compacts sentiment fields into LLM-safe summary', () => {
+    const summary = summarizeSentimentForLLM({
+      fundingRate: { rate: 0.012 },
+      fundingAvg24h: 0.01,
+      optionsSkew: [
+        { avg_put_iv: 0.61, avg_call_iv: 0.54 },
+        { avg_put_iv: 0.66, avg_call_iv: 0.55 },
+      ],
+      aggregateOI: [
+        { total_oi: 1000 },
+        { total_oi: 1150 },
+      ],
+      marketQuality: [
+        { option_type: 'P', count: 12, avg_spread: 0.0312, avg_iv: 0.64, avg_depth: 7.777 },
+      ],
+    });
+
+    assert.deepStrictEqual(summary, {
+      funding_rate: {
+        current: 0.012,
+        avg_24h: 0.01,
+        trend: 'rising',
+      },
+      options_skew: {
+        current_pct: 11,
+        avg_24h_pct: 9,
+        direction: 'widening',
+      },
+      aggregate_oi: {
+        current: 1150,
+        change_24h_pct: 15,
+      },
+      market_quality: [
+        { option_type: 'P', count: 12, avg_spread_pct: 3.12, avg_iv_pct: 64, avg_depth: 7.78 },
+      ],
+    });
   });
 });
 
