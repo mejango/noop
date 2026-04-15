@@ -313,13 +313,17 @@ const quantizeDown = (x, step) => {
 // garbage if the LLM outputs text between JSON blocks. This counts braces instead.
 const extractJSON = (text) => {
   if (!text || typeof text !== 'string') return null;
-  const start = text.indexOf('{');
+  const normalized = text
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+  const start = normalized.indexOf('{');
   if (start === -1) return null;
   let depth = 0;
   let inString = false;
   let escape = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
+  for (let i = start; i < normalized.length; i++) {
+    const ch = normalized[i];
     if (escape) { escape = false; continue; }
     if (ch === '\\' && inString) { escape = true; continue; }
     if (ch === '"') { inString = !inString; continue; }
@@ -328,7 +332,7 @@ const extractJSON = (text) => {
     else if (ch === '}') {
       depth--;
       if (depth === 0) {
-        try { return JSON.parse(text.slice(start, i + 1)); }
+        try { return JSON.parse(normalized.slice(start, i + 1)); }
         catch { return null; }
       }
     }
