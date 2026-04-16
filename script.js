@@ -227,6 +227,7 @@ const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Minimum profit percentage for autom
 
 // Journal auto-generation
 const JOURNAL_INTERVAL_MS = 8 * 60 * 60 * 1000; // Every 8 hours
+const WIKI_LINT_INTERVAL_MS = 24 * 60 * 60 * 1000; // Every 24 hours
 
 // Common bot state structure
 const createBotData = () => {
@@ -248,6 +249,7 @@ let botData = {
 
     // Timing (persisted to survive restarts)
     lastJournalGeneration: 0,
+    lastWikiLintRun: 0,
 
     // Advisory tracking
     lastAdvisorySpotPrice: null,  // spot price when last advisory ran
@@ -263,6 +265,7 @@ let botData = createBotData();
 
 // Advisory mutex — prevent overlapping LLM advisory runs
 let _advisoryInFlight = false;
+let _wikiLintInFlight = false;
 
 // Price move threshold to force a re-advisory (8% move since last advisory)
 const ADVISORY_PRICE_MOVE_THRESHOLD = 0.08;
@@ -375,6 +378,7 @@ const loadData = () => {
       botData.putBudgetForCycle = state.put_budget_for_cycle || 0;
       botData.lastCheck = state.last_check || 0;
       botData.lastJournalGeneration = state.last_journal_generation || 0;
+      botData.lastWikiLintRun = state.last_wiki_lint_run || 0;
       botData.lastAdvisorySpotPrice = state.last_advisory_spot_price || null;
       botData.lastAdvisoryTimestamp = state.last_advisory_timestamp || 0;
       console.log(`✅ Loaded cycle state from SQLite`);
@@ -2858,12 +2862,11 @@ const lintWiki = async () => {
     return;
   }
 
-  // Guard: only run once per 20 hours
+  // Guard: only run once per 24 hours
   const meta = readWikiMeta();
-  const LINT_INTERVAL_MS = 20 * 60 * 60 * 1000; // 20 hours
   logWikiMetaSummary('📚 Wiki lint: preflight', meta);
-  if (meta.last_lint && Date.now() - new Date(meta.last_lint).getTime() < LINT_INTERVAL_MS) {
-    const nextEligibleAt = new Date(new Date(meta.last_lint).getTime() + LINT_INTERVAL_MS).toISOString();
+  if (meta.last_lint && Date.now() - new Date(meta.last_lint).getTime() < WIKI_LINT_INTERVAL_MS) {
+    const nextEligibleAt = new Date(new Date(meta.last_lint).getTime() + WIKI_LINT_INTERVAL_MS).toISOString();
     console.log(`📚 Wiki lint: skipped — throttled until ${nextEligibleAt}`);
     return;
   }
@@ -6246,10 +6249,6 @@ const runBot = async () => {
           try { await ingestToWiki(entries); } catch (e) {
             console.log('📚 Wiki ingest failed (non-fatal):', e.message);
           }
-          // Lint wiki if enough time has passed (non-fatal)
-          try { await lintWiki(); } catch (e) {
-            console.log('📚 Wiki lint failed (non-fatal):', e.message);
-          }
           // Generate trading advisory alongside journal
           try { await generateTradingAdvisory(positions, spotPrice, tickerMap); }
           catch (e) { console.log('📋 Advisory failed (non-fatal):', e.message); }
@@ -6263,6 +6262,23 @@ const runBot = async () => {
           botData.lastJournalGeneration = prevJournalTs;
           persistCycleState();
           console.log('📓 Journal generation failed (will retry next tick):', e.message);
+        });
+      }
+
+      // Independent wiki lint cadence every 24 hours
+      if (process.env.ANTHROPIC_API_KEY && !_wikiLintInFlight && (Date.now() - botData.lastWikiLintRun >= WIKI_LINT_INTERVAL_MS)) {
+        const prevWikiLintTs = botData.lastWikiLintRun;
+        botData.lastWikiLintRun = Date.now();
+        _wikiLintInFlight = true;
+        persistCycleState();
+        lintWiki().then(() => {
+          console.log('📚 Scheduled wiki lint finished, next in 24h');
+        }).catch((e) => {
+          botData.lastWikiLintRun = prevWikiLintTs;
+          persistCycleState();
+          console.log('📚 Scheduled wiki lint failed (will retry next tick):', e.message);
+        }).finally(() => {
+          _wikiLintInFlight = false;
         });
       }
 
