@@ -89,6 +89,12 @@ const VERDICT_STYLES: Record<string, { label: string; color: string }> = {
   disproven_costly: { label: 'Costly Miss', color: 'bg-red-500/20 text-red-400' },
 };
 
+const HIDDEN_JOURNAL_ENTRY_TYPES = new Set([
+  'advisory_spitznagel',
+  'advisory_taleb',
+  'mandelbrot_archive',
+]);
+
 function timeUntil(ts: string): string {
   const diff = new Date(ts).getTime() - Date.now();
   if (diff <= 0) return 'reviewing...';
@@ -152,6 +158,117 @@ interface AdvisoryArtifacts {
   spitznagel: AdvisoryArtifact | null;
   taleb: AdvisoryArtifact | null;
   mandelbrot: AdvisoryArtifact | null;
+}
+
+function parseArtifactContent(content: string) {
+  try {
+    return JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function formatArtifactValue(value: unknown) {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  }
+  if (typeof value === 'string') return value;
+  if (typeof value === 'boolean') return value ? 'yes' : 'no';
+  return JSON.stringify(value);
+}
+
+function renderTalebArtifact(content: string) {
+  const parsed = parseArtifactContent(content);
+  if (!parsed) {
+    return <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{content}</pre>;
+  }
+
+  const critique = typeof parsed.critique === 'string' ? parsed.critique : null;
+  const vetoes = Array.isArray(parsed.vetoes) ? parsed.vetoes as Array<Record<string, unknown>> : [];
+  const amendments = Array.isArray(parsed.amendments) ? parsed.amendments as Array<Record<string, unknown>> : [];
+  const additions = Array.isArray(parsed.additions) ? parsed.additions as Array<Record<string, unknown>> : [];
+
+  return (
+    <div className="space-y-2">
+      {critique && <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{critique}</p>}
+      {vetoes.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] text-red-400 uppercase tracking-wider">Vetoes</p>
+          {vetoes.map((item, index) => (
+            <div key={`veto-${index}`} className="border border-red-500/15 bg-red-500/5 px-2 py-1.5">
+              <p className="text-[11px] text-gray-300 leading-relaxed">{String(item.reason || 'No reason provided')}</p>
+            </div>
+          ))}
+        </div>
+      )}
+      {amendments.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] text-amber-400 uppercase tracking-wider">Amendments</p>
+          {amendments.map((item, index) => (
+            <div key={`amendment-${index}`} className="border border-amber-500/15 bg-amber-500/5 px-2 py-1.5 space-y-1">
+              <p className="text-[11px] text-gray-300 leading-relaxed">{String(item.concern || 'No concern provided')}</p>
+              {('suggested_change' in item) && item.suggested_change != null && (
+                <pre className="text-[10px] text-gray-400 leading-relaxed whitespace-pre-wrap overflow-x-auto">{JSON.stringify(item.suggested_change as unknown, null, 2)}</pre>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {additions.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] text-blue-400 uppercase tracking-wider">Additions</p>
+          <pre className="text-[10px] text-gray-400 leading-relaxed whitespace-pre-wrap overflow-x-auto">{JSON.stringify(additions, null, 2)}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderMandelbrotArtifact(content: string) {
+  const parsed = parseArtifactContent(content);
+  if (!parsed) {
+    return <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{content}</pre>;
+  }
+
+  const geometryNotes = Array.isArray(parsed.geometry_notes) ? parsed.geometry_notes as unknown[] : [];
+  const invalidations = Array.isArray(parsed.invalidations) ? parsed.invalidations as unknown[] : [];
+  const metrics = ([
+    ['Regime', parsed.regime],
+    ['Confidence', parsed.confidence],
+    ['Roughness', parsed.roughness_score],
+    ['Wildness', parsed.wildness_score],
+    ['Vol clustering', parsed.vol_clustering_score],
+    ['Scaling instability', parsed.scaling_instability_score],
+  ] as Array<[string, unknown]>).filter(([, value]) => value != null);
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
+        {metrics.map(([label, value]) => (
+          <div key={label} className="flex justify-between gap-2">
+            <span className="text-gray-500">{label}</span>
+            <span className="text-gray-300 font-mono">{formatArtifactValue(value)}</span>
+          </div>
+        ))}
+      </div>
+      {geometryNotes.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] text-cyan-400 uppercase tracking-wider">Geometry Notes</p>
+          {geometryNotes.map((note, index) => (
+            <p key={`geometry-${index}`} className="text-[11px] text-gray-300 leading-relaxed">{String(note)}</p>
+          ))}
+        </div>
+      )}
+      {invalidations.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-[10px] text-gray-500 uppercase tracking-wider">Invalidations</p>
+          {invalidations.map((note, index) => (
+            <p key={`invalidation-${index}`} className="text-[11px] text-gray-400 leading-relaxed">{String(note)}</p>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 interface PortfolioSnapshot {
@@ -353,7 +470,7 @@ export default function AdvisorDrawer() {
       const res = await fetch('/api/ai/journal');
       if (res.ok) {
         const data = await res.json();
-        setJournalEntries(data.entries || []);
+        setJournalEntries((data.entries || []).filter((entry: JournalEntry) => !HIDDEN_JOURNAL_ENTRY_TYPES.has(entry.entry_type)));
       }
     } catch { /* silent */ }
     setJournalLoading(false);
@@ -1102,41 +1219,46 @@ export default function AdvisorDrawer() {
 
                 {/* Advisory Assessment */}
                 {(opsData.assessment || opsData.advisoryArtifacts?.main || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb || opsData.advisoryArtifacts?.mandelbrot) && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                  <div className="space-y-2">
                     {(opsData.advisoryArtifacts?.main || opsData.assessment) && (
-                      <div className="bg-white/5 border border-white/10 px-3 py-2.5 lg:col-span-2">
+                      <div className="bg-white/5 border border-white/10 px-3 py-2.5">
                         <div className="flex items-center justify-between mb-1">
                           <span className="text-[10px] text-gray-500 uppercase tracking-wider">Main Advisory Assessment</span>
                           <span className="text-[10px] text-gray-600">{timeAgo((opsData.advisoryArtifacts?.main || opsData.assessment)!.timestamp)}</span>
                         </div>
                         <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{(opsData.advisoryArtifacts?.main || opsData.assessment)!.content}</p>
-                      </div>
-                    )}
-                    {opsData.advisoryArtifacts?.spitznagel && (
-                      <div className="bg-white/5 border border-white/10 px-3 py-2.5">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Spitznagel</span>
-                          <span className="text-[10px] text-gray-600">{timeAgo(opsData.advisoryArtifacts.spitznagel.timestamp)}</span>
-                        </div>
-                        <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{opsData.advisoryArtifacts.spitznagel.content}</p>
-                      </div>
-                    )}
-                    {opsData.advisoryArtifacts?.taleb && (
-                      <div className="bg-white/5 border border-white/10 px-3 py-2.5">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Taleb</span>
-                          <span className="text-[10px] text-gray-600">{timeAgo(opsData.advisoryArtifacts.taleb.timestamp)}</span>
-                        </div>
-                        <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{opsData.advisoryArtifacts.taleb.content}</pre>
-                      </div>
-                    )}
-                    {opsData.advisoryArtifacts?.mandelbrot && (
-                      <div className="bg-white/5 border border-white/10 px-3 py-2.5 lg:col-span-2">
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Mandelbrot Market Structure Archive</span>
-                          <span className="text-[10px] text-gray-600">{timeAgo(opsData.advisoryArtifacts.mandelbrot.timestamp)}</span>
-                        </div>
-                        <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{opsData.advisoryArtifacts.mandelbrot.content}</pre>
+                        {(opsData.advisoryArtifacts?.mandelbrot || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb) && (
+                          <div className="mt-3 pt-2 border-t border-white/5 space-y-2">
+                            <p className="text-[10px] text-gray-500 uppercase tracking-wider">Council Breakdown</p>
+                            {opsData.advisoryArtifacts?.mandelbrot && (
+                              <details className="border border-white/5 bg-black/10 px-2.5 py-2 group">
+                                <summary className="cursor-pointer list-none flex items-center justify-between text-[10px] uppercase tracking-wider text-cyan-300">
+                                  <span>Mandelbrot Analysis</span>
+                                  <span className="text-gray-600 normal-case">{timeAgo(opsData.advisoryArtifacts.mandelbrot.timestamp)}</span>
+                                </summary>
+                                <div className="mt-2">{renderMandelbrotArtifact(opsData.advisoryArtifacts.mandelbrot.content)}</div>
+                              </details>
+                            )}
+                            {opsData.advisoryArtifacts?.spitznagel && (
+                              <details className="border border-white/5 bg-black/10 px-2.5 py-2 group">
+                                <summary className="cursor-pointer list-none flex items-center justify-between text-[10px] uppercase tracking-wider text-amber-300">
+                                  <span>Spitznagel Assessment</span>
+                                  <span className="text-gray-600 normal-case">{timeAgo(opsData.advisoryArtifacts.spitznagel.timestamp)}</span>
+                                </summary>
+                                <p className="mt-2 text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{opsData.advisoryArtifacts.spitznagel.content}</p>
+                              </details>
+                            )}
+                            {opsData.advisoryArtifacts?.taleb && (
+                              <details className="border border-white/5 bg-black/10 px-2.5 py-2 group">
+                                <summary className="cursor-pointer list-none flex items-center justify-between text-[10px] uppercase tracking-wider text-red-300">
+                                  <span>Taleb Review</span>
+                                  <span className="text-gray-600 normal-case">{timeAgo(opsData.advisoryArtifacts.taleb.timestamp)}</span>
+                                </summary>
+                                <div className="mt-2">{renderTalebArtifact(opsData.advisoryArtifacts.taleb.content)}</div>
+                              </details>
+                            )}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
