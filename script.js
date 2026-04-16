@@ -314,29 +314,44 @@ const quantizeDown = (x, step) => {
 // garbage if the LLM outputs text between JSON blocks. This counts braces instead.
 const extractJSON = (text) => {
   if (!text || typeof text !== 'string') return null;
-  const normalized = text
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
-  const start = normalized.indexOf('{');
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < normalized.length; i++) {
-    const ch = normalized[i];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\' && inString) { escape = true; continue; }
-    if (ch === '"') { inString = !inString; continue; }
-    if (inString) continue;
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) {
-        try { return JSON.parse(normalized.slice(start, i + 1)); }
-        catch { return null; }
+  const tryParseBalancedObject = (source) => {
+    if (!source || typeof source !== 'string') return null;
+    for (let start = source.indexOf('{'); start !== -1; start = source.indexOf('{', start + 1)) {
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      for (let i = start; i < source.length; i++) {
+        const ch = source[i];
+        if (escape) { escape = false; continue; }
+        if (ch === '\\' && inString) { escape = true; continue; }
+        if (ch === '"') { inString = !inString; continue; }
+        if (inString) continue;
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            try { return JSON.parse(source.slice(start, i + 1)); }
+            catch { break; }
+          }
+        }
       }
     }
+    return null;
+  };
+
+  const trimmed = text.trim();
+  const fencedBlocks = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)]
+    .map(match => match[1]?.trim())
+    .filter(Boolean);
+  const candidates = [
+    ...fencedBlocks,
+    trimmed.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim(),
+    trimmed,
+  ];
+
+  for (const candidate of candidates) {
+    const parsed = tryParseBalancedObject(candidate);
+    if (parsed) return parsed;
   }
   return null;
 };
