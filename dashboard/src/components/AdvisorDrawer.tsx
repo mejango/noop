@@ -90,6 +90,7 @@ const VERDICT_STYLES: Record<string, { label: string; color: string }> = {
 };
 
 const HIDDEN_JOURNAL_ENTRY_TYPES = new Set([
+  'advisory_main',
   'advisory_spitznagel',
   'advisory_taleb',
   'mandelbrot_archive',
