@@ -1104,7 +1104,7 @@ export default function AdvisorDrawer() {
                 {(opsData.assessment || opsData.advisoryArtifacts?.main || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb || opsData.advisoryArtifacts?.mandelbrot) && (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
                     {(opsData.advisoryArtifacts?.main || opsData.assessment) && (
-                      <div className="bg-white/5 border border-white/10 px-3 py-2.5">
+                      <div className="bg-white/5 border border-white/10 px-3 py-2.5 lg:col-span-2">
                         <div className="flex items-center justify-between mb-1">
                           <span className="text-[10px] text-gray-500 uppercase tracking-wider">Main Advisory Assessment</span>
                           <span className="text-[10px] text-gray-600">{timeAgo((opsData.advisoryArtifacts?.main || opsData.assessment)!.timestamp)}</span>
