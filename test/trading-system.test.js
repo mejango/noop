@@ -739,6 +739,13 @@ describe('DB operations (isolated test database)', () => {
       WHERE action = @action AND status = 'executed'
       ORDER BY executed_at DESC LIMIT 1
     `),
+    getLastRejectedAction: testDb.prepare(`
+      SELECT triggered_at FROM pending_actions
+      WHERE action = @action
+        AND instrument_name = @instrument_name
+        AND status = 'rejected'
+      ORDER BY triggered_at DESC LIMIT 1
+    `),
   };
 
   // Helper functions mirroring bot/db.js
@@ -793,6 +800,7 @@ describe('DB operations (isolated test database)', () => {
   const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ status });
   const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
   const getLastExecutedAction = (action) => stmts.getLastExecutedAction.get({ action })?.executed_at || null;
+  const getLastRejectedAction = (action, instrumentName) => stmts.getLastRejectedAction.get({ action, instrument_name: instrumentName })?.triggered_at || null;
 
   // ── replaceActiveRules tests ──
 
@@ -1021,6 +1029,20 @@ describe('DB operations (isolated test database)', () => {
     assert.ok(result !== null, 'Should have an executed buy_put action from earlier tests');
     // Should be a valid date string
     assert.ok(!isNaN(new Date(result).getTime()), 'Should be a valid date string');
+  });
+
+  test('getLastRejectedAction: returns latest rejection timestamp for action + instrument', () => {
+    testDb.prepare(`
+      INSERT INTO pending_actions (rule_id, action, instrument_name, amount, price, trigger_details, status, triggered_at)
+      VALUES (NULL, @action, @instrument_name, 0.01, 0.12, NULL, 'rejected', @triggered_at)
+    `).run({
+      action: 'sell_call',
+      instrument_name: 'ETH-20260424-2800-C',
+      triggered_at: '2026-04-16T17:25:00.000Z',
+    });
+
+    const result = getLastRejectedAction('sell_call', 'ETH-20260424-2800-C');
+    assert.strictEqual(result, '2026-04-16T17:25:00.000Z');
   });
 
   // Close the test database

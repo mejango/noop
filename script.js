@@ -158,6 +158,7 @@ const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
 const CALL_EXPOSURE_CAP_PCT = BOT_CONFIG.CALL_EXPOSURE_CAP_PCT || 0.45;
 const CALL_ENTRY_BUFFER_PCT = BOT_CONFIG.CALL_ENTRY_BUFFER_PCT || 0.05;
 const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
+const REJECTED_ACTION_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const SUBACCOUNT_ID = 25923;
 
 // ─── Telegram Notifications ──────────────────────────────────────────────────
@@ -3953,6 +3954,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
+        if (wasRecentlyRejected(rule.action, rule.instrument_name)) {
+          console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} — rejected recently, cooling down`);
+          continue;
+        }
+
         db.insertPendingAction({
           rule_id: rule.id,
           action: rule.action,
@@ -4230,6 +4236,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
+        if (wasRecentlyRejected(rule.action, best.name)) {
+          console.log(`📋 Skip ${rule.action} ${best.name}: rejected recently, cooling down`);
+          continue;
+        }
+
         db.insertPendingAction({
           rule_id: rule.id,
           action: rule.action,
@@ -4391,6 +4402,14 @@ const manageOpenOrders = async (tickerMap) => {
       db.updateRestingOrder(order.order_id, 'cancelled', filled);
     }
   }
+};
+
+const wasRecentlyRejected = (action, instrumentName, cooldownMs = REJECTED_ACTION_COOLDOWN_MS) => {
+  if (!db || !action || !instrumentName) return false;
+  const lastRejectedAt = db.getLastRejectedAction(action, instrumentName);
+  if (!lastRejectedAt) return false;
+  const elapsed = Date.now() - new Date(lastRejectedAt).getTime();
+  return elapsed >= 0 && elapsed < cooldownMs;
 };
 
 // ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
@@ -5077,12 +5096,17 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           console.log(`❌ Confirmed but execution failed: ${action.action} ${action.instrument_name}`);
         }
       } else {
+        const shouldAlert = !wasRecentlyRejected(action.action, action.instrument_name);
         db.updatePendingAction(action.id, {
           status: 'rejected',
           confirmation_reasoning: reasoning,
         });
         console.log(`🚫 Rejected: ${action.action} ${action.instrument_name} | ${reasoning}`);
-        sendTelegram(`❌ *REJECTED*: ${action.action} ${action.instrument_name}\n${reasoning}`);
+        if (shouldAlert) {
+          sendTelegram(`❌ *REJECTED*: ${action.action} ${action.instrument_name}\n${reasoning}`);
+        } else {
+          console.log(`📋 Rejection alert suppressed: ${action.action} ${action.instrument_name} was already rejected recently`);
+        }
       }
     } catch (e) {
       console.error(`❌ Confirmation error for ${action.instrument_name}:`, e.message);
