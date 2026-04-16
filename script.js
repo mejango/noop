@@ -1354,16 +1354,20 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     const timestamp = Date.now(); // Current UTC timestamp in ms
     const signature = await signMessage(wallet, timestamp);
     const signatureExpirySec = Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 900 : 86400));
+    const step = getInstrumentPriceStep(null, Number(price));
+    const normalizedPrice = normalizePriceToStep(price, step, 'nearest');
+    const limitPrice = normalizedPrice > 0 ? normalizedPrice : Number(price);
+    const limitPriceString = limitPrice.toFixed(getStepDecimals(step));
 
     const order = {
         instrument_name: name,
         subaccount_id: SUBACCOUNT_ID,
         direction,
-        limit_price: price.toString(),
+        limit_price: limitPriceString,
         amount: amount.toString(),
         // Give IOC orders extra buffer for signer/exchange clock skew. Derive rejects borderline 300s expiries.
         signature_expiry_sec: signatureExpirySec, // IOC: 15min, GTC/post_only: 24h
-        max_fee: Math.max(0.08 * price, 10.0).toFixed(2).toString(), // Max fee per unit of volume (USDC). Generous ceiling — actual fee is much lower (~0.1% of notional)
+        max_fee: Math.max(0.08 * limitPrice, 10.0).toFixed(2).toString(), // Max fee per unit of volume (USDC). Generous ceiling — actual fee is much lower (~0.1% of notional)
         // Noop submits sparse discretionary orders, not continuous maker quotes.
         // Venue-side MMP has been causing opaque sell-order cancellations and poor reconciliation.
         mmp: false,
@@ -4350,6 +4354,25 @@ const roundToStep = (value, step, mode = 'nearest') => {
   return Math.round(scaled) * step;
 };
 
+const getStepDecimals = (step) => {
+  if (!(step > 0)) return 8;
+  const normalized = String(step);
+  if (normalized.includes('e-')) {
+    const [, exponent] = normalized.split('e-');
+    return Number(exponent) || 0;
+  }
+  const [, fraction = ''] = normalized.split('.');
+  return fraction.length;
+};
+
+const normalizePriceToStep = (value, step, mode = 'nearest') => {
+  if (!(Number(value) > 0)) return 0;
+  if (!(step > 0)) return Number(value);
+  const rounded = roundToStep(Number(value), step, mode);
+  const decimals = getStepDecimals(step);
+  return Number(rounded.toFixed(decimals));
+};
+
 const ACTION_POLICY = Object.freeze({
   buy_put: Object.freeze({
     phase: 'entry',
@@ -4434,15 +4457,15 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
 
   if (direction === 'sell') {
     const retryBase = bidPrice > 0 ? bidPrice + step : attemptedPrice + step;
-    const retryPrice = roundToStep(retryBase, step, 'up');
+    const retryPrice = normalizePriceToStep(retryBase, step, 'up');
     return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
   }
 
   if (askPrice <= 0) return null;
   const belowAsk = askPrice - step;
   const candidate = belowAsk > 0
-    ? roundToStep(belowAsk, step, 'down')
-    : roundToStep(askPrice * 0.99, step, 'down');
+    ? normalizePriceToStep(belowAsk, step, 'down')
+    : normalizePriceToStep(askPrice * 0.99, step, 'down');
   return candidate > 0 ? { retryPrice: candidate, bidPrice, askPrice, step } : null;
 };
 
