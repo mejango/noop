@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { resolveWikiDir } from '@/lib/wiki';
 
 export const dynamic = 'force-dynamic';
 
-const WIKI_DIR = process.env.WIKI_DIR || path.join(process.cwd(), '..', 'knowledge');
+const WIKI_DIR = resolveWikiDir();
 const HISTORY_DIR = path.join(WIKI_DIR, '.history');
 
 const WIKI_PAGES = [

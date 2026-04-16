@@ -20,8 +20,9 @@ import { buildCorrelationAnalysis } from './correlation';
 import { getPositions, getCollaterals } from './lyra';
 import fs from 'fs';
 import path from 'path';
+import { resolveWikiDir } from './wiki';
 
-const WIKI_DIR = process.env.WIKI_DIR || path.join(process.cwd(), '..', 'knowledge');
+const WIKI_DIR = resolveWikiDir();
 
 function readWikiPageForSnapshot(pagePath: string): string | null {
   try {
