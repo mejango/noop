@@ -11,6 +11,8 @@ import { getTradeHistory } from '@/lib/lyra';
 
 export const dynamic = 'force-dynamic';
 
+const LEARNING_RECENT_LOOKBACK_DAYS = 5;
+
 type TradeOrder = {
   id: number;
   timestamp: string;
@@ -237,6 +239,7 @@ export async function GET() {
       reviews.map((review) => `${review.instrument_name}:${review.closed_at}:${review.review_window_days}`)
     );
     const derivedCampaigns = deriveClosedTradeCampaigns(mergedOrders);
+    const recentCampaignCutoffMs = now - LEARNING_RECENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
     const pendingCampaigns = derivedCampaigns
       .map((campaign) => {
         let reviewState: PendingCampaign['review_state'] = 'awaiting_horizon';
@@ -265,6 +268,7 @@ export async function GET() {
           review_window_days: reviewWindowDays,
         };
       })
+      .filter((campaign) => new Date(campaign.closed_at).getTime() >= recentCampaignCutoffMs)
       .filter((campaign) => campaign.review_state !== 'reviewed')
       .slice(0, 20);
 
