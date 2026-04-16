@@ -3359,34 +3359,37 @@ const callOpenAI = async (systemPrompt, userPrompt, { maxTokens = 2048, timeout 
   }
 };
 
-const summarizeSentimentForLLM = (sentiment) => {
+const summarizeSentimentWindowForLLM = (windowLabel, sentiment) => {
   const skewRows = Array.isArray(sentiment?.optionsSkew) ? sentiment.optionsSkew : [];
   const latestSkew = skewRows.length > 0 ? skewRows[skewRows.length - 1] : null;
   const validSkewRows = skewRows.filter(r => r.avg_put_iv != null && r.avg_call_iv != null);
   const currentSkewPct = latestSkew?.avg_put_iv != null && latestSkew?.avg_call_iv != null
     ? +(((latestSkew.avg_put_iv - latestSkew.avg_call_iv) * 100).toFixed(2))
     : null;
-  const avgSkew24hPct = validSkewRows.length > 0
+  const avgSkewPct = validSkewRows.length > 0
     ? +((validSkewRows.reduce((sum, row) => sum + (row.avg_put_iv - row.avg_call_iv), 0) / validSkewRows.length) * 100).toFixed(2)
     : null;
 
   let skewDirection = 'unknown';
-  if (currentSkewPct != null && avgSkew24hPct != null) {
-    skewDirection = currentSkewPct > avgSkew24hPct ? 'widening' : currentSkewPct < avgSkew24hPct ? 'narrowing' : 'stable';
+  if (currentSkewPct != null && avgSkewPct != null) {
+    skewDirection = currentSkewPct > avgSkewPct ? 'widening' : currentSkewPct < avgSkewPct ? 'narrowing' : 'stable';
   }
 
   const oiRows = Array.isArray(sentiment?.aggregateOI) ? sentiment.aggregateOI : [];
   const currentOI = oiRows.length > 0 ? Number(oiRows[oiRows.length - 1].total_oi) : null;
   const firstOI = oiRows.length > 1 ? Number(oiRows[0].total_oi) : null;
-  const oiChange24hPct = currentOI != null && firstOI > 0
+  const oiChangePct = currentOI != null && firstOI > 0
     ? +((((currentOI - firstOI) / firstOI) * 100).toFixed(1))
     : null;
 
-  const fundingCurrent = sentiment?.fundingRate?.rate ?? null;
-  const fundingAvg24h = sentiment?.fundingAvg24h ?? null;
+  const fundingRows = Array.isArray(sentiment?.fundingRates) ? sentiment.fundingRates : [];
+  const fundingCurrent = fundingRows.length > 0 ? Number(fundingRows[fundingRows.length - 1].rate) : null;
+  const fundingAvg = fundingRows.length > 0
+    ? +(fundingRows.reduce((sum, row) => sum + Number(row.rate || 0), 0) / fundingRows.length).toFixed(6)
+    : null;
   let fundingTrend = 'unknown';
-  if (fundingCurrent != null && fundingAvg24h != null) {
-    fundingTrend = fundingCurrent > fundingAvg24h ? 'rising' : fundingCurrent < fundingAvg24h ? 'declining' : 'stable';
+  if (fundingCurrent != null && fundingAvg != null) {
+    fundingTrend = fundingCurrent > fundingAvg ? 'rising' : fundingCurrent < fundingAvg ? 'declining' : 'stable';
   }
 
   const marketQuality = Array.isArray(sentiment?.marketQuality) ? sentiment.marketQuality : [];
@@ -3399,22 +3402,33 @@ const summarizeSentimentForLLM = (sentiment) => {
   }));
 
   return {
+    window: windowLabel,
     funding_rate: {
       current: fundingCurrent,
-      avg_24h: fundingAvg24h,
+      avg: fundingAvg,
       trend: fundingTrend,
+      samples: fundingRows.length,
     },
     options_skew: {
       current_pct: currentSkewPct,
-      avg_24h_pct: avgSkew24hPct,
+      avg_pct: avgSkewPct,
       direction: skewDirection,
+      samples: validSkewRows.length,
     },
     aggregate_oi: {
       current: currentOI,
-      change_24h_pct: oiChange24hPct,
+      change_pct: oiChangePct,
+      samples: oiRows.length,
     },
     market_quality: marketQualitySummary,
   };
+};
+
+const summarizeSentimentWindowsForLLM = (sentimentWindows) => {
+  const windows = sentimentWindows && typeof sentimentWindows === 'object' ? sentimentWindows : {};
+  return Object.fromEntries(
+    Object.entries(windows).map(([label, data]) => [label, summarizeSentimentWindowForLLM(label, data)])
+  );
 };
 
 const buildMandelbrotContextBlock = (mandelbrotContext) => {
@@ -3474,8 +3488,8 @@ ${JSON.stringify({
     putBudgetDiscipline: accountHealth?.putBudgetDiscipline ?? null,
   }, null, 2)}
 
-=== SENTIMENT / DISTRIBUTION ===
-${JSON.stringify(summarizeSentimentForLLM(sentiment), null, 2)}
+=== SENTIMENT / DISTRIBUTION BY WINDOW ===
+${JSON.stringify(summarizeSentimentWindowsForLLM(sentiment), null, 2)}
 
 === BEST PUT CANDIDATES ===
 ${JSON.stringify(topPuts, null, 2)}
@@ -4942,16 +4956,45 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
   const wikiSignals = getWikiSignalContext();
 
   // Market sentiment
-  const since24h = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const nowMs = Date.now();
+  const since6h = new Date(nowMs - 6 * 60 * 60 * 1000).toISOString();
+  const since24h = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString();
+  const since7dSentiment = new Date(nowMs - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const since30dSentiment = new Date(nowMs - 30 * 24 * 60 * 60 * 1000).toISOString();
   let sentiment = {};
   if (db) {
     try {
       sentiment = {
-        fundingRate: db.getFundingRateLatest(),
-        fundingAvg24h: db.getFundingRateAvg24h(),
-        optionsSkew: db.getOptionsSkew(since24h),
-        aggregateOI: db.getAggregateOI(since24h),
-        marketQuality: db.getMarketQualitySummary(since24h),
+        latest: {
+          fundingRate: db.getFundingRateLatest(),
+          fundingAvg24h: db.getFundingRateAvg24h(),
+        },
+        windows: {
+          '6h': {
+            fundingRates: db.getFundingRates(since6h),
+            optionsSkew: db.getOptionsSkew(since6h),
+            aggregateOI: db.getAggregateOI(since6h),
+            marketQuality: db.getMarketQualitySummary(since6h),
+          },
+          '24h': {
+            fundingRates: db.getFundingRates(since24h),
+            optionsSkew: db.getOptionsSkew(since24h),
+            aggregateOI: db.getAggregateOI(since24h),
+            marketQuality: db.getMarketQualitySummary(since24h),
+          },
+          '7d': {
+            fundingRates: db.getFundingRates(since7dSentiment),
+            optionsSkew: db.getOptionsSkew(since7dSentiment),
+            aggregateOI: db.getAggregateOI(since7dSentiment),
+            marketQuality: db.getMarketQualitySummary(since7dSentiment),
+          },
+          '30d': {
+            fundingRates: db.getFundingRates(since30dSentiment),
+            optionsSkew: db.getOptionsSkew(since30dSentiment),
+            aggregateOI: db.getAggregateOI(since30dSentiment),
+            marketQuality: db.getMarketQualitySummary(since30dSentiment),
+          },
+        },
       };
     } catch (e) {
       console.log('📋 Advisory: failed to fetch sentiment:', e.message);
