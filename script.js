@@ -124,6 +124,7 @@ const API_URL = {
   PLACE_ORDER: 'https://api.lyra.finance/private/order',
   GET_OPEN_ORDERS: 'https://api.lyra.finance/private/get_open_orders',
   GET_ORDER_HISTORY: 'https://api.lyra.finance/private/get_order_history',
+  GET_TRADE_HISTORY: 'https://api.lyra.finance/private/get_trade_history',
   CANCEL_ORDER: 'https://api.lyra.finance/private/cancel',
   GET_ORDER: 'https://api.lyra.finance/private/get_order',
   GET_SUBACCOUNT: 'https://api.lyra.finance/private/get_subaccount',
@@ -1709,6 +1710,33 @@ const fetchPositions = async () => {
   }
 };
 
+const fetchTradeHistory = async (fromTimestampMs, toTimestampMs) => {
+  try {
+    const wallet = createWallet();
+    const timestamp = Date.now();
+    const signature = await signMessage(wallet, timestamp);
+    const body = {
+      subaccount_id: SUBACCOUNT_ID,
+      from_timestamp: fromTimestampMs,
+      page_size: 250,
+    };
+    if (toTimestampMs) body.to_timestamp = toTimestampMs;
+    const response = await axios.post(API_URL.GET_TRADE_HISTORY, body, {
+      headers: {
+        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(),
+        'X-LyraSignature': signature,
+      },
+      timeout: 15000,
+    });
+    const raw = response.data?.result;
+    return Array.isArray(raw) ? raw : (raw?.trades || []);
+  } catch (e) {
+    console.log(`📋 Failed to fetch trade history for review recovery: ${e.message}`);
+    return [];
+  }
+};
+
 // Fetch collaterals (USDC/ETH balances) from Derive
 const fetchCollaterals = async () => {
   try {
@@ -2032,6 +2060,72 @@ const getTradeActionFamily = (action) => {
   return null;
 };
 
+const getActionFromTradeDirection = (instrumentName, direction) => {
+  if (!instrumentName || !direction) return null;
+  const normalized = String(direction).toLowerCase();
+  if (instrumentName.endsWith('-C')) {
+    if (normalized === 'sell') return 'sell_call';
+    if (normalized === 'buy') return 'buyback_call';
+  }
+  if (instrumentName.endsWith('-P')) {
+    if (normalized === 'buy') return 'buy_put';
+    if (normalized === 'sell') return 'sell_put';
+  }
+  return null;
+};
+
+const normalizeLyraTradeForReview = (trade) => {
+  const instrumentName = trade?.instrument_name || null;
+  const action = getActionFromTradeDirection(instrumentName, trade?.direction);
+  if (!action) return null;
+  const amount = Math.abs(Number(trade?.trade_amount ?? trade?.amount ?? 0));
+  const price = Number(trade?.trade_price ?? trade?.price ?? 0);
+  const timestamp = typeof trade?.timestamp === 'number'
+    ? new Date(trade.timestamp).toISOString()
+    : new Date(trade?.timestamp).toISOString();
+  if (!(amount > 0) || !timestamp || Number.isNaN(new Date(timestamp).getTime())) return null;
+  return {
+    id: `lyra:${trade?.trade_id ?? `${instrumentName}:${timestamp}:${action}:${amount}`}`,
+    timestamp,
+    action,
+    success: 1,
+    reason: 'Recovered from Lyra trade history',
+    instrument_name: instrumentName,
+    strike: null,
+    expiry: null,
+    delta: null,
+    price,
+    intended_amount: amount,
+    filled_amount: amount,
+    fill_price: price > 0 ? price : null,
+    total_value: amount * price,
+    spot_price: Number(trade?.index_price ?? 0) || null,
+    raw_response: trade,
+    _source: 'lyra',
+  };
+};
+
+const mergeOrdersForTradeReview = (localOrders, lyraTrades) => {
+  const merged = [...localOrders.map((order) => ({ ...order, _source: 'local' }))];
+  for (const trade of lyraTrades) {
+    const normalized = normalizeLyraTradeForReview(trade);
+    if (!normalized) continue;
+    const normalizedTs = new Date(normalized.timestamp).getTime();
+    const duplicateLocal = merged.some((order) => {
+      if (order._source !== 'local') return false;
+      if (order.instrument_name !== normalized.instrument_name) return false;
+      if (order.action !== normalized.action) return false;
+      if (Number(order.success || 0) !== 1) return false;
+      const orderTs = new Date(order.timestamp).getTime();
+      const orderAmount = Math.abs(Number(order.filled_amount || order.intended_amount || 0));
+      const normalizedAmount = Math.abs(Number(normalized.filled_amount || normalized.intended_amount || 0));
+      return Math.abs(orderTs - normalizedTs) < 60_000 && Math.abs(orderAmount - normalizedAmount) < 0.02;
+    });
+    if (!duplicateLocal) merged.push(normalized);
+  }
+  return merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+};
+
 const deriveClosedTradeCampaigns = (orders) => {
   const byInstrument = new Map();
   for (const order of orders) {
@@ -2105,35 +2199,7 @@ const deriveClosedTradeCampaigns = (orders) => {
 };
 
 const TRADE_REVIEW_WINDOWS_DAYS = [1, 3, 7];
-const DEBUG_TRADE_REVIEW_ON_BOOT = process.env.DEBUG_TRADE_REVIEW_ON_BOOT === '1';
-const DEBUG_TRADE_REVIEW_INSTRUMENT = (process.env.DEBUG_TRADE_REVIEW_INSTRUMENT || '').trim();
-
-const logTradeReviewDebugOrders = (orders) => {
-  if (!DEBUG_TRADE_REVIEW_INSTRUMENT) return;
-  const matchingOrders = orders
-    .filter((order) => order?.instrument_name === DEBUG_TRADE_REVIEW_INSTRUMENT)
-    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-
-  console.log(
-    `🧾 Trade review debug instrument=${DEBUG_TRADE_REVIEW_INSTRUMENT} ` +
-    `local_matches=${matchingOrders.length}`
-  );
-
-  if (matchingOrders.length === 0) {
-    console.log('🧾 Trade review debug: no local persisted orders matched target instrument');
-    return;
-  }
-
-  for (const order of matchingOrders) {
-    console.log(
-      `🧾 Local order ${order.timestamp} | action=${order.action} | success=${order.success} ` +
-      `| qty=${order.filled_amount || order.intended_amount || 0} | total=${order.total_value || 0} ` +
-      `| fill=${order.fill_price || order.price || 0} | instrument=${order.instrument_name}`
-    );
-  }
-};
-
-const collectPendingTradeReviews = (campaigns, now, debug = false) => {
+const collectPendingTradeReviews = (campaigns, now) => {
   const pendingReviews = [];
   for (const campaign of campaigns) {
     const closedAtMs = new Date(campaign.closed_at).getTime();
@@ -2141,13 +2207,6 @@ const collectPendingTradeReviews = (campaigns, now, debug = false) => {
       const horizonEndMs = closedAtMs + reviewWindowDays * 24 * 60 * 60 * 1000;
       const eligible = now >= horizonEndMs;
       const alreadyReviewed = db.hasTradeReview(campaign.instrument_name, campaign.closed_at, reviewWindowDays);
-      if (debug) {
-        console.log(
-          `🧾 Review gate ${campaign.instrument_name} [${reviewWindowDays}d] ` +
-          `closed=${campaign.closed_at} eligible=${eligible} reviewed=${alreadyReviewed} ` +
-          `horizon=${new Date(horizonEndMs).toISOString()}`
-        );
-      }
       if (!eligible || alreadyReviewed) continue;
       pendingReviews.push({
         ...campaign,
@@ -2160,23 +2219,18 @@ const collectPendingTradeReviews = (campaigns, now, debug = false) => {
 };
 
 let _tradeReviewInFlight = false;
-const reviewClosedTrades = async ({ debug = false } = {}) => {
+const reviewClosedTrades = async () => {
   if (_tradeReviewInFlight || !process.env.ANTHROPIC_API_KEY || !db) return;
   _tradeReviewInFlight = true;
   try {
-    const since = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString();
+    const fromMs = Date.now() - 21 * 24 * 60 * 60 * 1000;
+    const since = new Date(fromMs).toISOString();
     const recentOrders = db.getRecentOrders(since, 250) || [];
+    const lyraTrades = await fetchTradeHistory(fromMs, Date.now());
     const now = Date.now();
-    if (debug) {
-      logTradeReviewDebugOrders(recentOrders);
-    }
-    const campaigns = deriveClosedTradeCampaigns(recentOrders);
-    if (debug) {
-      console.log(`🧾 Trade review debug: ${recentOrders.length} recent orders, ${campaigns.length} closed campaigns`);
-    }
-    const pendingReviews = collectPendingTradeReviews(campaigns, now, debug);
+    const campaigns = deriveClosedTradeCampaigns(mergeOrdersForTradeReview(recentOrders, lyraTrades));
+    const pendingReviews = collectPendingTradeReviews(campaigns, now);
     if (pendingReviews.length === 0) {
-      if (debug) console.log('🧾 Trade review debug: no eligible pending reviews');
       return;
     }
 
@@ -6261,21 +6315,6 @@ const _bootAdvisory = async () => {
   }
 };
 _bootAdvisory();
-
-const _bootTradeReviewDebug = async () => {
-  if (!DEBUG_TRADE_REVIEW_ON_BOOT) return;
-  console.log('🧾 Boot trade-review debug enabled');
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.log('🧾 Boot trade-review debug skipped: ANTHROPIC_API_KEY missing');
-    return;
-  }
-  try {
-    await reviewClosedTrades({ debug: true });
-  } catch (e) {
-    console.log(`🧾 Boot trade-review debug failed: ${e.message}`);
-  }
-};
-_bootTradeReviewDebug();
 
 sendTelegram('🔄 *NOOP Bot restarted*');
 

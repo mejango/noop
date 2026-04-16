@@ -7,6 +7,7 @@ import {
   getTradeReviewSummary,
   hasTable,
 } from '@/lib/db';
+import { getTradeHistory } from '@/lib/lyra';
 
 export const dynamic = 'force-dynamic';
 
@@ -52,6 +53,63 @@ function getTradeActionFamily(action: string) {
   if (action === 'sell_call' || action === 'buyback_call') return 'short_call_campaign';
   if (action === 'buy_put' || action === 'sell_put') return 'long_put_campaign';
   return null;
+}
+
+function getActionFromTradeDirection(instrumentName: string | null, direction: string | null | undefined) {
+  if (!instrumentName || !direction) return null;
+  const normalized = direction.toLowerCase();
+  if (instrumentName.endsWith('-C')) {
+    if (normalized === 'sell') return 'sell_call';
+    if (normalized === 'buy') return 'buyback_call';
+  }
+  if (instrumentName.endsWith('-P')) {
+    if (normalized === 'buy') return 'buy_put';
+    if (normalized === 'sell') return 'sell_put';
+  }
+  return null;
+}
+
+function normalizeLyraTradeForReview(trade: Record<string, unknown>): TradeOrder | null {
+  const instrumentName = typeof trade.instrument_name === 'string' ? trade.instrument_name : null;
+  const action = getActionFromTradeDirection(instrumentName, typeof trade.direction === 'string' ? trade.direction : null);
+  const amount = Math.abs(Number(trade.trade_amount ?? trade.amount ?? 0));
+  const price = Number(trade.trade_price ?? trade.price ?? 0);
+  const rawTimestamp = trade.timestamp;
+  const timestamp = typeof rawTimestamp === 'number'
+    ? new Date(rawTimestamp).toISOString()
+    : new Date(String(rawTimestamp ?? '')).toISOString();
+  if (!action || !instrumentName || !(amount > 0) || Number.isNaN(new Date(timestamp).getTime())) return null;
+  return {
+    id: -1,
+    timestamp,
+    action,
+    success: 1,
+    instrument_name: instrumentName,
+    intended_amount: amount,
+    filled_amount: amount,
+    total_value: amount * price,
+    spot_price: Number(trade.index_price ?? 0) || null,
+  };
+}
+
+function mergeOrdersForTradeReview(localOrders: TradeOrder[], lyraTradesRaw: Record<string, unknown>[]) {
+  const merged = [...localOrders];
+  for (const trade of lyraTradesRaw) {
+    const normalized = normalizeLyraTradeForReview(trade);
+    if (!normalized) continue;
+    const normalizedTs = new Date(normalized.timestamp).getTime();
+    const duplicateLocal = merged.some((order) => {
+      if (Number(order.success || 0) !== 1) return false;
+      if (order.instrument_name !== normalized.instrument_name) return false;
+      if (order.action !== normalized.action) return false;
+      const orderTs = new Date(order.timestamp).getTime();
+      const orderAmount = Math.abs(Number(order.filled_amount ?? order.intended_amount ?? 0));
+      const normalizedAmount = Math.abs(Number(normalized.filled_amount ?? normalized.intended_amount ?? 0));
+      return Math.abs(orderTs - normalizedTs) < 60_000 && Math.abs(orderAmount - normalizedAmount) < 0.02;
+    });
+    if (!duplicateLocal) merged.push(normalized);
+  }
+  return merged;
 }
 
 function deriveClosedTradeCampaigns(orders: TradeOrder[]): PendingCampaign[] {
@@ -126,7 +184,7 @@ function deriveClosedTradeCampaigns(orders: TradeOrder[]): PendingCampaign[] {
   return campaigns.sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
 }
 
-export function GET() {
+export async function GET() {
   try {
     const hasTradeReviewsTable = hasTable('trade_reviews');
     const hasTradeLessonsTable = hasTable('trade_lessons');
@@ -141,6 +199,7 @@ export function GET() {
       new Date(now - 21 * 24 * 60 * 60 * 1000).toISOString(),
       new Date(now).toISOString()
     ) as TradeOrder[];
+    const lyraTradesRaw = await getTradeHistory(now - 21 * 24 * 60 * 60 * 1000);
     const reviewSummary = hasTradeReviewsTable
       ? (getTradeReviewSummary() || { review_count: 0, instrument_count: 0, last_created_at: null })
       : { review_count: 0, instrument_count: 0, last_created_at: null };
@@ -155,7 +214,7 @@ export function GET() {
     const reviewKeys = new Set(
       reviews.map((review) => `${review.instrument_name}:${review.closed_at}:${review.review_window_days}`)
     );
-    const pendingCampaigns = deriveClosedTradeCampaigns(recentOrders)
+    const pendingCampaigns = deriveClosedTradeCampaigns(mergeOrdersForTradeReview(recentOrders, Array.isArray(lyraTradesRaw) ? lyraTradesRaw as Record<string, unknown>[] : []))
       .map((campaign) => {
         let reviewState: PendingCampaign['review_state'] = 'awaiting_horizon';
         let nextReviewAt: string | null = null;
