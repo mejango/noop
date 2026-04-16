@@ -142,6 +142,18 @@ interface OpsAssessment {
   timestamp: string;
 }
 
+interface AdvisoryArtifact {
+  content: string;
+  timestamp: string;
+}
+
+interface AdvisoryArtifacts {
+  main: AdvisoryArtifact | null;
+  spitznagel: AdvisoryArtifact | null;
+  taleb: AdvisoryArtifact | null;
+  mandelbrot: AdvisoryArtifact | null;
+}
+
 interface PortfolioSnapshot {
   timestamp: string; spot_price: number; usdc_balance: number; eth_balance: number;
   total_unrealized_pnl: number; total_realized_pnl: number; portfolio_value_usd: number;
@@ -159,6 +171,7 @@ interface OpsData {
   actions: PendingAction[];
   orders: Order[];
   assessment: OpsAssessment | null;
+  advisoryArtifacts?: AdvisoryArtifacts | null;
   portfolio?: PortfolioSnapshot | null;
   pnl?: RealizedPnL | null;
 }
@@ -265,7 +278,7 @@ export default function AdvisorDrawer() {
   const [journalLoading, setJournalLoading] = useState(false);
   const [analyticsTab, setAnalyticsTab] = useState(false);
   const [journalFilter, setJournalFilter] = useState<string | null>(null);
-  const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null });
+  const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null, advisoryArtifacts: null });
   const [opsLoading, setOpsLoading] = useState(false);
   const [learningData, setLearningData] = useState<{ lessons: TradeLesson[]; reviews: TradeReview[]; pendingCampaigns: PendingTradeCampaign[]; status: LearningStatus | null; error?: string | null }>({ lessons: [], reviews: [], pendingCampaigns: [], status: null, error: null });
   const [learningLoading, setLearningLoading] = useState(false);
@@ -1088,13 +1101,44 @@ export default function AdvisorDrawer() {
                 )}
 
                 {/* Advisory Assessment */}
-                {opsData.assessment && (
-                  <div className="bg-white/5 border border-white/10 px-3 py-2.5">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[10px] text-gray-500 uppercase tracking-wider">Advisory Assessment</span>
-                      <span className="text-[10px] text-gray-600">{timeAgo(opsData.assessment.timestamp)}</span>
-                    </div>
-                    <p className="text-[11px] text-gray-300 leading-relaxed">{opsData.assessment.content}</p>
+                {(opsData.assessment || opsData.advisoryArtifacts?.main || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb || opsData.advisoryArtifacts?.mandelbrot) && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
+                    {(opsData.advisoryArtifacts?.main || opsData.assessment) && (
+                      <div className="bg-white/5 border border-white/10 px-3 py-2.5">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Main Advisory Assessment</span>
+                          <span className="text-[10px] text-gray-600">{timeAgo((opsData.advisoryArtifacts?.main || opsData.assessment)!.timestamp)}</span>
+                        </div>
+                        <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{(opsData.advisoryArtifacts?.main || opsData.assessment)!.content}</p>
+                      </div>
+                    )}
+                    {opsData.advisoryArtifacts?.spitznagel && (
+                      <div className="bg-white/5 border border-white/10 px-3 py-2.5">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Spitznagel</span>
+                          <span className="text-[10px] text-gray-600">{timeAgo(opsData.advisoryArtifacts.spitznagel.timestamp)}</span>
+                        </div>
+                        <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{opsData.advisoryArtifacts.spitznagel.content}</p>
+                      </div>
+                    )}
+                    {opsData.advisoryArtifacts?.taleb && (
+                      <div className="bg-white/5 border border-white/10 px-3 py-2.5">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Taleb</span>
+                          <span className="text-[10px] text-gray-600">{timeAgo(opsData.advisoryArtifacts.taleb.timestamp)}</span>
+                        </div>
+                        <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{opsData.advisoryArtifacts.taleb.content}</pre>
+                      </div>
+                    )}
+                    {opsData.advisoryArtifacts?.mandelbrot && (
+                      <div className="bg-white/5 border border-white/10 px-3 py-2.5 lg:col-span-2">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-gray-500 uppercase tracking-wider">Mandelbrot Market Structure Archive</span>
+                          <span className="text-[10px] text-gray-600">{timeAgo(opsData.advisoryArtifacts.mandelbrot.timestamp)}</span>
+                        </div>
+                        <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{opsData.advisoryArtifacts.mandelbrot.content}</pre>
+                      </div>
+                    )}
                   </div>
                 )}
 

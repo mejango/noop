@@ -5630,6 +5630,16 @@ Synthesize the final agenda now.`;
   if (db) {
     try {
       db.insertJournalEntry('advisory', assessmentText);
+      db.insertJournalEntry('advisory_main', assessmentText);
+      if (primaryAgenda?.assessment) {
+        db.insertJournalEntry('advisory_spitznagel', primaryAgenda.assessment);
+      }
+      if (secondOpinion) {
+        db.insertJournalEntry('advisory_taleb', JSON.stringify(secondOpinion, null, 2));
+      }
+      if (mandelbrotContext) {
+        db.insertJournalEntry('mandelbrot_archive', JSON.stringify(mandelbrotContext, null, 2));
+      }
     } catch (e) {
       console.log('📋 Advisory: failed to journal assessment:', e.message);
     }

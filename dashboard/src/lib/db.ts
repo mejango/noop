@@ -473,6 +473,14 @@ function prepareAll(d: Database.Database) {
       ORDER BY timestamp DESC LIMIT 1
     `),
 
+    getLatestAdvisoryArtifacts: d.prepare(`
+      SELECT entry_type, content, timestamp
+      FROM ai_journal
+      WHERE entry_type IN ('advisory', 'advisory_main', 'advisory_spitznagel', 'advisory_taleb', 'mandelbrot_archive')
+      ORDER BY timestamp DESC
+      LIMIT 20
+    `),
+
     getRecentTradeReviews: d.prepare(`
       SELECT id, instrument_name, action_family, opened_at, closed_at, review_window_days, horizon_end_at, order_ids,
         review_status, review_confidence, summary, lessons, pnl_realized,
@@ -1138,6 +1146,28 @@ export function getLatestAdvisoryAssessment() {
       content: string; timestamp: string;
     } | undefined;
   } catch { return undefined; }
+}
+
+export function getLatestAdvisoryArtifacts() {
+  try {
+    const rows = getStmts().getLatestAdvisoryArtifacts.all() as {
+      entry_type: string; content: string; timestamp: string;
+    }[];
+    const latestByType = new Map<string, { content: string; timestamp: string }>();
+    for (const row of rows) {
+      if (!latestByType.has(row.entry_type)) {
+        latestByType.set(row.entry_type, { content: row.content, timestamp: row.timestamp });
+      }
+    }
+    return {
+      main: latestByType.get('advisory_main') ?? latestByType.get('advisory') ?? null,
+      spitznagel: latestByType.get('advisory_spitznagel') ?? null,
+      taleb: latestByType.get('advisory_taleb') ?? null,
+      mandelbrot: latestByType.get('mandelbrot_archive') ?? null,
+    };
+  } catch {
+    return { main: null, spitznagel: null, taleb: null, mandelbrot: null };
+  }
 }
 
 export function getBudgetCycleState() {
