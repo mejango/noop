@@ -32,6 +32,12 @@ export function getWikiDiagnostics() {
     pageCount = 0;
   }
 
+  const lastLint = typeof meta?.last_lint === 'string' ? meta.last_lint : null;
+  const lastIngest = typeof meta?.last_ingest === 'string' ? meta.last_ingest : null;
+  const seededAt = typeof meta?.seeded_at === 'string' ? meta.seeded_at : null;
+  const lintAgeHours = lastLint ? +((Date.now() - new Date(lastLint).getTime()) / 3_600_000).toFixed(2) : null;
+  const lintStatus = lastLint ? 'present' : seededAt || lastIngest ? 'missing_after_seed_or_ingest' : 'never_initialized';
+
   return {
     cwd: process.cwd(),
     dataDir: process.env.DATA_DIR || path.join(process.cwd(), '..', 'data'),
@@ -43,6 +49,11 @@ export function getWikiDiagnostics() {
     historyDir,
     historyExists: fs.existsSync(historyDir),
     pageCount,
+    seededAt,
+    lastIngest,
+    lastLint,
+    lintAgeHours,
+    lintStatus,
     meta,
   };
 }

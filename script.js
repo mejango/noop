@@ -2510,6 +2510,11 @@ const writeWikiMeta = (meta) => {
   fs.writeFileSync(WIKI_META_PATH, JSON.stringify(meta, null, 2));
 };
 
+const logWikiMetaSummary = (prefix, meta = null) => {
+  const effectiveMeta = meta || readWikiMeta();
+  console.log(`${prefix} wiki_dir=${WIKI_DIR} meta_path=${WIKI_META_PATH} meta_exists=${fs.existsSync(WIKI_META_PATH)} seeded_at=${effectiveMeta.seeded_at || 'none'} last_ingest=${effectiveMeta.last_ingest || 'none'} last_lint=${effectiveMeta.last_lint || 'none'}`);
+};
+
 const queryWikiContext = () => {
   const sections = [];
   for (const page of WIKI_KEY_PAGES) {
@@ -2871,12 +2876,18 @@ const getWikiSignalContext = () => {
 };
 
 const lintWiki = async () => {
-  if (!process.env.ANTHROPIC_API_KEY) return;
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log('📚 Wiki lint: skipped — no ANTHROPIC_API_KEY');
+    return;
+  }
 
   // Guard: only run once per 20 hours
   const meta = readWikiMeta();
   const LINT_INTERVAL_MS = 20 * 60 * 60 * 1000; // 20 hours
+  logWikiMetaSummary('📚 Wiki lint: preflight', meta);
   if (meta.last_lint && Date.now() - new Date(meta.last_lint).getTime() < LINT_INTERVAL_MS) {
+    const nextEligibleAt = new Date(new Date(meta.last_lint).getTime() + LINT_INTERVAL_MS).toISOString();
+    console.log(`📚 Wiki lint: skipped — throttled until ${nextEligibleAt}`);
     return;
   }
 
@@ -2891,6 +2902,7 @@ const lintWiki = async () => {
   }
   if (!hasContent) {
     console.log('📚 Wiki lint: skipped — wiki not yet seeded');
+    logWikiMetaSummary('📚 Wiki lint: post-skip', meta);
     return;
   }
 
@@ -2944,6 +2956,7 @@ Wrap your JSON in a <lint_result> tag.`;
       console.log('📚 Wiki lint: no structured result returned');
       meta.last_lint = new Date().toISOString();
       writeWikiMeta(meta);
+      logWikiMetaSummary('📚 Wiki lint: wrote fallback last_lint', meta);
       return;
     }
 
@@ -2954,6 +2967,7 @@ Wrap your JSON in a <lint_result> tag.`;
       console.log('📚 Wiki lint: malformed JSON in lint_result:', parseErr.message);
       meta.last_lint = new Date().toISOString();
       writeWikiMeta(meta);
+      logWikiMetaSummary('📚 Wiki lint: wrote parse-fallback last_lint', meta);
       return;
     }
 
@@ -3011,10 +3025,12 @@ Wrap your JSON in a <lint_result> tag.`;
     meta.last_lint_issues = result.issues?.length || 0;
     meta.last_lint_updates = updateCount;
     writeWikiMeta(meta);
+    logWikiMetaSummary('📚 Wiki lint: wrote completion meta', meta);
 
     console.log(`📚 Wiki lint: complete (${updateCount} updates applied)`);
   } catch (e) {
     console.log('📚 Wiki lint failed:', e.message);
+    logWikiMetaSummary('📚 Wiki lint: failure state', meta);
   }
 };
 
