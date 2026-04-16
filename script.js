@@ -2428,29 +2428,6 @@ Output JSON:
   }
 };
 
-const USER_AUTHORED_TRADE_LESSONS = Object.freeze([
-  {
-    lesson: 'A stressed short call does not automatically justify an immediate buyback. When the move is sharp and emotional, buying back into peak premium expansion can make the bot the sucker of the move; process should favor patience, waiting for pullback or premium retracement, unless a true ruin constraint is present.',
-    evidence_count: 1,
-  },
-]);
-
-const seedUserAuthoredTradeLessons = () => {
-  if (!db) return;
-  try {
-    const activeTradeLessons = db.getActiveTradeLessons() || [];
-    for (const candidate of USER_AUTHORED_TRADE_LESSONS) {
-      const alreadyPresent = activeTradeLessons.some((lesson) => lesson.lesson === candidate.lesson);
-      if (!alreadyPresent) {
-        db.insertTradeLesson(candidate.lesson, candidate.evidence_count);
-        console.log(`🧠 Seeded user-authored trade lesson: ${candidate.lesson.slice(0, 80)}...`);
-      }
-    }
-  } catch (e) {
-    console.log(`🧠 Failed seeding user-authored trade lessons: ${e.message}`);
-  }
-};
-
 // ─── Wiki Knowledge System ──────────────────────────────────────────────────
 
 const WIKI_DIR = process.env.WIKI_DIR || path.join(__dirname, 'knowledge');
@@ -5759,8 +5736,6 @@ Synthesize the final agenda now.`;
 const runBot = async () => {
   try {
   const now = Date.now();
-
-  seedUserAuthoredTradeLessons();
 
   console.log(' ');
   console.log('─'.repeat(60));
