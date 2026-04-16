@@ -2106,21 +2106,38 @@ const normalizeLyraTradeForReview = (trade) => {
 };
 
 const mergeOrdersForTradeReview = (localOrders, lyraTrades) => {
+  const FILL_TIME_WINDOW_MS = 10 * 60_000;
+  const AMOUNT_EPSILON = 0.02;
+  const VALUE_EPSILON = 0.25;
+  const isSameRecoveredFill = (order, normalized) => {
+    if (order._source !== 'local') return false;
+    if (order.instrument_name !== normalized.instrument_name) return false;
+    if (order.action !== normalized.action) return false;
+    if (Number(order.success || 0) !== 1) return false;
+
+    const orderAmount = Math.abs(Number(order.filled_amount || 0));
+    const normalizedAmount = Math.abs(Number(normalized.filled_amount || normalized.intended_amount || 0));
+    if (!(orderAmount > 0) || !(normalizedAmount > 0)) return false;
+    if (Math.abs(orderAmount - normalizedAmount) >= AMOUNT_EPSILON) return false;
+
+    const orderTs = new Date(order.timestamp).getTime();
+    const normalizedTs = new Date(normalized.timestamp).getTime();
+    if (Math.abs(orderTs - normalizedTs) >= FILL_TIME_WINDOW_MS) return false;
+
+    const orderValue = Math.abs(Number(order.total_value || 0));
+    const normalizedValue = Math.abs(Number(normalized.total_value || 0));
+    if (orderValue > 0 && normalizedValue > 0) {
+      return Math.abs(orderValue - normalizedValue) < VALUE_EPSILON;
+    }
+
+    return true;
+  };
+
   const merged = [...localOrders.map((order) => ({ ...order, _source: 'local' }))];
   for (const trade of lyraTrades) {
     const normalized = normalizeLyraTradeForReview(trade);
     if (!normalized) continue;
-    const normalizedTs = new Date(normalized.timestamp).getTime();
-    const duplicateLocal = merged.some((order) => {
-      if (order._source !== 'local') return false;
-      if (order.instrument_name !== normalized.instrument_name) return false;
-      if (order.action !== normalized.action) return false;
-      if (Number(order.success || 0) !== 1) return false;
-      const orderTs = new Date(order.timestamp).getTime();
-      const orderAmount = Math.abs(Number(order.filled_amount || order.intended_amount || 0));
-      const normalizedAmount = Math.abs(Number(normalized.filled_amount || normalized.intended_amount || 0));
-      return Math.abs(orderTs - normalizedTs) < 60_000 && Math.abs(orderAmount - normalizedAmount) < 0.02;
-    });
+    const duplicateLocal = merged.some((order) => isSameRecoveredFill(order, normalized));
     if (!duplicateLocal) merged.push(normalized);
   }
   return merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -2146,7 +2163,7 @@ const deriveClosedTradeCampaigns = (orders) => {
     let active = null;
 
     for (const order of instrumentOrders) {
-      const qty = Math.abs(Number(order.filled_amount || order.intended_amount || 0));
+      const qty = Math.abs(Number(order.filled_amount || 0));
       if (!(qty > 0)) continue;
 
       const isOpen = order.action === 'sell_call' || order.action === 'buy_put';
