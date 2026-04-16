@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import {
   getActiveTradeLessons,
   getOrdersInRange,
@@ -112,6 +112,19 @@ function mergeOrdersForTradeReview(localOrders: TradeOrder[], lyraTradesRaw: Rec
   return merged;
 }
 
+function serializeOrderForDebug(order: TradeOrder) {
+  return {
+    timestamp: order.timestamp,
+    action: order.action,
+    success: order.success,
+    instrument_name: order.instrument_name,
+    intended_amount: order.intended_amount,
+    filled_amount: order.filled_amount,
+    total_value: order.total_value,
+    spot_price: order.spot_price,
+  };
+}
+
 function deriveClosedTradeCampaigns(orders: TradeOrder[]): PendingCampaign[] {
   const byInstrument = new Map<string, Array<TradeOrder & { family: string }>>();
   for (const order of orders) {
@@ -184,7 +197,7 @@ function deriveClosedTradeCampaigns(orders: TradeOrder[]): PendingCampaign[] {
   return campaigns.sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
     const hasTradeReviewsTable = hasTable('trade_reviews');
     const hasTradeLessonsTable = hasTable('trade_lessons');
@@ -200,6 +213,7 @@ export async function GET() {
       new Date(now).toISOString()
     ) as TradeOrder[];
     const lyraTradesRaw = await getTradeHistory(now - 21 * 24 * 60 * 60 * 1000);
+    const debugInstrument = new URL(req.url).searchParams.get('debug_instrument');
     const reviewSummary = hasTradeReviewsTable
       ? (getTradeReviewSummary() || { review_count: 0, instrument_count: 0, last_created_at: null })
       : { review_count: 0, instrument_count: 0, last_created_at: null };
@@ -211,10 +225,15 @@ export async function GET() {
           order_ids: review.order_ids ? JSON.parse(review.order_ids) : [],
         }))
       : [];
+    const mergedOrders = mergeOrdersForTradeReview(
+      recentOrders,
+      Array.isArray(lyraTradesRaw) ? lyraTradesRaw as Record<string, unknown>[] : []
+    );
     const reviewKeys = new Set(
       reviews.map((review) => `${review.instrument_name}:${review.closed_at}:${review.review_window_days}`)
     );
-    const pendingCampaigns = deriveClosedTradeCampaigns(mergeOrdersForTradeReview(recentOrders, Array.isArray(lyraTradesRaw) ? lyraTradesRaw as Record<string, unknown>[] : []))
+    const derivedCampaigns = deriveClosedTradeCampaigns(mergedOrders);
+    const pendingCampaigns = derivedCampaigns
       .map((campaign) => {
         let reviewState: PendingCampaign['review_state'] = 'awaiting_horizon';
         let nextReviewAt: string | null = null;
@@ -249,6 +268,30 @@ export async function GET() {
       lessons,
       reviews,
       pendingCampaigns,
+      ...(debugInstrument ? {
+        debug: {
+          instrument: debugInstrument,
+          localOrders: recentOrders
+            .filter((order) => order.instrument_name === debugInstrument)
+            .map(serializeOrderForDebug),
+          lyraTrades: (Array.isArray(lyraTradesRaw) ? lyraTradesRaw as Record<string, unknown>[] : [])
+            .filter((trade) => trade.instrument_name === debugInstrument)
+            .map((trade) => ({
+              instrument_name: trade.instrument_name,
+              direction: trade.direction,
+              timestamp: trade.timestamp,
+              trade_amount: Number(trade.trade_amount ?? trade.amount ?? 0),
+              trade_price: Number(trade.trade_price ?? trade.price ?? 0),
+              index_price: Number(trade.index_price ?? 0),
+              normalized: normalizeLyraTradeForReview(trade),
+            })),
+          mergedOrders: mergedOrders
+            .filter((order) => order.instrument_name === debugInstrument)
+            .map(serializeOrderForDebug),
+          derivedCampaigns: derivedCampaigns
+            .filter((campaign) => campaign.instrument_name === debugInstrument),
+        },
+      } : {}),
       status: {
         hasTradeReviewsTable,
         hasTradeLessonsTable,
