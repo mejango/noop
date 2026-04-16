@@ -2399,6 +2399,49 @@ const extractJSON = (text) => {
   return null;
 };
 
+const extractConfirmationVote = (text) => {
+  const parsed = extractJSON(text);
+  if (parsed && typeof parsed.confirm === 'boolean') return parsed;
+
+  if (!text || typeof text !== 'string') return null;
+  const cleaned = text
+    .replace(/```json/gi, '')
+    .replace(/```/g, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim();
+
+  const confirmMatch = cleaned.match(/"confirm"\s*:\s*(true|false)/i) || cleaned.match(/\bconfirm\b[^a-z]{0,10}(true|false)/i);
+  const orderTypeMatch = cleaned.match(/"order_type"\s*:\s*"(ioc|gtc|post_only)"/i);
+  const nullOrderTypeMatch = cleaned.match(/"order_type"\s*:\s*null/i);
+  const limitPriceMatch = cleaned.match(/"limit_price"\s*:\s*(null|-?\d+(?:\.\d+)?)/i);
+  const reasoningMatch = cleaned.match(/"reasoning"\s*:\s*"([\s\S]*?)"\s*(?:[,}]|$)/i);
+
+  let confirm = null;
+  if (confirmMatch) {
+    confirm = confirmMatch[1].toLowerCase() === 'true';
+  } else if (/\breject(?:ed)?\b/i.test(cleaned) && !/\bconfirm(?:ed)?\b/i.test(cleaned)) {
+    confirm = false;
+  } else if (/\bconfirm(?:ed)?\b/i.test(cleaned) && !/\breject(?:ed)?\b/i.test(cleaned)) {
+    confirm = true;
+  }
+
+  if (typeof confirm !== 'boolean') return null;
+
+  const vote = {
+    confirm,
+    order_type: orderTypeMatch ? orderTypeMatch[1] : (nullOrderTypeMatch ? null : null),
+    limit_price: null,
+    reasoning: reasoningMatch ? reasoningMatch[1] : cleaned.slice(0, 500),
+  };
+
+  if (limitPriceMatch) {
+    vote.limit_price = limitPriceMatch[1].toLowerCase() === 'null' ? null : Number(limitPriceMatch[1]);
+  }
+
+  return vote;
+};
+
 describe('extractJSON (balanced brace parser)', () => {
   test('simple JSON object', () => {
     const result = extractJSON('{"key": "value"}');
@@ -2455,6 +2498,48 @@ describe('extractJSON (balanced brace parser)', () => {
     assert.strictEqual(result.assessment, 'market bearish');
     assert.strictEqual(result.entry_rules.length, 1);
     assert.strictEqual(result.entry_rules[0].criteria.option_type, 'P');
+  });
+});
+
+describe('extractConfirmationVote', () => {
+  test('parses strict JSON vote directly', () => {
+    const result = extractConfirmationVote('{"confirm":true,"order_type":"gtc","limit_price":12.5,"reasoning":"priced well"}');
+    assert.deepStrictEqual(result, {
+      confirm: true,
+      order_type: 'gtc',
+      limit_price: 12.5,
+      reasoning: 'priced well',
+    });
+  });
+
+  test('parses fenced JSON vote', () => {
+    const result = extractConfirmationVote('```json\n{"confirm": false, "order_type": null, "limit_price": null, "reasoning": "too much risk"}\n```');
+    assert.deepStrictEqual(result, {
+      confirm: false,
+      order_type: null,
+      limit_price: null,
+      reasoning: 'too much risk',
+    });
+  });
+
+  test('salvages malformed fenced response', () => {
+    const result = extractConfirmationVote('```json { "confirm": false, "order_type": null, "limit_price": null, "reasoning": "REJECT because sizing is too small"');
+    assert.deepStrictEqual(result, {
+      confirm: false,
+      order_type: null,
+      limit_price: null,
+      reasoning: 'REJECT because sizing is too small',
+    });
+  });
+
+  test('falls back to prose reject inference', () => {
+    const result = extractConfirmationVote('REJECT - margin utilization is too high for this call sale.');
+    assert.deepStrictEqual(result, {
+      confirm: false,
+      order_type: null,
+      limit_price: null,
+      reasoning: 'REJECT - margin utilization is too high for this call sale.',
+    });
   });
 });
 

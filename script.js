@@ -359,6 +359,49 @@ const extractJSON = (text) => {
   return null;
 };
 
+const extractConfirmationVote = (text) => {
+  const parsed = extractJSON(text);
+  if (parsed && typeof parsed.confirm === 'boolean') return parsed;
+
+  if (!text || typeof text !== 'string') return null;
+  const cleaned = text
+    .replace(/```json/gi, '')
+    .replace(/```/g, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .trim();
+
+  const confirmMatch = cleaned.match(/"confirm"\s*:\s*(true|false)/i) || cleaned.match(/\bconfirm\b[^a-z]{0,10}(true|false)/i);
+  const orderTypeMatch = cleaned.match(/"order_type"\s*:\s*"(ioc|gtc|post_only)"/i);
+  const nullOrderTypeMatch = cleaned.match(/"order_type"\s*:\s*null/i);
+  const limitPriceMatch = cleaned.match(/"limit_price"\s*:\s*(null|-?\d+(?:\.\d+)?)/i);
+  const reasoningMatch = cleaned.match(/"reasoning"\s*:\s*"([\s\S]*?)"\s*(?:[,}]|$)/i);
+
+  let confirm = null;
+  if (confirmMatch) {
+    confirm = confirmMatch[1].toLowerCase() === 'true';
+  } else if (/\breject(?:ed)?\b/i.test(cleaned) && !/\bconfirm(?:ed)?\b/i.test(cleaned)) {
+    confirm = false;
+  } else if (/\bconfirm(?:ed)?\b/i.test(cleaned) && !/\breject(?:ed)?\b/i.test(cleaned)) {
+    confirm = true;
+  }
+
+  if (typeof confirm !== 'boolean') return null;
+
+  const vote = {
+    confirm,
+    order_type: orderTypeMatch ? orderTypeMatch[1] : (nullOrderTypeMatch ? null : null),
+    limit_price: null,
+    reasoning: reasoningMatch ? reasoningMatch[1] : cleaned.slice(0, 500),
+  };
+
+  if (limitPriceMatch) {
+    vote.limit_price = limitPriceMatch[1].toLowerCase() === 'null' ? null : Number(limitPriceMatch[1]);
+  }
+
+  return vote;
+};
+
 // Load existing data from SQLite
 const loadData = () => {
   if (!db) {
@@ -4831,7 +4874,9 @@ ${getActionOrderTypeHardRule(action.action)}
 - "gtc" (good-til-cancelled): rest on the order book at your limit_price until filled. MAKER fee = 0.01% of notional (~$0.16/contract). 6x cheaper than IOC. Use when you want a specific price and can wait.
 - "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee 0.01%). 6x cheaper than IOC. Best for patient limit orders.
 
-JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null for market>, "reasoning": "..." }`;
+Return EXACTLY one single-line JSON object.
+No markdown fences. No prose before or after. No explanation outside the JSON.
+JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, "limit_price": <number or null for market>, "reasoning": "..." }`;
 
       // Vote 1: Claude Haiku (Spitznagel temperament)
       let haikuVote = null;
@@ -4846,7 +4891,8 @@ MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure i
 CALL DISCIPLINE: Short calls have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters, but they must not exceed the ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% hard cap. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the hard cap or are too small to matter.
 CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. Buying back a short call because price rose is paying the crowd's fear premium. Ask: is the position genuinely threatened, or does it just feel that way? Confirm buybacks that lock in meaningful profit or exit a position that's truly challenged. Reject buybacks driven by price action alone when theta is still working and the position isn't under real threat. Use the Greeks and remaining DTE to judge the actual risk.
 PUT EXIT DISCIPLINE: For sell_put — evaluate it as monetizing or rolling an existing long put. Do not analyze it as short put selling or naked downside exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin. The question is whether closing this owned hedge now is prudent, not whether opening short put risk is acceptable.
-REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.`,
+REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.
+Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.`,
           messages: [{ role: 'user', content: confirmPrompt }],
         }, {
           headers: {
@@ -4860,7 +4906,7 @@ REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling p
         if (!haikuText.trim()) {
           haikuFailure = 'empty response';
         } else {
-          haikuVote = extractJSON(haikuText);
+          haikuVote = extractConfirmationVote(haikuText);
           if (!haikuVote) {
             haikuFailure = `parse error (len=${haikuText.length})`;
             const preview = haikuText.replace(/\s+/g, ' ').trim().slice(0, 200);
@@ -4893,12 +4939,13 @@ CALL DISCIPLINE: Short calls have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).
 CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous — that's paying a fear premium. Confirm buybacks only when the position is genuinely threatened or profit is worth locking in. Reject buybacks driven by price noise when theta is still working.
 PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
 REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV overpays alongside the crowd. Use actual Greeks, DTE, and momentum to judge.
-Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only", "limit_price": <number or null>, "reasoning": "..." }`,
+Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.
+Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, "limit_price": <number or null>, "reasoning": "..." }`,
           confirmPrompt,
           { maxTokens: 256, timeout: 15000, model: 'gpt-4o-mini' }
         );
         if (codexText) {
-          codexVote = extractJSON(codexText);
+          codexVote = extractConfirmationVote(codexText);
         }
         if (!codexVote) {
           codexFailure = 'empty or unparsable response';
