@@ -10,7 +10,6 @@ import { Bot, User } from 'lucide-react';
 import {
   ComposedChart, Line, Bar, Scatter, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
-  ReferenceDot,
 } from 'recharts';
 
 /** Hook: hover shows tooltip, click pins it, next click anywhere unpins */
@@ -191,10 +190,67 @@ interface LyraCollateral {
   unrealized_pnl: number;
 }
 
+interface ParsedInstrument {
+  base: string;
+  expiryLabel: string | null;
+  expiryDate: Date | null;
+  strike: number | null;
+  optionType: 'put' | 'call' | null;
+}
+
 interface AccountData {
   collaterals: LyraCollateral[];
   positions: LyraPosition[];
   trades: LyraTrade[];
+}
+
+interface EnrichedTrade extends LyraTrade {
+  ts: number;
+  strike: number | null;
+  optionType: 'put' | 'call' | null;
+  expiryLabel: string | null;
+  expiryDate: Date | null;
+  openAmount: number;
+  currentMark: number | null;
+  currentUnrealizedPnl: number | null;
+}
+
+interface PositionOverlay {
+  instrumentName: string;
+  optionType: 'put' | 'call' | null;
+  strike: number;
+  amount: number;
+  averagePrice: number;
+  markPrice: number;
+  unrealizedPnl: number;
+  entryTs: number;
+  expiryLabel: string | null;
+  expiryDate: Date | null;
+}
+
+interface PositionLifecycleSegment {
+  instrumentName: string;
+  optionType: 'put' | 'call' | null;
+  strike: number;
+  startTs: number;
+  endTs: number;
+  amount: number;
+  expiryLabel: string | null;
+  expiryDate: Date | null;
+}
+
+interface PositionLifecycleMarker {
+  id: string;
+  ts: number;
+  price: number;
+  amountBefore: number;
+  amountAfter: number;
+  deltaAmount: number;
+  instrumentName: string;
+  optionType: 'put' | 'call' | null;
+  strike: number | null;
+  expiryLabel: string | null;
+  expiryDate: Date | null;
 }
 
 interface TickData {
@@ -483,6 +539,95 @@ const MQDotShape = ({ cx, cy, payload }: any) => {
   const fill = lerpColor(mqBadColor, mqGoodColor, t);
   const r = 2.5 + (payload.depthIntensity ?? 0.3) * 4; // 2.5–6.5px radius based on depth
   return <circle cx={cx} cy={cy} r={r} fill={fill} fillOpacity={0.7 + t * 0.3} />;
+};
+
+function parseInstrumentName(instrumentName: string | null | undefined): ParsedInstrument {
+  if (!instrumentName) {
+    return { base: '', expiryLabel: null, expiryDate: null, strike: null, optionType: null };
+  }
+
+  const parts = instrumentName.split('-');
+  const [base = '', expiryLabel = null, strikeRaw = null, typeRaw = null] = parts;
+  const strike = strikeRaw != null ? Number(strikeRaw) : null;
+  const optionType = typeRaw === 'P' ? 'put' : typeRaw === 'C' ? 'call' : null;
+  let expiryDate: Date | null = null;
+  if (expiryLabel && /^\d{1,2}[A-Z]{3}\d{2}$/.test(expiryLabel)) {
+    const day = Number(expiryLabel.slice(0, expiryLabel.length - 5));
+    const monthLabel = expiryLabel.slice(expiryLabel.length - 5, expiryLabel.length - 2);
+    const year = Number(`20${expiryLabel.slice(-2)}`);
+    const monthMap: Record<string, number> = {
+      JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5,
+      JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11,
+    };
+    const month = monthMap[monthLabel];
+    if (Number.isFinite(day) && month != null) {
+      expiryDate = new Date(Date.UTC(year, month, day, 8, 0, 0));
+    }
+  }
+
+  return {
+    base,
+    expiryLabel,
+    expiryDate: expiryDate != null && !Number.isNaN(expiryDate.getTime()) ? expiryDate : null,
+    strike: Number.isFinite(strike) ? strike : null,
+    optionType,
+  };
+}
+
+function formatCompactDateTime(ts: number) {
+  return new Date(ts).toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function formatExpiryLabel(expiryDate: Date | null, fallback: string | null) {
+  if (!expiryDate) return fallback ?? 'N/A';
+  return expiryDate.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function getPositionColor(optionType: 'put' | 'call' | null) {
+  return optionType === 'put' ? chartColors.red : optionType === 'call' ? chartColors.secondary : '#a1a1aa';
+}
+
+function getTradePositionChange(trade: Pick<LyraTrade, 'direction' | 'trade_amount'>) {
+  return trade.direction === 'buy' ? trade.trade_amount : -trade.trade_amount;
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const TradeMarkerShape = ({ cx, cy, payload }: any) => {
+  if (!cx || !cy || !payload) return null;
+  const isBuy = payload.direction === 'buy';
+  const isBot = Boolean(payload.is_bot);
+  const fill = isBot ? chartColors.trade : '#111111';
+  const stroke = chartColors.trade;
+  const size = isBot ? 7 : 6;
+  const points = isBuy
+    ? `${cx},${cy - size} ${cx - size},${cy + size * 0.65} ${cx + size},${cy + size * 0.65}`
+    : `${cx},${cy + size} ${cx - size},${cy - size * 0.65} ${cx + size},${cy - size * 0.65}`;
+  return <polygon points={points} fill={fill} stroke={stroke} strokeWidth={1.5} />;
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const LifecycleMarkerShape = ({ cx, cy, payload }: any) => {
+  if (!cx || !cy || !payload) return null;
+  const color = getPositionColor(payload.optionType);
+  const opened = Math.abs(payload.amountBefore) < 0.0001 && Math.abs(payload.amountAfter) > 0.0001;
+  const closed = Math.abs(payload.amountBefore) > 0.0001 && Math.abs(payload.amountAfter) < 0.0001;
+  if (opened) {
+    return <circle cx={cx} cy={cy} r={4.5} fill="#111111" stroke={color} strokeWidth={1.5} />;
+  }
+  if (closed) {
+    return (
+      <g>
+        <circle cx={cx} cy={cy} r={4.5} fill="#111111" stroke={color} strokeWidth={1.5} />
+        <path d={`M ${cx - 3} ${cy - 3} L ${cx + 3} ${cy + 3} M ${cx - 3} ${cy + 3} L ${cx + 3} ${cy - 3}`} stroke={color} strokeWidth={1.5} />
+      </g>
+    );
+  }
+  return <rect x={cx - 3.5} y={cy - 3.5} width={7} height={7} fill="#111111" stroke={color} strokeWidth={1.5} rx={1.5} />;
 };
 
 function buildInstrumentSeries<T extends { instrument: string; ts: number }>(data: T[]): T[][] {
@@ -917,6 +1062,12 @@ export default function OverviewPage() {
     return rows;
   }, [chart, latestTick, stats]);
 
+  const currentSpot = useMemo(() => {
+    if (stats.last_price > 0) return stats.last_price;
+    const lastMergedPrice = merged.length > 0 ? merged[merged.length - 1].price : null;
+    return lastMergedPrice && lastMergedPrice > 0 ? lastMergedPrice : 0;
+  }, [stats.last_price, merged]);
+
   // Data for momentum bar (only points with momentum data)
   const momentumData = useMemo(() =>
     merged.filter(d => d.momentum !== undefined),
@@ -1121,6 +1272,23 @@ export default function OverviewPage() {
     [merged]
   );
 
+  const findNearestMergedRow = useCallback((targetTs: number) => {
+    if (merged.length === 0) return null;
+    let lo = 0;
+    let hi = merged.length - 1;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (merged[mid].ts < targetTs) lo = mid + 1;
+      else hi = mid;
+    }
+    const current = merged[lo];
+    const previous = lo > 0 ? merged[lo - 1] : null;
+    if (previous && Math.abs(previous.ts - targetTs) < Math.abs(current.ts - targetTs)) {
+      return previous;
+    }
+    return current;
+  }, [merged]);
+
   // Filter sub-chart data to match the selected time range (single pass)
   const { filteredLiquidity, filteredCallHeatmap, filteredPutHeatmap, filteredPutMQ, filteredCallMQ } = useMemo(() => {
     const [lo, hi] = xDomain;
@@ -1224,6 +1392,156 @@ export default function OverviewPage() {
     const [lo, hi] = xDomain;
     return account.trades.filter(t => t.timestamp >= lo && t.timestamp <= hi);
   }, [account.trades, xDomain]);
+
+  const positionsByInstrument = useMemo(
+    () => new Map(account.positions.map((position) => [position.instrument_name, position])),
+    [account.positions]
+  );
+
+  const visibleTradesEnriched = useMemo<EnrichedTrade[]>(() => visibleTrades.map((trade) => {
+    const parsed = parseInstrumentName(trade.instrument_name);
+    const currentPosition = trade.instrument_name ? positionsByInstrument.get(trade.instrument_name) : undefined;
+    return {
+      ...trade,
+      ts: trade.timestamp,
+      strike: parsed.strike,
+      optionType: parsed.optionType,
+      expiryLabel: parsed.expiryLabel,
+      expiryDate: parsed.expiryDate,
+      openAmount: Number(currentPosition?.amount ?? 0),
+      currentMark: currentPosition ? Number(currentPosition.mark_price ?? 0) : null,
+      currentUnrealizedPnl: currentPosition ? Number(currentPosition.unrealized_pnl ?? 0) : null,
+    };
+  }), [positionsByInstrument, visibleTrades]);
+
+  const tradeMarkers = useMemo(() => ({
+    buys: visibleTradesEnriched.filter((trade) => trade.direction === 'buy').map((trade) => ({
+      ...trade,
+      price: trade.index_price,
+    })),
+    sells: visibleTradesEnriched.filter((trade) => trade.direction !== 'buy').map((trade) => ({
+      ...trade,
+      price: trade.index_price,
+    })),
+  }), [visibleTradesEnriched]);
+
+  const positionOverlays = useMemo<PositionOverlay[]>(() => {
+    const [lo, hi] = xDomain;
+    return account.positions.flatMap((position) => {
+      const parsed = parseInstrumentName(position.instrument_name);
+      if (!parsed.strike || parsed.optionType == null) return [];
+
+      const matchingTrades = account.trades
+        .filter((trade) => trade.instrument_name === position.instrument_name)
+        .sort((a, b) => a.timestamp - b.timestamp);
+      const latestMatchingTrade = matchingTrades[matchingTrades.length - 1];
+      const entryTs = latestMatchingTrade?.timestamp ?? hi;
+
+      return [{
+        instrumentName: position.instrument_name,
+        optionType: parsed.optionType,
+        strike: parsed.strike,
+        amount: position.amount,
+        averagePrice: position.average_price,
+        markPrice: position.mark_price,
+        unrealizedPnl: position.unrealized_pnl,
+        entryTs: Math.max(lo, Math.min(entryTs, hi)),
+        expiryLabel: parsed.expiryLabel,
+        expiryDate: parsed.expiryDate,
+      }];
+    });
+  }, [account.positions, account.trades, xDomain]);
+
+  const { lifecycleSegments, lifecycleMarkers } = useMemo(() => {
+    const [lo, hi] = xDomain;
+    const segments: PositionLifecycleSegment[] = [];
+    const markers: PositionLifecycleMarker[] = [];
+    const positionAmountByInstrument = new Map(account.positions.map((position) => [position.instrument_name, position.amount]));
+    const tradesByInstrument = new Map<string, LyraTrade[]>();
+
+    for (const trade of account.trades) {
+      if (!trade.instrument_name) continue;
+      const parsed = parseInstrumentName(trade.instrument_name);
+      if (!parsed.strike || parsed.optionType == null) continue;
+      if (!tradesByInstrument.has(trade.instrument_name)) tradesByInstrument.set(trade.instrument_name, []);
+      tradesByInstrument.get(trade.instrument_name)!.push(trade);
+    }
+
+    for (const [instrumentName, instrumentTradesRaw] of tradesByInstrument.entries()) {
+      const parsed = parseInstrumentName(instrumentName);
+      if (!parsed.strike || parsed.optionType == null) continue;
+
+      const instrumentTrades = [...instrumentTradesRaw].sort((a, b) => a.timestamp - b.timestamp);
+      let runningAmount = Number(positionAmountByInstrument.get(instrumentName) ?? 0);
+      const reconstructed: Array<{
+        trade: LyraTrade;
+        amountBefore: number;
+        amountAfter: number;
+      }> = [];
+
+      for (let i = instrumentTrades.length - 1; i >= 0; i -= 1) {
+        const trade = instrumentTrades[i];
+        const deltaAmount = getTradePositionChange(trade);
+        const amountAfter = runningAmount;
+        const amountBefore = runningAmount - deltaAmount;
+        reconstructed.push({ trade, amountBefore, amountAfter });
+        runningAmount = amountBefore;
+      }
+
+      reconstructed.reverse();
+      const points = [{ ts: lo, amount: runningAmount }];
+
+      for (const step of reconstructed) {
+        points.push({ ts: Math.max(lo, Math.min(step.trade.timestamp, hi)), amount: step.amountAfter });
+        if (step.trade.timestamp >= lo && step.trade.timestamp <= hi) {
+          markers.push({
+            id: `${step.trade.trade_id}-lifecycle`,
+            ts: step.trade.timestamp,
+            price: parsed.strike,
+            amountBefore: step.amountBefore,
+            amountAfter: step.amountAfter,
+            deltaAmount: step.amountAfter - step.amountBefore,
+            instrumentName,
+            optionType: parsed.optionType,
+            strike: parsed.strike,
+            expiryLabel: parsed.expiryLabel,
+            expiryDate: parsed.expiryDate,
+          });
+        }
+      }
+
+      points.push({ ts: hi, amount: Number(positionAmountByInstrument.get(instrumentName) ?? 0) });
+
+      for (let i = 0; i < points.length - 1; i += 1) {
+        const start = points[i];
+        const end = points[i + 1];
+        if (Math.abs(start.amount) < 0.0001) continue;
+        if (end.ts <= lo || start.ts >= hi) continue;
+        segments.push({
+          instrumentName,
+          optionType: parsed.optionType,
+          strike: parsed.strike,
+          startTs: Math.max(lo, start.ts),
+          endTs: Math.min(hi, end.ts),
+          amount: start.amount,
+          expiryLabel: parsed.expiryLabel,
+          expiryDate: parsed.expiryDate,
+        });
+      }
+    }
+
+    return {
+      lifecycleSegments: segments.sort((a, b) => a.startTs - b.startTs),
+      lifecycleMarkers: markers.sort((a, b) => a.ts - b.ts),
+    };
+  }, [account.positions, account.trades, xDomain]);
+
+  const lifecycleSummary = useMemo(() => {
+    const active = lifecycleSegments.filter((segment) => segment.endTs >= xDomain[1] - 1);
+    return active
+      .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
+      .slice(0, 6);
+  }, [lifecycleSegments, xDomain]);
 
   return (
     <div className="space-y-6">
@@ -1368,6 +1686,8 @@ export default function OverviewPage() {
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
           {account.trades.length > 0 && <span className="flex items-center gap-1"><span className="inline-block" style={{ width: 0, height: 0, borderLeft: '4px solid transparent', borderRight: '4px solid transparent', borderBottom: `6px solid ${chartColors.trade}` }} /> Trade</span>}
+          {positionOverlays.length > 0 && <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: 'rgba(255,255,255,0.45)', borderTop: `1px dashed ${chartColors.trade}` }} /> Open strike</span>}
+          {lifecycleMarkers.length > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 inline-block rounded-full border" style={{ borderColor: chartColors.secondary }} /> Lifecycle</span>}
         </div>
       </div>
 
@@ -1378,13 +1698,41 @@ export default function OverviewPage() {
         ) : merged.length === 0 ? (
           <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
+          <>
+          {(visibleTradesEnriched.length > 0 || positionOverlays.length > 0 || lifecycleSummary.length > 0) && (
+            <div className="mb-3 flex flex-wrap gap-2 text-[11px]">
+              {visibleTradesEnriched.length > 0 && (
+                <span className="px-2 py-1 rounded-full border border-white/10 bg-white/[0.03] text-gray-400">
+                  {visibleTradesEnriched.length} fills in view
+                </span>
+              )}
+              {lifecycleSummary.map((position) => {
+                const distancePct = currentSpot > 0 ? ((position.strike - currentSpot) / currentSpot) * 100 : null;
+                const color = getPositionColor(position.optionType);
+                return (
+                  <span
+                    key={position.instrumentName}
+                    className="px-2 py-1 rounded-full border bg-white/[0.03]"
+                    style={{ borderColor: `${color}55`, color }}
+                  >
+                    {position.optionType === 'put' ? 'PUT' : 'CALL'} {position.strike.toFixed(0)}
+                    {' · '}
+                    {position.amount > 0 ? '+' : ''}{position.amount.toFixed(2)}
+                    {' · '}
+                    {formatExpiryLabel(position.expiryDate, position.expiryLabel)}
+                    {distancePct != null && ` · ${distancePct >= 0 ? '+' : ''}${distancePct.toFixed(1)}%`}
+                  </span>
+                );
+              })}
+            </div>
+          )}
           <div {...pinPrice.containerProps}>
           <ResponsiveContainer width="100%" height={mobile ? 300 : 500}>
             <ComposedChart data={merged} margin={margins}>
               <XAxis
                 dataKey="ts"
                 type="number"
-                domain={pnlXDomain}
+                domain={xDomain}
                 tickFormatter={xTickFormatter}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
@@ -1407,7 +1755,14 @@ export default function OverviewPage() {
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 content={({ active, payload, label }: any) => {
                   if (!active || !payload?.length) return pinPrice.wrap(null);
-                  const row = payload[0]?.payload;
+                  const labelTs = typeof label === 'number' ? label : Number(label);
+                  const tradePayloads = payload
+                    .map((entry: { payload?: EnrichedTrade }) => entry.payload)
+                    .filter((entry: EnrichedTrade | undefined): entry is EnrichedTrade => Boolean(entry?.trade_id));
+                  const lifecyclePayloads = payload
+                    .map((entry: { payload?: PositionLifecycleMarker }) => entry.payload)
+                    .filter((entry: PositionLifecycleMarker | undefined): entry is PositionLifecycleMarker => Boolean(entry?.id));
+                  const row = findNearestMergedRow(labelTs);
                   if (!row) return pinPrice.wrap(null);
                   const bestPut = row.bestPut;
                   const bestCall = row.bestCall;
@@ -1419,7 +1774,7 @@ export default function OverviewPage() {
                   const cd = row.bestCallDetail;
                   return pinPrice.wrap(
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
-                      <div className="text-xs text-gray-400 mb-1">{new Date(label as number).toLocaleString()}</div>
+                      <div className="text-xs text-gray-400 mb-1">{formatCompactDateTime(labelTs)}</div>
                       <div className="text-sm" style={{ color: chartColors.primary }}>ETH CG: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
                       {row.lyraSpot != null && <div className="text-sm text-white/50">ETH L: {formatUSD(row.lyraSpot)}</div>}
                       <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}{pd ? <span className="text-xs text-gray-400 ml-2">Ask ${Number(pd.price).toFixed(4)}</span> : null}</div>
@@ -1440,6 +1795,53 @@ export default function OverviewPage() {
                         {' / '}
                         <span style={{ color: chartColors.secondary }}>C {Number(bestCallScore).toFixed(2)}</span>
                       </div>
+                      {tradePayloads.length > 0 && (
+                        <div className="border-t border-white/10 mt-1.5 pt-1.5 space-y-1">
+                          {tradePayloads.slice(0, 3).map((trade) => {
+                            const strikeGap = trade.strike != null ? trade.strike - trade.index_price : null;
+                            const optionColor = getPositionColor(trade.optionType);
+                            return (
+                              <div key={trade.trade_id}>
+                                <div className="text-xs font-medium" style={{ color: optionColor }}>
+                                  {trade.direction.toUpperCase()} {trade.instrument_name}
+                                  {trade.is_bot ? ' · bot' : ' · manual'}
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                  Fill {formatUSD(trade.trade_price)} for {trade.trade_amount.toFixed(3)} @ spot {formatUSD(trade.index_price)}
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                  {trade.strike != null && `Strike ${formatUSD(trade.strike)}`}
+                                  {trade.expiryLabel && ` · Exp ${formatExpiryLabel(trade.expiryDate, trade.expiryLabel)}`}
+                                  {strikeGap != null && ` · gap ${strikeGap >= 0 ? '+' : ''}${formatUSD(strikeGap)}`}
+                                  {trade.openAmount !== 0 && ` · open ${trade.openAmount > 0 ? '+' : ''}${trade.openAmount.toFixed(3)}`}
+                                  {trade.currentUnrealizedPnl != null && ` · UPnL ${trade.currentUnrealizedPnl >= 0 ? '+' : ''}${formatUSD(trade.currentUnrealizedPnl)}`}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {lifecyclePayloads.length > 0 && (
+                        <div className="border-t border-white/10 mt-1.5 pt-1.5 space-y-1">
+                          {lifecyclePayloads.slice(0, 3).map((marker) => (
+                            <div key={marker.id}>
+                              <div className="text-xs font-medium" style={{ color: getPositionColor(marker.optionType) }}>
+                                {marker.instrumentName}
+                              </div>
+                              <div className="text-xs text-gray-500">
+                                {marker.amountBefore.toFixed(2)} → {marker.amountAfter.toFixed(2)}
+                                {' · '}
+                                {marker.deltaAmount >= 0 ? '+' : ''}{marker.deltaAmount.toFixed(2)} contracts
+                              </div>
+                              <div className="text-xs text-gray-500">
+                                Strike {marker.strike != null ? formatUSD(marker.strike) : 'N/A'}
+                                {' · '}
+                                Exp {formatExpiryLabel(marker.expiryDate, marker.expiryLabel)}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   );
                 }}
@@ -1473,34 +1875,81 @@ export default function OverviewPage() {
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
 
-              {/* Trade star markers */}
-              {visibleTrades.map((t) => (
-                <ReferenceDot
-                  key={t.trade_id}
-                  x={t.timestamp}
-                  y={t.index_price}
+              {visibleTradesEnriched.map((trade) => (
+                trade.strike != null ? (
+                  <ReferenceLine
+                    key={`${trade.trade_id}-spot-gap`}
+                    yAxisId="price"
+                    ifOverflow="extendDomain"
+                    stroke={getPositionColor(trade.optionType)}
+                    strokeOpacity={0.18}
+                    strokeDasharray="3 3"
+                    segment={[
+                      { x: trade.ts, y: trade.index_price },
+                      { x: trade.ts, y: trade.strike },
+                    ]}
+                  />
+                ) : null
+              ))}
+              {positionOverlays.map((position) => (
+                <ReferenceLine
+                  key={`${position.instrumentName}-lane`}
                   yAxisId="price"
-                  r={5}
-                  fill={t.is_bot ? chartColors.trade : 'none'}
-                  stroke={chartColors.trade}
-                  strokeWidth={1.5}
-                  shape={({ cx, cy }: { cx?: number; cy?: number }) => {
-                    if (!cx || !cy) return <></>;
-                    const isBuy = t.direction === 'buy';
-                    const size = 6;
-                    // Star / triangle marker
-                    if (isBuy) {
-                      // Upward triangle
-                      return <polygon points={`${cx},${cy - size} ${cx - size},${cy + size * 0.6} ${cx + size},${cy + size * 0.6}`} fill={t.is_bot ? chartColors.trade : 'none'} stroke={chartColors.trade} strokeWidth={1.5} />;
-                    }
-                    // Downward triangle
-                    return <polygon points={`${cx},${cy + size} ${cx - size},${cy - size * 0.6} ${cx + size},${cy - size * 0.6}`} fill={t.is_bot ? chartColors.trade : 'none'} stroke={chartColors.trade} strokeWidth={1.5} />;
-                  }}
+                  ifOverflow="extendDomain"
+                  stroke={getPositionColor(position.optionType)}
+                  strokeDasharray="6 5"
+                  strokeOpacity={0.45}
+                  segment={[
+                    { x: position.entryTs, y: position.strike },
+                    { x: xDomain[1], y: position.strike },
+                  ]}
                 />
               ))}
+              {lifecycleSegments.map((segment) => (
+                <ReferenceLine
+                  key={`${segment.instrumentName}-${segment.startTs}-${segment.endTs}-lifecycle`}
+                  yAxisId="price"
+                  ifOverflow="extendDomain"
+                  stroke={getPositionColor(segment.optionType)}
+                  strokeOpacity={Math.min(0.85, 0.2 + Math.abs(segment.amount) * 0.18)}
+                  strokeWidth={Math.min(5, 1.25 + Math.abs(segment.amount) * 0.85)}
+                  segment={[
+                    { x: segment.startTs, y: segment.strike },
+                    { x: segment.endTs, y: segment.strike },
+                  ]}
+                />
+              ))}
+              <Scatter
+                yAxisId="price"
+                data={tradeMarkers.buys}
+                dataKey="price"
+                name="tradeMarkerBuys"
+                fill={chartColors.trade}
+                shape={(props: unknown) => <TradeMarkerShape {...props} />}
+                isAnimationActive={false}
+              />
+              <Scatter
+                yAxisId="price"
+                data={tradeMarkers.sells}
+                dataKey="price"
+                name="tradeMarkerSells"
+                fill={chartColors.trade}
+                shape={(props: unknown) => <TradeMarkerShape {...props} />}
+                isAnimationActive={false}
+              />
+              <Scatter
+                yAxisId="price"
+                data={lifecycleMarkers}
+                dataKey="price"
+                name="lifecycleMarkers"
+                fill="none"
+                shape={(props: unknown) => <LifecycleMarkerShape {...props} />}
+                isAnimationActive={false}
+              />
             </ComposedChart>
           </ResponsiveContainer>
           </div>
+          </>
         )}
       </Card>
 
