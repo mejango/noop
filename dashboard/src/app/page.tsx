@@ -216,17 +216,6 @@ interface EnrichedTrade extends LyraTrade {
   currentUnrealizedPnl: number | null;
 }
 
-interface PositionLifecycleSegment {
-  instrumentName: string;
-  optionType: 'put' | 'call' | null;
-  strike: number;
-  startTs: number;
-  endTs: number;
-  amount: number;
-  expiryLabel: string | null;
-  expiryDate: Date | null;
-}
-
 interface TickData {
   price: number;
   medium_momentum: { main: string; derivative: string | null } | string;
@@ -564,10 +553,6 @@ function formatExpiryLabel(expiryDate: Date | null, fallback: string | null) {
 
 function getPositionColor(optionType: 'put' | 'call' | null) {
   return optionType === 'put' ? chartColors.red : optionType === 'call' ? chartColors.secondary : '#a1a1aa';
-}
-
-function getTradePositionChange(trade: Pick<LyraTrade, 'direction' | 'trade_amount'>) {
-  return trade.direction === 'buy' ? trade.trade_amount : -trade.trade_amount;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1016,12 +1001,6 @@ export default function OverviewPage() {
     return rows;
   }, [chart, latestTick, stats]);
 
-  const currentSpot = useMemo(() => {
-    if (stats.last_price > 0) return stats.last_price;
-    const lastMergedPrice = merged.length > 0 ? merged[merged.length - 1].price : null;
-    return lastMergedPrice && lastMergedPrice > 0 ? lastMergedPrice : 0;
-  }, [stats.last_price, merged]);
-
   // Data for momentum bar (only points with momentum data)
   const momentumData = useMemo(() =>
     merged.filter(d => d.momentum !== undefined),
@@ -1379,116 +1358,6 @@ export default function OverviewPage() {
     })),
   }), [visibleTradesEnriched]);
 
-  const lifecycleSegments = useMemo(() => {
-    const [lo, hi] = xDomain;
-    const segments: PositionLifecycleSegment[] = [];
-    const positionAmountByInstrument = new Map(account.positions.map((position) => [position.instrument_name, position.amount]));
-    const tradesByInstrument = new Map<string, LyraTrade[]>();
-
-    for (const trade of account.trades) {
-      if (!trade.instrument_name) continue;
-      const parsed = parseInstrumentName(trade.instrument_name);
-      if (!parsed.strike || parsed.optionType == null) continue;
-      if (!tradesByInstrument.has(trade.instrument_name)) tradesByInstrument.set(trade.instrument_name, []);
-      tradesByInstrument.get(trade.instrument_name)!.push(trade);
-    }
-
-    for (const [instrumentName, instrumentTradesRaw] of Array.from(tradesByInstrument.entries())) {
-      const parsed = parseInstrumentName(instrumentName);
-      if (!parsed.strike || parsed.optionType == null) continue;
-
-      const instrumentTrades = [...instrumentTradesRaw].sort((a, b) => a.timestamp - b.timestamp);
-      let runningAmount = Number(positionAmountByInstrument.get(instrumentName) ?? 0);
-      const reconstructed: Array<{
-        trade: LyraTrade;
-        amountBefore: number;
-        amountAfter: number;
-      }> = [];
-
-      for (let i = instrumentTrades.length - 1; i >= 0; i -= 1) {
-        const trade = instrumentTrades[i];
-        const deltaAmount = getTradePositionChange(trade);
-        const amountAfter = runningAmount;
-        const amountBefore = runningAmount - deltaAmount;
-        reconstructed.push({ trade, amountBefore, amountAfter });
-        runningAmount = amountBefore;
-      }
-
-      reconstructed.reverse();
-      const points = [{ ts: lo, amount: runningAmount }];
-
-      for (const step of reconstructed) {
-        points.push({ ts: Math.max(lo, Math.min(step.trade.timestamp, hi)), amount: step.amountAfter });
-      }
-
-      points.push({ ts: hi, amount: Number(positionAmountByInstrument.get(instrumentName) ?? 0) });
-
-      for (let i = 0; i < points.length - 1; i += 1) {
-        const start = points[i];
-        const end = points[i + 1];
-        if (Math.abs(start.amount) < 0.0001) continue;
-        if (end.ts <= lo || start.ts >= hi) continue;
-        segments.push({
-          instrumentName,
-          optionType: parsed.optionType,
-          strike: parsed.strike,
-          startTs: Math.max(lo, start.ts),
-          endTs: Math.min(hi, end.ts),
-          amount: start.amount,
-          expiryLabel: parsed.expiryLabel,
-          expiryDate: parsed.expiryDate,
-        });
-      }
-    }
-
-    return segments.sort((a, b) => a.startTs - b.startTs);
-  }, [account.positions, account.trades, xDomain]);
-
-  const lifecycleSummary = useMemo(() => {
-    const active = lifecycleSegments.filter((segment) => segment.endTs >= xDomain[1] - 1);
-    return active
-      .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
-      .slice(0, 6);
-  }, [lifecycleSegments, xDomain]);
-
-  const lifecycleLegend = useMemo(() => {
-    const byKey = new Map<string, {
-      key: string;
-      optionType: 'put' | 'call' | null;
-      strike: number;
-      expiryLabel: string | null;
-      expiryDate: Date | null;
-      amount: number;
-      distancePct: number | null;
-      count: number;
-    }>();
-
-    for (const segment of lifecycleSummary) {
-      const key = `${segment.optionType ?? 'unknown'}-${segment.strike}-${segment.expiryLabel ?? 'na'}`;
-      const distancePct = currentSpot > 0 ? ((segment.strike - currentSpot) / currentSpot) * 100 : null;
-      const existing = byKey.get(key);
-      if (existing) {
-        existing.amount += segment.amount;
-        existing.count += 1;
-      } else {
-        byKey.set(key, {
-          key,
-          optionType: segment.optionType,
-          strike: segment.strike,
-          expiryLabel: segment.expiryLabel,
-          expiryDate: segment.expiryDate,
-          amount: segment.amount,
-          distancePct,
-          count: 1,
-        });
-      }
-    }
-
-    return Array.from(byKey.values())
-      .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
-      .slice(0, 4);
-  }, [currentSpot, lifecycleSummary]);
-
   return (
     <div className="space-y-6">
       {/* Left: Range + Best Options | Right: Momentum */}
@@ -1636,39 +1505,14 @@ export default function OverviewPage() {
       </div>
 
       {/* Big Combined Chart */}
-      <Card>
+      <Card className="overflow-hidden min-w-0">
         {loading && merged.length === 0 ? (
           <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">Loading...</div>
         ) : merged.length === 0 ? (
           <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
           <>
-          {lifecycleLegend.length > 0 && (
-            <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
-              <span className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Active strikes</span>
-              {lifecycleLegend.map((position) => {
-                const color = getPositionColor(position.optionType);
-                const typeLabel = position.optionType === 'put' ? 'P' : position.optionType === 'call' ? 'C' : '?';
-                return (
-                  <span
-                    key={position.key}
-                    className="px-2 py-1 rounded-full border bg-white/[0.03]"
-                    style={{ borderColor: `${color}55`, color }}
-                    title={[
-                      `${position.optionType === 'put' ? 'PUT' : 'CALL'} ${position.strike.toFixed(0)}`,
-                      `Net ${position.amount > 0 ? '+' : ''}${position.amount.toFixed(2)}`,
-                      `Expiry ${formatExpiryLabel(position.expiryDate, position.expiryLabel)}`,
-                      position.distancePct != null ? `Distance ${position.distancePct >= 0 ? '+' : ''}${position.distancePct.toFixed(1)}%` : null,
-                    ].filter(Boolean).join(' · ')}
-                  >
-                    {typeLabel} {position.strike.toFixed(0)}
-                    {position.distancePct != null && ` · ${position.distancePct >= 0 ? '+' : ''}${position.distancePct.toFixed(1)}%`}
-                  </span>
-                );
-              })}
-            </div>
-          )}
-          <div {...pinPrice.containerProps}>
+          <div {...pinPrice.containerProps} className="w-full min-w-0 overflow-hidden">
           <ResponsiveContainer width="100%" height={mobile ? 300 : 500}>
             <ComposedChart data={merged} margin={margins}>
               <XAxis
