@@ -339,44 +339,6 @@ db.exec(`
 try { db.exec('ALTER TABLE trade_reviews ADD COLUMN review_window_days INTEGER NOT NULL DEFAULT 1'); } catch {}
 try { db.exec('ALTER TABLE trade_reviews ADD COLUMN horizon_end_at TEXT'); } catch {}
 
-const LEGACY_SHORT_CALL_LESSON_PREFIX = 'A stressed short call does not automatically justify an immediate buyback.';
-const UPDATED_SHORT_CALL_LESSON = 'Short-call buybacks are an income-vs-insurance tradeoff: temporary mark stress does not erase premium already collected, and a buyback below strike is paying to remove tail risk of continued upside. Favor exits only when continuation risk is credible enough to justify sacrificing remaining theta and premium income.';
-
-const migrateTradeLessons = () => {
-  try {
-    const archiveLegacy = db.prepare(`
-      UPDATE trade_lessons
-      SET is_active = 0, archived_at = COALESCE(archived_at, datetime('now'))
-      WHERE is_active = 1
-        AND lesson LIKE @legacy_prefix
-    `);
-    const hasUpdatedLesson = db.prepare(`
-      SELECT id
-      FROM trade_lessons
-      WHERE is_active = 1
-        AND lesson = @lesson
-      LIMIT 1
-    `);
-    const insertUpdatedLesson = db.prepare(`
-      INSERT INTO trade_lessons (lesson, evidence_count)
-      VALUES (@lesson, @evidence_count)
-    `);
-
-    const archived = archiveLegacy.run({ legacy_prefix: `${LEGACY_SHORT_CALL_LESSON_PREFIX}%` });
-    const existing = hasUpdatedLesson.get({ lesson: UPDATED_SHORT_CALL_LESSON });
-    if (!existing) {
-      insertUpdatedLesson.run({ lesson: UPDATED_SHORT_CALL_LESSON, evidence_count: 1 });
-      console.log('Applied trade-lesson startup migration: inserted balanced short-call buyback lesson.');
-    } else if (archived.changes > 0) {
-      console.log('Applied trade-lesson startup migration: archived legacy short-call buyback lesson.');
-    }
-  } catch (error) {
-    console.log(`Trade-lesson startup migration skipped: ${error.message}`);
-  }
-};
-
-migrateTradeLessons();
-
 // ─── Prepared Statements ──────────────────────────────────────────────────────
 
 const stmts = {
