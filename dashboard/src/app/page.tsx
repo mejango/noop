@@ -216,19 +216,6 @@ interface EnrichedTrade extends LyraTrade {
   currentUnrealizedPnl: number | null;
 }
 
-interface PositionOverlay {
-  instrumentName: string;
-  optionType: 'put' | 'call' | null;
-  strike: number;
-  amount: number;
-  averagePrice: number;
-  markPrice: number;
-  unrealizedPnl: number;
-  entryTs: number;
-  expiryLabel: string | null;
-  expiryDate: Date | null;
-}
-
 interface PositionLifecycleSegment {
   instrumentName: string;
   optionType: 'put' | 'call' | null;
@@ -236,20 +223,6 @@ interface PositionLifecycleSegment {
   startTs: number;
   endTs: number;
   amount: number;
-  expiryLabel: string | null;
-  expiryDate: Date | null;
-}
-
-interface PositionLifecycleMarker {
-  id: string;
-  ts: number;
-  price: number;
-  amountBefore: number;
-  amountAfter: number;
-  deltaAmount: number;
-  instrumentName: string;
-  optionType: 'put' | 'call' | null;
-  strike: number | null;
   expiryLabel: string | null;
   expiryDate: Date | null;
 }
@@ -609,26 +582,6 @@ const TradeMarkerShape = ({ cx, cy, payload }: any) => {
     ? `${cx},${cy - size} ${cx - size},${cy + size * 0.65} ${cx + size},${cy + size * 0.65}`
     : `${cx},${cy + size} ${cx - size},${cy - size * 0.65} ${cx + size},${cy - size * 0.65}`;
   return <polygon points={points} fill={fill} stroke={stroke} strokeWidth={1.5} />;
-};
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const LifecycleMarkerShape = ({ cx, cy, payload }: any) => {
-  if (!cx || !cy || !payload) return null;
-  const color = getPositionColor(payload.optionType);
-  const opened = Math.abs(payload.amountBefore) < 0.0001 && Math.abs(payload.amountAfter) > 0.0001;
-  const closed = Math.abs(payload.amountBefore) > 0.0001 && Math.abs(payload.amountAfter) < 0.0001;
-  if (opened) {
-    return <circle cx={cx} cy={cy} r={4.5} fill="#111111" stroke={color} strokeWidth={1.5} />;
-  }
-  if (closed) {
-    return (
-      <g>
-        <circle cx={cx} cy={cy} r={4.5} fill="#111111" stroke={color} strokeWidth={1.5} />
-        <path d={`M ${cx - 3} ${cy - 3} L ${cx + 3} ${cy + 3} M ${cx - 3} ${cy + 3} L ${cx + 3} ${cy - 3}`} stroke={color} strokeWidth={1.5} />
-      </g>
-    );
-  }
-  return <rect x={cx - 3.5} y={cy - 3.5} width={7} height={7} fill="#111111" stroke={color} strokeWidth={1.5} rx={1.5} />;
 };
 
 function buildInstrumentSeries<T extends { instrument: string; ts: number }>(data: T[]): T[][] {
@@ -1426,37 +1379,9 @@ export default function OverviewPage() {
     })),
   }), [visibleTradesEnriched]);
 
-  const positionOverlays = useMemo<PositionOverlay[]>(() => {
-    const [lo, hi] = xDomain;
-    return account.positions.flatMap((position) => {
-      const parsed = parseInstrumentName(position.instrument_name);
-      if (!parsed.strike || parsed.optionType == null) return [];
-
-      const matchingTrades = account.trades
-        .filter((trade) => trade.instrument_name === position.instrument_name)
-        .sort((a, b) => a.timestamp - b.timestamp);
-      const latestMatchingTrade = matchingTrades[matchingTrades.length - 1];
-      const entryTs = latestMatchingTrade?.timestamp ?? hi;
-
-      return [{
-        instrumentName: position.instrument_name,
-        optionType: parsed.optionType,
-        strike: parsed.strike,
-        amount: position.amount,
-        averagePrice: position.average_price,
-        markPrice: position.mark_price,
-        unrealizedPnl: position.unrealized_pnl,
-        entryTs: Math.max(lo, Math.min(entryTs, hi)),
-        expiryLabel: parsed.expiryLabel,
-        expiryDate: parsed.expiryDate,
-      }];
-    });
-  }, [account.positions, account.trades, xDomain]);
-
-  const { lifecycleSegments, lifecycleMarkers } = useMemo(() => {
+  const lifecycleSegments = useMemo(() => {
     const [lo, hi] = xDomain;
     const segments: PositionLifecycleSegment[] = [];
-    const markers: PositionLifecycleMarker[] = [];
     const positionAmountByInstrument = new Map(account.positions.map((position) => [position.instrument_name, position.amount]));
     const tradesByInstrument = new Map<string, LyraTrade[]>();
 
@@ -1494,21 +1419,6 @@ export default function OverviewPage() {
 
       for (const step of reconstructed) {
         points.push({ ts: Math.max(lo, Math.min(step.trade.timestamp, hi)), amount: step.amountAfter });
-        if (step.trade.timestamp >= lo && step.trade.timestamp <= hi) {
-          markers.push({
-            id: `${step.trade.trade_id}-lifecycle`,
-            ts: step.trade.timestamp,
-            price: parsed.strike,
-            amountBefore: step.amountBefore,
-            amountAfter: step.amountAfter,
-            deltaAmount: step.amountAfter - step.amountBefore,
-            instrumentName,
-            optionType: parsed.optionType,
-            strike: parsed.strike,
-            expiryLabel: parsed.expiryLabel,
-            expiryDate: parsed.expiryDate,
-          });
-        }
       }
 
       points.push({ ts: hi, amount: Number(positionAmountByInstrument.get(instrumentName) ?? 0) });
@@ -1531,10 +1441,7 @@ export default function OverviewPage() {
       }
     }
 
-    return {
-      lifecycleSegments: segments.sort((a, b) => a.startTs - b.startTs),
-      lifecycleMarkers: markers.sort((a, b) => a.ts - b.ts),
-    };
+    return segments.sort((a, b) => a.startTs - b.startTs);
   }, [account.positions, account.trades, xDomain]);
 
   const lifecycleSummary = useMemo(() => {
@@ -1725,8 +1632,6 @@ export default function OverviewPage() {
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
           {account.trades.length > 0 && <span className="flex items-center gap-1"><span className="inline-block" style={{ width: 0, height: 0, borderLeft: '4px solid transparent', borderRight: '4px solid transparent', borderBottom: `6px solid ${chartColors.trade}` }} /> Trade</span>}
-          {positionOverlays.length > 0 && <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: 'rgba(255,255,255,0.45)', borderTop: `1px dashed ${chartColors.trade}` }} /> Open strike</span>}
-          {lifecycleMarkers.length > 0 && <span className="flex items-center gap-1"><span className="w-2 h-2 inline-block rounded-full border" style={{ borderColor: chartColors.secondary }} /> Lifecycle</span>}
         </div>
       </div>
 
@@ -1796,9 +1701,6 @@ export default function OverviewPage() {
                   const tradePayloads = payload
                     .map((entry: { payload?: EnrichedTrade }) => entry.payload)
                     .filter((entry: EnrichedTrade | undefined): entry is EnrichedTrade => Boolean(entry?.trade_id));
-                  const lifecyclePayloads = payload
-                    .map((entry: { payload?: PositionLifecycleMarker }) => entry.payload)
-                    .filter((entry: PositionLifecycleMarker | undefined): entry is PositionLifecycleMarker => Boolean(entry?.id));
                   const row = findNearestMergedRow(labelTs);
                   if (!row) return pinPrice.wrap(null);
                   const bestPut = row.bestPut;
@@ -1858,27 +1760,6 @@ export default function OverviewPage() {
                           })}
                         </div>
                       )}
-                      {lifecyclePayloads.length > 0 && (
-                        <div className="border-t border-white/10 mt-1.5 pt-1.5 space-y-1">
-                          {lifecyclePayloads.slice(0, 3).map((marker: PositionLifecycleMarker) => (
-                            <div key={marker.id}>
-                              <div className="text-xs font-medium" style={{ color: getPositionColor(marker.optionType) }}>
-                                {marker.instrumentName}
-                              </div>
-                              <div className="text-xs text-gray-500">
-                                {marker.amountBefore.toFixed(2)} → {marker.amountAfter.toFixed(2)}
-                                {' · '}
-                                {marker.deltaAmount >= 0 ? '+' : ''}{marker.deltaAmount.toFixed(2)} contracts
-                              </div>
-                              <div className="text-xs text-gray-500">
-                                Strike {marker.strike != null ? formatUSD(marker.strike) : 'N/A'}
-                                {' · '}
-                                Exp {formatExpiryLabel(marker.expiryDate, marker.expiryLabel)}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
                     </div>
                   );
                 }}
@@ -1912,50 +1793,6 @@ export default function OverviewPage() {
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
 
-              {visibleTradesEnriched.map((trade) => (
-                trade.strike != null ? (
-                  <ReferenceLine
-                    key={`${trade.trade_id}-spot-gap`}
-                    yAxisId="price"
-                    ifOverflow="extendDomain"
-                    stroke={getPositionColor(trade.optionType)}
-                    strokeOpacity={0.18}
-                    strokeDasharray="3 3"
-                    segment={[
-                      { x: trade.ts, y: trade.index_price },
-                      { x: trade.ts, y: trade.strike },
-                    ]}
-                  />
-                ) : null
-              ))}
-              {positionOverlays.map((position) => (
-                <ReferenceLine
-                  key={`${position.instrumentName}-lane`}
-                  yAxisId="price"
-                  ifOverflow="extendDomain"
-                  stroke={getPositionColor(position.optionType)}
-                  strokeDasharray="6 5"
-                  strokeOpacity={0.45}
-                  segment={[
-                    { x: position.entryTs, y: position.strike },
-                    { x: xDomain[1], y: position.strike },
-                  ]}
-                />
-              ))}
-              {lifecycleSegments.map((segment) => (
-                <ReferenceLine
-                  key={`${segment.instrumentName}-${segment.startTs}-${segment.endTs}-lifecycle`}
-                  yAxisId="price"
-                  ifOverflow="extendDomain"
-                  stroke={getPositionColor(segment.optionType)}
-                  strokeOpacity={Math.min(0.85, 0.2 + Math.abs(segment.amount) * 0.18)}
-                  strokeWidth={Math.min(5, 1.25 + Math.abs(segment.amount) * 0.85)}
-                  segment={[
-                    { x: segment.startTs, y: segment.strike },
-                    { x: segment.endTs, y: segment.strike },
-                  ]}
-                />
-              ))}
               <Scatter
                 yAxisId="price"
                 data={tradeMarkers.buys}
@@ -1972,15 +1809,6 @@ export default function OverviewPage() {
                 name="tradeMarkerSells"
                 fill={chartColors.trade}
                 shape={(props: ScatterShapeProps) => <TradeMarkerShape {...props} />}
-                isAnimationActive={false}
-              />
-              <Scatter
-                yAxisId="price"
-                data={lifecycleMarkers}
-                dataKey="price"
-                name="lifecycleMarkers"
-                fill="none"
-                shape={(props: ScatterShapeProps) => <LifecycleMarkerShape {...props} />}
                 isAnimationActive={false}
               />
             </ComposedChart>
