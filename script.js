@@ -156,8 +156,13 @@ const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
 // Call exposure discipline: never exceed 45% of ETH holdings in short calls.
 // This is a hard cap — enforced in monitoring before queuing sell_call actions.
 const CALL_EXPOSURE_CAP_PCT = BOT_CONFIG.CALL_EXPOSURE_CAP_PCT || 0.45;
+const CALL_BREAKOUT_OVERRIDE_CAP_PCT = Math.max(
+  CALL_EXPOSURE_CAP_PCT,
+  BOT_CONFIG.CALL_BREAKOUT_OVERRIDE_CAP_PCT || 0.55
+);
 const CALL_ENTRY_BUFFER_PCT = BOT_CONFIG.CALL_ENTRY_BUFFER_PCT || 0.05;
 const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
+const CALL_BREAKOUT_DERIVATIVES = new Set(['moving', 'slanted', 'steep']);
 const REJECTED_ACTION_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const SUBACCOUNT_ID = 25923;
 
@@ -2341,6 +2346,7 @@ Short-call review discipline:
 - Treat a call buyback below strike as an insurance purchase: it may be rational to pay to remove tail risk of continuation, but it converts uncertain future upside risk into certain realized cost.
 - When comparing a closer strike versus a farther OTM strike, explicitly note the tradeoff: farther OTM reduces forced-intervention risk but also materially reduces premium income. Do not imply that safety is free.
 - If post-close spot later remains below strike through the review horizon, say clearly that holding would likely have preserved more premium unless there was strong evidence at the time of a continued upside breakout.
+- On upside breakouts when short calls were already on, explicitly consider whether selling more calls into emotionally rich bullish premium would have been superior to buying back for insurance, provided the account still had room under the active margin cap.
 
 Campaign:
 - Instrument: ${campaign.instrument_name}
@@ -2453,6 +2459,7 @@ Trade-lesson discipline for short calls:
 - Preserve the distinction between mark pain and expiry payoff. A short call can look bad intraday and still expire profitably if spot stays at or below strike.
 - Treat buybacks below strike as costly upside insurance decisions, not automatic proof that the original trade was wrong.
 - When discussing farther OTM calls, explicitly acknowledge the cost: less premium income. Lessons must frame the tradeoff as income vs forced-intervention risk, not "safer is always better."
+- Preserve the possibility that upside breakouts can justify selling richer additional call premium rather than buying back, when short calls are already open and margin remains tolerable.
 
 Archive current lessons that no longer hold.
 
@@ -3833,6 +3840,33 @@ const estimateProjectedDisplayedMarginUtilization = (marginState, additionalMarg
   return estimateMarginUtilization(marginState, additionalMargin);
 };
 
+const getShortCallExposure = (positions = []) => positions
+  .filter((p) => p.instrument_name?.endsWith('-C') && p.direction === 'short')
+  .reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
+
+const isCallBreakoutAddWindow = (positions = [], spotPrice = 0) => {
+  const currentShortExposure = getShortCallExposure(positions);
+  if (!(currentShortExposure > 0) || !(spotPrice > 0)) return false;
+
+  const short = botData.shortTermMomentum || {};
+  const medium = botData.mediumTermMomentum || {};
+  const threeDayHigh = Number(short.threeDayHigh || 0);
+  const sevenDayHigh = Number(short.sevenDayHigh || 0);
+  const nearRecentHigh = (threeDayHigh > 0 && spotPrice >= threeDayHigh * 0.997)
+    || (sevenDayHigh > 0 && spotPrice >= sevenDayHigh * 0.995);
+
+  return short.main === 'upward'
+    && CALL_BREAKOUT_DERIVATIVES.has(short.derivative)
+    && medium.main !== 'downward'
+    && nearRecentHigh;
+};
+
+const getEffectiveCallExposureCapPct = (positions = [], spotPrice = 0) => (
+  isCallBreakoutAddWindow(positions, spotPrice)
+    ? CALL_BREAKOUT_OVERRIDE_CAP_PCT
+    : CALL_EXPOSURE_CAP_PCT
+);
+
 const getDisplayedMarginHeadroomAtCap = (marginState, capPct = CALL_EXPOSURE_CAP_PCT) => {
   if (!marginState) return null;
   const currentDisplayed = estimateDisplayedMarginUtilization(marginState);
@@ -3881,6 +3915,8 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   if (action !== 'sell_call') return 'Call margin utilization: not applicable for this action.';
   if (!marginState) return 'Call margin utilization: unavailable (margin state unavailable).';
 
+  const effectiveCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
+  const breakoutOverrideActive = effectiveCapPct > CALL_EXPOSURE_CAP_PCT;
   const currentUtilization = estimateDisplayedMarginUtilization(marginState);
   const instrument = instruments.find((item) => item.instrument_name === instrumentName);
   const strike = Number(instrument?.option_details?.strike || instrumentName?.split('-')?.[2] || 0) || 0;
@@ -3889,10 +3925,11 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const marginPerUnit = estimateShortCallMarginPerUnit(marginState, positions, restingOrders, spotPrice, strike, normalizedLimitPrice);
   const additionalMargin = normalizedAmount * marginPerUnit;
   const projectedUtilization = estimateProjectedDisplayedMarginUtilization(marginState, additionalMargin);
-  const capPct = CALL_EXPOSURE_CAP_PCT * 100;
+  const capPct = effectiveCapPct * 100;
+  const baseCapPct = CALL_EXPOSURE_CAP_PCT * 100;
   const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
 
-  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, hard_cap=${capPct.toFixed(1)}%. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the actual ceiling; if the initial size is too large, reduce size down toward the hard cap before rejecting. Use these exact figures; do not invent utilization numbers.`;
+  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${baseCapPct.toFixed(1)}%, active_cap=${capPct.toFixed(1)}%, base_cap=${baseCapPct.toFixed(1)}%, breakout_override=${breakoutOverrideActive ? 'active' : 'inactive'}. Treat ${entryCapPct.toFixed(1)}% as a caution threshold. The normal ceiling is ${baseCapPct.toFixed(1)}%, but when breakout_override is active and there are already short calls on, selling more into euphoric upside is allowed up to ${capPct.toFixed(1)}% instead of reflexively buying back into expensive bullish sentiment. Use these exact figures; do not invent utilization numbers.`;
 };
 
 const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice, instruments, spotPrice }) => {
@@ -3919,14 +3956,15 @@ const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice,
   const buyingPowerHeadroom = Math.max(0, Number(marginState?.initial_margin || 0));
   const currentUtilization = estimateDisplayedMarginUtilization(marginState);
   const projectedUtilization = estimateProjectedDisplayedMarginUtilization(marginState, additionalMargin);
-  const requiredBuyingPowerAtCap = marginBase > 0 ? Math.max(0, (1 - CALL_EXPOSURE_CAP_PCT) * marginBase) : 0;
+  const effectiveCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
+  const requiredBuyingPowerAtCap = marginBase > 0 ? Math.max(0, (1 - effectiveCapPct) * marginBase) : 0;
   const hardCapHeadroom = buyingPowerHeadroom - requiredBuyingPowerAtCap;
   const allowed = additionalMargin <= buyingPowerHeadroom
     && projectedUtilization != null
-    && projectedUtilization <= CALL_EXPOSURE_CAP_PCT;
+    && projectedUtilization <= effectiveCapPct;
   return {
     allowed,
-    reason: `retry_margin=$${additionalMargin.toFixed(2)}, current_display_utilization=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_display_utilization=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, hard_cap_headroom=$${hardCapHeadroom.toFixed(2)}, buying_power=$${buyingPowerHeadroom.toFixed(2)}`,
+    reason: `retry_margin=$${additionalMargin.toFixed(2)}, current_display_utilization=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_display_utilization=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, active_cap=${(effectiveCapPct * 100).toFixed(1)}%, hard_cap_headroom=$${hardCapHeadroom.toFixed(2)}, buying_power=$${buyingPowerHeadroom.toFixed(2)}`,
   };
 };
 
@@ -4031,13 +4069,14 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             console.log(`📋 Skip ${rule.action}: margin state unavailable`);
             continue;
           }
+          const effectiveCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
           const currentUtilization = estimateProjectedDisplayedMarginUtilization(liveMarginState, provisionalCallOrderMargin);
           if (currentUtilization == null) {
             console.log(`📋 Skip ${rule.action}: unable to compute margin utilization`);
             continue;
           }
-          if (currentUtilization >= CALL_EXPOSURE_CAP_PCT) {
-            console.log(`📋 Call hard cap reached: ${(currentUtilization * 100).toFixed(1)}% >= ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(1)}%`);
+          if (currentUtilization >= effectiveCapPct) {
+            console.log(`📋 Call hard cap reached: ${(currentUtilization * 100).toFixed(1)}% >= ${(effectiveCapPct * 100).toFixed(1)}%`);
             continue;
           }
         }
@@ -4182,7 +4221,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
         // For calls: cap by remaining exposure headroom under the hard cap.
         if (rule.action === 'sell_call' && liveMarginState) {
-          const marginHeadroom = getDisplayedMarginHeadroomAtCap(liveMarginState, CALL_EXPOSURE_CAP_PCT);
+          const effectiveCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
+          const marginHeadroom = getDisplayedMarginHeadroomAtCap(liveMarginState, effectiveCapPct);
           const marginPerUnit = estimateShortCallMarginPerUnit(
             liveMarginState,
             positions,
@@ -4198,6 +4238,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               marginHeadroom,
               marginPerUnit,
               maxQtyAtCap,
+              effectiveCapPct,
             };
             maxByBudget = Math.min(maxByBudget, maxQtyAtCap);
           }
@@ -4216,13 +4257,13 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             console.log(
               `📋 Skip ${rule.action} ${best.name}: desired=${raw.toFixed(3)}, max_safe_qty=${sellCallMarginDebug.maxQtyAtCap.toFixed(3)}, step=${step.toFixed(3)}`
               + `, current=${sellCallMarginDebug.currentUtilization != null ? `${(sellCallMarginDebug.currentUtilization * 100).toFixed(1)}%` : 'N/A'}`
-              + `, hard_cap=${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(1)}% — no tradable size under cap`
+              + `, hard_cap=${(sellCallMarginDebug.effectiveCapPct * 100).toFixed(1)}% — no tradable size under cap`
             );
           } else if (qty > 0 && raw - qty >= step / 2) {
             console.log(
               `📋 Resize ${rule.action} ${best.name}: desired=${raw.toFixed(3)} -> ${qty.toFixed(3)}`
               + ` (max_safe=${sellCallMarginDebug.maxQtyAtCap.toFixed(3)}, current=${sellCallMarginDebug.currentUtilization != null ? `${(sellCallMarginDebug.currentUtilization * 100).toFixed(1)}%` : 'N/A'}`
-              + `${projectedDisplayedUtilization != null ? `, projected=${(projectedDisplayedUtilization * 100).toFixed(1)}%` : ''})`
+              + `${projectedDisplayedUtilization != null ? `, projected=${(projectedDisplayedUtilization * 100).toFixed(1)}%` : ''}, cap=${(sellCallMarginDebug.effectiveCapPct * 100).toFixed(1)}%)`
             );
           }
         }
@@ -4920,7 +4961,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
 ${getSharedActionPolicyPrompt()}
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
-CALL DISCIPLINE: Short calls have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters, but they must not exceed the ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% hard cap. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the hard cap or are too small to matter.
+CALL DISCIPLINE: Short calls normally have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active cap may widen up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the active cap or are too small to matter.
 CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove the tail risk of further upside continuation. Confirm buybacks when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by actual breakout evidence. Reject buybacks driven by price action alone when theta is still working, the call remains OTM, and the position is not under real threat. Use the Greeks, remaining DTE, and the premium already collected to judge the actual risk.
 PUT EXIT DISCIPLINE: For sell_put — evaluate it as monetizing or rolling an existing long put. Do not analyze it as short put selling or naked downside exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin. The question is whether closing this owned hedge now is prudent, not whether opening short put risk is acceptable.
 REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.
@@ -4967,7 +5008,7 @@ Return EXACTLY one single-line JSON object. No markdown fences. No prose before 
 ${getSharedActionPolicyPrompt()}
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
-CALL DISCIPLINE: Short calls have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters, but they must not exceed the ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% hard cap. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the hard cap or are too small to matter.
+CALL DISCIPLINE: Short calls normally have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active cap may widen up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the active cap or are too small to matter.
 CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous, but the premium was already collected and temporary mark pain is not the same as final loss. A buyback below strike is an explicit purchase of upside insurance. Confirm buybacks only when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by real continuation evidence. Reject buybacks driven by price noise when theta is still working.
 PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
 REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV overpays alongside the crowd. Use actual Greeks, DTE, and momentum to judge.
@@ -5225,17 +5266,22 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
   try { marginState = await fetchSubaccount(); } catch { /* ok */ }
 
   const putBudgetRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
+  const effectiveCallCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
+  const breakoutAddWindow = effectiveCallCapPct > CALL_EXPOSURE_CAP_PCT;
 
   const accountHealth = {
     ethBalance,
     usdcBalance,
     shortCallExposure: totalCallExposure,
     callMarginDiscipline: {
-      capPct: CALL_EXPOSURE_CAP_PCT,
+      capPct: effectiveCallCapPct,
+      baseCapPct: CALL_EXPOSURE_CAP_PCT,
+      breakoutOverrideCapPct: CALL_BREAKOUT_OVERRIDE_CAP_PCT,
+      breakoutAddWindow,
       currentShortExposure: +totalCallExposure.toFixed(2),
       utilizationPct: marginState ? +(100 * (estimateDisplayedMarginUtilization(marginState) || 0)).toFixed(1) : null,
       marginBase: marginState ? +getMarginCapacityBase(marginState).toFixed(2) : null,
-      note: `Hard cap: keep Derive-displayed margin utilization below ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold for new short-call entries, but the bot may size down within that zone up to the hard cap when the trade still matters. utilizationPct mirrors the Derive display metric; projected trade sizing still uses the internal margin estimate.`,
+      note: `Base cap: keep Derive-displayed margin utilization below ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold for new short-call entries. When breakoutAddWindow=true because spot is breaking upward with existing short calls already on, the bot may add into richer upside premium up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% instead of reflexively buying back into emotional bullish pricing. utilizationPct mirrors the Derive display metric; projected trade sizing still uses the internal margin estimate.`,
     },
     margin: marginState ? {
       buying_power: +marginState.initial_margin.toFixed(2),              // available margin for new trades
@@ -5259,7 +5305,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
       cycleDays: BOT_CONFIG.PERIOD_DAYS,
       note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of portfolio value per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once.`,
     },
-    note: 'Account is ETH-collateralized on Derive. buying_power = available initial margin for new trades. margin_usage_pct mirrors the Derive display metric. Projected trade sizing still uses the bot internal margin estimate. Sizing must respect buying power, put budget discipline, AND the call margin-utilization cap.',
+    note: 'Account is ETH-collateralized on Derive. buying_power = available initial margin for new trades. margin_usage_pct mirrors the Derive display metric. Projected trade sizing still uses the bot internal margin estimate. Sizing must respect buying power, put budget discipline, and the active call margin-utilization cap, which can widen during an upside breakout when the bot already has short calls on.',
   };
 
   // Recent orders
@@ -5382,7 +5428,7 @@ There are TWO constraints on put buying:
 1. **Margin**: initial_margin must stay positive. maintenance_margin at zero = liquidation.
 2. **Budget discipline**: We commit to spending 3.33% of portfolio value per year on puts, allocated in 15-day budget windows. The budget for each cycle is calculated from current portfolio value at cycle start. Spend predictably across the cycle. Don't front-load. Don't impulse buy. If nothing is well-priced, let the budget roll over.
 
-For calls: **hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization**. Treat ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% as a caution threshold for new trades, not an automatic rejection line. The bot may size trades down within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters, but it must not exceed the hard cap. Size against margin headroom, not ETH balance.
+For calls: **base hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization**. Treat ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% as a caution threshold for new trades, not an automatic rejection line. The bot may size trades down within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and the bot already has short calls on, call premium may be richest exactly when buyback temptation is highest. In that case the bot may sell additional calls into euphoric premium up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% utilization instead of reflexively paying up to derisk. Size against margin headroom, not ETH balance.
 
 ## Call Buyback Philosophy (Spitznagel)
 We sell short-dated calls. The arithmetic of buybacks is simple: don't pay fear premiums to exit positions that are working.
@@ -5390,6 +5436,7 @@ We sell short-dated calls. The arithmetic of buybacks is simple: don't pay fear 
 - **Profit capture over panic**: When a meaningful chunk of premium has decayed, locking it in and redeploying is disciplined. Buying back because the mark expanded is different: that is paying for upside insurance. It can be rational, but only if the continuation risk is real enough to justify the cost.
 - **Let theta work**: Short calls are a time-decay trade. A price move against you does not by itself invalidate the thesis. Distinguish temporary mark stress from final payoff geometry, and use the Greeks plus the position's actual risk profile to judge.
 - **Safety is not free**: Farther OTM strikes reduce buyback pressure and assignment risk, but they also pay materially less premium. Optimize for premium income that can still be managed systematically, not for maximum distance from spot at any price.
+- **Breakout upside can be a sale, not just a threat**: When spot breaks upward while short calls are already on, the instinct is to buy back into elevated bullish sentiment to relieve margin. That is often when call premium is emotionally richest. Consider whether selling more calls at the higher level is the better use of margin, provided the active cap and ruin constraints still hold.
 - **Rolling discipline**: Rolling should improve the position, not just delay a loss. If rolling costs more than it's worth, accepting assignment is the honest response.
 - Use your judgment on the specific situation — the Greeks, DTE remaining, how much premium has decayed, and the broader portfolio context all matter more than any fixed threshold.
 
@@ -5451,11 +5498,11 @@ Rules:
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
 - For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
-- For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, genuine assignment risk, expiry cleanup, or credible breakout continuation are good reasons. Price moving against you alone is not. Set conditions that reflect the position's actual risk profile and the tradeoff between keeping premium income and paying to reduce tail risk.
+- For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, genuine assignment risk, expiry cleanup, or credible breakout continuation are good reasons. Price moving against you alone is not. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending.
-- For calls: hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold; the code may size down within that zone, but must not exceed the hard cap. Size meaningfully, but do not lean on the full cap.
+- For calls: the normal hard cap is ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold; the code may size down within that zone. In the specific case of an upside breakout with short calls already open, the active cap can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% so the bot can sell into richer bullish premium rather than paying up for fear-driven buybacks. This override is for breakout add-ons only, not generic leverage creep.
 - Entry rules should target the highest-scoring candidates when possible
 - Exit rules MUST reference specific instrument_name from current positions
 - If the market is unclear, it is ALWAYS correct to produce fewer rules or none
