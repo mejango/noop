@@ -1544,6 +1544,44 @@ export default function OverviewPage() {
       .slice(0, 6);
   }, [lifecycleSegments, xDomain]);
 
+  const lifecycleLegend = useMemo(() => {
+    const byKey = new Map<string, {
+      key: string;
+      optionType: 'put' | 'call' | null;
+      strike: number;
+      expiryLabel: string | null;
+      expiryDate: Date | null;
+      amount: number;
+      distancePct: number | null;
+      count: number;
+    }>();
+
+    for (const segment of lifecycleSummary) {
+      const key = `${segment.optionType ?? 'unknown'}-${segment.strike}-${segment.expiryLabel ?? 'na'}`;
+      const distancePct = currentSpot > 0 ? ((segment.strike - currentSpot) / currentSpot) * 100 : null;
+      const existing = byKey.get(key);
+      if (existing) {
+        existing.amount += segment.amount;
+        existing.count += 1;
+      } else {
+        byKey.set(key, {
+          key,
+          optionType: segment.optionType,
+          strike: segment.strike,
+          expiryLabel: segment.expiryLabel,
+          expiryDate: segment.expiryDate,
+          amount: segment.amount,
+          distancePct,
+          count: 1,
+        });
+      }
+    }
+
+    return Array.from(byKey.values())
+      .sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount))
+      .slice(0, 4);
+  }, [currentSpot, lifecycleSummary]);
+
   return (
     <div className="space-y-6">
       {/* Left: Range + Best Options | Right: Momentum */}
@@ -1700,28 +1738,26 @@ export default function OverviewPage() {
           <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
           <>
-          {(visibleTradesEnriched.length > 0 || positionOverlays.length > 0 || lifecycleSummary.length > 0) && (
-            <div className="mb-3 flex flex-wrap gap-2 text-[11px]">
-              {visibleTradesEnriched.length > 0 && (
-                <span className="px-2 py-1 rounded-full border border-white/10 bg-white/[0.03] text-gray-400">
-                  {visibleTradesEnriched.length} fills in view
-                </span>
-              )}
-              {lifecycleSummary.map((position) => {
-                const distancePct = currentSpot > 0 ? ((position.strike - currentSpot) / currentSpot) * 100 : null;
+          {lifecycleLegend.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="text-[10px] uppercase tracking-[0.18em] text-gray-500">Active strikes</span>
+              {lifecycleLegend.map((position) => {
                 const color = getPositionColor(position.optionType);
+                const typeLabel = position.optionType === 'put' ? 'P' : position.optionType === 'call' ? 'C' : '?';
                 return (
                   <span
-                    key={position.instrumentName}
+                    key={position.key}
                     className="px-2 py-1 rounded-full border bg-white/[0.03]"
                     style={{ borderColor: `${color}55`, color }}
+                    title={[
+                      `${position.optionType === 'put' ? 'PUT' : 'CALL'} ${position.strike.toFixed(0)}`,
+                      `Net ${position.amount > 0 ? '+' : ''}${position.amount.toFixed(2)}`,
+                      `Expiry ${formatExpiryLabel(position.expiryDate, position.expiryLabel)}`,
+                      position.distancePct != null ? `Distance ${position.distancePct >= 0 ? '+' : ''}${position.distancePct.toFixed(1)}%` : null,
+                    ].filter(Boolean).join(' · ')}
                   >
-                    {position.optionType === 'put' ? 'PUT' : 'CALL'} {position.strike.toFixed(0)}
-                    {' · '}
-                    {position.amount > 0 ? '+' : ''}{position.amount.toFixed(2)}
-                    {' · '}
-                    {formatExpiryLabel(position.expiryDate, position.expiryLabel)}
-                    {distancePct != null && ` · ${distancePct >= 0 ? '+' : ''}${distancePct.toFixed(1)}%`}
+                    {typeLabel} {position.strike.toFixed(0)}
+                    {position.distancePct != null && ` · ${position.distancePct >= 0 ? '+' : ''}${position.distancePct.toFixed(1)}%`}
                   </span>
                 );
               })}
