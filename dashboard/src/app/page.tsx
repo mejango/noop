@@ -11,6 +11,7 @@ import {
   ComposedChart, Line, Bar, Scatter, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
 } from 'recharts';
+import type { ScatterShapeProps } from 'recharts';
 
 /** Hook: hover shows tooltip, click pins it, next click anywhere unpins */
 function usePinnableTooltip() {
@@ -1467,7 +1468,7 @@ export default function OverviewPage() {
       tradesByInstrument.get(trade.instrument_name)!.push(trade);
     }
 
-    for (const [instrumentName, instrumentTradesRaw] of tradesByInstrument.entries()) {
+    for (const [instrumentName, instrumentTradesRaw] of Array.from(tradesByInstrument.entries())) {
       const parsed = parseInstrumentName(instrumentName);
       if (!parsed.strike || parsed.optionType == null) continue;
 
@@ -1797,7 +1798,7 @@ export default function OverviewPage() {
                       </div>
                       {tradePayloads.length > 0 && (
                         <div className="border-t border-white/10 mt-1.5 pt-1.5 space-y-1">
-                          {tradePayloads.slice(0, 3).map((trade) => {
+                          {tradePayloads.slice(0, 3).map((trade: EnrichedTrade) => {
                             const strikeGap = trade.strike != null ? trade.strike - trade.index_price : null;
                             const optionColor = getPositionColor(trade.optionType);
                             return (
@@ -1823,7 +1824,7 @@ export default function OverviewPage() {
                       )}
                       {lifecyclePayloads.length > 0 && (
                         <div className="border-t border-white/10 mt-1.5 pt-1.5 space-y-1">
-                          {lifecyclePayloads.slice(0, 3).map((marker) => (
+                          {lifecyclePayloads.slice(0, 3).map((marker: PositionLifecycleMarker) => (
                             <div key={marker.id}>
                               <div className="text-xs font-medium" style={{ color: getPositionColor(marker.optionType) }}>
                                 {marker.instrumentName}
@@ -1925,7 +1926,7 @@ export default function OverviewPage() {
                 dataKey="price"
                 name="tradeMarkerBuys"
                 fill={chartColors.trade}
-                shape={(props: unknown) => <TradeMarkerShape {...props} />}
+                shape={(props: ScatterShapeProps) => <TradeMarkerShape {...props} />}
                 isAnimationActive={false}
               />
               <Scatter
@@ -1934,7 +1935,7 @@ export default function OverviewPage() {
                 dataKey="price"
                 name="tradeMarkerSells"
                 fill={chartColors.trade}
-                shape={(props: unknown) => <TradeMarkerShape {...props} />}
+                shape={(props: ScatterShapeProps) => <TradeMarkerShape {...props} />}
                 isAnimationActive={false}
               />
               <Scatter
@@ -1943,7 +1944,7 @@ export default function OverviewPage() {
                 dataKey="price"
                 name="lifecycleMarkers"
                 fill="none"
-                shape={(props: unknown) => <LifecycleMarkerShape {...props} />}
+                shape={(props: ScatterShapeProps) => <LifecycleMarkerShape {...props} />}
                 isAnimationActive={false}
               />
             </ComposedChart>
