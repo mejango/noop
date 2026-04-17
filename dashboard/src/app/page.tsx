@@ -444,8 +444,8 @@ const emptyPnlReport: PnlReportData = {
 const emptyAccount: AccountData = { collaterals: [], positions: [], trades: [] };
 const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d', '365d'] as const;
 
-const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 0 };
-const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 0 };
+const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 18 };
+const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 18 };
 
 // Momentum color helpers for bar cells (derivative-aware shading)
 const momentumBarColorMedium = (m: string | undefined | null, derivative: string | undefined | null) => {
@@ -1205,6 +1205,15 @@ export default function OverviewPage() {
     [merged]
   );
 
+  const priceDomain = useMemo<[number, number]>(() => {
+    const values = merged.flatMap((row) => [row.price, row.lyraSpot]).filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+    if (values.length === 0) return [0, 1];
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const padding = Math.max((max - min) * 0.06, max * 0.01, 12);
+    return [Math.max(0, min - padding), max + padding];
+  }, [merged]);
+
   const findNearestMergedRow = useCallback((targetTs: number) => {
     if (merged.length === 0) return null;
     let lo = 0;
@@ -1519,6 +1528,7 @@ export default function OverviewPage() {
                 dataKey="ts"
                 type="number"
                 domain={xDomain}
+                allowDataOverflow
                 tickFormatter={xTickFormatter}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
@@ -1526,7 +1536,8 @@ export default function OverviewPage() {
               {/* Left Y-axis: ETH price */}
               <YAxis
                 yAxisId="price"
-                domain={['auto', 'auto']}
+                domain={priceDomain}
+                allowDataOverflow
                 tickFormatter={(v) => `$${v}`}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
