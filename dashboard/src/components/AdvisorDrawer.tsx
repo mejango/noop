@@ -361,6 +361,13 @@ interface LearningStatus {
     closed_count: number;
     ready_count: number;
   };
+  tradeReviewJob?: {
+    last_run_at: string | null;
+    last_success_at: string | null;
+    ready_count_at_last_run: number;
+    last_error: string | null;
+    next_due_at: string | null;
+  };
 }
 
 const ACTION_STYLES: Record<string, { label: string; color: string }> = {
@@ -1005,11 +1012,19 @@ export default function AdvisorDrawer() {
                   <p>reviewed instruments: <span className="text-gray-300">{learningData.status.reviewSummary.instrument_count}</span></p>
                   <p>closed campaigns: <span className="text-gray-300">{learningData.status.pendingCampaignSummary?.closed_count ?? 0}</span></p>
                   <p>review ready: <span className="text-gray-300">{learningData.status.pendingCampaignSummary?.ready_count ?? 0}</span></p>
+                  <p>ready at last run: <span className="text-gray-300">{learningData.status.tradeReviewJob?.ready_count_at_last_run ?? 0}</span></p>
                 </div>
                 <div className="flex flex-wrap gap-3 text-[10px] text-gray-600">
                   <span>recent order window: {learningData.status.recentOrderStats.first_timestamp ? `${timeAgo(learningData.status.recentOrderStats.first_timestamp)} → ${timeAgo(learningData.status.recentOrderStats.last_timestamp || learningData.status.recentOrderStats.first_timestamp)}` : 'none'}</span>
                   <span>last review: {learningData.status.reviewSummary.last_created_at ? timeAgo(learningData.status.reviewSummary.last_created_at) : 'none'}</span>
+                  <span>review job: {learningData.status.tradeReviewJob?.last_run_at ? timeAgo(learningData.status.tradeReviewJob.last_run_at) : 'never'}</span>
+                  <span>next due: {learningData.status.tradeReviewJob?.next_due_at ? timeUntil(learningData.status.tradeReviewJob.next_due_at) : 'n/a'}</span>
                 </div>
+                {learningData.status.tradeReviewJob?.last_error && (
+                  <div className="text-[10px] text-red-400">
+                    trade review error: {learningData.status.tradeReviewJob.last_error}
+                  </div>
+                )}
               </div>
             )}
 

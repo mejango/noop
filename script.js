@@ -233,6 +233,7 @@ const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Minimum profit percentage for autom
 
 // Journal auto-generation
 const JOURNAL_INTERVAL_MS = 8 * 60 * 60 * 1000; // Every 8 hours
+const TRADE_REVIEW_INTERVAL_MS = 8 * 60 * 60 * 1000; // Every 8 hours
 const WIKI_LINT_INTERVAL_MS = 24 * 60 * 60 * 1000; // Every 24 hours
 
 // Common bot state structure
@@ -256,6 +257,10 @@ let botData = {
     // Timing (persisted to survive restarts)
     lastJournalGeneration: 0,
     lastWikiLintRun: 0,
+    lastTradeReviewRun: 0,
+    lastTradeReviewSuccess: 0,
+    lastTradeReviewReadyCount: 0,
+    lastTradeReviewError: null,
 
     // Advisory tracking
     lastAdvisorySpotPrice: null,  // spot price when last advisory ran
@@ -428,6 +433,10 @@ const loadData = () => {
       botData.lastCheck = state.last_check || 0;
       botData.lastJournalGeneration = state.last_journal_generation || 0;
       botData.lastWikiLintRun = state.last_wiki_lint_run || 0;
+      botData.lastTradeReviewRun = state.last_trade_review_run || 0;
+      botData.lastTradeReviewSuccess = state.last_trade_review_success || 0;
+      botData.lastTradeReviewReadyCount = state.last_trade_review_ready_count || 0;
+      botData.lastTradeReviewError = state.last_trade_review_error || null;
       botData.lastAdvisorySpotPrice = state.last_advisory_spot_price || null;
       botData.lastAdvisoryTimestamp = state.last_advisory_timestamp || 0;
       console.log(`✅ Loaded cycle state from SQLite`);
@@ -2309,9 +2318,12 @@ const collectPendingTradeReviews = (campaigns, now) => {
 
 let _tradeReviewInFlight = false;
 const reviewClosedTrades = async () => {
-  if (_tradeReviewInFlight || !process.env.ANTHROPIC_API_KEY || !db) return;
+  if (_tradeReviewInFlight || !process.env.ANTHROPIC_API_KEY || !db) return { attempted: false, readyCount: 0, storedCount: 0, error: null };
   _tradeReviewInFlight = true;
   try {
+    botData.lastTradeReviewRun = Date.now();
+    botData.lastTradeReviewError = null;
+    persistCycleState();
     const fromMs = Date.now() - 21 * 24 * 60 * 60 * 1000;
     const since = new Date(fromMs).toISOString();
     const recentOrders = db.getRecentOrders(since, 250) || [];
@@ -2319,11 +2331,17 @@ const reviewClosedTrades = async () => {
     const now = Date.now();
     const campaigns = deriveClosedTradeCampaigns(mergeOrdersForTradeReview(recentOrders, lyraTrades));
     const pendingReviews = collectPendingTradeReviews(campaigns, now);
+    botData.lastTradeReviewReadyCount = pendingReviews.length;
+    persistCycleState();
     if (pendingReviews.length === 0) {
-      return;
+      console.log('🧾 Trade review: no eligible closed campaigns');
+      botData.lastTradeReviewSuccess = Date.now();
+      persistCycleState();
+      return { attempted: true, readyCount: 0, storedCount: 0, error: null };
     }
 
     console.log(`🧾 Reviewing ${pendingReviews.length} closed trade window(s)...`);
+    let storedCount = 0;
 
     for (const campaign of pendingReviews.slice(0, 4)) {
       try {
@@ -2422,10 +2440,20 @@ Output JSON only:
           spot_max_after_close: afterClose.length > 0 ? Math.max(...afterClose.map(p => p.price)) : null,
         });
         console.log(`🧾 Trade review stored for ${campaign.instrument_name} [${campaign.review_window_days}d]: ${result.status}`);
+        storedCount += 1;
       } catch (e) {
         console.log(`🧾 Trade review failed for ${campaign.instrument_name} [${campaign.review_window_days}d]: ${e.message}`);
       }
     }
+    botData.lastTradeReviewSuccess = Date.now();
+    botData.lastTradeReviewReadyCount = Math.max(0, pendingReviews.length - storedCount);
+    persistCycleState();
+    return { attempted: true, readyCount: pendingReviews.length, storedCount, error: null };
+  } catch (e) {
+    botData.lastTradeReviewError = e.message;
+    persistCycleState();
+    console.log(`🧾 Trade review scheduler failed: ${e.message}`);
+    return { attempted: true, readyCount: botData.lastTradeReviewReadyCount || 0, storedCount: 0, error: e.message };
   } finally {
     _tradeReviewInFlight = false;
   }
@@ -6385,11 +6413,9 @@ const runBot = async () => {
           // Generate trading advisory alongside journal
           try { await generateTradingAdvisory(positions, spotPrice, tickerMap); }
           catch (e) { console.log('📋 Advisory failed (non-fatal):', e.message); }
-          // Review and extract lessons on the same 8h cadence
+          // Review hypotheses and extract lessons on the journal cadence
           await reviewExpiredHypotheses();
           await extractHypothesisLessons();
-          await reviewClosedTrades();
-          await extractTradeLessons();
         }).catch(e => {
           // Roll back so it retries next tick
           botData.lastJournalGeneration = prevJournalTs;
@@ -6412,6 +6438,30 @@ const runBot = async () => {
           console.log('📚 Scheduled wiki lint failed (will retry next tick):', e.message);
         }).finally(() => {
           _wikiLintInFlight = false;
+        });
+      }
+
+      // Independent trade review cadence every 8 hours
+      if (process.env.ANTHROPIC_API_KEY && !_tradeReviewInFlight && (Date.now() - botData.lastTradeReviewRun >= TRADE_REVIEW_INTERVAL_MS)) {
+        const prevTradeReviewRun = botData.lastTradeReviewRun;
+        const prevTradeReviewError = botData.lastTradeReviewError;
+        botData.lastTradeReviewRun = Date.now();
+        botData.lastTradeReviewError = null;
+        persistCycleState();
+        reviewClosedTrades().then(async (result) => {
+          if (!result?.attempted) {
+            botData.lastTradeReviewRun = prevTradeReviewRun;
+            botData.lastTradeReviewError = prevTradeReviewError;
+            persistCycleState();
+            return;
+          }
+          console.log(`🧾 Trade review cycle finished: ready=${result.readyCount} stored=${result.storedCount}`);
+          await extractTradeLessons();
+        }).catch((e) => {
+          botData.lastTradeReviewRun = prevTradeReviewRun;
+          botData.lastTradeReviewError = e.message;
+          persistCycleState();
+          console.log('🧾 Trade review cycle failed (will retry next tick):', e.message);
         });
       }
 

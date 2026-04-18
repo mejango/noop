@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import {
   getActiveTradeLessons,
+  getBudgetCycleState,
   getOrdersInRange,
   getRecentTradeOrderStats,
   getRecentTradeReviews,
@@ -223,6 +224,12 @@ export async function GET() {
     const reviewSummary = hasTradeReviewsTable
       ? (getTradeReviewSummary() || { review_count: 0, instrument_count: 0, last_created_at: null })
       : { review_count: 0, instrument_count: 0, last_created_at: null };
+    const tradeReviewState = getBudgetCycleState() || {
+      last_trade_review_run: 0,
+      last_trade_review_success: 0,
+      last_trade_review_ready_count: 0,
+      last_trade_review_error: null,
+    };
     const lessons = hasTradeLessonsTable ? getActiveTradeLessons() : [];
     const reviews = hasTradeReviewsTable
       ? getRecentTradeReviews(20).map((review) => ({
@@ -284,6 +291,19 @@ export async function GET() {
         pendingCampaignSummary: {
           closed_count: pendingCampaigns.length,
           ready_count: pendingCampaigns.filter((campaign) => campaign.review_state === 'ready_for_review').length,
+        },
+        tradeReviewJob: {
+          last_run_at: tradeReviewState.last_trade_review_run
+            ? new Date(tradeReviewState.last_trade_review_run).toISOString()
+            : null,
+          last_success_at: tradeReviewState.last_trade_review_success
+            ? new Date(tradeReviewState.last_trade_review_success).toISOString()
+            : null,
+          ready_count_at_last_run: tradeReviewState.last_trade_review_ready_count ?? 0,
+          last_error: tradeReviewState.last_trade_review_error ?? null,
+          next_due_at: tradeReviewState.last_trade_review_run
+            ? new Date(tradeReviewState.last_trade_review_run + 8 * 60 * 60 * 1000).toISOString()
+            : null,
         },
       },
     });
