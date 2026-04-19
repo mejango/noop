@@ -5838,6 +5838,7 @@ Output JSON only:
   console.log('📋 Advisory Step 3: Synthesis (Claude Sonnet)...');
 
   let finalAgenda = primaryAgenda; // Default: use primary if synthesis fails
+  const synthesisAnthropicModel = ANTHROPIC_SONNET_MODEL;
 
   const synthesisSystemPrompt = secondOpinion
     ? `You are the Synthesizer on a trading council. You have two advisor inputs. Your job is to produce the final trading agenda.
@@ -5919,7 +5920,7 @@ Synthesize the final agenda now.`;
     await waitUntilNextMinuteBoundary('Advisory Step 3');
     const synthesisResponse = await callAnthropicWithMinuteBoundaryRetry({
       label: 'Advisory Step 3',
-      model: advisoryAnthropicModel,
+      model: synthesisAnthropicModel,
       maxTokens: 2048,
       system: synthesisSystemPrompt,
       messages: [{ role: 'user', content: synthesisUserPrompt }],
@@ -6713,43 +6714,6 @@ if (db?.deactivateStaleEmergencyBuybackRules) {
   }
 }
 
-// Startup verification: run one advisory shortly after boot so Railway restarts
-// exercise the full advisory path immediately instead of waiting for cadence.
-const _startupAdvisoryCheck = async () => {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.log('📋 Startup advisory check skipped — no ANTHROPIC_API_KEY');
-    return;
-  }
-
-  try {
-    const activeRuleCount = db?.getActiveRules?.().length || 0;
-    console.log(`📋 Startup advisory check: verifying advisory pipeline (active rules=${activeRuleCount})...`);
-
-    const positions = await fetchPositions();
-    const spotPrice = await getSpotPrice();
-    if (!spotPrice) {
-      console.log('📋 Startup advisory check skipped — spot price unavailable');
-      return;
-    }
-
-    const fetchResult = await fetchAndFilterInstruments(spotPrice);
-    const expiryDates = [...new Set([...(fetchResult.putCandidates || []), ...(fetchResult.callCandidates || [])].map(i => i.instrument_name.split('-')[1]))];
-    const tickerResults = await Promise.all(expiryDates.map(e => fetchTickersByExpiry(e)));
-    const tickerMap = {};
-    for (const tickers of tickerResults) {
-      for (const [name, data] of Object.entries(tickers)) tickerMap[name] = data;
-    }
-
-    const result = await generateTradingAdvisory(positions, spotPrice, tickerMap);
-    console.log(`📋 Startup advisory check complete: ${result?.rulesCount || 0} rules from ${result?.advisoryId || 'unknown advisory'}`);
-  } catch (e) {
-    console.log('📋 Startup advisory check failed (non-fatal):', e.message);
-  }
-};
-
-setTimeout(() => {
-  _startupAdvisoryCheck();
-}, 15000);
 
 sendTelegram('🔄 *NOOP Bot restarted*');
 
