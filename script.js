@@ -2334,7 +2334,9 @@ const reviewClosedTrades = async () => {
     persistCycleState();
     const fromMs = Date.now() - 21 * 24 * 60 * 60 * 1000;
     const since = new Date(fromMs).toISOString();
-    const recentOrders = db.getRecentOrders(since, 250) || [];
+    const recentOrders = db.getOrdersInRange
+      ? (db.getOrdersInRange(since, new Date(now).toISOString()) || [])
+      : (db.getRecentOrders(since, 1000) || []);
     const lyraTrades = await fetchTradeHistory(fromMs, Date.now());
     const now = Date.now();
     const campaigns = deriveClosedTradeCampaigns(mergeOrdersForTradeReview(recentOrders, lyraTrades));

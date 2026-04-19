@@ -787,6 +787,12 @@ const stmts = {
     SELECT * FROM orders WHERE timestamp > @since ORDER BY timestamp DESC LIMIT @limit
   `),
 
+  getOrdersInRange: db.prepare(`
+    SELECT * FROM orders
+    WHERE timestamp >= @from AND timestamp <= @to
+    ORDER BY timestamp ASC
+  `),
+
   // Hourly rollup upserts
   upsertSpotHourly: db.prepare(`
     INSERT INTO spot_prices_hourly (hour, open, high, low, close, avg_price, short_momentum, medium_momentum, count)
@@ -1285,6 +1291,7 @@ const insertOrder = (data) => {
 };
 
 const getRecentOrders = (since, limit = 50) => stmts.getRecentOrders.all({ since, limit });
+const getOrdersInRange = (from, to) => stmts.getOrdersInRange.all({ from, to });
 
 const getAvgCallPremium7d = () => {
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -1691,6 +1698,7 @@ module.exports = {
   getBestScores,
   insertOrder,
   getRecentOrders,
+  getOrdersInRange,
   insertJournalEntry,
   getRecentJournalEntries,
   insertJournalEntryFull,
