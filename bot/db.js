@@ -1326,6 +1326,10 @@ const getFundingRatesHourly = (since, symbol = 'ETHUSDT') => {
   return stmts.getFundingRatesHourly.all({ since, symbol });
 };
 
+const getFundingRates = (since, symbol = 'ETHUSDT') => {
+  return getFundingRatesHourly(since, symbol);
+};
+
 const getFundingRateLatest = (symbol = 'ETHUSDT') => {
   try { return stmts.getFundingRateLatest.get({ symbol }); } catch { return null; }
 };
@@ -1694,6 +1698,7 @@ module.exports = {
   migrateFromJson,
   insertOISnapshot,
   insertFundingRates,
+  getFundingRates,
   getFundingRatesHourly,
   getFundingRateLatest,
   getFundingRateAvg24h,

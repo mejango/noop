@@ -3019,7 +3019,7 @@ Wrap your JSON in a <lint_result> tag.`;
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 60000,
+      timeout: 180000,
     });
 
     const text = response.data?.content?.[0]?.text || '';
