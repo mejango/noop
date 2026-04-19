@@ -3586,6 +3586,57 @@ const getAnthropicErrorMessage = (error) => {
   return error?.message || 'Unknown Anthropic error';
 };
 
+const isAnthropicAccelerationLimitError = (error) => {
+  const message = String(getAnthropicErrorMessage(error) || '').toLowerCase();
+  return message.includes('maximum usage increase rate')
+    || message.includes('acceleration limit')
+    || (message.includes('input tokens per minute') && message.includes('next minute boundary'));
+};
+
+const waitUntilNextMinuteBoundary = async (label = 'Anthropic retry') => {
+  const now = Date.now();
+  const nextMinute = Math.ceil(now / 60000) * 60000;
+  const delayMs = Math.max(1500, nextMinute - now + 1500);
+  console.log(`⏱️ ${label}: waiting ${(delayMs / 1000).toFixed(1)}s for next minute boundary`);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+};
+
+const callAnthropicWithMinuteBoundaryRetry = async ({
+  label,
+  model,
+  maxTokens,
+  system,
+  messages,
+  timeout = 120000,
+  spreadAfterBoundary = false,
+}) => {
+  const attemptCall = () => axios.post('https://api.anthropic.com/v1/messages', {
+    model,
+    max_tokens: maxTokens,
+    system,
+    messages,
+  }, {
+    headers: {
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    timeout,
+  });
+
+  try {
+    return await attemptCall();
+  } catch (error) {
+    if (!isAnthropicAccelerationLimitError(error)) throw error;
+    console.log(`⏱️ ${label}: Anthropic acceleration limit hit — ${getAnthropicErrorMessage(error)}`);
+    await waitUntilNextMinuteBoundary(label);
+    if (spreadAfterBoundary) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+    return attemptCall();
+  }
+};
+
 const summarizeSentimentWindowForLLM = (windowLabel, sentiment) => {
   const skewRows = Array.isArray(sentiment?.optionsSkew) ? sentiment.optionsSkew : [];
   const latestSkew = skewRows.length > 0 ? skewRows[skewRows.length - 1] : null;
@@ -5630,17 +5681,12 @@ Produce your trading agenda JSON now.`;
 
   let primaryAgenda = null;
   try {
-    const primaryResponse = await axios.post('https://api.anthropic.com/v1/messages', {
+    const primaryResponse = await callAnthropicWithMinuteBoundaryRetry({
+      label: 'Advisory Step 1',
       model: advisoryAnthropicModel,
-      max_tokens: 3000,
+      maxTokens: 3000,
       system: primarySystemPrompt,
       messages: [{ role: 'user', content: primaryUserPrompt }],
-    }, {
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
       timeout: 120000,
     });
 
@@ -5813,18 +5859,15 @@ ${JSON.stringify(accountHealth, null, 2)}
 Synthesize the final agenda now.`;
 
   try {
-    const synthesisResponse = await axios.post('https://api.anthropic.com/v1/messages', {
+    await waitUntilNextMinuteBoundary('Advisory Step 3');
+    const synthesisResponse = await callAnthropicWithMinuteBoundaryRetry({
+      label: 'Advisory Step 3',
       model: advisoryAnthropicModel,
-      max_tokens: 2048,
+      maxTokens: 2048,
       system: synthesisSystemPrompt,
       messages: [{ role: 'user', content: synthesisUserPrompt }],
-    }, {
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
       timeout: 60000,
+      spreadAfterBoundary: true,
     });
 
     const synthesisText = synthesisResponse.data?.content?.[0]?.text || '';
