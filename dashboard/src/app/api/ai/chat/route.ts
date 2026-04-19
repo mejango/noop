@@ -179,7 +179,7 @@ export async function POST(request: Request) {
       });
     }
 
-    const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+    const model = 'claude-sonnet-4-20250514';
     const client = new Anthropic({ apiKey });
 
     // Build fresh snapshot for every request (data changes every 60s)

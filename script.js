@@ -2042,7 +2042,7 @@ Output ONLY this JSON:
 {"status":"<category>","confidence":<0-1>,"verdict":"<2-3 sentence explanation focusing on whether protection was cheap/expensive and the bleed cost, not just whether the price moved correctly>"}`;
 
       const response = await axios.post('https://api.anthropic.com/v1/messages', {
-        model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
+        model: ANTHROPIC_SONNET_MODEL,
         max_tokens: 512,
         messages: [{ role: 'user', content: reviewPrompt }],
       }, {
@@ -2108,7 +2108,7 @@ Output JSON:
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
+      model: ANTHROPIC_SONNET_MODEL,
       max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -2415,7 +2415,7 @@ Output JSON only:
 }`;
 
         const response = await axios.post('https://api.anthropic.com/v1/messages', {
-          model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
+          model: ANTHROPIC_SONNET_MODEL,
           max_tokens: 700,
           messages: [{ role: 'user', content: reviewPrompt }],
         }, {
@@ -2513,7 +2513,7 @@ Output JSON:
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
+      model: ANTHROPIC_SONNET_MODEL,
       max_tokens: 800,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -2718,7 +2718,7 @@ Output each page as:
 Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(', ')}`;
 
   const response = await axios.post('https://api.anthropic.com/v1/messages', {
-    model: 'claude-sonnet-4-6',
+    model: ANTHROPIC_SONNET_MODEL,
     max_tokens: 8192,
     messages: [{ role: 'user', content: prompt }],
   }, {
@@ -2818,7 +2818,7 @@ If no pages need updating, output: <no_updates/>`;
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-opus-4-6',
+      model: ANTHROPIC_OPUS_MODEL,
       max_tokens: 8192,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -3027,7 +3027,7 @@ Wrap your JSON in a <lint_result> tag.`;
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-sonnet-4-6',
+      model: ANTHROPIC_SONNET_MODEL,
       max_tokens: 4096,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -3488,7 +3488,7 @@ Use this wiki context to:
     const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite exactly 3 journal entries: one regime_note, one hypothesis, one observation. Use the <journal type="..."> tags. Do NOT write a suggestion entry.`;
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: process.env.ANTHROPIC_MODEL || 'claude-opus-4-6',
+      model: ANTHROPIC_SONNET_MODEL,
       max_tokens: 4096,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
@@ -3575,6 +3575,15 @@ const callOpenAI = async (systemPrompt, userPrompt, { maxTokens = 2048, timeout 
     console.log(`⚠️ OpenAI API call failed: ${e.message}`);
     return null;
   }
+};
+
+const ANTHROPIC_SONNET_MODEL = 'claude-sonnet-4-20250514';
+const ANTHROPIC_OPUS_MODEL = 'claude-opus-4-20250514';
+
+const getAnthropicErrorMessage = (error) => {
+  const apiMessage = error?.response?.data?.error?.message;
+  if (apiMessage) return apiMessage;
+  return error?.message || 'Unknown Anthropic error';
 };
 
 const summarizeSentimentWindowForLLM = (windowLabel, sentiment) => {
@@ -5617,10 +5626,12 @@ ${wikiContext ? `\n=== KNOWLEDGE WIKI (cumulative bot knowledge) ===\n${wikiCont
 
 Produce your trading agenda JSON now.`;
 
+  const advisoryAnthropicModel = ANTHROPIC_OPUS_MODEL;
+
   let primaryAgenda = null;
   try {
     const primaryResponse = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-opus-4-6',
+      model: advisoryAnthropicModel,
       max_tokens: 3000,
       system: primarySystemPrompt,
       messages: [{ role: 'user', content: primaryUserPrompt }],
@@ -5646,7 +5657,7 @@ Produce your trading agenda JSON now.`;
       throw parseErr;
     }
   } catch (e) {
-    console.log('📋 Advisory Step 1 FAILED:', e.message);
+    console.log('📋 Advisory Step 1 FAILED:', getAnthropicErrorMessage(e));
     throw e; // Primary failure is fatal
   }
 
@@ -5803,7 +5814,7 @@ Synthesize the final agenda now.`;
 
   try {
     const synthesisResponse = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-opus-4-6',
+      model: advisoryAnthropicModel,
       max_tokens: 2048,
       system: synthesisSystemPrompt,
       messages: [{ role: 'user', content: synthesisUserPrompt }],
@@ -5829,7 +5840,7 @@ Synthesize the final agenda now.`;
       console.log('📋 Advisory Step 3: JSON parse failed, using primary agenda:', parseErr.message);
     }
   } catch (e) {
-    console.log('📋 Advisory Step 3 FAILED, using primary agenda:', e.message);
+    console.log('📋 Advisory Step 3 FAILED, using primary agenda:', getAnthropicErrorMessage(e));
   }
 
   // ── Persist rules to database ───────────────────────────────────────────────

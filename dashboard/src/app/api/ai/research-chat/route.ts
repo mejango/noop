@@ -71,7 +71,7 @@ export async function POST(request: Request) {
       });
     }
 
-    const model = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+    const model = 'claude-sonnet-4-20250514';
     const client = new Anthropic({ apiKey });
     const snapshot = await buildMarketSnapshot();
     const snapshotBlock = `<market_snapshot>\n${JSON.stringify(snapshot, null, 2)}\n</market_snapshot>`;
