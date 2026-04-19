@@ -6613,25 +6613,43 @@ if (db?.deactivateStaleEmergencyBuybackRules) {
   }
 }
 
-// First-boot: generate advisory if no active rules exist
-const _bootAdvisory = async () => {
-  if (db && db.getActiveRules().length === 0 && process.env.ANTHROPIC_API_KEY) {
-    console.log('📋 No active trading rules — generating first advisory...');
-    try {
-      const positions = await fetchPositions();
-      const spotPrice = await getSpotPrice();
-      if (spotPrice) {
-        const fetchResult = await fetchAndFilterInstruments(spotPrice);
-        const expiryDates = [...new Set([...(fetchResult.putCandidates || []), ...(fetchResult.callCandidates || [])].map(i => i.instrument_name.split('-')[1]))];
-        const tickerResults = await Promise.all(expiryDates.map(e => fetchTickersByExpiry(e)));
-        const tickerMap = {};
-        for (const tickers of tickerResults) for (const [name, data] of Object.entries(tickers)) tickerMap[name] = data;
-        await generateTradingAdvisory(positions, spotPrice, tickerMap);
-      }
-    } catch (e) { console.log('📋 First-boot advisory failed (non-fatal):', e.message); }
+// Startup verification: run one advisory shortly after boot so Railway restarts
+// exercise the full advisory path immediately instead of waiting for cadence.
+const _startupAdvisoryCheck = async () => {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log('📋 Startup advisory check skipped — no ANTHROPIC_API_KEY');
+    return;
+  }
+
+  try {
+    const activeRuleCount = db?.getActiveRules?.().length || 0;
+    console.log(`📋 Startup advisory check: verifying advisory pipeline (active rules=${activeRuleCount})...`);
+
+    const positions = await fetchPositions();
+    const spotPrice = await getSpotPrice();
+    if (!spotPrice) {
+      console.log('📋 Startup advisory check skipped — spot price unavailable');
+      return;
+    }
+
+    const fetchResult = await fetchAndFilterInstruments(spotPrice);
+    const expiryDates = [...new Set([...(fetchResult.putCandidates || []), ...(fetchResult.callCandidates || [])].map(i => i.instrument_name.split('-')[1]))];
+    const tickerResults = await Promise.all(expiryDates.map(e => fetchTickersByExpiry(e)));
+    const tickerMap = {};
+    for (const tickers of tickerResults) {
+      for (const [name, data] of Object.entries(tickers)) tickerMap[name] = data;
+    }
+
+    const result = await generateTradingAdvisory(positions, spotPrice, tickerMap);
+    console.log(`📋 Startup advisory check complete: ${result?.rulesCount || 0} rules from ${result?.advisoryId || 'unknown advisory'}`);
+  } catch (e) {
+    console.log('📋 Startup advisory check failed (non-fatal):', e.message);
   }
 };
-_bootAdvisory();
+
+setTimeout(() => {
+  _startupAdvisoryCheck();
+}, 15000);
 
 sendTelegram('🔄 *NOOP Bot restarted*');
 
