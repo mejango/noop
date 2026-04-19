@@ -3709,6 +3709,82 @@ const summarizeSentimentWindowsForLLM = (sentimentWindows) => {
   );
 };
 
+const formatSignedPct = (value, digits = 1) => {
+  if (!Number.isFinite(value)) return 'n/a';
+  return `${value > 0 ? '+' : ''}${Number(value).toFixed(digits)}%`;
+};
+
+const summarizeSentimentForAdvisor = (sentimentWindows) => {
+  const summary = summarizeSentimentWindowsForLLM(sentimentWindows);
+  const windowOrder = ['6h', '24h', '7d', '30d'];
+  const lines = [];
+
+  for (const label of windowOrder) {
+    const row = summary[label];
+    if (!row) continue;
+    const callQuality = Array.isArray(row.market_quality)
+      ? row.market_quality.find((item) => item.option_type === 'C')
+      : null;
+    const putQuality = Array.isArray(row.market_quality)
+      ? row.market_quality.find((item) => item.option_type === 'P')
+      : null;
+
+    lines.push(
+      `${label}: funding ${row.funding_rate.current != null ? row.funding_rate.current : 'n/a'} vs avg ${row.funding_rate.avg != null ? row.funding_rate.avg : 'n/a'} (${row.funding_rate.trend}), ` +
+      `skew ${row.options_skew.current_pct != null ? `${formatSignedPct(row.options_skew.current_pct, 2)} current` : 'n/a'} vs ${row.options_skew.avg_pct != null ? `${formatSignedPct(row.options_skew.avg_pct, 2)} avg` : 'n/a'} (${row.options_skew.direction}), ` +
+      `OI ${row.aggregate_oi.current != null ? row.aggregate_oi.current : 'n/a'} (${row.aggregate_oi.change_pct != null ? formatSignedPct(row.aggregate_oi.change_pct, 1) : 'n/a'}), ` +
+      `put mkt ${putQuality ? `spread ${putQuality.avg_spread_pct ?? 'n/a'}%, iv ${putQuality.avg_iv_pct ?? 'n/a'}%, depth ${putQuality.avg_depth ?? 'n/a'}` : 'n/a'}, ` +
+      `call mkt ${callQuality ? `spread ${callQuality.avg_spread_pct ?? 'n/a'}%, iv ${callQuality.avg_iv_pct ?? 'n/a'}%, depth ${callQuality.avg_depth ?? 'n/a'}` : 'n/a'}`
+    );
+  }
+
+  return lines.join('\n');
+};
+
+const summarizeActiveRulesForAdvisor = (activeRules = []) => {
+  if (!Array.isArray(activeRules) || activeRules.length === 0) return 'No active rules';
+  return activeRules.slice(0, 8).map((rule, index) => {
+    const criteria = typeof rule.criteria === 'string'
+      ? (() => { try { return JSON.parse(rule.criteria); } catch { return rule.criteria; } })()
+      : rule.criteria;
+    const criteriaSummary = criteria && typeof criteria === 'object'
+      ? Object.entries(criteria)
+          .slice(0, 5)
+          .map(([key, value]) => `${key}=${Array.isArray(value) ? `[${value.join(',')}]` : typeof value === 'object' ? '{...}' : value}`)
+          .join(', ')
+      : String(criteria || 'none');
+    return `${index + 1}. ${rule.rule_type}/${rule.action} priority=${rule.priority} ${rule.instrument_name ? `instrument=${rule.instrument_name} ` : ''}| ${criteriaSummary}`;
+  }).join('\n');
+};
+
+const summarizePendingActionsForAdvisor = (pendingActions = []) => {
+  if (!Array.isArray(pendingActions) || pendingActions.length === 0) return 'No recent pending actions';
+  const counts = pendingActions.reduce((acc, action) => {
+    const status = action.status || 'unknown';
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {});
+  const headline = `Status counts: ${Object.entries(counts).map(([status, count]) => `${status}=${count}`).join(', ')}`;
+  const details = pendingActions.slice(0, 6).map((action, index) =>
+    `${index + 1}. ${action.status} ${action.action} ${action.instrument_name || 'portfolio'} @ ${action.triggered_at}`
+  );
+  return [headline, ...details].join('\n');
+};
+
+const summarizeOpenOrdersForAdvisor = (openOrders = []) => {
+  if (!Array.isArray(openOrders) || openOrders.length === 0) return 'No open orders';
+  const byTif = openOrders.reduce((acc, order) => {
+    const tif = order.time_in_force || 'unknown';
+    acc[tif] = (acc[tif] || 0) + 1;
+    return acc;
+  }, {});
+  const headline = `Open orders: ${openOrders.length} total | ${Object.entries(byTif).map(([tif, count]) => `${tif}=${count}`).join(', ')}`;
+  const details = openOrders.slice(0, 6).map((order, index) =>
+    `${index + 1}. ${order.instrument_name} ${order.direction} qty=${order.amount} limit=$${order.limit_price} filled=${order.filled_amount} age=${((Date.now() - order.creation_timestamp) / 3600000).toFixed(1)}h`
+  );
+  return [headline, ...details].join('\n');
+};
+
 const buildMandelbrotContextBlock = (mandelbrotContext) => {
   if (!mandelbrotContext) return 'No Mandelbrot regime context available.';
   return JSON.stringify(mandelbrotContext, null, 2);
@@ -3717,19 +3793,16 @@ const buildMandelbrotContextBlock = (mandelbrotContext) => {
 const generateMandelbrotRegimeContext = async ({
   spotPrice,
   momentum,
-  accountHealth,
   sentiment,
-  topPuts,
-  topCalls,
-  positions,
   wikiSignals,
 }) => {
   if (!process.env.OPENAI_API_KEY) return null;
 
   const systemPrompt = `You are a Mandelbrot-style market structure analyst for an ETH options tail-hedging system.
 
-You do NOT propose trades directly. You do NOT predict price direction.
+You do NOT propose trades directly. You do NOT predict price direction. You do NOT recommend any particular action set.
 Your job is to synthesize current market structure in a Mandelbrotian way and classify whether current behavior looks calm, transitional, clustered-stress, or cascade-risk.
+You are writing for a downstream Spitznagel-style strategist who will make the actual trade recommendations.
 
 Focus on:
 - roughness versus smoothness of the recent path
@@ -3739,7 +3812,7 @@ Focus on:
 - whether the process appears mild or wild, smooth or discontinuous
 
 Be skeptical of Gaussian assumptions. Prefer describing geometry, clustering, scaling instability, and persistence over forecasting direction.
-Use only the supplied data. Do not invent measurements. Do not suggest trades, thresholds, or portfolio actions.
+Use only the supplied market data. Do not invent measurements. Do not suggest trades, thresholds, or portfolio actions.
 
 Return JSON only:
 {
@@ -3750,6 +3823,8 @@ Return JSON only:
   "vol_clustering_score": 0.0,
   "scaling_instability_score": 0.0,
   "geometry_notes": ["..."],
+  "key_considerations_for_spitznagel": ["..."],
+  "market_rationale": "2-4 sentence synthesis of what a Spitznagel-style strategist should pay attention to in current market structure",
   "invalidations": ["..."]
 }`;
 
@@ -3759,29 +3834,13 @@ Return JSON only:
 Spot: $${spotPrice}
 Momentum: ${JSON.stringify(momentum, null, 2)}
 
-=== ACCOUNT HEALTH ===
-${JSON.stringify({
-    margin: accountHealth?.margin ?? null,
-    callMarginDiscipline: accountHealth?.callMarginDiscipline ?? null,
-    putBudgetDiscipline: accountHealth?.putBudgetDiscipline ?? null,
-  }, null, 2)}
-
 === SENTIMENT / DISTRIBUTION BY WINDOW ===
 ${JSON.stringify(summarizeSentimentWindowsForLLM(sentiment), null, 2)}
-
-=== BEST PUT CANDIDATES ===
-${JSON.stringify(topPuts, null, 2)}
-
-=== BEST CALL CANDIDATES ===
-${JSON.stringify(topCalls, null, 2)}
-
-=== CURRENT POSITIONS ===
-${JSON.stringify((positions || []).slice(0, 8), null, 2)}
 
 === WIKI SIGNALS ===
 ${JSON.stringify(wikiSignals || null, null, 2)}
 
-Return JSON only. Synthesize market characteristics; do not include trading recommendations.`;
+Return JSON only. Synthesize market characteristics for a downstream strategist; do not include trading recommendations.`;
 
   try {
     const text = await callOpenAI(systemPrompt, userPrompt, { maxTokens: 1200, timeout: 45000, model: 'gpt-4o' });
@@ -5500,11 +5559,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     mandelbrotContext = await generateMandelbrotRegimeContext({
       spotPrice,
       momentum,
-      accountHealth,
       sentiment,
-      topPuts: top5Puts,
-      topCalls: top5Calls,
-      positions,
       wikiSignals,
     });
     if (mandelbrotContext) {
@@ -5625,7 +5680,7 @@ Order type guidance (fee matters — maker is 6x cheaper than taker):
 
 - Return ONLY valid JSON, no markdown fences`;
 
-  const primaryUserPrompt = `=== CURRENT MARKET STATE ===
+  const sharedAdvisoryInputBlock = `=== CURRENT MARKET STATE ===
 Spot Price: $${spotPrice.toFixed(2)}
 Momentum: Medium-term ${momentum.mediumTerm.main} (${momentum.mediumTerm.derivative || 'n/a'}), Short-term ${momentum.shortTerm.main} (${momentum.shortTerm.derivative || 'n/a'})
 
@@ -5641,7 +5696,7 @@ Balances: ${JSON.stringify(balances, null, 1)}
 ${JSON.stringify(accountHealth, null, 2)}
 
 === MARKET SENTIMENT ===
-${JSON.stringify(sentiment, null, 2)}
+${summarizeSentimentForAdvisor(sentiment?.windows || {})}
 
 === TOP PUT CANDIDATES (by delta/ask ratio, wide scan) ===
 ${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte} | score=${p.score.toFixed(4)}`).join('\n') : 'No qualifying puts found'}
@@ -5659,13 +5714,13 @@ ${recentTradeReviews.length > 0 ? recentTradeReviews.map(r => `${r.instrument_na
 ${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
 
 === CURRENT ACTIVE RULES ===
-${activeRules.length > 0 ? JSON.stringify(activeRules.map(r => ({ type: r.rule_type, action: r.action, criteria: r.criteria, priority: r.priority })), null, 1) : 'No active rules'}
+${summarizeActiveRulesForAdvisor(activeRules)}
 
 === RECENT PENDING ACTIONS ===
-${recentPendingActions.length > 0 ? JSON.stringify(recentPendingActions.map(a => ({ action: a.action, instrument: a.instrument_name, status: a.status, triggered: a.triggered_at })), null, 1) : 'No recent pending actions'}
+${summarizePendingActionsForAdvisor(recentPendingActions)}
 
 === OPEN ORDERS ON BOOK ===
-${openOrders.length > 0 ? openOrders.map(o => `${o.instrument_name} | ${o.direction} ${o.amount} @ $${o.limit_price} | filled=${o.filled_amount} | ${o.time_in_force} | age=${((Date.now() - o.creation_timestamp) / 3600000).toFixed(1)}h`).join('\n') : 'No open orders'}
+${summarizeOpenOrdersForAdvisor(openOrders)}
 ${wikiSignals ? `\n=== WIKI SIGNALS (parsed from knowledge base) ===
 Regime: ${wikiSignals.regime || 'unknown'} (confidence: ${wikiSignals.regimeConfidence || 'unknown'})
 Protection cost: ${wikiSignals.protectionAssessment || 'unknown'}
@@ -5674,6 +5729,10 @@ ${wikiSignals.playbookRules.length > 0 ? `Playbook rules:\n${wikiSignals.playboo
 === MANDELBROT MARKET STRUCTURE ARCHIVE ===
 ${buildMandelbrotContextBlock(mandelbrotContext)}
 ${wikiContext ? `\n=== KNOWLEDGE WIKI (cumulative bot knowledge) ===\n${wikiContext}` : ''}
+
+Use the Mandelbrot archive as descriptive market-structure context. It highlights what should matter intellectually, but it does not prescribe trade actions.`;
+
+  const primaryUserPrompt = `${sharedAdvisoryInputBlock}
 
 Produce your trading agenda JSON now.`;
 
@@ -5742,16 +5801,14 @@ ETH crashes cascade — they accelerate, not slow down. Your critique should con
 - But these are tendencies, not absolutes. The actual Greeks, DTE, position size, and portfolio shape matter. Use your judgment.
 - Ask: is this trade benefiting from disorder (antifragile) or just reacting to it (fragile)?`;
 
-    const talebPrompt = `## The Agenda to Review
+    const talebPrompt = `## Shared Advisory Input
+${sharedAdvisoryInputBlock}
+
+## The Agenda to Review
 ${JSON.stringify(primaryAgenda)}
 
-## Market Context
-Spot: $${spotPrice}, Positions: ${JSON.stringify(positions.slice(0, 5))}, Momentum: ${JSON.stringify(momentum)}
-Account: ETH-collateralized. ${marginState ? `Initial margin: $${marginState.initial_margin.toFixed(2)}, Maintenance: $${marginState.maintenance_margin.toFixed(2)}, Account value: $${marginState.subaccount_value.toFixed(2)}` : 'Margin data unavailable'}
-Mandelbrot market-structure archive: ${buildMandelbrotContextBlock(mandelbrotContext)}
-
 ## Your Task
-Critique the agenda. For each rule, ask:
+Critique the agenda using the same advisory input set Spitznagel saw. For each rule, ask:
 1. Is the downside truly bounded? What's the worst case?
 2. Where is the convexity? Is the asymmetry real or imagined?
 3. Are we being antifragile or just hedged?
