@@ -366,6 +366,12 @@ interface LearningStatus {
     last_success_at: string | null;
     ready_count_at_last_run: number;
     last_error: string | null;
+    targets_at_last_run: Array<{
+      instrument_name: string;
+      review_window_days: number;
+      closed_at: string;
+      horizon_end_at: string | null;
+    }>;
     next_due_at: string | null;
   };
 }
@@ -1023,6 +1029,11 @@ export default function AdvisorDrawer() {
                 {learningData.status.tradeReviewJob?.last_error && (
                   <div className="text-[10px] text-red-400">
                     trade review error: {learningData.status.tradeReviewJob.last_error}
+                  </div>
+                )}
+                {learningData.status.tradeReviewJob?.targets_at_last_run && learningData.status.tradeReviewJob.targets_at_last_run.length > 0 && (
+                  <div className="text-[10px] text-gray-500">
+                    last targets: {learningData.status.tradeReviewJob.targets_at_last_run.map((target) => `${target.instrument_name} [${target.review_window_days}d]`).join(', ')}
                   </div>
                 )}
               </div>

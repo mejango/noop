@@ -261,6 +261,7 @@ let botData = {
     lastTradeReviewSuccess: 0,
     lastTradeReviewReadyCount: 0,
     lastTradeReviewError: null,
+    lastTradeReviewTargets: [],
 
     // Advisory tracking
     lastAdvisorySpotPrice: null,  // spot price when last advisory ran
@@ -437,6 +438,7 @@ const loadData = () => {
       botData.lastTradeReviewSuccess = state.last_trade_review_success || 0;
       botData.lastTradeReviewReadyCount = state.last_trade_review_ready_count || 0;
       botData.lastTradeReviewError = state.last_trade_review_error || null;
+      try { botData.lastTradeReviewTargets = state.last_trade_review_targets ? JSON.parse(state.last_trade_review_targets) : []; } catch { botData.lastTradeReviewTargets = []; }
       botData.lastAdvisorySpotPrice = state.last_advisory_spot_price || null;
       botData.lastAdvisoryTimestamp = state.last_advisory_timestamp || 0;
       console.log(`✅ Loaded cycle state from SQLite`);
@@ -2332,6 +2334,12 @@ const reviewClosedTrades = async () => {
     const campaigns = deriveClosedTradeCampaigns(mergeOrdersForTradeReview(recentOrders, lyraTrades));
     const pendingReviews = collectPendingTradeReviews(campaigns, now);
     botData.lastTradeReviewReadyCount = pendingReviews.length;
+    botData.lastTradeReviewTargets = pendingReviews.map((campaign) => ({
+      instrument_name: campaign.instrument_name,
+      review_window_days: campaign.review_window_days,
+      closed_at: campaign.closed_at,
+      horizon_end_at: campaign.horizon_end_at,
+    }));
     persistCycleState();
     if (pendingReviews.length === 0) {
       console.log('🧾 Trade review: no eligible closed campaigns');
@@ -2341,6 +2349,7 @@ const reviewClosedTrades = async () => {
     }
 
     console.log(`🧾 Reviewing ${pendingReviews.length} closed trade window(s)...`);
+    console.log(`🧾 Trade review targets: ${pendingReviews.map((campaign) => `${campaign.instrument_name} [${campaign.review_window_days}d]`).join(', ')}`);
     let storedCount = 0;
 
     for (const campaign of pendingReviews.slice(0, 4)) {

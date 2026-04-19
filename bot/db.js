@@ -194,6 +194,7 @@ db.exec(`
     last_trade_review_success INTEGER NOT NULL DEFAULT 0,
     last_trade_review_ready_count INTEGER NOT NULL DEFAULT 0,
     last_trade_review_error TEXT,
+    last_trade_review_targets TEXT,
     last_advisory_spot_price REAL,
     last_advisory_timestamp INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -238,6 +239,7 @@ try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_review_run INTEGER NO
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_review_success INTEGER NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_review_ready_count INTEGER NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_review_error TEXT'); } catch {}
+try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_review_targets TEXT'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN put_budget_for_cycle REAL NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE ai_journal ADD COLUMN prediction_target TEXT'); } catch {}
 try { db.exec('ALTER TABLE ai_journal ADD COLUMN prediction_direction TEXT'); } catch {}
@@ -427,11 +429,11 @@ const stmts = {
   upsertBotState: db.prepare(`
     INSERT INTO bot_state (id, put_cycle_start, put_net_bought, put_unspent_buy_limit, put_budget_for_cycle,
       call_cycle_start, call_net_sold, call_unspent_sell_limit, last_check, last_journal_generation, last_wiki_lint_run,
-      last_trade_review_run, last_trade_review_success, last_trade_review_ready_count, last_trade_review_error,
+      last_trade_review_run, last_trade_review_success, last_trade_review_ready_count, last_trade_review_error, last_trade_review_targets,
       last_advisory_spot_price, last_advisory_timestamp, updated_at)
     VALUES (1, @put_cycle_start, @put_net_bought, @put_unspent_buy_limit, @put_budget_for_cycle,
       @call_cycle_start, @call_net_sold, @call_unspent_sell_limit, @last_check, @last_journal_generation, @last_wiki_lint_run,
-      @last_trade_review_run, @last_trade_review_success, @last_trade_review_ready_count, @last_trade_review_error,
+      @last_trade_review_run, @last_trade_review_success, @last_trade_review_ready_count, @last_trade_review_error, @last_trade_review_targets,
       @last_advisory_spot_price, @last_advisory_timestamp, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       put_cycle_start = @put_cycle_start,
@@ -448,6 +450,7 @@ const stmts = {
       last_trade_review_success = @last_trade_review_success,
       last_trade_review_ready_count = @last_trade_review_ready_count,
       last_trade_review_error = @last_trade_review_error,
+      last_trade_review_targets = @last_trade_review_targets,
       last_advisory_spot_price = @last_advisory_spot_price,
       last_advisory_timestamp = @last_advisory_timestamp,
       updated_at = datetime('now')
@@ -1596,6 +1599,7 @@ const saveBotState = (botData) => {
     last_trade_review_success: botData.lastTradeReviewSuccess || 0,
     last_trade_review_ready_count: botData.lastTradeReviewReadyCount || 0,
     last_trade_review_error: botData.lastTradeReviewError || null,
+    last_trade_review_targets: botData.lastTradeReviewTargets ? JSON.stringify(botData.lastTradeReviewTargets) : null,
     last_advisory_spot_price: botData.lastAdvisorySpotPrice || null,
     last_advisory_timestamp: botData.lastAdvisoryTimestamp || 0,
   });

@@ -229,6 +229,7 @@ export async function GET() {
       last_trade_review_success: 0,
       last_trade_review_ready_count: 0,
       last_trade_review_error: null,
+      last_trade_review_targets: null,
     };
     const lessons = hasTradeLessonsTable ? getActiveTradeLessons() : [];
     const reviews = hasTradeReviewsTable
@@ -301,6 +302,9 @@ export async function GET() {
             : null,
           ready_count_at_last_run: tradeReviewState.last_trade_review_ready_count ?? 0,
           last_error: tradeReviewState.last_trade_review_error ?? null,
+          targets_at_last_run: tradeReviewState.last_trade_review_targets
+            ? JSON.parse(tradeReviewState.last_trade_review_targets)
+            : [],
           next_due_at: tradeReviewState.last_trade_review_run
             ? new Date(tradeReviewState.last_trade_review_run + 8 * 60 * 60 * 1000).toISOString()
             : null,
