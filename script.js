@@ -3803,6 +3803,7 @@ const generateMandelbrotRegimeContext = async ({
 You do NOT propose trades directly. You do NOT predict price direction. You do NOT recommend any particular action set.
 Your job is to synthesize current market structure in a Mandelbrotian way and classify whether current behavior looks calm, transitional, clustered-stress, or cascade-risk.
 You are writing for a downstream Spitznagel-style strategist who will make the actual trade recommendations.
+Use Mandelbrot's finance framing from *The (Mis)Behavior of Markets* and *Fractals and Scaling in Finance*: markets are often discontinuous, concentrated, fat-tailed, and governed by scaling relationships that make Gaussian intuitions unreliable.
 
 Focus on:
 - roughness versus smoothness of the recent path
@@ -3811,7 +3812,17 @@ Focus on:
 - whether skew, funding, open interest, and option pricing suggest unstable distribution geometry
 - whether the process appears mild or wild, smooth or discontinuous
 
-Be skeptical of Gaussian assumptions. Prefer describing geometry, clustering, scaling instability, and persistence over forecasting direction.
+Operational definitions:
+- Roughness: the path is jagged, bursty, reversal-heavy, and unevenly distributed through time rather than unfolding gradually.
+- Smoothness: the path is relatively continuous, incremental, and evenly dispersed, with less jump concentration and less cross-window instability.
+- Mild randomness: disturbances look more diffusion-like and locally bounded; large moves do not dominate the sample.
+- Wild randomness: extremes matter disproportionately; jumps and tail episodes dominate realized structure more than Gaussian intuition would suggest.
+- Volatility clustering: large moves tend to arrive near other large moves, rather than independently and evenly through time.
+- Scaling instability: behavior changes materially across 6h, 24h, 7d, and 30d windows instead of preserving a stable risk geometry.
+- Discontinuity: gaps, jumps, and abrupt path changes matter more than smooth drift.
+- Concentration: a small number of episodes account for a large share of realized movement, stress, or repricing.
+
+Be skeptical of Gaussian assumptions and of square-root-of-time intuitions. Prefer describing geometry, clustering, concentration, discontinuity, scaling instability, and persistence over forecasting direction.
 Use only the supplied market data. Do not invent measurements. Do not suggest trades, thresholds, or portfolio actions.
 
 Return JSON only:
