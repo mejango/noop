@@ -14,7 +14,7 @@ export function GET() {
     const portfolio = getLatestPortfolioSnapshot();
     const pnl = getRealizedPnL();
     const budgetCycle = getBudgetCycleState();
-    return NextResponse.json({ stats, rules, actions, orders, assessment, advisoryArtifacts, portfolio, pnl, budgetCycle });
+    return NextResponse.json({ stats, rules, actions, orders, assessment, advisoryArtifacts, portfolio, pnl, budgetCycle, schedulerState: budgetCycle });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });

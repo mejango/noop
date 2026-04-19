@@ -264,6 +264,9 @@ let botData = {
     lastTradeReviewTargets: [],
 
     // Advisory tracking
+    lastAdvisoryRun: 0,
+    lastAdvisorySuccess: 0,
+    lastAdvisoryError: null,
     lastAdvisorySpotPrice: null,  // spot price when last advisory ran
     lastAdvisoryTimestamp: 0,     // when last advisory ran
   };
@@ -439,6 +442,9 @@ const loadData = () => {
       botData.lastTradeReviewReadyCount = state.last_trade_review_ready_count || 0;
       botData.lastTradeReviewError = state.last_trade_review_error || null;
       try { botData.lastTradeReviewTargets = state.last_trade_review_targets ? JSON.parse(state.last_trade_review_targets) : []; } catch { botData.lastTradeReviewTargets = []; }
+      botData.lastAdvisoryRun = state.last_advisory_run || 0;
+      botData.lastAdvisorySuccess = state.last_advisory_success || 0;
+      botData.lastAdvisoryError = state.last_advisory_error || null;
       botData.lastAdvisorySpotPrice = state.last_advisory_spot_price || null;
       botData.lastAdvisoryTimestamp = state.last_advisory_timestamp || 0;
       console.log(`✅ Loaded cycle state from SQLite`);
@@ -5225,6 +5231,9 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
 
   try {
   const advisoryId = `adv_${Date.now()}`;
+  botData.lastAdvisoryRun = Date.now();
+  botData.lastAdvisoryError = null;
+  persistCycleState();
   console.log(`📋 Advisory ${advisoryId}: starting 3-step deliberation...`);
 
   // ── Gather context ──────────────────────────────────────────────────────────
@@ -5896,9 +5905,15 @@ Synthesize the final agenda now.`;
   // Track advisory state for price-triggered re-advisory (persisted to survive restarts)
   botData.lastAdvisorySpotPrice = spotPrice;
   botData.lastAdvisoryTimestamp = Date.now();
+  botData.lastAdvisorySuccess = Date.now();
+  botData.lastAdvisoryError = null;
   persistCycleState();
 
   return { advisoryId, agenda: finalAgenda, rulesCount: allRules.length };
+  } catch (e) {
+    botData.lastAdvisoryError = e.message;
+    persistCycleState();
+    throw e;
   } finally {
     _advisoryInFlight = false;
   }

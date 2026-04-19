@@ -121,6 +121,12 @@ interface OpsStats {
   advisory_created_at: string | null;
 }
 
+interface SchedulerState {
+  last_advisory_run?: number | null;
+  last_advisory_success?: number | null;
+  last_advisory_error?: string | null;
+}
+
 interface TradingRule {
   id: number; rule_type: string; action: string; instrument_name: string | null;
   criteria: string; budget_limit: number | null; priority: string;
@@ -292,6 +298,7 @@ interface OpsData {
   advisoryArtifacts?: AdvisoryArtifacts | null;
   portfolio?: PortfolioSnapshot | null;
   pnl?: RealizedPnL | null;
+  schedulerState?: SchedulerState | null;
 }
 
 interface TradeLesson {
@@ -409,7 +416,7 @@ export default function AdvisorDrawer() {
   const [journalLoading, setJournalLoading] = useState(false);
   const [analyticsTab, setAnalyticsTab] = useState(false);
   const [journalFilter, setJournalFilter] = useState<string | null>(null);
-  const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null, advisoryArtifacts: null });
+  const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null, advisoryArtifacts: null, schedulerState: null });
   const [opsLoading, setOpsLoading] = useState(false);
   const [learningData, setLearningData] = useState<{ lessons: TradeLesson[]; reviews: TradeReview[]; pendingCampaigns: PendingTradeCampaign[]; status: LearningStatus | null; error?: string | null }>({ lessons: [], reviews: [], pendingCampaigns: [], status: null, error: null });
   const [learningLoading, setLearningLoading] = useState(false);
@@ -1199,6 +1206,15 @@ export default function AdvisorDrawer() {
                     <span className="text-gray-400">{opsData.stats.rejected_count} rejected</span>
                     <span className="text-red-400">{opsData.stats.failed_count} failed</span>
                   </div>
+                  <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-gray-600">
+                    <span>last attempt: {opsData.schedulerState?.last_advisory_run ? timeAgo(new Date(opsData.schedulerState.last_advisory_run).toISOString()) : 'never'}</span>
+                    <span>last success: {opsData.schedulerState?.last_advisory_success ? timeAgo(new Date(opsData.schedulerState.last_advisory_success).toISOString()) : 'never'}</span>
+                  </div>
+                  {opsData.schedulerState?.last_advisory_error && (
+                    <div className="mt-1 text-[10px] text-red-400">
+                      advisory error: {opsData.schedulerState.last_advisory_error}
+                    </div>
+                  )}
                 </div>
 
                 {/* Portfolio P&L */}
