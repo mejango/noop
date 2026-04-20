@@ -2332,13 +2332,13 @@ const reviewClosedTrades = async () => {
     botData.lastTradeReviewRun = Date.now();
     botData.lastTradeReviewError = null;
     persistCycleState();
-    const fromMs = Date.now() - 21 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const fromMs = now - 21 * 24 * 60 * 60 * 1000;
     const since = new Date(fromMs).toISOString();
     const recentOrders = db.getOrdersInRange
       ? (db.getOrdersInRange(since, new Date(now).toISOString()) || [])
       : (db.getRecentOrders(since, 1000) || []);
-    const lyraTrades = await fetchTradeHistory(fromMs, Date.now());
-    const now = Date.now();
+    const lyraTrades = await fetchTradeHistory(fromMs, now);
     const campaigns = deriveClosedTradeCampaigns(mergeOrdersForTradeReview(recentOrders, lyraTrades));
     const pendingReviews = collectPendingTradeReviews(campaigns, now);
     botData.lastTradeReviewReadyCount = pendingReviews.length;
