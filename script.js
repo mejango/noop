@@ -262,6 +262,8 @@ let botData = {
     lastTradeReviewReadyCount: 0,
     lastTradeReviewError: null,
     lastTradeReviewTargets: [],
+    lastHypothesisLessonReviewId: 0,
+    lastTradeLessonReviewId: 0,
 
     // Advisory tracking
     lastAdvisoryRun: 0,
@@ -442,6 +444,8 @@ const loadData = () => {
       botData.lastTradeReviewReadyCount = state.last_trade_review_ready_count || 0;
       botData.lastTradeReviewError = state.last_trade_review_error || null;
       try { botData.lastTradeReviewTargets = state.last_trade_review_targets ? JSON.parse(state.last_trade_review_targets) : []; } catch { botData.lastTradeReviewTargets = []; }
+      botData.lastHypothesisLessonReviewId = state.last_hypothesis_lesson_review_id || 0;
+      botData.lastTradeLessonReviewId = state.last_trade_lesson_review_id || 0;
       botData.lastAdvisoryRun = state.last_advisory_run || 0;
       botData.lastAdvisorySuccess = state.last_advisory_success || 0;
       botData.lastAdvisoryError = state.last_advisory_error || null;
@@ -2076,12 +2080,14 @@ Output ONLY this JSON:
 };
 
 const extractHypothesisLessons = async () => {
-  const reviewedCount = db.countReviewedSinceLastLesson();
-  if (reviewedCount < 10) return;
+  if (!process.env.ANTHROPIC_API_KEY || !db) return { processed: 0, advancedToId: botData.lastHypothesisLessonReviewId || 0 };
+  const reviewed = db.getReviewedHypothesesSinceId
+    ? db.getReviewedHypothesesSinceId(botData.lastHypothesisLessonReviewId || 0, 12)
+    : db.getReviewedHypotheses(12);
+  if (!reviewed || reviewed.length < 4) return { processed: 0, advancedToId: botData.lastHypothesisLessonReviewId || 0 };
 
-  console.log(`🧠 Extracting lessons from ${reviewedCount} new hypothesis reviews...`);
+  console.log(`🧠 Extracting lessons from ${reviewed.length} hypothesis reviews (after id ${botData.lastHypothesisLessonReviewId || 0})...`);
 
-  const reviewed = db.getReviewedHypotheses(18);
   const currentLessons = db.getActiveLessons().slice(0, 8);
 
   const prompt = `You are analyzing hypothesis review outcomes to extract actionable lessons for a Spitznagel-style tail-risk hedging bot.
@@ -2133,11 +2139,16 @@ Output JSON:
       for (const id of (result.archive_ids || [])) {
         db.archiveLesson(id);
       }
+      const advancedToId = reviewed[reviewed.length - 1]?.id || botData.lastHypothesisLessonReviewId || 0;
+      botData.lastHypothesisLessonReviewId = advancedToId;
+      persistCycleState();
       console.log(`🧠 Extracted ${result.new_lessons?.length || 0} lessons, archived ${result.archive_ids?.length || 0}`);
+      return { processed: reviewed.length, advancedToId };
     }
   } catch (e) {
     console.log('🧠 Lesson extraction failed:', e.message);
   }
+  return { processed: 0, advancedToId: botData.lastHypothesisLessonReviewId || 0 };
 };
 
 const getTradeCashflow = (order) => {
@@ -2481,13 +2492,14 @@ Output JSON only:
 };
 
 const extractTradeLessons = async () => {
-  if (!process.env.ANTHROPIC_API_KEY || !db) return;
-  const reviewedCount = db.countReviewedSinceLastTradeLesson();
-  if (reviewedCount < 2) return;
+  if (!process.env.ANTHROPIC_API_KEY || !db) return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
+  const reviews = db.getTradeReviewsSinceId
+    ? (db.getTradeReviewsSinceId(botData.lastTradeLessonReviewId || 0, 8) || [])
+    : (db.getRecentTradeReviews(8) || []);
+  if (reviews.length < 2) return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
 
-  console.log(`🧠 Extracting trade lessons from ${reviewedCount} new trade review(s)...`);
+  console.log(`🧠 Extracting trade lessons from ${reviews.length} trade review(s) (after id ${botData.lastTradeLessonReviewId || 0})...`);
 
-  const reviews = db.getRecentTradeReviews(12) || [];
   const currentTradeLessons = (db.getActiveTradeLessons() || []).slice(0, 8);
 
   const prompt = `You are extracting reusable lessons from reviewed trade campaigns for a Spitznagel-style ETH options bot.
@@ -2539,10 +2551,15 @@ Output JSON:
     for (const id of (result.archive_ids || [])) {
       db.archiveTradeLesson(id);
     }
+    const advancedToId = reviews[reviews.length - 1]?.id || botData.lastTradeLessonReviewId || 0;
+    botData.lastTradeLessonReviewId = advancedToId;
+    persistCycleState();
     console.log(`🧠 Trade lessons extracted: ${result.new_lessons?.length || 0} new, ${result.archive_ids?.length || 0} archived`);
+    return { processed: reviews.length, advancedToId };
   } catch (e) {
     console.log('🧠 Trade lesson extraction failed:', e.message);
   }
+  return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
 };
 
 // ─── Wiki Knowledge System ──────────────────────────────────────────────────
@@ -6814,8 +6831,15 @@ const _startupKnowledgeCheck = async () => {
     } else {
       console.log('🧠 Startup knowledge check: no recent journal entries available for wiki ingest');
     }
-    await extractHypothesisLessons();
-    await extractTradeLessons();
+    const MAX_BATCHES = 12;
+    for (let i = 0; i < MAX_BATCHES; i++) {
+      const result = await extractHypothesisLessons();
+      if (!result?.processed) break;
+    }
+    for (let i = 0; i < MAX_BATCHES; i++) {
+      const result = await extractTradeLessons();
+      if (!result?.processed) break;
+    }
     console.log('🧠 Startup knowledge check complete');
   } catch (e) {
     console.log('🧠 Startup knowledge check failed (non-fatal):', e.message);

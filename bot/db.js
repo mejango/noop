@@ -195,6 +195,8 @@ db.exec(`
     last_trade_review_ready_count INTEGER NOT NULL DEFAULT 0,
     last_trade_review_error TEXT,
     last_trade_review_targets TEXT,
+    last_hypothesis_lesson_review_id INTEGER NOT NULL DEFAULT 0,
+    last_trade_lesson_review_id INTEGER NOT NULL DEFAULT 0,
     last_advisory_run INTEGER NOT NULL DEFAULT 0,
     last_advisory_success INTEGER NOT NULL DEFAULT 0,
     last_advisory_error TEXT,
@@ -243,6 +245,8 @@ try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_review_success INTEGE
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_review_ready_count INTEGER NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_review_error TEXT'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_review_targets TEXT'); } catch {}
+try { db.exec('ALTER TABLE bot_state ADD COLUMN last_hypothesis_lesson_review_id INTEGER NOT NULL DEFAULT 0'); } catch {}
+try { db.exec('ALTER TABLE bot_state ADD COLUMN last_trade_lesson_review_id INTEGER NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_advisory_run INTEGER NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_advisory_success INTEGER NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_advisory_error TEXT'); } catch {}
@@ -436,11 +440,13 @@ const stmts = {
     INSERT INTO bot_state (id, put_cycle_start, put_net_bought, put_unspent_buy_limit, put_budget_for_cycle,
       call_cycle_start, call_net_sold, call_unspent_sell_limit, last_check, last_journal_generation, last_wiki_lint_run,
       last_trade_review_run, last_trade_review_success, last_trade_review_ready_count, last_trade_review_error, last_trade_review_targets,
+      last_hypothesis_lesson_review_id, last_trade_lesson_review_id,
       last_advisory_run, last_advisory_success, last_advisory_error,
       last_advisory_spot_price, last_advisory_timestamp, updated_at)
     VALUES (1, @put_cycle_start, @put_net_bought, @put_unspent_buy_limit, @put_budget_for_cycle,
       @call_cycle_start, @call_net_sold, @call_unspent_sell_limit, @last_check, @last_journal_generation, @last_wiki_lint_run,
       @last_trade_review_run, @last_trade_review_success, @last_trade_review_ready_count, @last_trade_review_error, @last_trade_review_targets,
+      @last_hypothesis_lesson_review_id, @last_trade_lesson_review_id,
       @last_advisory_run, @last_advisory_success, @last_advisory_error,
       @last_advisory_spot_price, @last_advisory_timestamp, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
@@ -459,6 +465,8 @@ const stmts = {
       last_trade_review_ready_count = @last_trade_review_ready_count,
       last_trade_review_error = @last_trade_review_error,
       last_trade_review_targets = @last_trade_review_targets,
+      last_hypothesis_lesson_review_id = @last_hypothesis_lesson_review_id,
+      last_trade_lesson_review_id = @last_trade_lesson_review_id,
       last_advisory_run = @last_advisory_run,
       last_advisory_success = @last_advisory_success,
       last_advisory_error = @last_advisory_error,
@@ -611,6 +619,18 @@ const stmts = {
     WHERE id = @id
   `),
 
+  getReviewedHypothesesSinceId: db.prepare(`
+    SELECT id, timestamp, content, prediction_target, prediction_direction,
+      prediction_value, outcome_status, outcome_verdict, outcome_confidence,
+      trade_pnl_attribution, outcome_reviewed_at
+    FROM ai_journal
+    WHERE entry_type = 'hypothesis'
+      AND outcome_status != 'pending'
+      AND id > @after_id
+    ORDER BY id ASC
+    LIMIT @limit
+  `),
+
   countReviewedSinceLastLesson: db.prepare(`
     SELECT COUNT(*) as count
     FROM ai_journal
@@ -652,6 +672,19 @@ const stmts = {
     FROM trade_reviews
     WHERE is_active = 1
     ORDER BY closed_at DESC
+    LIMIT @limit
+  `),
+
+  getTradeReviewsSinceId: db.prepare(`
+    SELECT id, instrument_name, action_family, opened_at, closed_at, review_window_days, horizon_end_at, order_ids,
+      review_status, review_confidence, summary, lessons, pnl_realized,
+      premium_opened, premium_closed, spot_open, spot_close,
+      spot_min_while_open, spot_max_while_open, spot_min_after_close, spot_max_after_close,
+      created_at
+    FROM trade_reviews
+    WHERE is_active = 1
+      AND id > @after_id
+    ORDER BY id ASC
     LIMIT @limit
   `),
 
@@ -1420,6 +1453,9 @@ const updateHypothesisVerdict = (id, verdict) => {
 const getReviewedHypotheses = (limit = 30) => {
   return stmts.getReviewedHypotheses.all({ limit });
 };
+const getReviewedHypothesesSinceId = (afterId = 0, limit = 20) => {
+  return stmts.getReviewedHypothesesSinceId.all({ after_id: afterId, limit });
+};
 
 const getHypothesisStats = (sinceDays = 30) => {
   const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000).toISOString();
@@ -1481,6 +1517,9 @@ const insertTradeReview = (review) => {
 
 const getRecentTradeReviews = (limit = 20) => {
   return stmts.getRecentTradeReviews.all({ limit });
+};
+const getTradeReviewsSinceId = (afterId = 0, limit = 20) => {
+  return stmts.getTradeReviewsSinceId.all({ after_id: afterId, limit });
 };
 
 const countReviewedSinceLastTradeLesson = () => {
@@ -1618,6 +1657,8 @@ const saveBotState = (botData) => {
     last_trade_review_ready_count: botData.lastTradeReviewReadyCount || 0,
     last_trade_review_error: botData.lastTradeReviewError || null,
     last_trade_review_targets: botData.lastTradeReviewTargets ? JSON.stringify(botData.lastTradeReviewTargets) : null,
+    last_hypothesis_lesson_review_id: botData.lastHypothesisLessonReviewId || 0,
+    last_trade_lesson_review_id: botData.lastTradeLessonReviewId || 0,
     last_advisory_run: botData.lastAdvisoryRun || 0,
     last_advisory_success: botData.lastAdvisorySuccess || 0,
     last_advisory_error: botData.lastAdvisoryError || null,
@@ -1705,6 +1746,7 @@ module.exports = {
   getPendingHypotheses,
   updateHypothesisVerdict,
   getReviewedHypotheses,
+  getReviewedHypothesesSinceId,
   getHypothesisStats,
   getOrdersInWindow,
   insertLesson,
@@ -1714,6 +1756,7 @@ module.exports = {
   hasTradeReview,
   insertTradeReview,
   getRecentTradeReviews,
+  getTradeReviewsSinceId,
   countReviewedSinceLastTradeLesson,
   insertTradeLesson,
   getActiveTradeLessons,
