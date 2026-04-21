@@ -2081,21 +2081,25 @@ const extractHypothesisLessons = async () => {
 
   console.log(`🧠 Extracting lessons from ${reviewedCount} new hypothesis reviews...`);
 
-  const reviewed = db.getReviewedHypotheses(50);
-  const currentLessons = db.getActiveLessons();
+  const reviewed = db.getReviewedHypotheses(18);
+  const currentLessons = db.getActiveLessons().slice(0, 8);
 
   const prompt = `You are analyzing hypothesis review outcomes to extract actionable lessons for a Spitznagel-style tail-risk hedging bot.
 
 ## Reviewed Hypotheses (most recent first)
-${reviewed.map(h => `#${h.id} [${h.outcome_status}] (confidence: ${h.outcome_confidence}) - ${h.content.slice(0, 150)}... VERDICT: ${h.outcome_verdict}`).join('\n\n')}
+${reviewed.map(h => {
+  const hypothesis = String(h.content || '').replace(/\s+/g, ' ').slice(0, 110);
+  const verdict = String(h.outcome_verdict || '').replace(/\s+/g, ' ').slice(0, 140);
+  return `#${h.id} [${h.outcome_status}] conf=${h.outcome_confidence ?? 'n/a'} | hyp=${hypothesis} | verdict=${verdict}`;
+}).join('\n')}
 
 ## Current Active Lessons
-${currentLessons.length > 0 ? currentLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count}, since: ${l.created_at})`).join('\n') : 'None yet'}
+${currentLessons.length > 0 ? currentLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None yet'}
 
 ## Instructions
 Analyze the pattern of outcomes. Key metric: convex posture rate = (confirmed_convex + disproven_bounded) / total.
 
-Extract 3-5 actionable lessons about:
+Extract at most 3 actionable lessons about:
 1. Which conditions reliably produce cheap protection windows (low IV, compressed skew, stable price)?
 2. Which signals preceded put price spikes (meaning we should have bought before)?
 3. What's the average bleed rate on disproven_bounded hypotheses (lower = better insurance buying)?
@@ -2109,7 +2113,7 @@ Output JSON:
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
-      max_tokens: 1024,
+      max_tokens: 700,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -2117,7 +2121,7 @@ Output JSON:
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 30000,
+      timeout: 20000,
     });
 
     const text = response.data?.content?.[0]?.text || '';
@@ -2483,18 +2487,18 @@ const extractTradeLessons = async () => {
 
   console.log(`🧠 Extracting trade lessons from ${reviewedCount} new trade review(s)...`);
 
-  const reviews = db.getRecentTradeReviews(30) || [];
-  const currentTradeLessons = db.getActiveTradeLessons() || [];
+  const reviews = db.getRecentTradeReviews(12) || [];
+  const currentTradeLessons = (db.getActiveTradeLessons() || []).slice(0, 8);
 
   const prompt = `You are extracting reusable lessons from reviewed trade campaigns for a Spitznagel-style ETH options bot.
 
 Recent trade reviews:
-${reviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] pnl=$${Number(r.pnl_realized || 0).toFixed(2)} summary=${r.summary}`).join('\n')}
+${reviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] pnl=$${Number(r.pnl_realized || 0).toFixed(2)} summary=${String(r.summary || '').replace(/\s+/g, ' ').slice(0, 180)}`).join('\n')}
 
 Current active trade lessons:
 ${currentTradeLessons.length > 0 ? currentTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
 
-Extract 2-4 durable lessons about:
+Extract at most 3 durable lessons about:
 - strike selection
 - exit timing
 - execution quality
@@ -2514,7 +2518,7 @@ Output JSON:
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
-      max_tokens: 800,
+      max_tokens: 600,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -2522,7 +2526,7 @@ Output JSON:
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 30000,
+      timeout: 20000,
     });
 
     const text = response.data?.content?.[0]?.text || '';
@@ -2635,6 +2639,55 @@ const isPlaceholderWikiPage = (content) => {
 
 const getWikiPagesNeedingSeed = () => {
   return WIKI_ALL_PAGES.filter((page) => isPlaceholderWikiPage(readWikiPage(page)));
+};
+
+const inferWikiPagesForJournalEntries = (journalEntries = []) => {
+  const selected = new Set(WIKI_KEY_PAGES);
+
+  for (const entry of journalEntries) {
+    const type = entry?.type || entry?.entry_type || '';
+    const content = String(entry?.content || '').toLowerCase();
+
+    if (type === 'regime_note') {
+      selected.add('regimes/current.md');
+      selected.add('regimes/history.md');
+      selected.add('protection/pricing.md');
+      selected.add('revenue/pricing.md');
+    }
+
+    if (type === 'hypothesis') {
+      selected.add('protection/windows.md');
+      selected.add('revenue/windows.md');
+      selected.add('indicators/leading.md');
+      selected.add('indicators/divergences.md');
+    }
+
+    if (type === 'observation') {
+      selected.add('indicators/correlations.md');
+      selected.add('indicators/divergences.md');
+    }
+
+    if (content.includes('convex') || content.includes('skew') || content.includes('tail')) {
+      selected.add('protection/convexity.md');
+    }
+    if (content.includes('premium') || content.includes('call')) {
+      selected.add('revenue/efficiency.md');
+    }
+    if (content.includes('mistake') || content.includes('discipline') || content.includes('rule')) {
+      selected.add('strategy/mistakes.md');
+      selected.add('strategy/playbook.md');
+    }
+  }
+
+  return Array.from(selected).filter((page) => WIKI_ALL_PAGES.includes(page)).slice(0, 10);
+};
+
+const buildWikiIngestPagesContext = (pages, selectedPages) => {
+  return selectedPages.map((page) => {
+    const content = pages[page] || '';
+    const truncated = content.length > 1200 ? `${content.slice(0, 1200)}\n...[truncated]` : content;
+    return `--- ${page} ---\n${truncated}`;
+  }).join('\n\n');
 };
 
 const seedWikiFromHistory = async (incomingEntries = []) => {
@@ -2766,17 +2819,15 @@ const ingestToWiki = async (journalEntries) => {
 
   console.log('📚 Wiki ingest: processing', journalEntries.length, 'journal entries...');
 
-  // Read schema + all pages
+  // Read schema + targeted page subset to keep prompt compact.
   const schema = readWikiPage('schema.md');
   const pages = {};
   for (const page of WIKI_ALL_PAGES) {
     pages[page] = readWikiPage(page);
   }
-
-  const pagesContext = Object.entries(pages)
-    .map(([p, content]) => `--- ${p} ---\n${content}`)
-    .join('\n\n');
-  const recentTradeReviews = db.getRecentTradeReviews(20) || [];
+  const selectedPages = inferWikiPagesForJournalEntries(journalEntries);
+  const pagesContext = buildWikiIngestPagesContext(pages, selectedPages);
+  const recentTradeReviews = db.getRecentTradeReviews(10) || [];
   const activeTradeLessons = db.getActiveTradeLessons() || [];
 
   const entriesText = journalEntries
@@ -2788,25 +2839,29 @@ const ingestToWiki = async (journalEntries) => {
 ## Wiki Schema
 ${schema}
 
-## Current Wiki Pages
+## Allowed Wiki Pages
+${selectedPages.join('\n')}
+
+## Current Wiki Pages (targeted excerpts)
 ${pagesContext}
 
 ## New Journal Entries
 ${entriesText}
 
 ## Reviewed Trade Campaigns
-${recentTradeReviews.length > 0 ? recentTradeReviews.slice(0, 10).map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] ${r.summary}`).join('\n') : 'None'}
+${recentTradeReviews.length > 0 ? recentTradeReviews.slice(0, 6).map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] ${r.summary}`).join('\n') : 'None'}
 
 ## Active Trade Lessons
 ${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
 
 ## Instructions
-1. Analyze which wiki pages need updating based on the new journal entries
+1. Analyze which ALLOWED wiki pages need updating based on the new journal entries
 2. Preserve existing accurate content — ADD to it, don't replace it
 3. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
 4. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" format
 5. Keep each page under 2000 words — consolidate older entries if approaching limit
 6. Every page must start with a bold TLDR line reflecting current state
+7. Prefer the smallest set of page updates that captures the new information cleanly
 
 Output your updates as XML blocks. Only include pages that need changes:
 
@@ -2818,8 +2873,8 @@ If no pages need updating, output: <no_updates/>`;
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: ANTHROPIC_OPUS_MODEL,
-      max_tokens: 8192,
+      model: ANTHROPIC_SONNET_MODEL,
+      max_tokens: 4096,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -6742,6 +6797,34 @@ if (db?.deactivateStaleEmergencyBuybackRules) {
     console.log('🧹 Failed to scrub stale emergency buyback rules:', e.message);
   }
 }
+
+// Startup maintenance check: exercise wiki/lesson pipelines once after boot
+// so Railway deploys can validate prompt/runtime changes without waiting for cadence.
+const _startupKnowledgeCheck = async () => {
+  if (!process.env.ANTHROPIC_API_KEY || !db) {
+    console.log('🧠 Startup knowledge check skipped — missing ANTHROPIC_API_KEY or db');
+    return;
+  }
+
+  try {
+    console.log('🧠 Startup knowledge check: running wiki ingest + lesson extraction...');
+    const recentJournalEntries = db.getRecentJournalEntries(3) || [];
+    if (recentJournalEntries.length > 0) {
+      await ingestToWiki(recentJournalEntries);
+    } else {
+      console.log('🧠 Startup knowledge check: no recent journal entries available for wiki ingest');
+    }
+    await extractHypothesisLessons();
+    await extractTradeLessons();
+    console.log('🧠 Startup knowledge check complete');
+  } catch (e) {
+    console.log('🧠 Startup knowledge check failed (non-fatal):', e.message);
+  }
+};
+
+setTimeout(() => {
+  _startupKnowledgeCheck();
+}, 15000);
 
 
 sendTelegram('🔄 *NOOP Bot restarted*');
