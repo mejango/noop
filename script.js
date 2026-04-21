@@ -6815,42 +6815,6 @@ if (db?.deactivateStaleEmergencyBuybackRules) {
   }
 }
 
-// Startup maintenance check: exercise wiki/lesson pipelines once after boot
-// so Railway deploys can validate prompt/runtime changes without waiting for cadence.
-const _startupKnowledgeCheck = async () => {
-  if (!process.env.ANTHROPIC_API_KEY || !db) {
-    console.log('🧠 Startup knowledge check skipped — missing ANTHROPIC_API_KEY or db');
-    return;
-  }
-
-  try {
-    console.log('🧠 Startup knowledge check: running wiki ingest + lesson extraction...');
-    const recentJournalEntries = db.getRecentJournalEntries(3) || [];
-    if (recentJournalEntries.length > 0) {
-      await ingestToWiki(recentJournalEntries);
-    } else {
-      console.log('🧠 Startup knowledge check: no recent journal entries available for wiki ingest');
-    }
-    const MAX_BATCHES = 12;
-    for (let i = 0; i < MAX_BATCHES; i++) {
-      const result = await extractHypothesisLessons();
-      if (!result?.processed) break;
-    }
-    for (let i = 0; i < MAX_BATCHES; i++) {
-      const result = await extractTradeLessons();
-      if (!result?.processed) break;
-    }
-    console.log('🧠 Startup knowledge check complete');
-  } catch (e) {
-    console.log('🧠 Startup knowledge check failed (non-fatal):', e.message);
-  }
-};
-
-setTimeout(() => {
-  _startupKnowledgeCheck();
-}, 15000);
-
-
 sendTelegram('🔄 *NOOP Bot restarted*');
 
 // Defer first run if the bot ran recently (prevents premature runs on redeploy)
