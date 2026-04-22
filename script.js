@@ -3918,7 +3918,7 @@ Spot: $${spotPrice}
 Momentum: ${JSON.stringify(momentum, null, 2)}
 
 === SENTIMENT / DISTRIBUTION BY WINDOW ===
-${JSON.stringify(summarizeSentimentWindowsForLLM(sentiment), null, 2)}
+${JSON.stringify(summarizeSentimentWindowsForLLM(sentiment?.windows || {}), null, 2)}
 
 === WIKI SIGNALS ===
 ${JSON.stringify(wikiSignals || null, null, 2)}
