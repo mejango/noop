@@ -5565,10 +5565,8 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
     try { recentOrders = db.getRecentOrders(since7d, 10); } catch { /* ok */ }
   }
   let recentTradeReviews = [];
-  let activeTradeLessons = [];
   if (db) {
     try { recentTradeReviews = db.getRecentTradeReviews(6); } catch { /* ok */ }
-    try { activeTradeLessons = db.getActiveTradeLessons(); } catch { /* ok */ }
   }
 
   // Current active rules + recent pending actions
@@ -5801,9 +5799,6 @@ ${recentOrders.length > 0 ? recentOrders.map(o => `${o.timestamp} | ${o.action} 
 
 === TRADE REVIEWS (closed campaigns) ===
 ${recentTradeReviews.length > 0 ? recentTradeReviews.map(r => `${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] | pnl=$${Number(r.pnl_realized || 0).toFixed(2)} | ${r.summary}`).join('\n') : 'No trade reviews yet'}
-
-=== ACTIVE TRADE LESSONS ===
-${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
 
 === CURRENT ACTIVE RULES ===
 ${summarizeActiveRulesForAdvisor(activeRules)}
