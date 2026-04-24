@@ -3665,11 +3665,27 @@ const isAnthropicAccelerationLimitError = (error) => {
     || (message.includes('input tokens per minute') && message.includes('next minute boundary'));
 };
 
+const isRetryableAnthropicServerError = (error) => {
+  const status = Number(error?.response?.status || 0);
+  const message = String(getAnthropicErrorMessage(error) || '').toLowerCase();
+  return status === 500
+    || status === 502
+    || status === 503
+    || status === 504
+    || message.includes('internal server error');
+};
+
 const waitUntilNextMinuteBoundary = async (label = 'Anthropic retry') => {
   const now = Date.now();
   const nextMinute = Math.ceil(now / 60000) * 60000;
   const delayMs = Math.max(1500, nextMinute - now + 1500);
   console.log(`⏱️ ${label}: waiting ${(delayMs / 1000).toFixed(1)}s for next minute boundary`);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+};
+
+const waitWithBackoff = async (label, attempt, baseDelayMs = 4000) => {
+  const delayMs = baseDelayMs * attempt;
+  console.log(`⏱️ ${label}: retrying in ${(delayMs / 1000).toFixed(1)}s after transient Anthropic server error`);
   await new Promise((resolve) => setTimeout(resolve, delayMs));
 };
 
@@ -3681,6 +3697,7 @@ const callAnthropicWithMinuteBoundaryRetry = async ({
   messages,
   timeout = 120000,
   spreadAfterBoundary = false,
+  maxServerErrorRetries = 2,
 }) => {
   const attemptCall = () => axios.post('https://api.anthropic.com/v1/messages', {
     model,
@@ -3696,16 +3713,33 @@ const callAnthropicWithMinuteBoundaryRetry = async ({
     timeout,
   });
 
-  try {
-    return await attemptCall();
-  } catch (error) {
-    if (!isAnthropicAccelerationLimitError(error)) throw error;
-    console.log(`⏱️ ${label}: Anthropic acceleration limit hit — ${getAnthropicErrorMessage(error)}`);
-    await waitUntilNextMinuteBoundary(label);
-    if (spreadAfterBoundary) {
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+  let serverErrorRetries = 0;
+  let accelerationRetries = 0;
+
+  while (true) {
+    try {
+      return await attemptCall();
+    } catch (error) {
+      if (isAnthropicAccelerationLimitError(error)) {
+        if (accelerationRetries >= 1) throw error;
+        accelerationRetries += 1;
+        console.log(`⏱️ ${label}: Anthropic acceleration limit hit — ${getAnthropicErrorMessage(error)}`);
+        await waitUntilNextMinuteBoundary(label);
+        if (spreadAfterBoundary) {
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+        }
+        continue;
+      }
+
+      if (isRetryableAnthropicServerError(error) && serverErrorRetries < maxServerErrorRetries) {
+        serverErrorRetries += 1;
+        console.log(`⏱️ ${label}: transient Anthropic server error (${serverErrorRetries}/${maxServerErrorRetries}) — ${getAnthropicErrorMessage(error)}`);
+        await waitWithBackoff(label, serverErrorRetries);
+        continue;
+      }
+
+      throw error;
     }
-    return attemptCall();
   }
 };
 

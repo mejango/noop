@@ -450,6 +450,17 @@ export default function AdvisorDrawer() {
   // Derived: active chat's messages
   const activeChat = chats.find(c => c.id === activeChatId) ?? null;
   const messages = activeChat?.messages ?? [];
+  const advisoryLastAttempt = opsData.schedulerState?.last_advisory_run
+    ? new Date(opsData.schedulerState.last_advisory_run).toISOString()
+    : null;
+  const advisoryLastSuccess = opsData.schedulerState?.last_advisory_success
+    ? new Date(opsData.schedulerState.last_advisory_success).toISOString()
+    : null;
+  const advisoryHasRecentFailure = Boolean(
+    opsData.schedulerState?.last_advisory_error
+    && advisoryLastAttempt
+    && (!advisoryLastSuccess || advisoryLastAttempt > advisoryLastSuccess)
+  );
 
   const createNewChat = useCallback(() => {
     const newChat: Chat = {
@@ -1206,9 +1217,14 @@ export default function AdvisorDrawer() {
                     <span className="text-gray-400">{opsData.stats.rejected_count} rejected</span>
                     <span className="text-red-400">{opsData.stats.failed_count} failed</span>
                   </div>
+                  {advisoryHasRecentFailure && (
+                    <div className="mt-2 border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] text-red-300">
+                      advisory stale: last attempt {advisoryLastAttempt ? timeAgo(advisoryLastAttempt) : 'unknown'} failed; last success {advisoryLastSuccess ? timeAgo(advisoryLastSuccess) : 'never'}
+                    </div>
+                  )}
                   <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-gray-600">
-                    <span>last attempt: {opsData.schedulerState?.last_advisory_run ? timeAgo(new Date(opsData.schedulerState.last_advisory_run).toISOString()) : 'never'}</span>
-                    <span>last success: {opsData.schedulerState?.last_advisory_success ? timeAgo(new Date(opsData.schedulerState.last_advisory_success).toISOString()) : 'never'}</span>
+                    <span>last attempt: {advisoryLastAttempt ? timeAgo(advisoryLastAttempt) : 'never'}</span>
+                    <span>last success: {advisoryLastSuccess ? timeAgo(advisoryLastSuccess) : 'never'}</span>
                   </div>
                   {opsData.schedulerState?.last_advisory_error && (
                     <div className="mt-1 text-[10px] text-red-400">
