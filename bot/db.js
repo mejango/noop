@@ -150,6 +150,8 @@ try { db.exec('ALTER TABLE options_snapshots ADD COLUMN implied_vol REAL'); } ca
 try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_put_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_call_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE trading_rules ADD COLUMN preferred_order_type TEXT'); } catch {}
+try { db.exec('ALTER TABLE bot_state ADD COLUMN advisory_retry_count INTEGER NOT NULL DEFAULT 0'); } catch {}
+try { db.exec('ALTER TABLE bot_state ADD COLUMN next_advisory_retry_at INTEGER NOT NULL DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_advisory_spot_price REAL'); } catch {}
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_advisory_timestamp INTEGER NOT NULL DEFAULT 0'); } catch {}
 
@@ -200,6 +202,8 @@ db.exec(`
     last_advisory_run INTEGER NOT NULL DEFAULT 0,
     last_advisory_success INTEGER NOT NULL DEFAULT 0,
     last_advisory_error TEXT,
+    advisory_retry_count INTEGER NOT NULL DEFAULT 0,
+    next_advisory_retry_at INTEGER NOT NULL DEFAULT 0,
     last_advisory_spot_price REAL,
     last_advisory_timestamp INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -441,13 +445,13 @@ const stmts = {
       call_cycle_start, call_net_sold, call_unspent_sell_limit, last_check, last_journal_generation, last_wiki_lint_run,
       last_trade_review_run, last_trade_review_success, last_trade_review_ready_count, last_trade_review_error, last_trade_review_targets,
       last_hypothesis_lesson_review_id, last_trade_lesson_review_id,
-      last_advisory_run, last_advisory_success, last_advisory_error,
+      last_advisory_run, last_advisory_success, last_advisory_error, advisory_retry_count, next_advisory_retry_at,
       last_advisory_spot_price, last_advisory_timestamp, updated_at)
     VALUES (1, @put_cycle_start, @put_net_bought, @put_unspent_buy_limit, @put_budget_for_cycle,
       @call_cycle_start, @call_net_sold, @call_unspent_sell_limit, @last_check, @last_journal_generation, @last_wiki_lint_run,
       @last_trade_review_run, @last_trade_review_success, @last_trade_review_ready_count, @last_trade_review_error, @last_trade_review_targets,
       @last_hypothesis_lesson_review_id, @last_trade_lesson_review_id,
-      @last_advisory_run, @last_advisory_success, @last_advisory_error,
+      @last_advisory_run, @last_advisory_success, @last_advisory_error, @advisory_retry_count, @next_advisory_retry_at,
       @last_advisory_spot_price, @last_advisory_timestamp, datetime('now'))
     ON CONFLICT(id) DO UPDATE SET
       put_cycle_start = @put_cycle_start,
@@ -470,6 +474,8 @@ const stmts = {
       last_advisory_run = @last_advisory_run,
       last_advisory_success = @last_advisory_success,
       last_advisory_error = @last_advisory_error,
+      advisory_retry_count = @advisory_retry_count,
+      next_advisory_retry_at = @next_advisory_retry_at,
       last_advisory_spot_price = @last_advisory_spot_price,
       last_advisory_timestamp = @last_advisory_timestamp,
       updated_at = datetime('now')
@@ -1662,6 +1668,8 @@ const saveBotState = (botData) => {
     last_advisory_run: botData.lastAdvisoryRun || 0,
     last_advisory_success: botData.lastAdvisorySuccess || 0,
     last_advisory_error: botData.lastAdvisoryError || null,
+    advisory_retry_count: botData.advisoryRetryCount || 0,
+    next_advisory_retry_at: botData.nextAdvisoryRetryAt || 0,
     last_advisory_spot_price: botData.lastAdvisorySpotPrice || null,
     last_advisory_timestamp: botData.lastAdvisoryTimestamp || 0,
   });

@@ -269,6 +269,8 @@ let botData = {
     lastAdvisoryRun: 0,
     lastAdvisorySuccess: 0,
     lastAdvisoryError: null,
+    advisoryRetryCount: 0,
+    nextAdvisoryRetryAt: 0,
     lastAdvisorySpotPrice: null,  // spot price when last advisory ran
     lastAdvisoryTimestamp: 0,     // when last advisory ran
   };
@@ -286,6 +288,19 @@ let _wikiLintInFlight = false;
 
 // Price move threshold to force a re-advisory (8% move since last advisory)
 const ADVISORY_PRICE_MOVE_THRESHOLD = 0.08;
+const ADVISORY_RETRY_BACKOFF_MS = [
+  5 * 60 * 1000,
+  15 * 60 * 1000,
+  30 * 60 * 1000,
+  60 * 60 * 1000,
+  2 * 60 * 60 * 1000,
+  4 * 60 * 60 * 1000,
+];
+
+const getAdvisoryRetryDelayMs = (retryCount) => {
+  const idx = Math.max(0, Math.min(ADVISORY_RETRY_BACKOFF_MS.length - 1, retryCount - 1));
+  return ADVISORY_RETRY_BACKOFF_MS[idx];
+};
 
 const persistCycleState = () => {
   if (!db) return;
@@ -449,6 +464,8 @@ const loadData = () => {
       botData.lastAdvisoryRun = state.last_advisory_run || 0;
       botData.lastAdvisorySuccess = state.last_advisory_success || 0;
       botData.lastAdvisoryError = state.last_advisory_error || null;
+      botData.advisoryRetryCount = state.advisory_retry_count || 0;
+      botData.nextAdvisoryRetryAt = state.next_advisory_retry_at || 0;
       botData.lastAdvisorySpotPrice = state.last_advisory_spot_price || null;
       botData.lastAdvisoryTimestamp = state.last_advisory_timestamp || 0;
       console.log(`✅ Loaded cycle state from SQLite`);
@@ -6151,11 +6168,15 @@ Synthesize the final agenda now.`;
   botData.lastAdvisoryTimestamp = Date.now();
   botData.lastAdvisorySuccess = Date.now();
   botData.lastAdvisoryError = null;
+  botData.advisoryRetryCount = 0;
+  botData.nextAdvisoryRetryAt = 0;
   persistCycleState();
 
   return { advisoryId, agenda: finalAgenda, rulesCount: allRules.length };
   } catch (e) {
     botData.lastAdvisoryError = e.message;
+    botData.advisoryRetryCount = (botData.advisoryRetryCount || 0) + 1;
+    botData.nextAdvisoryRetryAt = Date.now() + getAdvisoryRetryDelayMs(botData.advisoryRetryCount);
     persistCycleState();
     throw e;
   } finally {
@@ -6664,6 +6685,19 @@ const runBot = async () => {
             console.log(`📋 Price-triggered advisory failed (non-fatal): ${e.message}`);
           });
         }
+      }
+
+      if (
+        process.env.ANTHROPIC_API_KEY
+        && spotPrice
+        && botData.nextAdvisoryRetryAt
+        && Date.now() >= botData.nextAdvisoryRetryAt
+      ) {
+        const retryCount = botData.advisoryRetryCount || 0;
+        console.log(`📋 Advisory retry due now (${retryCount} prior failure${retryCount === 1 ? '' : 's'}) — reattempting`);
+        generateTradingAdvisory(positions, spotPrice, tickerMap).catch(e => {
+          console.log(`📋 Scheduled advisory retry failed (non-fatal): ${e.message}`);
+        });
       }
 
       // Auto-generate journal entries every 8 hours

@@ -125,6 +125,8 @@ interface SchedulerState {
   last_advisory_run?: number | null;
   last_advisory_success?: number | null;
   last_advisory_error?: string | null;
+  advisory_retry_count?: number | null;
+  next_advisory_retry_at?: number | null;
 }
 
 interface TradingRule {
@@ -455,6 +457,9 @@ export default function AdvisorDrawer() {
     : null;
   const advisoryLastSuccess = opsData.schedulerState?.last_advisory_success
     ? new Date(opsData.schedulerState.last_advisory_success).toISOString()
+    : null;
+  const advisoryNextRetry = opsData.schedulerState?.next_advisory_retry_at
+    ? new Date(opsData.schedulerState.next_advisory_retry_at).toISOString()
     : null;
   const advisoryHasRecentFailure = Boolean(
     opsData.schedulerState?.last_advisory_error
@@ -1220,6 +1225,11 @@ export default function AdvisorDrawer() {
                   {advisoryHasRecentFailure && (
                     <div className="mt-2 border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] text-red-300">
                       advisory stale: last attempt {advisoryLastAttempt ? timeAgo(advisoryLastAttempt) : 'unknown'} failed; last success {advisoryLastSuccess ? timeAgo(advisoryLastSuccess) : 'never'}
+                    </div>
+                  )}
+                  {opsData.schedulerState?.advisory_retry_count && opsData.schedulerState.advisory_retry_count > 0 && advisoryNextRetry && (
+                    <div className="mt-1 text-[10px] text-amber-300">
+                      retry #{opsData.schedulerState.advisory_retry_count} due {timeAgo(advisoryNextRetry)}
                     </div>
                   )}
                   <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-gray-600">

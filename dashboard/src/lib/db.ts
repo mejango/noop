@@ -465,7 +465,8 @@ function prepareAll(d: Database.Database) {
       SELECT put_cycle_start, put_net_bought, put_unspent_buy_limit,
         put_budget_for_cycle, last_advisory_spot_price, last_advisory_timestamp,
         last_trade_review_run, last_trade_review_success, last_trade_review_ready_count, last_trade_review_error,
-        last_trade_review_targets, last_advisory_run, last_advisory_success, last_advisory_error
+        last_trade_review_targets, last_advisory_run, last_advisory_success, last_advisory_error,
+        advisory_retry_count, next_advisory_retry_at
       FROM bot_state WHERE id = 1
     `),
 
@@ -1189,6 +1190,8 @@ export function getBudgetCycleState() {
       last_advisory_run: number;
       last_advisory_success: number;
       last_advisory_error: string | null;
+      advisory_retry_count: number;
+      next_advisory_retry_at: number;
     } | undefined;
   } catch { return undefined; }
 }
