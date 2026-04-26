@@ -302,7 +302,7 @@ const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
   );
   if (configuredStep > 0) return configuredStep;
   if (fallbackPrice >= 10) return 0.1;
-  if (fallbackPrice >= 1) return 0.05;
+  if (fallbackPrice >= 1) return 0.1;
   return 0.01;
 };
 
@@ -1058,7 +1058,7 @@ describe('Entry rule matching (integration)', () => {
   test('evaluateConditions + computeCurrentValues work together for exit rule triggering', () => {
     // Simulate: position has DTE < 2 and unrealized P&L > 30%
     const position = {
-      instrument_name: 'ETH-20260420-1500-P', // comfortably above the <2 DTE threshold
+      instrument_name: 'ETH-20990420-1500-P', // comfortably above the <2 DTE threshold
       direction: 'long',
       avg_entry_price: 0.05,
       mark_price: 0,
@@ -3964,6 +3964,18 @@ describe('post_only retry price discipline', () => {
     );
     assert.ok(retry);
     assert.strictEqual(retry.retryPrice, 4.95);
+  });
+
+  test('sell retry uses 1-decimal fallback when metadata lacks price step', () => {
+    const retry = computePostOnlyRetryPrice(
+      'sell',
+      { b: 5.7, a: 6.7 },
+      { option_details: {} },
+      5.7
+    );
+    assert.ok(retry);
+    assert.ok(Math.abs(retry.retryPrice - 5.8) < 0.0000001, `Expected ~5.8, got ${retry.retryPrice}`);
+    assert.strictEqual(retry.step, 0.1);
   });
 });
 

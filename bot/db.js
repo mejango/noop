@@ -987,6 +987,12 @@ const stmts = {
       )
   `),
 
+  deactivateRuleById: db.prepare(`
+    UPDATE trading_rules
+    SET is_active = 0
+    WHERE id = @id
+  `),
+
   insertPendingAction: db.prepare(`
     INSERT INTO pending_actions (rule_id, action, instrument_name, amount, price, trigger_details, status)
     VALUES (@rule_id, @action, @instrument_name, @amount, @price, @trigger_details, 'pending')
@@ -1600,6 +1606,7 @@ const updatePendingAction = (id, fields) => {
 const getActiveRules = () => stmts.getActiveRules.all();
 const getActiveRulesByType = (ruleType) => stmts.getActiveRulesByType.all({ rule_type: ruleType });
 const deactivateStaleEmergencyBuybackRules = () => stmts.deactivateStaleEmergencyBuybackRules.run().changes || 0;
+const deactivateRuleById = (id) => stmts.deactivateRuleById.run({ id }).changes || 0;
 const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ status });
 const getRecentPendingActions = (limit = 20) => stmts.getRecentPendingActions.all({ limit });
 const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
@@ -1798,6 +1805,7 @@ module.exports = {
   getActiveRules,
   getActiveRulesByType,
   deactivateStaleEmergencyBuybackRules,
+  deactivateRuleById,
   getPendingActions,
   getRecentPendingActions,
   hasPendingActionForRule,

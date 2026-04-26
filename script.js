@@ -4564,6 +4564,14 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { criteria = null; }
         if (!criteria || typeof criteria !== 'object' || !criteria.option_type) {
           console.log(`📋 Entry rule ${rule.id}: skipping — criteria missing structured fields (need option_type, delta_range, dte_range)`);
+          try {
+            const deactivated = db.deactivateRuleById ? db.deactivateRuleById(rule.id) : 0;
+            if (deactivated > 0) {
+              console.log(`📋 Entry rule ${rule.id}: deactivated malformed persisted rule`);
+            }
+          } catch (deactivateErr) {
+            console.log(`📋 Entry rule ${rule.id}: failed to deactivate malformed rule: ${deactivateErr.message}`);
+          }
           continue;
         }
 
@@ -4996,6 +5004,10 @@ const getRecentFailedEntry = (action, instrumentName, cooldownMs = FAILED_ENTRY_
   if (!db || !action || !instrumentName || !isEntryAction(action)) return null;
   const lastFailed = db.getLastFailedAction(action, instrumentName);
   if (!lastFailed?.triggered_at) return null;
+  const reason = String(lastFailed.execution_result || '');
+  if (reason.toLowerCase().includes('invalid limit price') && reason.toLowerCase().includes('decimal places')) {
+    return null;
+  }
   const elapsed = Date.now() - new Date(lastFailed.triggered_at).getTime();
   if (elapsed < 0 || elapsed >= cooldownMs) return null;
   return {
@@ -5040,7 +5052,10 @@ const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
   );
   if (configuredStep > 0) return configuredStep;
   if (fallbackPrice >= 10) return 0.1;
-  if (fallbackPrice >= 1) return 0.05;
+  // Derive option quotes above $1 trade on a 1-decimal grid when instrument metadata
+  // does not expose a usable price step. Falling back to $0.05 produced repeated
+  // venue rejects like "must not have more than 1 decimal places" for 5.x quotes.
+  if (fallbackPrice >= 1) return 0.1;
   return 0.01;
 };
 
