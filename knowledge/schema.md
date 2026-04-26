@@ -2,6 +2,38 @@
 
 This file defines the structure, update rules, and format conventions for the NOOP-C knowledge wiki.
 
+## System-Owned Files
+
+### index.md
+- System-maintained catalog of the wiki
+- Lists all pages with one-line summaries
+- Read this first when orienting to the wiki
+- The system updates this deterministically; LLM page-update prompts should not rewrite it
+
+### log.md
+- Append-only maintenance timeline
+- Records ingests, seed passes, lint passes, and notable knowledge-system events
+- The system updates this deterministically; LLM page-update prompts should not rewrite it
+
+### raw/evidence/
+- Immutable evidence packets written by the system
+- Packets contain factual market snapshots, factual order activity, and supporting analyst notes
+- Prefer these packets over re-derived claims when compiling wiki updates
+
+## Source Hierarchy
+
+When sources disagree, trust them in this order:
+
+1. **Raw evidence packets and structured factual data** — market snapshots, order activity, account state
+2. **Reviewed outcomes** — trade reviews and hypothesis verdicts
+3. **Journal entries and active lessons** — analyst interpretation and distilled heuristics
+4. **Existing wiki text** — prior synthesis, useful but revisable
+
+Rules:
+- Never elevate journal interpretation into fact unless corroborated by higher-priority evidence
+- When higher-priority evidence contradicts existing wiki text, revise transparently
+- If evidence is mixed or thin, state uncertainty instead of over-asserting
+
 ## Page Types & Required Sections
 
 ### regimes/current.md

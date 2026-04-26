@@ -2596,9 +2596,14 @@ Output JSON:
 const WIKI_DIR = process.env.WIKI_DIR || path.join(__dirname, 'knowledge');
 const WIKI_META_PATH = path.join(WIKI_DIR, '.meta.json');
 const WIKI_HISTORY_DIR = path.join(WIKI_DIR, '.history');
+const WIKI_INDEX_PAGE = 'index.md';
+const WIKI_LOG_PAGE = 'log.md';
+const WIKI_INDEX_PATH = path.join(WIKI_DIR, WIKI_INDEX_PAGE);
+const WIKI_LOG_PATH = path.join(WIKI_DIR, WIKI_LOG_PAGE);
+const WIKI_RAW_EVIDENCE_DIR = path.join(WIKI_DIR, 'raw', 'evidence');
 
 // Ensure all wiki subdirectories exist
-for (const sub of ['regimes', 'protection', 'revenue', 'indicators', 'strategy']) {
+for (const sub of ['regimes', 'protection', 'revenue', 'indicators', 'strategy', 'raw', 'raw/evidence']) {
   fs.mkdirSync(path.join(WIKI_DIR, sub), { recursive: true });
 }
 
@@ -2650,13 +2655,158 @@ const writeWikiMeta = (meta) => {
   fs.writeFileSync(WIKI_META_PATH, JSON.stringify(meta, null, 2));
 };
 
+const ensureWikiSupportFiles = () => {
+  if (!fs.existsSync(WIKI_INDEX_PATH)) {
+    fs.writeFileSync(WIKI_INDEX_PATH, '# Knowledge Index\n\nSystem-maintained index. Awaiting first refresh.\n');
+  }
+  if (!fs.existsSync(WIKI_LOG_PATH)) {
+    fs.writeFileSync(WIKI_LOG_PATH, '# Knowledge Log\n\nAppend-only system log of wiki ingests, seeds, queries, and lint passes.\n\n');
+  }
+};
+
 const logWikiMetaSummary = (prefix, meta = null) => {
   const effectiveMeta = meta || readWikiMeta();
   console.log(`${prefix} wiki_dir=${WIKI_DIR} meta_path=${WIKI_META_PATH} meta_exists=${fs.existsSync(WIKI_META_PATH)} seeded_at=${effectiveMeta.seeded_at || 'none'} last_ingest=${effectiveMeta.last_ingest || 'none'} last_lint=${effectiveMeta.last_lint || 'none'}`);
 };
 
+ensureWikiSupportFiles();
+
+const getWikiTldr = (content = '') => {
+  const lines = String(content).split('\n').map((line) => line.trim()).filter(Boolean);
+  const tldrLine = lines.find((line) => line.startsWith('**') && line.endsWith('**'));
+  if (tldrLine) return tldrLine.replace(/^\*\*/, '').replace(/\*\*$/, '').trim();
+  return lines[0] || 'Awaiting initial assessment';
+};
+
+const countDatedEvidencePoints = (content = '') => (String(content).match(/\[\d{4}-\d{2}-\d{2}\]/g) || []).length;
+
+const refreshWikiIndex = () => {
+  const meta = readWikiMeta();
+  const groupedPages = new Map();
+  for (const page of WIKI_ALL_PAGES) {
+    const category = page.split('/')[0];
+    if (!groupedPages.has(category)) groupedPages.set(category, []);
+    const content = readWikiPage(page);
+    groupedPages.get(category).push({
+      page,
+      summary: getWikiTldr(content),
+      placeholder: isPlaceholderWikiPage(content),
+      evidenceCount: countDatedEvidencePoints(content),
+    });
+  }
+
+  const lines = [
+    '# Knowledge Index',
+    '',
+    'System-maintained catalog of the compiled trading wiki. Read this first to understand what pages exist and where current knowledge lives.',
+    '',
+    `Updated: ${new Date().toISOString()}`,
+    '',
+    '## System Files',
+    `- [schema.md](schema.md) — wiki structure, source hierarchy, and update rules`,
+    `- [${WIKI_LOG_PAGE}](${WIKI_LOG_PAGE}) — append-only maintenance timeline`,
+    `- Raw evidence packets live in [raw/evidence](raw/evidence)${meta.last_evidence_packet ? ` (latest: [${meta.last_evidence_packet}](${meta.last_evidence_packet}))` : ''}`,
+    '',
+  ];
+
+  for (const [category, pages] of groupedPages.entries()) {
+    lines.push(`## ${category}`);
+    for (const page of pages) {
+      lines.push(`- [${page.page}](${page.page}) — ${page.summary} ${page.placeholder ? '(placeholder)' : `(evidence marks: ${page.evidenceCount})`}`);
+    }
+    lines.push('');
+  }
+
+  fs.writeFileSync(WIKI_INDEX_PATH, `${lines.join('\n').trim()}\n`);
+};
+
+const appendWikiLog = (kind, title, bulletLines = []) => {
+  ensureWikiSupportFiles();
+  const timestamp = new Date().toISOString();
+  const lines = [`## [${timestamp}] ${kind} | ${title}`];
+  for (const line of bulletLines) {
+    lines.push(`- ${line}`);
+  }
+  lines.push('');
+  fs.appendFileSync(WIKI_LOG_PATH, `${lines.join('\n')}\n`);
+};
+
+const parseTickSummary = (row) => {
+  try {
+    return typeof row?.summary === 'string' ? JSON.parse(row.summary) : (row?.summary || null);
+  } catch {
+    return null;
+  }
+};
+
+const formatTickEvidenceLine = (row) => {
+  const parsed = parseTickSummary(row) || {};
+  const medium = parsed.medium_momentum?.main || parsed.medium_momentum || 'unknown';
+  const short = parsed.short_momentum?.main || parsed.short_momentum || 'unknown';
+  const putScore = Number(parsed.current_best_put || 0).toFixed(4);
+  const callScore = Number(parsed.current_best_call || 0).toFixed(4);
+  return `${row.timestamp} | spot=$${Number(parsed.price || 0).toFixed(2)} | medium=${medium} | short=${short} | put_score=${putScore} | call_score=${callScore}`;
+};
+
+const formatOrderEvidenceLine = (order) => {
+  const side = order.success ? 'OK' : 'FAIL';
+  const value = Number(order.total_value || 0).toFixed(2);
+  const reason = order.reason ? String(order.reason).replace(/\s+/g, ' ').slice(0, 120) : 'n/a';
+  return `${order.timestamp} | ${side} | ${order.action} ${order.instrument_name || 'portfolio'} | value=$${value} | reason=${reason}`;
+};
+
+const formatTradeReviewEvidenceLine = (review) => {
+  return `${review.closed_at} | ${review.instrument_name} [${review.review_status}] [${review.review_window_days}d] | pnl=$${Number(review.pnl_realized || 0).toFixed(2)} | ${String(review.summary || '').replace(/\s+/g, ' ').slice(0, 160)}`;
+};
+
+const writeRawEvidencePacket = (journalEntries = []) => {
+  if (!db) return null;
+  const createdAt = new Date().toISOString();
+  const fileName = `${createdAt.replace(/[:.]/g, '-')}_wiki-ingest.md`;
+  const fullPath = path.join(WIKI_RAW_EVIDENCE_DIR, fileName);
+  const relativePath = path.relative(WIKI_DIR, fullPath).replace(/\\/g, '/');
+  const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
+  const recentTicks = db.getRecentTicks(6) || [];
+  const recentOrders = db.getRecentOrders(since7d, 20) || [];
+  const recentTradeReviews = db.getRecentTradeReviews(8) || [];
+  const entriesText = journalEntries
+    .map((entry) => `- [${entry.type || entry.entry_type || 'unknown'}] ${String(entry.content || '').replace(/\s+/g, ' ').slice(0, 260)}`)
+    .join('\n');
+  const content = [
+    '# Raw Evidence Packet',
+    '',
+    `Created: ${createdAt}`,
+    'Purpose: immutable evidence bundle for wiki compilation.',
+    '',
+    '## Source Hierarchy',
+    '1. Factual market snapshots and order activity below are primary evidence.',
+    '2. Reviewed trade campaigns are evaluated second-order evidence.',
+    '3. Journal entries are analyst notes and may contain interpretation; do not treat them as facts without corroboration.',
+    '',
+    '## Factual Market Snapshots',
+    recentTicks.length > 0 ? recentTicks.map(formatTickEvidenceLine).join('\n') : 'No recent tick snapshots.',
+    '',
+    '## Factual Order Activity (last 7d)',
+    recentOrders.length > 0 ? recentOrders.map(formatOrderEvidenceLine).join('\n') : 'No recent orders.',
+    '',
+    '## Reviewed Trade Campaigns',
+    recentTradeReviews.length > 0 ? recentTradeReviews.map(formatTradeReviewEvidenceLine).join('\n') : 'No reviewed campaigns.',
+    '',
+    '## New Journal Entries',
+    entriesText || 'No journal entries provided.',
+    '',
+  ].join('\n');
+  fs.writeFileSync(fullPath, content);
+  return { relativePath, content };
+};
+
 const queryWikiContext = () => {
   const sections = [];
+  const indexContent = readWikiPage(WIKI_INDEX_PAGE);
+  if (indexContent) {
+    const truncatedIndex = indexContent.length > 1200 ? indexContent.slice(0, 1200) + '\n...[truncated]' : indexContent;
+    sections.push(`--- ${WIKI_INDEX_PAGE} ---\n${truncatedIndex}`);
+  }
   for (const page of WIKI_KEY_PAGES) {
     const content = readWikiPage(page);
     if (!content || content.includes('Awaiting initial assessment')) continue;
@@ -2752,6 +2902,8 @@ const seedWikiFromHistory = async (incomingEntries = []) => {
   const activeLessons = db.getActiveLessons() || [];
   const recentTradeReviews = db.getRecentTradeReviews(20) || [];
   const activeTradeLessons = db.getActiveTradeLessons() || [];
+  const recentTicks = db.getRecentTicks(12) || [];
+  const recentOrders = db.getRecentOrders(new Date(Date.now() - 14 * 86400000).toISOString(), 30) || [];
 
   const mergedEntries = [...incomingEntries];
   for (const entry of historicalJournal) {
@@ -2771,6 +2923,8 @@ const seedWikiFromHistory = async (incomingEntries = []) => {
   const journalText = sampleEntries
     .map(e => `[${e.entry_type || e.type || 'unknown'}] (${e.timestamp || 'unknown'}) ${String(e.content || '').slice(0, 300)}`)
     .join('\n\n');
+  const tickText = recentTicks.map(formatTickEvidenceLine).join('\n');
+  const ordersText = recentOrders.map(formatOrderEvidenceLine).join('\n');
 
   const hypothesesText = reviewedHypotheses.slice(0, 25)
     .map(h => `#${h.id} [${h.outcome_status}] — ${h.content.slice(0, 180)}... VERDICT: ${h.outcome_verdict || 'none'}`)
@@ -2786,6 +2940,17 @@ Synthesize the historical data below into ${pagesNeedingSeed.length} wiki page(s
 
 ## Wiki Schema
 ${schema}
+
+## Source Hierarchy
+1. Factual market snapshots and order activity are primary evidence.
+2. Reviewed hypotheses and reviewed trade campaigns are evaluated second-order evidence.
+3. Journal entries and existing lessons are analyst interpretation. Do not elevate them to factual claims without corroboration.
+
+## Factual Market Snapshots
+${tickText || 'No recent tick evidence available'}
+
+## Factual Order Activity
+${ordersText || 'No recent order evidence available'}
 
 ## Historical Journal Entries (${mergedEntries.length} total, showing ${sampleEntries.length})
 ${journalText}
@@ -2804,10 +2969,11 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (ev
 
 ## Instructions
 1. Generate ONLY the missing or placeholder wiki pages listed below
-2. Use specific data values and dates from the entries as evidence when available
+2. Use specific data values and dates from the raw evidence as evidence when available
 3. Each page MUST start with a bold TLDR line
 4. Follow the required sections from the schema exactly
-5. Today's date: ${new Date().toISOString().split('T')[0]}
+5. If journal interpretation conflicts with factual evidence, trust the factual evidence and write uncertainty explicitly
+6. Today's date: ${new Date().toISOString().split('T')[0]}
 
 Output each page as:
 <wiki_page path="regimes/current.md">
@@ -2849,6 +3015,12 @@ Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(
   meta.seeded_targets = pagesNeedingSeed;
   meta.seed_journal_entries_used = sampleEntries.length;
   writeWikiMeta(meta);
+  refreshWikiIndex();
+  appendWikiLog('seed', 'wiki bootstrap', [
+    `pages written: ${writeCount}/${pagesNeedingSeed.length}`,
+    `targets: ${pagesNeedingSeed.join(', ')}`,
+    `journal entries used: ${sampleEntries.length}`,
+  ]);
 
   console.log(`📚 Wiki seed: ${writeCount}/${pagesNeedingSeed.length} page(s) written`);
   return writeCount;
@@ -2875,21 +3047,30 @@ const ingestToWiki = async (journalEntries) => {
   const pagesContext = buildWikiIngestPagesContext(pages, selectedPages);
   const recentTradeReviews = db.getRecentTradeReviews(10) || [];
   const activeTradeLessons = db.getActiveTradeLessons() || [];
+  const rawEvidencePacket = writeRawEvidencePacket(journalEntries);
 
   const entriesText = journalEntries
     .map(e => `[${e.type || e.entry_type || 'unknown'}] ${e.content}`)
     .join('\n\n---\n\n');
 
-  const prompt = `You are maintaining a knowledge wiki for a Spitznagel-style tail-risk hedging bot. Your job is to update wiki pages based on new journal entries.
+  const prompt = `You are maintaining a knowledge wiki for a Spitznagel-style tail-risk hedging bot. Your job is to compile wiki updates from evidence, not to restate speculative notes.
 
 ## Wiki Schema
 ${schema}
+
+## Source Hierarchy
+1. Raw evidence packet below is primary truth.
+2. Reviewed trade campaigns and active trade lessons are evaluated second-order evidence.
+3. Journal entries are analyst notes; use them to guide emphasis, but do not copy speculative language as fact without corroboration.
 
 ## Allowed Wiki Pages
 ${selectedPages.join('\n')}
 
 ## Current Wiki Pages (targeted excerpts)
 ${pagesContext}
+
+## Raw Evidence Packet${rawEvidencePacket?.relativePath ? ` (${rawEvidencePacket.relativePath})` : ''}
+${rawEvidencePacket?.content || 'No raw evidence packet available'}
 
 ## New Journal Entries
 ${entriesText}
@@ -2901,13 +3082,15 @@ ${recentTradeReviews.length > 0 ? recentTradeReviews.slice(0, 6).map(r => `- ${r
 ${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
 
 ## Instructions
-1. Analyze which ALLOWED wiki pages need updating based on the new journal entries
+1. Analyze which ALLOWED wiki pages need updating based primarily on the raw evidence packet
 2. Preserve existing accurate content — ADD to it, don't replace it
 3. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
 4. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" format
 5. Keep each page under 2000 words — consolidate older entries if approaching limit
 6. Every page must start with a bold TLDR line reflecting current state
 7. Prefer the smallest set of page updates that captures the new information cleanly
+8. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
+9. If evidence is thin or mixed, say so explicitly instead of over-asserting
 
 Output your updates as XML blocks. Only include pages that need changes:
 
@@ -2934,6 +3117,16 @@ If no pages need updating, output: <no_updates/>`;
     const text = response.data?.content?.[0]?.text || '';
 
     if (text.includes('<no_updates/>')) {
+      const meta = readWikiMeta();
+      meta.last_ingest = new Date().toISOString();
+      meta.last_ingest_updates = 0;
+      meta.last_evidence_packet = rawEvidencePacket?.relativePath || meta.last_evidence_packet || null;
+      writeWikiMeta(meta);
+      refreshWikiIndex();
+      appendWikiLog('ingest', 'no wiki updates needed', [
+        rawEvidencePacket?.relativePath ? `evidence packet: ${rawEvidencePacket.relativePath}` : 'evidence packet: none',
+        `selected pages: ${selectedPages.join(', ')}`,
+      ]);
       console.log('📚 Wiki ingest: no updates needed');
       return;
     }
@@ -3006,7 +3199,14 @@ If no pages need updating, output: <no_updates/>`;
     const meta = readWikiMeta();
     meta.last_ingest = new Date().toISOString();
     meta.last_ingest_updates = updateCount;
+    meta.last_evidence_packet = rawEvidencePacket?.relativePath || meta.last_evidence_packet || null;
     writeWikiMeta(meta);
+    refreshWikiIndex();
+    appendWikiLog('ingest', 'wiki ingest applied', [
+      rawEvidencePacket?.relativePath ? `evidence packet: ${rawEvidencePacket.relativePath}` : 'evidence packet: none',
+      `selected pages: ${selectedPages.join(', ')}`,
+      `pages updated: ${updateCount}`,
+    ]);
 
     console.log(`📚 Wiki ingest: ${updateCount} page(s) updated`);
   } catch (e) {
@@ -3146,6 +3346,8 @@ Wrap your JSON in a <lint_result> tag.`;
       console.log('📚 Wiki lint: no structured result returned');
       meta.last_lint = new Date().toISOString();
       writeWikiMeta(meta);
+      refreshWikiIndex();
+      appendWikiLog('lint', 'no structured lint result', ['result parsing failed or model returned unstructured output']);
       logWikiMetaSummary('📚 Wiki lint: wrote fallback last_lint', meta);
       return;
     }
@@ -3157,6 +3359,8 @@ Wrap your JSON in a <lint_result> tag.`;
       console.log('📚 Wiki lint: malformed JSON in lint_result:', parseErr.message);
       meta.last_lint = new Date().toISOString();
       writeWikiMeta(meta);
+      refreshWikiIndex();
+      appendWikiLog('lint', 'malformed lint result', [`parse error: ${parseErr.message}`]);
       logWikiMetaSummary('📚 Wiki lint: wrote parse-fallback last_lint', meta);
       return;
     }
@@ -3215,6 +3419,11 @@ Wrap your JSON in a <lint_result> tag.`;
     meta.last_lint_issues = result.issues?.length || 0;
     meta.last_lint_updates = updateCount;
     writeWikiMeta(meta);
+    refreshWikiIndex();
+    appendWikiLog('lint', 'wiki lint complete', [
+      `issues: ${result.issues?.length || 0}`,
+      `updates: ${updateCount}`,
+    ]);
     logWikiMetaSummary('📚 Wiki lint: wrote completion meta', meta);
 
     console.log(`📚 Wiki lint: complete (${updateCount} updates applied)`);
@@ -5923,6 +6132,11 @@ Balances: ${JSON.stringify(balances, null, 1)}
 
 === ACCOUNT HEALTH (margin-aware sizing) ===
 ${JSON.stringify(accountHealth, null, 2)}
+
+=== SOURCE PRIORITY ===
+1. Current market, portfolio, account-health, and order-book state in this prompt are primary facts.
+2. Recent orders and closed-campaign trade reviews are recent empirical evidence.
+3. The knowledge wiki is compiled long-term memory. Use it for pattern recognition and discipline, but if live state conflicts with wiki memory, trust the live state and note the mismatch.
 
 === MARKET SENTIMENT ===
 ${summarizeSentimentForAdvisor(sentiment?.windows || {})}
