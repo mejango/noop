@@ -1034,6 +1034,14 @@ const stmts = {
     ORDER BY triggered_at DESC LIMIT 1
   `),
 
+  getLastFailedAction: db.prepare(`
+    SELECT triggered_at, execution_result FROM pending_actions
+    WHERE action = @action
+      AND instrument_name = @instrument_name
+      AND status = 'failed'
+    ORDER BY triggered_at DESC LIMIT 1
+  `),
+
   // Resting order tracking
   insertRestingOrder: db.prepare(`
     INSERT OR IGNORE INTO resting_orders (order_id, instrument_name, action, direction, amount, limit_price)
@@ -1597,6 +1605,7 @@ const getRecentPendingActions = (limit = 20) => stmts.getRecentPendingActions.al
 const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
 const getLastExecutedAction = (action) => stmts.getLastExecutedAction.get({ action })?.executed_at || null;
 const getLastRejectedAction = (action, instrumentName) => stmts.getLastRejectedAction.get({ action, instrument_name: instrumentName })?.triggered_at || null;
+const getLastFailedAction = (action, instrumentName) => stmts.getLastFailedAction.get({ action, instrument_name: instrumentName }) || null;
 
 // ─── Resting Order Helpers ──────────────────────────────────────────────────
 
@@ -1794,6 +1803,7 @@ module.exports = {
   hasPendingActionForRule,
   getLastExecutedAction,
   getLastRejectedAction,
+  getLastFailedAction,
   // Resting orders
   insertRestingOrder,
   getOpenRestingOrders,

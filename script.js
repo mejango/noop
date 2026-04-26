@@ -1528,7 +1528,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         return { rejected_post_only: true, error: errMsg };
       }
       console.error(`Error placing limit order for ${name}:`, errMsg);
-      return null;
+      return { placement_error: errMsg };
     }
     // Check for cancelled IOC (cancel_reason in response indicates immediate cancel)
     const orderResult = extractOrderRecord(response.data?.result || response.data) || response.data?.result || response.data;
@@ -1550,7 +1550,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     }
     const bodyStr = errBody ? (typeof errBody === 'string' ? errBody.slice(0, 300) : JSON.stringify(errBody).slice(0, 300)) : 'no body';
     console.error(`Error placing limit order for ${name}: ${error.message} | status: ${status || 'N/A'} | body: ${bodyStr}`);
-    return null;
+    return { placement_error: `status=${status || 'N/A'} ${error.message} | body: ${bodyStr}` };
   }
 };
 
@@ -4605,6 +4605,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
+        const recentFailedEntry = getRecentFailedEntry(rule.action, best.name);
+        if (recentFailedEntry) {
+          console.log(`📋 Skip ${rule.action} ${best.name}: failed recently, cooling down (${recentFailedEntry.reason || 'recent execution failure'})`);
+          continue;
+        }
+
         db.insertPendingAction({
           rule_id: rule.id,
           action: rule.action,
@@ -4776,6 +4782,20 @@ const wasRecentlyRejected = (action, instrumentName, cooldownMs = REJECTED_ACTIO
   return elapsed >= 0 && elapsed < cooldownMs;
 };
 
+const FAILED_ENTRY_ACTION_COOLDOWN_MS = 30 * 60 * 1000;
+const getRecentFailedEntry = (action, instrumentName, cooldownMs = FAILED_ENTRY_ACTION_COOLDOWN_MS) => {
+  if (!db || !action || !instrumentName || !isEntryAction(action)) return null;
+  const lastFailed = db.getLastFailedAction(action, instrumentName);
+  if (!lastFailed?.triggered_at) return null;
+  const elapsed = Date.now() - new Date(lastFailed.triggered_at).getTime();
+  if (elapsed < 0 || elapsed >= cooldownMs) return null;
+  return {
+    triggeredAt: lastFailed.triggered_at,
+    elapsed,
+    reason: lastFailed.execution_result || null,
+  };
+};
+
 // ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
 
 const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
@@ -4942,14 +4962,15 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     const reason = `Invalid execution price for ${action}: ${price}`;
     console.error(`❌ ${reason}`);
     if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
-    return null;
+    return { failed: true, reason };
   }
 
   // Find instrument to get base_asset_address and base_asset_sub_id
   const instrument = instruments.find(i => i.instrument_name === instrumentName);
   if (!instrument) {
-    console.error(`❌ executeOrder: instrument ${instrumentName} not found`);
-    return null;
+    const reason = `Instrument ${instrumentName} not found during execution`;
+    console.error(`❌ ${reason}`);
+    return { failed: true, reason };
   }
 
   const addr = instrument.base_asset_address;
@@ -4981,13 +5002,21 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     );
   } catch (error) {
     console.error(`❌ Error placing ${action} order for ${instrumentName}:`, error.message);
-    if (db) db.insertOrder({ action, success: false, reason: `Order error: ${error.message}`, instrument_name: instrumentName, spot_price: spotPrice });
-    return null;
+    const reason = `Order error: ${error.message}`;
+    if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
+    return { failed: true, reason };
   }
 
   if (!order) {
-    if (db) db.insertOrder({ action, success: false, reason: 'Order placement failed', instrument_name: instrumentName, spot_price: spotPrice });
-    return null;
+    const reason = 'Order placement failed';
+    if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
+    return { failed: true, reason };
+  }
+
+  if (order.placement_error) {
+    const reason = `Venue rejected order: ${order.placement_error}`;
+    if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice, price, intended_amount: amount });
+    return { failed: true, reason };
   }
 
   // Detect post_only rejection (order would cross the book)
@@ -5458,6 +5487,9 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           });
           confirmed++;
           console.log(`📋 Resting order: ${action.action} ${action.instrument_name} @ $${finalOrderPrice} [${orderType}] | ${reasoning}`);
+        } else if (result && result.failed) {
+          db.updatePendingAction(action.id, { status: 'failed', execution_result: result.reason || 'Order placement failed' });
+          console.log(`❌ Confirmed but execution failed: ${action.action} ${action.instrument_name} — ${result.reason || 'Order placement failed'}`);
         } else if (result) {
           db.updatePendingAction(action.id, {
             status: 'executed',
@@ -5467,8 +5499,9 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           confirmed++;
           console.log(`✅ Confirmed & executed: ${action.action} ${action.instrument_name} [${orderType}] | ${reasoning}`);
         } else {
-          db.updatePendingAction(action.id, { status: 'failed', execution_result: 'Order placement failed' });
-          console.log(`❌ Confirmed but execution failed: ${action.action} ${action.instrument_name}`);
+          const failureReason = result?.reason || 'Order placement failed';
+          db.updatePendingAction(action.id, { status: 'failed', execution_result: failureReason });
+          console.log(`❌ Confirmed but execution failed: ${action.action} ${action.instrument_name} — ${failureReason}`);
         }
       } else {
         const shouldAlert = !wasRecentlyRejected(action.action, action.instrument_name);
