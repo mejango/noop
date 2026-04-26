@@ -5086,6 +5086,15 @@ const normalizePriceToStep = (value, step, mode = 'nearest') => {
   return Number(rounded.toFixed(decimals));
 };
 
+const avoidRoundNumberRestingPrice = (direction, price, step) => {
+  const numericPrice = Number(price);
+  if (!(numericPrice > 0) || !(step > 0)) return numericPrice;
+  if (Math.abs(numericPrice - Math.round(numericPrice)) > 1e-9) return numericPrice;
+  if (direction === 'sell') return normalizePriceToStep(numericPrice + step, step, 'up');
+  const lowerPrice = numericPrice - step;
+  return lowerPrice > 0 ? normalizePriceToStep(lowerPrice, step, 'down') : numericPrice;
+};
+
 const ACTION_POLICY = Object.freeze({
   buy_put: Object.freeze({
     phase: 'entry',
@@ -5170,7 +5179,7 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
 
   if (direction === 'sell') {
     const retryBase = bidPrice > 0 ? bidPrice + step : attemptedPrice + step;
-    const retryPrice = normalizePriceToStep(retryBase, step, 'up');
+    const retryPrice = avoidRoundNumberRestingPrice(direction, normalizePriceToStep(retryBase, step, 'up'), step);
     return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
   }
 
@@ -5179,7 +5188,8 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
   const candidate = belowAsk > 0
     ? normalizePriceToStep(belowAsk, step, 'down')
     : normalizePriceToStep(askPrice * 0.99, step, 'down');
-  return candidate > 0 ? { retryPrice: candidate, bidPrice, askPrice, step } : null;
+  const retryPrice = avoidRoundNumberRestingPrice(direction, candidate, step);
+  return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
 };
 
 const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc', tickerMap = {}) => {
@@ -5224,15 +5234,25 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   const addr = instrument.base_asset_address;
   const subId = instrument.base_asset_sub_id;
   const ticker = tickerMap?.[instrumentName];
-  if (orderType === 'post_only' && ticker) {
-    const retryPlan = computePostOnlyRetryPrice(direction, ticker, instrument, price);
-    const bidPrice = Number(ticker?.b) || 0;
-    const askPrice = Number(ticker?.a) || 0;
-    const guaranteedCross = (direction === 'buy' && askPrice > 0 && price >= askPrice)
-      || (direction === 'sell' && bidPrice > 0 && price <= bidPrice);
-    if (guaranteedCross && retryPlan && Math.abs(retryPlan.retryPrice - price) > 1e-9) {
-      console.log(`📋 pre-adjusting post_only ${action} ${instrumentName} from $${price} to maker-safe $${retryPlan.retryPrice} (bid=$${bidPrice.toFixed(4)} ask=$${askPrice.toFixed(4)})`);
-      price = retryPlan.retryPrice;
+  if (orderType === 'post_only') {
+    const step = getInstrumentPriceStep(instrument, Number(price));
+    const offRoundPrice = avoidRoundNumberRestingPrice(direction, Number(price), step);
+    if (ticker) {
+      const retryPlan = computePostOnlyRetryPrice(direction, ticker, instrument, price);
+      const bidPrice = Number(ticker?.b) || 0;
+      const askPrice = Number(ticker?.a) || 0;
+      const guaranteedCross = (direction === 'buy' && askPrice > 0 && price >= askPrice)
+        || (direction === 'sell' && bidPrice > 0 && price <= bidPrice);
+      if (guaranteedCross && retryPlan && Math.abs(retryPlan.retryPrice - price) > 1e-9) {
+        console.log(`📋 pre-adjusting post_only ${action} ${instrumentName} from $${price} to maker-safe $${retryPlan.retryPrice} (bid=$${bidPrice.toFixed(4)} ask=$${askPrice.toFixed(4)})`);
+        price = retryPlan.retryPrice;
+      } else if (Math.abs(offRoundPrice - Number(price)) > 1e-9) {
+        console.log(`📋 nudging post_only ${action} ${instrumentName} away from round number $${price} -> $${offRoundPrice}`);
+        price = offRoundPrice;
+      }
+    } else if (Math.abs(offRoundPrice - Number(price)) > 1e-9) {
+      console.log(`📋 nudging post_only ${action} ${instrumentName} away from round number $${price} -> $${offRoundPrice}`);
+      price = offRoundPrice;
     }
   }
 

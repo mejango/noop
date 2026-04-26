@@ -314,6 +314,31 @@ const roundToStep = (value, step, mode = 'nearest') => {
   return Math.round(scaled) * step;
 };
 
+const normalizePriceToStep = (value, step, mode = 'nearest') => {
+  if (!(Number(value) > 0)) return 0;
+  if (!(step > 0)) return Number(value);
+  const rounded = roundToStep(Number(value), step, mode);
+  const decimals = (() => {
+    const normalized = String(step);
+    if (normalized.includes('e-')) {
+      const [, exponent] = normalized.split('e-');
+      return Number(exponent) || 0;
+    }
+    const [, fraction = ''] = normalized.split('.');
+    return fraction.length;
+  })();
+  return Number(rounded.toFixed(decimals));
+};
+
+const avoidRoundNumberRestingPrice = (direction, price, step) => {
+  const numericPrice = Number(price);
+  if (!(numericPrice > 0) || !(step > 0)) return numericPrice;
+  if (Math.abs(numericPrice - Math.round(numericPrice)) > 1e-9) return numericPrice;
+  if (direction === 'sell') return normalizePriceToStep(numericPrice + step, step, 'up');
+  const lowerPrice = numericPrice - step;
+  return lowerPrice > 0 ? normalizePriceToStep(lowerPrice, step, 'down') : numericPrice;
+};
+
 const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice) => {
   const bidPrice = Number(ticker?.b) || 0;
   const askPrice = Number(ticker?.a) || 0;
@@ -321,16 +346,17 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
 
   if (direction === 'sell') {
     const retryBase = bidPrice > 0 ? bidPrice + step : attemptedPrice + step;
-    const retryPrice = roundToStep(retryBase, step, 'up');
+    const retryPrice = avoidRoundNumberRestingPrice(direction, normalizePriceToStep(retryBase, step, 'up'), step);
     return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
   }
 
   if (askPrice <= 0) return null;
   const belowAsk = askPrice - step;
   const candidate = belowAsk > 0
-    ? roundToStep(belowAsk, step, 'down')
-    : roundToStep(askPrice * 0.99, step, 'down');
-  return candidate > 0 ? { retryPrice: candidate, bidPrice, askPrice, step } : null;
+    ? normalizePriceToStep(belowAsk, step, 'down')
+    : normalizePriceToStep(askPrice * 0.99, step, 'down');
+  const retryPrice = avoidRoundNumberRestingPrice(direction, candidate, step);
+  return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
 };
 
 
@@ -3975,6 +4001,30 @@ describe('post_only retry price discipline', () => {
     );
     assert.ok(retry);
     assert.ok(Math.abs(retry.retryPrice - 5.8) < 0.0000001, `Expected ~5.8, got ${retry.retryPrice}`);
+    assert.strictEqual(retry.step, 0.1);
+  });
+
+  test('sell retry skips exact round numbers by one extra tick', () => {
+    const retry = computePostOnlyRetryPrice(
+      'sell',
+      { b: 5.9, a: 6.8 },
+      { option_details: {} },
+      5.9
+    );
+    assert.ok(retry);
+    assert.ok(Math.abs(retry.retryPrice - 6.1) < 0.0000001, `Expected ~6.1, got ${retry.retryPrice}`);
+    assert.strictEqual(retry.step, 0.1);
+  });
+
+  test('buy retry skips exact round numbers by one tick lower', () => {
+    const retry = computePostOnlyRetryPrice(
+      'buy',
+      { b: 5.2, a: 6.1 },
+      { option_details: {} },
+      6.1
+    );
+    assert.ok(retry);
+    assert.ok(Math.abs(retry.retryPrice - 5.9) < 0.0000001, `Expected ~5.9, got ${retry.retryPrice}`);
     assert.strictEqual(retry.step, 0.1);
   });
 });
