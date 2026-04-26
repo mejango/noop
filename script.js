@@ -4796,6 +4796,30 @@ const getRecentFailedEntry = (action, instrumentName, cooldownMs = FAILED_ENTRY_
   };
 };
 
+const adaptOrderTypeFromFailureHistory = (action, instrumentName, proposedOrderType) => {
+  const validOrderTypes = getAllowedOrderTypesForAction(action);
+  const normalized = validOrderTypes.includes(proposedOrderType) ? proposedOrderType : 'ioc';
+  const recentFailed = getRecentFailedEntry(action, instrumentName);
+  if (!recentFailed?.reason) return { orderType: normalized, note: null };
+
+  const reason = String(recentFailed.reason || '').toLowerCase();
+  if (normalized === 'post_only' && reason.includes('post_only rejected') && validOrderTypes.includes('gtc')) {
+    return {
+      orderType: 'gtc',
+      note: 'recent post_only rejection on this instrument; using gtc instead of post_only',
+    };
+  }
+
+  if (normalized === 'ioc' && reason.includes('zero fill') && validOrderTypes.includes('gtc')) {
+    return {
+      orderType: 'gtc',
+      note: 'recent ioc zero fill on this instrument; using gtc instead of ioc',
+    };
+  }
+
+  return { orderType: normalized, note: null };
+};
+
 // ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
 
 const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
@@ -5265,6 +5289,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       let triggerData = {};
       try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
       const advisoryOrderPref = normalizePreferredOrderType(action.action, triggerData.preferred_order_type);
+      const recentFailedEntry = getRecentFailedEntry(action.action, action.instrument_name);
       const callMarginContext = getCallMarginContext(
         action.action,
         marginState,
@@ -5289,6 +5314,7 @@ Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
 ${callMarginContext}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
+${recentFailedEntry?.reason ? `Recent execution friction on this exact instrument/action: ${recentFailedEntry.reason}` : ''}
 ${recentTradeReviews.length > 0 ? `Recent trade reviews:\n${recentTradeReviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}` : ''}
 ${activeTradeLessons.length > 0 ? `Active trade lessons:\n${activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}` : ''}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
@@ -5403,7 +5429,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       // Resolve order type from voter consensus (prefer haiku's pick, fallback to codex)
       const confirmedOrderType = (haikuVote?.order_type || codexVote?.order_type || 'ioc');
       const validOrderTypes = getAllowedOrderTypesForAction(action.action);
-      const orderType = validOrderTypes.includes(confirmedOrderType) ? confirmedOrderType : 'ioc';
+      const baseOrderType = validOrderTypes.includes(confirmedOrderType) ? confirmedOrderType : 'ioc';
 
       if (!validOrderTypes.includes(confirmedOrderType)) {
         const failureReason = `Invalid LLM order_type for ${action.action}: ${confirmedOrderType}. Expected one of ${validOrderTypes.join(', ')}.`;
@@ -5414,6 +5440,12 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         });
         console.log(`⚠️ ${failureReason} ${action.action} ${action.instrument_name}`);
         continue;
+      }
+
+      const orderTypeAdaptation = adaptOrderTypeFromFailureHistory(action.action, action.instrument_name, baseOrderType);
+      const orderType = orderTypeAdaptation.orderType;
+      if (orderTypeAdaptation.note) {
+        console.log(`📋 Order-type override for ${action.action} ${action.instrument_name}: ${baseOrderType} -> ${orderType} (${orderTypeAdaptation.note})`);
       }
 
       // Resolve limit price: voter can override, otherwise use current market price
@@ -5443,7 +5475,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       if (decision === 'confirmed') {
         db.updatePendingAction(action.id, {
           status: 'confirmed',
-          confirmation_reasoning: `${reasoning} | order_type=${orderType} limit=$${executionPrice}`,
+          confirmation_reasoning: `${reasoning} | order_type=${orderType} limit=$${executionPrice}${orderTypeAdaptation.note ? ` | order_type_override=${orderTypeAdaptation.note}` : ''}`,
           confirmed_at: new Date().toISOString(),
         });
 
