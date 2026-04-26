@@ -1451,13 +1451,13 @@ function encodeTradeData(order, assetAddress, optionSubId) {
 }
 
 // Place order function
-const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, reduceOnly = true, timeInForce = 'ioc') => {
+const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, reduceOnly = true, timeInForce = 'ioc', instrument = null) => {
   try {
     const wallet = createWallet();
     const timestamp = Date.now(); // Current UTC timestamp in ms
     const signature = await signMessage(wallet, timestamp);
     const signatureExpirySec = Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 900 : 86400));
-    const step = getInstrumentPriceStep(null, Number(price));
+    const step = getInstrumentPriceStep(instrument, Number(price));
     const normalizedPrice = normalizePriceToStep(price, step, 'nearest');
     const limitPrice = normalizedPrice > 0 ? normalizedPrice : Number(price);
     const limitPriceString = limitPrice.toFixed(getStepDecimals(step));
@@ -5231,7 +5231,8 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       addr,
       subId,
       reduceOnly,
-      orderType
+      orderType,
+      instrument
     );
   } catch (error) {
     console.error(`❌ Error placing ${action} order for ${instrumentName}:`, error.message);
@@ -5287,7 +5288,8 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
           addr,
           subId,
           reduceOnly,
-          orderType
+          orderType,
+          instrument
         );
       } catch (error) {
         console.error(`❌ Error retrying ${action} order for ${instrumentName}:`, error.message);
