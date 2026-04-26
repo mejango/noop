@@ -877,7 +877,7 @@ const analyzeDEXLiquidity = async (spotPrice) => {
         `
       };
       
-      const response = await axios.post(DEX_APIS.UNISWAP_V3, uniswapQuery, { timeout: 10000 });
+      const response = await axios.post(DEX_APIS.UNISWAP_V3, uniswapQuery, { timeout: 15000 });
       if (response.data?.data?.pools && Array.isArray(response.data.data.pools)) {
         // For Uniswap V3, calculate both TVL and in-range liquidity
         const poolCount = response.data.data.pools.length;
@@ -1262,28 +1262,40 @@ const determineCheckInterval = (mediumTermMomentum, shortTermMomentum) => {
   return DYNAMIC_INTERVALS.normal;
 };
 
-// Get current spot price from CoinGecko (retries on 429)
+let coinGeckoCooldownUntil = 0;
+let coinGeckoCooldownNoticeUntil = 0;
+let lastSuccessfulCoinGeckoSpot = null;
+
+// Get current spot price from CoinGecko with cooldown after rate limiting.
 const getSpotPrice = async () => {
-  const maxRetries = 3;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      const response = await axios.get(`${COINGECKO_API}/simple/price?ids=ethereum&vs_currencies=usd`);
-      return response.data.ethereum.usd;
-    } catch (error) {
-      const status = error.response?.status;
-      const retryAfter = error.response?.headers?.['retry-after'];
-      const rateLimitRemaining = error.response?.headers?.['x-ratelimit-remaining'];
-      const rateLimitReset = error.response?.headers?.['x-ratelimit-reset'];
-      const is429 = status === 429;
-      if (is429 && attempt < maxRetries) {
-        const delay = retryAfter ? Number(retryAfter) * 1000 : (attempt + 1) * 5000;
-        console.log(`⏳ CoinGecko 429 rate-limited | retry-after: ${retryAfter || 'none'} | remaining: ${rateLimitRemaining ?? 'N/A'} | reset: ${rateLimitReset ?? 'N/A'} | waiting ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})`);
-        await new Promise(r => setTimeout(r, delay));
-        continue;
-      }
-      console.error(`Error fetching spot price: ${error.message} | status: ${status || 'N/A'} | retry-after: ${retryAfter || 'none'} | ratelimit-remaining: ${rateLimitRemaining ?? 'N/A'}`);
-      return null;
+  const now = Date.now();
+  if (coinGeckoCooldownUntil > now) {
+    if (coinGeckoCooldownNoticeUntil !== coinGeckoCooldownUntil) {
+      console.log(`⏳ CoinGecko cooldown active for ${Math.ceil((coinGeckoCooldownUntil - now) / 1000)}s — skipping spot fetch`);
+      coinGeckoCooldownNoticeUntil = coinGeckoCooldownUntil;
     }
+    return lastSuccessfulCoinGeckoSpot;
+  }
+
+  try {
+    const response = await axios.get(`${COINGECKO_API}/simple/price?ids=ethereum&vs_currencies=usd`, { timeout: 5000 });
+    const price = Number(response.data?.ethereum?.usd);
+    if (price > 0) {
+      lastSuccessfulCoinGeckoSpot = price;
+      coinGeckoCooldownNoticeUntil = 0;
+    }
+    return price > 0 ? price : null;
+  } catch (error) {
+    const status = error.response?.status;
+    const retryAfter = error.response?.headers?.['retry-after'];
+    const rateLimitRemaining = error.response?.headers?.['x-ratelimit-remaining'];
+    if (status === 429) {
+      const cooldownMs = Math.max(15000, (Number(retryAfter) || 60) * 1000);
+      coinGeckoCooldownUntil = Date.now() + cooldownMs;
+      coinGeckoCooldownNoticeUntil = 0;
+    }
+    console.error(`Error fetching spot price: ${error.message} | status: ${status || 'N/A'} | retry-after: ${retryAfter || 'none'} | ratelimit-remaining: ${rateLimitRemaining ?? 'N/A'}`);
+    return lastSuccessfulCoinGeckoSpot;
   }
 };
 
@@ -2099,8 +2111,8 @@ Output ONLY this JSON:
 const extractHypothesisLessons = async () => {
   if (!process.env.ANTHROPIC_API_KEY || !db) return { processed: 0, advancedToId: botData.lastHypothesisLessonReviewId || 0 };
   const reviewed = db.getReviewedHypothesesSinceId
-    ? db.getReviewedHypothesesSinceId(botData.lastHypothesisLessonReviewId || 0, 12)
-    : db.getReviewedHypotheses(12);
+    ? db.getReviewedHypothesesSinceId(botData.lastHypothesisLessonReviewId || 0, 8)
+    : db.getReviewedHypotheses(8);
   if (!reviewed || reviewed.length < 4) return { processed: 0, advancedToId: botData.lastHypothesisLessonReviewId || 0 };
 
   console.log(`🧠 Extracting lessons from ${reviewed.length} hypothesis reviews (after id ${botData.lastHypothesisLessonReviewId || 0})...`);
@@ -2111,13 +2123,13 @@ const extractHypothesisLessons = async () => {
 
 ## Reviewed Hypotheses (most recent first)
 ${reviewed.map(h => {
-  const hypothesis = String(h.content || '').replace(/\s+/g, ' ').slice(0, 110);
-  const verdict = String(h.outcome_verdict || '').replace(/\s+/g, ' ').slice(0, 140);
+  const hypothesis = String(h.content || '').replace(/\s+/g, ' ').slice(0, 85);
+  const verdict = String(h.outcome_verdict || '').replace(/\s+/g, ' ').slice(0, 110);
   return `#${h.id} [${h.outcome_status}] conf=${h.outcome_confidence ?? 'n/a'} | hyp=${hypothesis} | verdict=${verdict}`;
 }).join('\n')}
 
 ## Current Active Lessons
-${currentLessons.length > 0 ? currentLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None yet'}
+${currentLessons.length > 0 ? currentLessons.map(l => `- ${String(l.lesson || '').slice(0, 140)} (evidence: ${l.evidence_count})`).join('\n') : 'None yet'}
 
 ## Instructions
 Analyze the pattern of outcomes. Key metric: convex posture rate = (confirmed_convex + disproven_bounded) / total.
@@ -2136,7 +2148,7 @@ Output JSON:
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
-      max_tokens: 700,
+      max_tokens: 500,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -2144,7 +2156,7 @@ Output JSON:
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 20000,
+      timeout: 45000,
     });
 
     const text = response.data?.content?.[0]?.text || '';
@@ -4943,6 +4955,17 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   const addr = instrument.base_asset_address;
   const subId = instrument.base_asset_sub_id;
   const ticker = tickerMap?.[instrumentName];
+  if (orderType === 'post_only' && ticker) {
+    const retryPlan = computePostOnlyRetryPrice(direction, ticker, instrument, price);
+    const bidPrice = Number(ticker?.b) || 0;
+    const askPrice = Number(ticker?.a) || 0;
+    const guaranteedCross = (direction === 'buy' && askPrice > 0 && price >= askPrice)
+      || (direction === 'sell' && bidPrice > 0 && price <= bidPrice);
+    if (guaranteedCross && retryPlan && Math.abs(retryPlan.retryPrice - price) > 1e-9) {
+      console.log(`📋 pre-adjusting post_only ${action} ${instrumentName} from $${price} to maker-safe $${retryPlan.retryPrice} (bid=$${bidPrice.toFixed(4)} ask=$${askPrice.toFixed(4)})`);
+      price = retryPlan.retryPrice;
+    }
+  }
 
   let order;
   try {
