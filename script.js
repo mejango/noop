@@ -1343,6 +1343,18 @@ const fetchTickersByExpiry = async (expiryDate) => {
   }
 };
 
+const getExpiryDateCodeFromInstrumentName = (instrumentName) => {
+  const parts = String(instrumentName || '').split('-');
+  return /^\d{8}$/.test(parts?.[1] || '') ? parts[1] : null;
+};
+
+const fetchFreshTickerForInstrument = async (instrumentName) => {
+  const expiryDate = getExpiryDateCodeFromInstrumentName(instrumentName);
+  if (!expiryDate) return null;
+  const tickers = await fetchTickersByExpiry(expiryDate);
+  return tickers?.[instrumentName] || null;
+};
+
 // Enrich a candidate instrument using pre-fetched ticker data
 const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
   if (!ticker) return null;
@@ -5233,8 +5245,12 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
 
   const addr = instrument.base_asset_address;
   const subId = instrument.base_asset_sub_id;
-  const ticker = tickerMap?.[instrumentName];
+  let ticker = tickerMap?.[instrumentName];
   if (orderType === 'post_only') {
+    const freshTicker = await fetchFreshTickerForInstrument(instrumentName);
+    if (freshTicker) {
+      ticker = freshTicker;
+    }
     const step = getInstrumentPriceStep(instrument, Number(price));
     const offRoundPrice = avoidRoundNumberRestingPrice(direction, Number(price), step);
     if (ticker) {
@@ -5290,12 +5306,20 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
 
   // Detect post_only rejection (order would cross the book)
   if (order.rejected_post_only) {
-    const retryPlan = orderType === 'post_only' ? computePostOnlyRetryPrice(direction, ticker, instrument, price) : null;
+    let retryTicker = ticker;
+    let retryPlan = orderType === 'post_only' ? computePostOnlyRetryPrice(direction, retryTicker, instrument, price) : null;
+    if (orderType === 'post_only' && (!retryPlan || Math.abs(retryPlan.retryPrice - price) <= 1e-9)) {
+      const refreshedRetryTicker = await fetchFreshTickerForInstrument(instrumentName);
+      if (refreshedRetryTicker) {
+        retryTicker = refreshedRetryTicker;
+        retryPlan = computePostOnlyRetryPrice(direction, retryTicker, instrument, price);
+      }
+    }
     const initialContext = formatPostOnlyContext({
       attemptedPrice: price,
       retryPrice: retryPlan?.retryPrice ?? null,
-      bidPrice: retryPlan?.bidPrice ?? ticker?.b ?? 0,
-      askPrice: retryPlan?.askPrice ?? ticker?.a ?? 0,
+      bidPrice: retryPlan?.bidPrice ?? retryTicker?.b ?? 0,
+      askPrice: retryPlan?.askPrice ?? retryTicker?.a ?? 0,
       step: retryPlan?.step ?? getInstrumentPriceStep(instrument, price),
       reason: order.error || null,
     });
