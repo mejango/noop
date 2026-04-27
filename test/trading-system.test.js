@@ -2424,27 +2424,83 @@ describe('Resting order dedup for entry rules', () => {
 // Copy of extractJSON from script.js
 const extractJSON = (text) => {
   if (!text || typeof text !== 'string') return null;
-  const start = text.indexOf('{');
-  if (start === -1) return null;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (escape) { escape = false; continue; }
-    if (ch === '\\' && inString) { escape = true; continue; }
-    if (ch === '"') { inString = !inString; continue; }
-    if (inString) continue;
-    if (ch === '{') depth++;
-    else if (ch === '}') {
-      depth--;
-      if (depth === 0) {
-        try { return JSON.parse(text.slice(start, i + 1)); }
-        catch { return null; }
+  const tryParseBalancedObject = (source) => {
+    if (!source || typeof source !== 'string') return null;
+    for (let start = source.indexOf('{'); start !== -1; start = source.indexOf('{', start + 1)) {
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      for (let i = start; i < source.length; i++) {
+        const ch = source[i];
+        if (escape) { escape = false; continue; }
+        if (ch === '\\' && inString) { escape = true; continue; }
+        if (ch === '"') { inString = !inString; continue; }
+        if (inString) continue;
+        if (ch === '{') depth++;
+        else if (ch === '}') {
+          depth--;
+          if (depth === 0) {
+            try { return JSON.parse(source.slice(start, i + 1)); }
+            catch { break; }
+          }
+        }
       }
     }
+    return null;
+  };
+
+  const trimmed = text.trim();
+  const fencedBlocks = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)]
+    .map(match => match[1]?.trim())
+    .filter(Boolean);
+  const candidates = [
+    ...fencedBlocks,
+    trimmed.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim(),
+    trimmed,
+  ];
+
+  for (const candidate of candidates) {
+    const parsed = tryParseBalancedObject(candidate);
+    if (parsed) return parsed;
   }
   return null;
+};
+
+const normalizeTalebSecondOpinion = (payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+
+  const critique = [
+    payload.critique,
+    payload.assessment,
+    payload.summary,
+    payload.reasoning,
+    payload.overall_assessment,
+  ].find((value) => typeof value === 'string' && value.trim().length > 0) || null;
+
+  const vetoes = Array.isArray(payload.vetoes) ? payload.vetoes.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
+  const amendments = Array.isArray(payload.amendments) ? payload.amendments.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
+  const additions = Array.isArray(payload.additions) ? payload.additions.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
+
+  if (!critique && vetoes.length === 0 && amendments.length === 0 && additions.length === 0) {
+    return null;
+  }
+
+  return { critique, vetoes, amendments, additions };
+};
+
+const parseTalebSecondOpinion = (text) => {
+  if (!text || typeof text !== 'string') return null;
+  const normalized = normalizeTalebSecondOpinion(extractJSON(text));
+  if (normalized) return normalized;
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  return {
+    critique: trimmed,
+    vetoes: [],
+    amendments: [],
+    additions: [],
+    _parse_fallback: true,
+  };
 };
 
 const extractConfirmationVote = (text) => {
@@ -2588,6 +2644,25 @@ describe('extractConfirmationVote', () => {
       limit_price: null,
       reasoning: 'REJECT - margin utilization is too high for this call sale.',
     });
+  });
+});
+
+describe('parseTalebSecondOpinion', () => {
+  test('normalizes valid Taleb review JSON', () => {
+    const result = parseTalebSecondOpinion('{"critique":"too fragile","vetoes":[{"reason":"bad convexity"}],"amendments":[],"additions":[]}');
+    assert.ok(result);
+    assert.strictEqual(result.critique, 'too fragile');
+    assert.strictEqual(result.vetoes.length, 1);
+    assert.strictEqual(result._parse_fallback, undefined);
+  });
+
+  test('falls back to raw text when only nested JSON fragment is parseable', () => {
+    const text = 'Taleb review:\n{"amendments":[{"concern":"tight dte","suggested_change":{"field":"dte","op":"lte","value":25}}]\n';
+    const result = parseTalebSecondOpinion(text);
+    assert.ok(result);
+    assert.strictEqual(result._parse_fallback, true);
+    assert.ok(result.critique.includes('"field":"dte"'));
+    assert.strictEqual(result.vetoes.length, 0);
   });
 });
 

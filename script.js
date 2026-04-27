@@ -4162,10 +4162,27 @@ const normalizeTalebSecondOpinion = (payload) => {
   const additions = Array.isArray(payload.additions) ? payload.additions.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
 
   if (!critique && vetoes.length === 0 && amendments.length === 0 && additions.length === 0) {
-    return payload;
+    return null;
   }
 
   return { critique, vetoes, amendments, additions };
+};
+
+const parseTalebSecondOpinion = (text) => {
+  if (!text || typeof text !== 'string') return null;
+  const normalized = normalizeTalebSecondOpinion(extractJSON(text));
+  if (normalized) return normalized;
+
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  return {
+    critique: trimmed,
+    vetoes: [],
+    amendments: [],
+    additions: [],
+    _parse_fallback: true,
+  };
 };
 
 const generateMandelbrotRegimeContext = async ({
@@ -6356,8 +6373,11 @@ Output JSON only:
 
     const talebText = await callOpenAI(talebSystem, talebPrompt, { maxTokens: 2048, timeout: 60000 });
     if (talebText) {
-      secondOpinion = normalizeTalebSecondOpinion(extractJSON(talebText));
+      secondOpinion = parseTalebSecondOpinion(talebText);
       if (secondOpinion) {
+        if (secondOpinion._parse_fallback) {
+          console.log('📋 Taleb review: parse fallback to raw text');
+        }
         console.log(`📋 Taleb review: ${secondOpinion.vetoes?.length || 0} vetoes, ${secondOpinion.amendments?.length || 0} amendments`);
       }
     }
