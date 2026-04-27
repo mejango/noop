@@ -171,10 +171,14 @@ interface AdvisoryArtifacts {
 
 function parseArtifactContent(content: string) {
   try {
-    return JSON.parse(content) as Record<string, unknown>;
+    return JSON.parse(content) as unknown;
   } catch {
     return null;
   }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function formatArtifactValue(value: unknown) {
@@ -188,14 +192,29 @@ function formatArtifactValue(value: unknown) {
 
 function renderTalebArtifact(content: string) {
   const parsed = parseArtifactContent(content);
-  if (!parsed) {
+  if (!isPlainObject(parsed)) {
     return <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{content}</pre>;
   }
 
-  const critique = typeof parsed.critique === 'string' ? parsed.critique : null;
+  const critique = [
+    parsed.critique,
+    parsed.assessment,
+    parsed.summary,
+    parsed.reasoning,
+    parsed.overall_assessment,
+  ].find((value): value is string => typeof value === 'string' && value.trim().length > 0) ?? null;
   const vetoes = Array.isArray(parsed.vetoes) ? parsed.vetoes as Array<Record<string, unknown>> : [];
   const amendments = Array.isArray(parsed.amendments) ? parsed.amendments as Array<Record<string, unknown>> : [];
   const additions = Array.isArray(parsed.additions) ? parsed.additions as Array<Record<string, unknown>> : [];
+  const hasRenderableSections = Boolean(critique) || vetoes.length > 0 || amendments.length > 0 || additions.length > 0;
+
+  if (!hasRenderableSections) {
+    return (
+      <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">
+        {JSON.stringify(parsed, null, 2)}
+      </pre>
+    );
+  }
 
   return (
     <div className="space-y-2">
@@ -235,7 +254,7 @@ function renderTalebArtifact(content: string) {
 
 function renderMandelbrotArtifact(content: string) {
   const parsed = parseArtifactContent(content);
-  if (!parsed) {
+  if (!isPlainObject(parsed)) {
     return <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{content}</pre>;
   }
 

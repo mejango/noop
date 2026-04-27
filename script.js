@@ -4146,6 +4146,28 @@ const buildMandelbrotContextBlock = (mandelbrotContext) => {
   return JSON.stringify(mandelbrotContext, null, 2);
 };
 
+const normalizeTalebSecondOpinion = (payload) => {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+
+  const critique = [
+    payload.critique,
+    payload.assessment,
+    payload.summary,
+    payload.reasoning,
+    payload.overall_assessment,
+  ].find((value) => typeof value === 'string' && value.trim().length > 0) || null;
+
+  const vetoes = Array.isArray(payload.vetoes) ? payload.vetoes.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
+  const amendments = Array.isArray(payload.amendments) ? payload.amendments.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
+  const additions = Array.isArray(payload.additions) ? payload.additions.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
+
+  if (!critique && vetoes.length === 0 && amendments.length === 0 && additions.length === 0) {
+    return payload;
+  }
+
+  return { critique, vetoes, amendments, additions };
+};
+
 const generateMandelbrotRegimeContext = async ({
   spotPrice,
   momentum,
@@ -6334,7 +6356,7 @@ Output JSON only:
 
     const talebText = await callOpenAI(talebSystem, talebPrompt, { maxTokens: 2048, timeout: 60000 });
     if (talebText) {
-      secondOpinion = extractJSON(talebText);
+      secondOpinion = normalizeTalebSecondOpinion(extractJSON(talebText));
       if (secondOpinion) {
         console.log(`📋 Taleb review: ${secondOpinion.vetoes?.length || 0} vetoes, ${secondOpinion.amendments?.length || 0} amendments`);
       }
