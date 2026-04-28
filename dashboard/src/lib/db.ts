@@ -10,8 +10,18 @@ const CONFIG_PATH = process.env.BOT_CONFIG_PATH || path.join(process.cwd(), '..'
 const BOT_CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 // Budget is now dynamic (calculated per cycle in bot_state), not static config constants
 const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
+const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
 const PERIOD_MS = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 const MEASUREMENT_WINDOW_DAYS = 6.2;
+
+function getPutBudgetPortfolioValue(snapshot: {
+  spot_price: number;
+  usdc_balance: number;
+  eth_balance: number;
+} | undefined) {
+  if (!snapshot) return 0;
+  return Number(snapshot.usdc_balance || 0) + ((Number(snapshot.eth_balance || 0) + PUT_INSURED_EXTERNAL_ETH) * Number(snapshot.spot_price || 0));
+}
 
 let db: Database.Database | null = null;
 
@@ -1058,10 +1068,15 @@ export function getBotBudget() {
     let cycleBudget = row.put_budget_for_cycle || 0;
     if (cycleBudget === 0) {
       try {
-        const snap = getStmts().getLatestPortfolioSnapshot.get() as { portfolio_value_usd: number } | undefined;
-        if (snap && snap.portfolio_value_usd > 0) {
+        const snap = getStmts().getLatestPortfolioSnapshot.get() as {
+          spot_price: number;
+          usdc_balance: number;
+          eth_balance: number;
+        } | undefined;
+        const insuredPortfolioValue = getPutBudgetPortfolioValue(snap);
+        if (insuredPortfolioValue > 0) {
           const cyclesPerYear = 365 / (PERIOD_MS / (1000 * 60 * 60 * 24));
-          cycleBudget = snap.portfolio_value_usd * PUT_ANNUAL_RATE / cyclesPerYear;
+          cycleBudget = insuredPortfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
         }
       } catch { /* ok */ }
     }

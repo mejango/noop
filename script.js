@@ -67,7 +67,7 @@
  * Sizing & Risk:
  * --------------
  *   • ETH-collateralized: puts bought on leverage, long puts offset ETH in margin engine
- *   • Put buying has arithmetic budget discipline (3.33% of portfolio/yr in 15d cycles)
+ *   • Put buying has arithmetic budget discipline (3.33% of insured base/yr in 15d cycles)
  *   • Margin state (initial/maintenance/liquidation) fetched from Derive's get_subaccount API
  *   • Sizing capped by both margin health AND put budget discipline; amount quantized to venue step
  *
@@ -149,10 +149,11 @@ const DOMAIN_SEPARATOR = '0xd96e5f90797da7ec8dc4e276260c7f3f87fedf68775fbe1ef116
 
 // Common trading parameters (single source of truth: bot/config.json)
 const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'config.json'), 'utf-8'));
-// Arithmetic discipline: spend 3.33% of portfolio value per year on puts,
+// Arithmetic discipline: spend 3.33% of insured base per year on puts,
 // allocated in PERIOD_DAYS windows. Budget recalculated at each cycle start.
-// Formula: portfolioValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
+// Formula: insuredBaseValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
 const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
+const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
 // Call exposure discipline: never exceed 45% of ETH holdings in short calls.
 // This is a hard cap — enforced in monitoring before queuing sell_call actions.
 const CALL_EXPOSURE_CAP_PCT = BOT_CONFIG.CALL_EXPOSURE_CAP_PCT || 0.45;
@@ -308,8 +309,15 @@ const persistCycleState = () => {
   catch (e) { console.error('Failed to persist cycle state:', e.message); }
 };
 
+const getPutBudgetPortfolioValue = (ethBalance, usdcBalance, spotPrice) => {
+  const insuredEth = Number(ethBalance || 0) + PUT_INSURED_EXTERNAL_ETH;
+  const ethValue = insuredEth * Number(spotPrice || 0);
+  const usdcValue = Number(usdcBalance || 0);
+  return usdcValue + ethValue;
+};
+
 // Recalculate put budget at cycle boundaries.
-// Budget = portfolioValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
+// Budget = insuredBaseValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
 // Called each tick — resets cycle when PERIOD elapses.
 const maybeResetPutCycle = (portfolioValue) => {
   const now = Date.now();
@@ -332,7 +340,10 @@ const maybeResetPutCycle = (portfolioValue) => {
     botData.putNetBought = 0;
     persistCycleState();
 
-    console.log(`📋 Put cycle ${noCycle ? 'started' : 'reset'}: $${newBudget.toFixed(2)} budget (${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of $${portfolioValue.toFixed(0)} / ${cyclesPerYear.toFixed(1)} cycles/yr)${botData.putUnspentBuyLimit > 0 ? ` + $${botData.putUnspentBuyLimit.toFixed(2)} rollover` : ''}`);
+    const insuredBasisNote = PUT_INSURED_EXTERNAL_ETH > 0
+      ? ` | +${PUT_INSURED_EXTERNAL_ETH.toFixed(4)} external ETH insured`
+      : '';
+    console.log(`📋 Put cycle ${noCycle ? 'started' : 'reset'}: $${newBudget.toFixed(2)} budget (${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of $${portfolioValue.toFixed(0)} insured base / ${cyclesPerYear.toFixed(1)} cycles/yr)${botData.putUnspentBuyLimit > 0 ? ` + $${botData.putUnspentBuyLimit.toFixed(2)} rollover` : ''}${insuredBasisNote}`);
   }
 };
 
@@ -5966,6 +5977,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
   const putBudgetRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
   const effectiveCallCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
   const breakoutAddWindow = effectiveCallCapPct > CALL_EXPOSURE_CAP_PCT;
+  const insuredPortfolioBaseUsd = getPutBudgetPortfolioValue(ethBalance, usdcBalance, spotPrice);
 
   const accountHealth = {
     ethBalance,
@@ -6001,7 +6013,9 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
       remaining: putBudgetRemaining,
       rollover: botData.putUnspentBuyLimit,
       cycleDays: BOT_CONFIG.PERIOD_DAYS,
-      note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of portfolio value per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once.`,
+      insuredPortfolioBaseUsd: +insuredPortfolioBaseUsd.toFixed(2),
+      insuredExternalEth: PUT_INSURED_EXTERNAL_ETH,
+      note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of insured base per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Budget base = Derive USDC plus total insured ETH marked at spot, where external insured ETH is fixed at ${PUT_INSURED_EXTERNAL_ETH.toFixed(4)}. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once.`,
     },
     note: 'Account is ETH-collateralized on Derive. buying_power = available initial margin for new trades. margin_usage_pct mirrors the Derive display metric. Projected trade sizing still uses the bot internal margin estimate. Sizing must respect buying power, put budget discipline, and the active call margin-utilization cap, which can widen during an upside breakout when the bot already has short calls on.',
   };
@@ -6127,7 +6141,7 @@ The account is ETH-collateralized. Puts are bought on leverage against ETH. Deri
 
 There are TWO constraints on put buying:
 1. **Margin**: initial_margin must stay positive. maintenance_margin at zero = liquidation.
-2. **Budget discipline**: We commit to spending 3.33% of portfolio value per year on puts, allocated in 15-day budget windows. The budget for each cycle is calculated from current portfolio value at cycle start. Spend predictably across the cycle. Don't front-load. Don't impulse buy. If nothing is well-priced, let the budget roll over.
+2. **Budget discipline**: We commit to spending 3.33% of insured base per year on puts, allocated in 15-day budget windows. The insured base is Derive USDC plus total insured ETH marked at spot, where off-platform insured ETH is fixed at ${PUT_INSURED_EXTERNAL_ETH.toFixed(4)}. Spend predictably across the cycle. Don't front-load. Don't impulse buy. If nothing is well-priced, let the budget roll over.
 
 For calls: **base hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization**. Treat ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% as a caution threshold for new trades, not an automatic rejection line. The bot may size trades down within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and the bot already has short calls on, call premium may be richest exactly when buyback temptation is highest. In that case the bot may sell additional calls into euphoric premium up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% utilization instead of reflexively paying up to derisk. Size against margin headroom, not ETH balance.
 
@@ -6947,8 +6961,8 @@ const runBot = async () => {
         const ethBal = Number(balances.find(b => b.asset_name === 'ETH')?.amount || 0);
         const usdcBal = Number(balances.find(b => b.asset_name === 'USDC')?.amount || 0);
         botData.ethBalance = ethBal;
-        const portfolioValue = ethBal * spotPrice + usdcBal;
-        if (portfolioValue > 0) maybeResetPutCycle(portfolioValue);
+        const insuredPortfolioValue = getPutBudgetPortfolioValue(ethBal, usdcBal, spotPrice);
+        if (insuredPortfolioValue > 0) maybeResetPutCycle(insuredPortfolioValue);
       } catch (e) { console.log('📋 Cycle check failed:', e.message); }
     }
 
@@ -7267,7 +7281,7 @@ console.log('='.repeat(70));
 console.log(`🥱 NO OPERATION`);
 console.log(' ');
 console.log("Welcome. Let's begin...");
-console.log(`ETH-collateralized. Put budget: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of portfolio/yr in ${BOT_CONFIG.PERIOD_DAYS}d cycles. Calls sized by margin.`);
+console.log(`ETH-collateralized. Put budget: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of insured base/yr in ${BOT_CONFIG.PERIOD_DAYS}d cycles${PUT_INSURED_EXTERNAL_ETH > 0 ? ` (+${PUT_INSURED_EXTERNAL_ETH.toFixed(4)} external ETH insured)` : ''}. Calls sized by margin.`);
 console.log('='.repeat(70));
 console.log(' ');
 loadData();

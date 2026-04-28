@@ -19,6 +19,7 @@ interface NavStats {
   last_price_time: string;
   lyra_spot: number | null;
   margin_usage_pct: number | null;
+  put_insured_external_eth?: number;
   budget: Budget;
 }
 
@@ -32,8 +33,17 @@ interface AccountData {
 }
 
 const emptyBudget: Budget = { putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0, cycleDays: CYCLE_DAYS };
-const emptyStats: NavStats = { last_price: 0, last_price_time: '', lyra_spot: null, margin_usage_pct: null, budget: emptyBudget };
+const emptyStats: NavStats = { last_price: 0, last_price_time: '', lyra_spot: null, margin_usage_pct: null, put_insured_external_eth: 0, budget: emptyBudget };
 const emptyAccount: AccountData = { collaterals: [] };
+
+function getPutBudgetPortfolioValue(
+  ethAmount: number | undefined,
+  usdcAmount: number | undefined,
+  spotPrice: number,
+  externalEthAmount: number | undefined,
+) {
+  return Number(usdcAmount || 0) + ((Number(ethAmount || 0) + Number(externalEthAmount || 0)) * spotPrice);
+}
 
 export default function Nav() {
   const STATS_INTERVAL = 60_000;
@@ -50,7 +60,7 @@ export default function Nav() {
   let putTotalBudget = b.putTotalBudget;
   let putRemaining = b.putRemaining;
   if (putTotalBudget === 0 && stats.last_price > 0) {
-    const portfolioValue = Number(eth?.amount || 0) * stats.last_price + Number(usdc?.amount || 0);
+    const portfolioValue = getPutBudgetPortfolioValue(eth?.amount, usdc?.amount, stats.last_price, stats.put_insured_external_eth);
     if (portfolioValue > 0) {
       const cyclesPerYear = 365 / (b.cycleDays || CYCLE_DAYS);
       putTotalBudget = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;

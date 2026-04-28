@@ -58,6 +58,7 @@ interface Stats {
   last_price: number;
   last_price_time: string;
   lyra_spot?: number | null;
+  put_insured_external_eth?: number;
   short_momentum: string;
   short_derivative: string;
   medium_momentum: string;
@@ -383,6 +384,7 @@ const emptyStats: Stats = {
   medium_momentum: '', medium_derivative: '', three_day_high: 0, three_day_low: 0,
   seven_day_high: 0, seven_day_low: 0,
   lyra_spot: null,
+  put_insured_external_eth: 0,
   budget: emptyBudget,
 };
 

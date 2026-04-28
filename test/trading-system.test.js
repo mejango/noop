@@ -2704,6 +2704,18 @@ describe('Dynamic put budget: formula', () => {
   test('24.33 cycles per year (365/15)', () => {
     assert.ok(Math.abs(cyclesPerYear - 24.333) < 0.01, `Got ${cyclesPerYear}`);
   });
+
+  test('insured base adds fixed external ETH without multiplying USDC', () => {
+    const spotPrice = 2000;
+    const ethBalance = 2;
+    const externalEth = 9;
+    const usdcBalance = 1000;
+    const insuredBase = usdcBalance + ((ethBalance + externalEth) * spotPrice);
+    assert.strictEqual(insuredBase, 23000);
+
+    const budget = insuredBase * PUT_ANNUAL_RATE / cyclesPerYear;
+    assert.ok(budget > 31 && budget < 32, `Expected ~$31.48, got $${budget.toFixed(2)}`);
+  });
 });
 
 // ============================================================================
