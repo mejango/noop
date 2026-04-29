@@ -92,11 +92,11 @@
  * -------------
  *   • Node.js environment with ethers.js, axios, technicalindicators, fs, path
  *   • .private_key.txt with trading wallet private key
- *   • Internet access to Lyra API + CoinGecko spot feed
+ *   • Internet access to Lyra API + CoinGecko fallback spot feed
  *
  * Caveats:
  * --------
- *   • Strike gating still uses index/mark from ticker; fallback is CoinGecko spot.
+ *   • Strike gating uses Derive spot/index when available; CoinGecko is only a fallback.
  *   • No global risk checks on vega/theta exposure or per-expiry concentration.
  *   • No backoff/throttling: may hit API limits under heavy load.
  *   • Execution relies on book liquidity at best bid/ask; slippage not bounded.
@@ -1277,8 +1277,51 @@ let coinGeckoCooldownUntil = 0;
 let coinGeckoCooldownNoticeUntil = 0;
 let lastSuccessfulCoinGeckoSpot = null;
 
+const extractTickerSpotPrice = (ticker) => {
+  if (!ticker || typeof ticker !== 'object') return null;
+  const candidates = [
+    ticker.I,
+    ticker.index_price,
+    ticker.indexPrice,
+    ticker.underlying_price,
+    ticker.underlyingPrice,
+    ticker.spot_price,
+    ticker.spotPrice,
+    ticker.price,
+    ticker.last_price,
+    ticker.lastPrice,
+    ticker.M,
+    ticker.mark_price,
+    ticker.markPrice,
+  ];
+  for (const candidate of candidates) {
+    const value = Number(candidate);
+    if (value > 0) return value;
+  }
+  return null;
+};
+
+const fetchDeriveSpotPrice = async () => {
+  try {
+    const response = await axios.post(API_URL.GET_TICKERS, {
+      instrument_type: 'perp',
+      currency: 'ETH',
+    }, { timeout: 5000 });
+    const raw = response.data?.result;
+    const tickers = Array.isArray(raw)
+      ? raw
+      : (Array.isArray(raw?.tickers) ? raw.tickers : []);
+    const ethPerp = tickers.find(t => t.instrument_name === 'ETH-PERP') || tickers[0];
+    return extractTickerSpotPrice(ethPerp);
+  } catch (error) {
+    const status = error.response?.status;
+    console.log(`⚠️ Derive spot fetch failed: ${error.message} | status: ${status || 'N/A'}`);
+    return null;
+  }
+};
+
 // Get current spot price from CoinGecko with cooldown after rate limiting.
-const getSpotPrice = async () => {
+const fetchCoinGeckoSpotPrice = async () => {
   const now = Date.now();
   if (coinGeckoCooldownUntil > now) {
     if (coinGeckoCooldownNoticeUntil !== coinGeckoCooldownUntil) {
@@ -6613,8 +6656,11 @@ const runBot = async () => {
   console.log('─'.repeat(60));
   console.log(`🥱 NO OPERATION RUN`);
 
-  // Get spot price — try CoinGecko first
-  let spotPrice = await getSpotPrice();
+  // Get spot price — prefer Derive, fall back to CoinGecko only if needed
+  let spotPrice = await fetchDeriveSpotPrice();
+  if (!spotPrice) {
+    spotPrice = await fetchCoinGeckoSpotPrice();
+  }
 
   // Shared timestamp for all DB writes this tick
   const tickTimestamp = new Date().toISOString();
@@ -6780,13 +6826,13 @@ const runBot = async () => {
       }
     }
 
-  // Prefer Lyra index price over CoinGecko (more timely, matches options pricing)
+  // Prefer option-ticker index price over early spot (more timely, matches options pricing)
   if (Object.keys(tickerMap).length > 0) {
     const firstTicker = Object.values(tickerMap)[0];
     const lyraIndex = Number(firstTicker.I);
     if (lyraIndex > 0) {
       if (spotPrice) {
-        console.log(`🔄 Upgrading spot from CoinGecko $${spotPrice.toFixed(2)} → Lyra index $${lyraIndex.toFixed(2)} (Δ${(lyraIndex - spotPrice).toFixed(2)})`);
+        console.log(`🔄 Upgrading spot from early quote $${spotPrice.toFixed(2)} → Lyra index $${lyraIndex.toFixed(2)} (Δ${(lyraIndex - spotPrice).toFixed(2)})`);
       } else {
         console.log(`🔄 Using Lyra index price as spot: $${lyraIndex.toFixed(2)}`);
       }
@@ -6948,7 +6994,7 @@ const runBot = async () => {
 
     console.log('─'.repeat(60));
   } else {
-    console.log('⚠️ No spot price available (CoinGecko + Lyra fallback both failed)');
+    console.log('⚠️ No spot price available (Derive + CoinGecko fallback both failed)');
   }
 
     console.log(`📊 ${Object.keys(tickerMap).length} tickers | ${putCandidates.length} put + ${callCandidates.length} call candidates`);

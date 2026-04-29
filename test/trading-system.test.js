@@ -2666,6 +2666,47 @@ describe('parseTalebSecondOpinion', () => {
   });
 });
 
+describe('Spot price sourcing helpers', () => {
+  const extractTickerSpotPrice = (ticker) => {
+    if (!ticker || typeof ticker !== 'object') return null;
+    const candidates = [
+      ticker.I,
+      ticker.index_price,
+      ticker.indexPrice,
+      ticker.underlying_price,
+      ticker.underlyingPrice,
+      ticker.spot_price,
+      ticker.spotPrice,
+      ticker.price,
+      ticker.last_price,
+      ticker.lastPrice,
+      ticker.M,
+      ticker.mark_price,
+      ticker.markPrice,
+    ];
+    for (const candidate of candidates) {
+      const value = Number(candidate);
+      if (value > 0) return value;
+    }
+    return null;
+  };
+
+  test('prefers explicit index price fields from Derive tickers', () => {
+    assert.strictEqual(extractTickerSpotPrice({ I: '1825.4', M: '1820.1' }), 1825.4);
+    assert.strictEqual(extractTickerSpotPrice({ index_price: '1827.9' }), 1827.9);
+  });
+
+  test('falls back through alternate spot-like fields', () => {
+    assert.strictEqual(extractTickerSpotPrice({ spot_price: '1819.2' }), 1819.2);
+    assert.strictEqual(extractTickerSpotPrice({ M: '1817.6' }), 1817.6);
+  });
+
+  test('returns null when no positive price exists', () => {
+    assert.strictEqual(extractTickerSpotPrice({ I: 0, M: 0, price: null }), null);
+    assert.strictEqual(extractTickerSpotPrice(null), null);
+  });
+});
+
 // ============================================================================
 // 29. Dynamic put budget calculation
 // ============================================================================
