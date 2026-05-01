@@ -4201,6 +4201,55 @@ describe('stale emergency buyback rule scrub', () => {
 });
 
 // ============================================================================
+// 46. Deterministic short-call theta harvest
+// ============================================================================
+
+describe('Deterministic short-call theta harvest', () => {
+  const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
+
+  const shouldQueueDeterministicCallHarvestBuyback = (metrics) => {
+    if (!metrics) return false;
+    return metrics.values.unrealized_pnl_pct >= CALL_BUYBACK_PROFIT_THRESHOLD;
+  };
+
+  test('queues harvest buyback when profit is at threshold', () => {
+    const metrics = {
+      values: { unrealized_pnl_pct: 80, dte: 45 },
+    };
+    assert.strictEqual(shouldQueueDeterministicCallHarvestBuyback(metrics), true);
+  });
+
+  test('queues harvest buyback above threshold even with long dte and weak margin economics', () => {
+    const metrics = {
+      values: { unrealized_pnl_pct: 93, dte: 32 },
+      estimatedMarginRelease: 5,
+      releaseToCostRatio: 0.8,
+      currentUtilization: 0.12,
+      entryHeadroom: 1000,
+    };
+    assert.strictEqual(shouldQueueDeterministicCallHarvestBuyback(metrics), true);
+  });
+
+  test('does not queue when profit is below threshold', () => {
+    const metrics = {
+      values: { unrealized_pnl_pct: 55, dte: 2 },
+    };
+    assert.strictEqual(shouldQueueDeterministicCallHarvestBuyback(metrics), false);
+  });
+
+  test('does not queue when profit is just below threshold even if margin context is attractive', () => {
+    const metrics = {
+      values: { unrealized_pnl_pct: 79.9, dte: 5 },
+      estimatedMarginRelease: 3000,
+      releaseToCostRatio: 30,
+      currentUtilization: 0.45,
+      entryHeadroom: 90,
+    };
+    assert.strictEqual(shouldQueueDeterministicCallHarvestBuyback(metrics), false);
+  });
+});
+
+// ============================================================================
 // 46. Call exposure cap: 45% hard cap, 40% entry buffer
 // ============================================================================
 
