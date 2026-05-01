@@ -59,6 +59,22 @@ const computeCurrentValues = (position, ticker, spotPrice) => {
   };
 };
 
+const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => {
+  const values = computeCurrentValues(position, ticker, spotPrice);
+  if (action !== 'buyback_call' || position?.direction !== 'short') return values;
+
+  const executablePrice = Number(ticker?.a) || values.mark_price || 0;
+  const entryPrice = Number(position?.avg_entry_price) || 0;
+  const rawPnlPct = entryPrice > 0 ? ((executablePrice - entryPrice) / entryPrice) * 100 : 0;
+  const adjustedPnlPct = position.direction === 'short' ? -rawPnlPct : rawPnlPct;
+
+  return {
+    ...values,
+    unrealized_pnl_pct: adjustedPnlPct,
+    execution_price: executablePrice,
+  };
+};
+
 const evaluateConditions = (conditions, logic, values) => {
   if (!Array.isArray(conditions) || conditions.length === 0) return false;
   const results = conditions.map(c => {
@@ -595,6 +611,30 @@ describe('computeCurrentValues', () => {
 
     // Short: -((0.08 - 0.05) / 0.05 * 100) = -60%
     assert.strictEqual(result.unrealized_pnl_pct, -60);
+  });
+
+  test('buyback_call rule evaluation uses executable ask price for short-call pnl', () => {
+    const position = {
+      instrument_name: 'ETH-20261231-2000-C',
+      direction: 'short',
+      avg_entry_price: 6.0,
+      mark_price: 0,
+      delta: 0,
+      theta: 0,
+    };
+    const ticker = {
+      M: '1.00',
+      a: '1.40',
+      option_pricing: { d: '0.1', i: '0.65', t: '-0.02' },
+    };
+
+    const base = computeCurrentValues(position, ticker, 1800);
+    const executable = getRuleEvaluationValues(position, ticker, 1800, 'buyback_call');
+
+    assert.ok(Math.abs(base.unrealized_pnl_pct - 83.3333333333) < 0.0001, `Expected mark-based pnl ~83.33, got ${base.unrealized_pnl_pct}`);
+    assert.ok(Math.abs(executable.unrealized_pnl_pct - 76.6666666667) < 0.0001, `Expected ask-based pnl ~76.67, got ${executable.unrealized_pnl_pct}`);
+    assert.strictEqual(executable.execution_price, 1.4);
+    assert.strictEqual(executable.mark_price, 1.0);
   });
 
   test('DTE calculation from instrument name', () => {
@@ -1738,7 +1778,7 @@ describe('execution order type normalization', () => {
     buy_put: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
     sell_call: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
     sell_put: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc'] },
-    buyback_call: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc'] },
+    buyback_call: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
   };
   const getActionPolicy = (action) => ACTION_POLICY[action] || null;
   const isReduceOnlyExitAction = (action) => Boolean(getActionPolicy(action)?.reduceOnly);
@@ -1757,8 +1797,8 @@ describe('execution order type normalization', () => {
     assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'gtc'), true);
   });
 
-  test('buyback_call rejects post_only for reduce_only exit', () => {
-    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'post_only'), true);
+  test('buyback_call allows post_only for patient reduce_only buybacks', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'post_only'), false);
   });
 
   test('sell_put accepts ioc for reduce_only exit', () => {
@@ -1777,8 +1817,12 @@ describe('execution order type normalization', () => {
     assert.strictEqual(normalizePreferredOrderType('sell_call', 'post_only'), 'post_only');
   });
 
+  test('buyback_call keeps valid resting preference', () => {
+    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'post_only'), 'post_only');
+  });
+
   test('exit preference is normalized case-insensitively', () => {
-    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'IOC'), 'ioc');
+    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'GTC'), 'gtc');
   });
 });
 
@@ -4197,55 +4241,6 @@ describe('stale emergency buyback rule scrub', () => {
       reasoning: 'Buy back only if the position is genuinely threatened near expiry.',
     };
     assert.strictEqual(shouldDeactivate(rule), false);
-  });
-});
-
-// ============================================================================
-// 46. Deterministic short-call theta harvest
-// ============================================================================
-
-describe('Deterministic short-call theta harvest', () => {
-  const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
-
-  const shouldQueueDeterministicCallHarvestBuyback = (metrics) => {
-    if (!metrics) return false;
-    return metrics.values.unrealized_pnl_pct >= CALL_BUYBACK_PROFIT_THRESHOLD;
-  };
-
-  test('queues harvest buyback when profit is at threshold', () => {
-    const metrics = {
-      values: { unrealized_pnl_pct: 80, dte: 45 },
-    };
-    assert.strictEqual(shouldQueueDeterministicCallHarvestBuyback(metrics), true);
-  });
-
-  test('queues harvest buyback above threshold even with long dte and weak margin economics', () => {
-    const metrics = {
-      values: { unrealized_pnl_pct: 93, dte: 32 },
-      estimatedMarginRelease: 5,
-      releaseToCostRatio: 0.8,
-      currentUtilization: 0.12,
-      entryHeadroom: 1000,
-    };
-    assert.strictEqual(shouldQueueDeterministicCallHarvestBuyback(metrics), true);
-  });
-
-  test('does not queue when profit is below threshold', () => {
-    const metrics = {
-      values: { unrealized_pnl_pct: 55, dte: 2 },
-    };
-    assert.strictEqual(shouldQueueDeterministicCallHarvestBuyback(metrics), false);
-  });
-
-  test('does not queue when profit is just below threshold even if margin context is attractive', () => {
-    const metrics = {
-      values: { unrealized_pnl_pct: 79.9, dte: 5 },
-      estimatedMarginRelease: 3000,
-      releaseToCostRatio: 30,
-      currentUtilization: 0.45,
-      entryHeadroom: 90,
-    };
-    assert.strictEqual(shouldQueueDeterministicCallHarvestBuyback(metrics), false);
   });
 });
 

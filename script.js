@@ -4345,6 +4345,22 @@ const computeCurrentValues = (position, ticker, spotPrice) => {
   };
 };
 
+const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => {
+  const values = computeCurrentValues(position, ticker, spotPrice);
+  if (action !== 'buyback_call' || position?.direction !== 'short') return values;
+
+  const executablePrice = Number(ticker?.a) || values.mark_price || 0;
+  const entryPrice = Number(position?.avg_entry_price) || 0;
+  const rawPnlPct = entryPrice > 0 ? ((executablePrice - entryPrice) / entryPrice) * 100 : 0;
+  const adjustedPnlPct = position.direction === 'short' ? -rawPnlPct : rawPnlPct;
+
+  return {
+    ...values,
+    unrealized_pnl_pct: adjustedPnlPct,
+    execution_price: executablePrice,
+  };
+};
+
 const evaluateConditions = (conditions, logic, values) => {
   if (!Array.isArray(conditions) || conditions.length === 0) return false;
   const results = conditions.map(c => {
@@ -4556,66 +4572,6 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${baseCapPct.toFixed(1)}%, active_cap=${capPct.toFixed(1)}%, base_cap=${baseCapPct.toFixed(1)}%, breakout_override=${breakoutOverrideActive ? 'active' : 'inactive'}. Treat ${entryCapPct.toFixed(1)}% as a caution threshold. The normal ceiling is ${baseCapPct.toFixed(1)}%, but when breakout_override is active and there are already short calls on, selling more into euphoric upside is allowed up to ${capPct.toFixed(1)}% instead of reflexively buying back into expensive bullish sentiment. Use these exact figures; do not invent utilization numbers.`;
 };
 
-const getDeterministicCallHarvestMetrics = ({
-  position,
-  ticker,
-  spotPrice,
-  marginState,
-  positions,
-  restingOrders,
-}) => {
-  if (!position || position.direction !== 'short' || !position.instrument_name?.endsWith('-C')) return null;
-  if (!marginState || !(spotPrice > 0)) return null;
-
-  const values = computeCurrentValues(position, ticker, spotPrice);
-  const askPrice = Number(ticker?.a) || 0;
-  const bidPrice = Number(ticker?.b) || 0;
-  const markPrice = Number(ticker?.M) || values.mark_price || 0;
-  const buybackUnitPrice = askPrice > 0 ? askPrice : markPrice;
-  if (!(buybackUnitPrice > 0)) return null;
-
-  const amount = Math.abs(Number(position.amount) || 0);
-  if (!(amount > 0)) return null;
-
-  const strike = Number(position.instrument_name?.split('-')?.[2] || 0) || 0;
-  const marginPerUnit = estimateShortCallMarginPerUnit(
-    marginState,
-    positions,
-    restingOrders,
-    spotPrice,
-    strike,
-    buybackUnitPrice
-  );
-  if (!(marginPerUnit > 0)) return null;
-
-  const currentUtilization = estimateDisplayedMarginUtilization(marginState);
-  const entryHeadroom = getDisplayedMarginHeadroomAtCap(marginState, CALL_ENTRY_CAP_PCT);
-  const estimatedMarginRelease = amount * marginPerUnit;
-  const buybackCost = amount * buybackUnitPrice;
-  const releaseToCostRatio = buybackCost > 0 ? estimatedMarginRelease / buybackCost : Infinity;
-
-  return {
-    values,
-    askPrice,
-    bidPrice,
-    markPrice,
-    buybackUnitPrice,
-    amount,
-    strike,
-    marginPerUnit,
-    currentUtilization,
-    entryHeadroom,
-    estimatedMarginRelease,
-    buybackCost,
-    releaseToCostRatio,
-  };
-};
-
-const shouldQueueDeterministicCallHarvestBuyback = (metrics) => {
-  if (!metrics) return false;
-  return metrics.values.unrealized_pnl_pct >= CALL_BUYBACK_PROFIT_THRESHOLD;
-};
-
 const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice, instruments, spotPrice }) => {
   let marginState = null;
   try { marginState = await fetchSubaccount(); } catch { /* ok */ }
@@ -4664,7 +4620,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         if (!position) continue;
 
         const ticker = tickerMap[rule.instrument_name];
-        const values = computeCurrentValues(position, ticker, spotPrice);
+        const values = getRuleEvaluationValues(position, ticker, spotPrice, rule.action);
 
         let criteria;
         try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { criteria = null; }
@@ -4714,67 +4670,6 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
     }
   } catch (e) {
     console.log(`📋 Exit rules evaluation failed: ${e.message}`);
-  }
-
-  // ── Deterministic short-call harvest ──────────────────────────────────────
-  try {
-    let liveMarginState = null;
-    try { liveMarginState = await fetchSubaccount(); } catch { /* ok */ }
-    if (liveMarginState && spotPrice > 0) {
-      const openRestingOrders = db.getOpenRestingOrders();
-      for (const position of positions) {
-        if (!position.instrument_name?.endsWith('-C') || position.direction !== 'short') continue;
-        if (db.hasPendingActionForInstrumentAction?.('buyback_call', position.instrument_name)) continue;
-        if (wasRecentlyRejected('buyback_call', position.instrument_name)) continue;
-
-        const ticker = tickerMap[position.instrument_name];
-        const metrics = getDeterministicCallHarvestMetrics({
-          position,
-          ticker,
-          spotPrice,
-          marginState: liveMarginState,
-          positions,
-          restingOrders: openRestingOrders,
-        });
-        if (!shouldQueueDeterministicCallHarvestBuyback(metrics)) continue;
-
-        const currentUtilText = metrics.currentUtilization != null
-          ? `${(metrics.currentUtilization * 100).toFixed(1)}%`
-          : 'N/A';
-        const headroomText = metrics.entryHeadroom != null
-          ? `$${metrics.entryHeadroom.toFixed(2)}`
-          : 'N/A';
-        const reason = `Deterministic theta-harvest: captured ${metrics.values.unrealized_pnl_pct.toFixed(1)}% of premium, which is above the ${CALL_BUYBACK_PROFIT_THRESHOLD}% harvest threshold. Buying back at $${metrics.buybackUnitPrice.toFixed(4)} would cost ~$${metrics.buybackCost.toFixed(2)}. Margin release context only: would free ~$${metrics.estimatedMarginRelease.toFixed(2)} of call margin (${metrics.releaseToCostRatio.toFixed(1)}x release/cost). Current utilization ${currentUtilText}; entry-cap headroom ${headroomText}.`;
-
-        db.insertPendingAction({
-          rule_id: null,
-          action: 'buyback_call',
-          instrument_name: position.instrument_name,
-          amount: position.amount,
-          price: metrics.buybackUnitPrice,
-          trigger_details: {
-            trigger_type: 'deterministic_call_harvest',
-            reasoning: reason,
-            current_values: metrics.values,
-            ask_price: metrics.askPrice,
-            bid_price: metrics.bidPrice,
-            mark_price: metrics.markPrice,
-            buyback_unit_price: metrics.buybackUnitPrice,
-            buyback_cost_usd: +metrics.buybackCost.toFixed(2),
-            estimated_margin_release_usd: +metrics.estimatedMarginRelease.toFixed(2),
-            release_to_cost_ratio: +metrics.releaseToCostRatio.toFixed(2),
-            current_margin_utilization_pct: metrics.currentUtilization != null ? +(metrics.currentUtilization * 100).toFixed(1) : null,
-            entry_cap_pct: +(CALL_ENTRY_CAP_PCT * 100).toFixed(1),
-            entry_cap_headroom_usd: metrics.entryHeadroom != null ? +metrics.entryHeadroom.toFixed(2) : null,
-            profit_threshold_pct: CALL_BUYBACK_PROFIT_THRESHOLD,
-          },
-        });
-        triggeredCount++;
-        console.log(`📋 Deterministic call harvest queued: buyback_call ${position.instrument_name} | pnl=${metrics.values.unrealized_pnl_pct.toFixed(1)}% | release/cost=${metrics.releaseToCostRatio.toFixed(1)}x`);
-      }
-    }
-  } catch (e) {
-    console.log(`📋 Deterministic call harvest evaluation failed: ${e.message}`);
   }
 
   // ── Entry rules ────────────────────────────────────────────────────────────
@@ -5227,7 +5122,7 @@ const wasRecentlyRejected = (action, instrumentName, cooldownMs = REJECTED_ACTIO
 
 const FAILED_ENTRY_ACTION_COOLDOWN_MS = 30 * 60 * 1000;
 const getRecentFailedEntry = (action, instrumentName, cooldownMs = FAILED_ENTRY_ACTION_COOLDOWN_MS) => {
-  if (!db || !action || !instrumentName || !isEntryAction(action)) return null;
+  if (!db || !action || !instrumentName) return null;
   const lastFailed = db.getLastFailedAction(action, instrumentName);
   if (!lastFailed?.triggered_at) return null;
   const reason = String(lastFailed.execution_result || '');
@@ -5347,7 +5242,7 @@ const ACTION_POLICY = Object.freeze({
     phase: 'exit',
     direction: 'buy',
     reduceOnly: true,
-    allowedOrderTypes: Object.freeze(['ioc']),
+    allowedOrderTypes: Object.freeze(['ioc', 'gtc', 'post_only']),
     semantics: 'Exit-only action: buying back an already-open short call to close or trim it. This is reduce_only=true and cannot create a new long call exposure beyond the short being closed.',
   }),
 });
@@ -5375,7 +5270,7 @@ const getActionOrderTypeHardRule = (action) => {
 
 const getSharedActionPolicyPrompt = () => [
   `EXIT SEMANTICS: ${describeActionSemantics('sell_put')} ${describeActionSemantics('buyback_call')}`,
-  `ORDER-TYPE RULE: reduce_only exits (${EXIT_ACTIONS.join(', ')}) must use ${EXIT_ALLOWED_ORDER_TYPES.join('/').toUpperCase()}/non-resting execution. Never return gtc or post_only for a reduce_only exit.`,
+  `ORDER-TYPE RULE: sell_put must use IOC/non-resting execution. buyback_call may use ${getAllowedOrderTypesForAction('buyback_call').join('/').toUpperCase()} depending on urgency and book quality; patient resting buyback pricing is allowed when the market is wide and there is no urgent threat.`,
   `ENTRY ORDER-TYPE RULE: ${ENTRY_ACTIONS.join(' and ')} are entry actions, not reduce_only exits. Resting order types like gtc and post_only are valid for entries when patience and pricing matter.`,
 ].join('\n');
 
@@ -5822,7 +5717,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
 ${getSharedActionPolicyPrompt()}
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
 CALL DISCIPLINE: Short calls normally have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active cap may widen up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the active cap or are too small to matter.
-CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove the tail risk of further upside continuation. Confirm buybacks when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by actual breakout evidence. Reject buybacks driven by price action alone when theta is still working, the call remains OTM, and the position is not under real threat. There is one explicit house-rule exception: deterministic theta harvesting. If the trigger details show unrealized_pnl_pct at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, that buyback is a valid profit-harvest/capacity-reset action by policy even if DTE or margin-release metrics are not especially compelling. Treat any extra DTE or margin context as informational, not as a required hurdle.
+CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove the tail risk of further upside continuation. Confirm buybacks when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by actual breakout evidence. Reject buybacks driven by price action alone when theta is still working, the call remains OTM, and the position is not under real threat. There is one explicit house-rule exception: deterministic theta harvesting. If the trigger details show unrealized_pnl_pct at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, treat that as a valid profit-harvest/capacity-reset trigger, but read it as executable buyback economics using the live buy price rather than midpoint fantasy. Treat any extra DTE or margin context as informational, not as a required hurdle. If there is no urgency and the book is wide, patient limit-style buyback pricing is acceptable.
 PUT EXIT DISCIPLINE: For sell_put — evaluate it as monetizing or rolling an existing long put. Do not analyze it as short put selling or naked downside exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin. The question is whether closing this owned hedge now is prudent, not whether opening short put risk is acceptable.
 REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.
 Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.`,
@@ -5869,7 +5764,7 @@ ${getSharedActionPolicyPrompt()}
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
 CALL DISCIPLINE: Short calls normally have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active cap may widen up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the active cap or are too small to matter.
-CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous, but the premium was already collected and temporary mark pain is not the same as final loss. A buyback below strike is an explicit purchase of upside insurance. Confirm buybacks only when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by real continuation evidence. Reject buybacks driven by price noise when theta is still working. One explicit house-rule exception is deterministic theta harvesting: when unrealized_pnl_pct is at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, treat the buyback as an allowed profit-harvest/capacity-reset by policy. Extra DTE or margin-release metrics are context, not gating requirements for that case.
+CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous, but the premium was already collected and temporary mark pain is not the same as final loss. A buyback below strike is an explicit purchase of upside insurance. Confirm buybacks only when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by real continuation evidence. Reject buybacks driven by price noise when theta is still working. One explicit house-rule exception is deterministic theta harvesting: when unrealized_pnl_pct is at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, treat the buyback as an allowed profit-harvest/capacity-reset by policy, judged on executable buyback price rather than midpoint mark. Extra DTE or margin-release metrics are context, not gating requirements for that case. If urgency is low and the book is wide, patient limit-style buyback pricing is acceptable.
 PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
 REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV overpays alongside the crowd. Use actual Greeks, DTE, and momentum to judge.
 Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.
@@ -6372,12 +6267,12 @@ CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: op
 Rules:
 - Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, max_cost (for buys), min_bid (for sells), market_conditions.
 - Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
-- Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. Exit rules may use preferred_order_type ${formatOrderTypeList(EXIT_ALLOWED_ORDER_TYPES)} only because reduce_only exits cannot rest on the Derive book.
+- Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: sell_put should use "ioc". buyback_call may use preferred_order_type ${formatOrderTypeList(getAllowedOrderTypesForAction('buyback_call'))}; patient resting buyback pricing is valid when urgency is low and the market is wide.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
 - For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
-- For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. When unrealized_pnl_pct is very high and most premium has already been harvested, buying back to free meaningful margin for fresh short-call entries can be correct. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
+- For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. When unrealized_pnl_pct is very high and most premium has already been harvested, buying back to free meaningful margin for fresh short-call entries can be correct. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. If urgency is low and the book is wide, patient limit-style buyback pricing via gtc/post_only is acceptable. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending.

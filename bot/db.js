@@ -1026,13 +1026,6 @@ const stmts = {
     WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed')
   `),
 
-  hasPendingActionForInstrumentAction: db.prepare(`
-    SELECT COUNT(*) as count FROM pending_actions
-    WHERE action = @action
-      AND instrument_name = @instrument_name
-      AND status IN ('pending', 'confirmed')
-  `),
-
   getLastExecutedAction: db.prepare(`
     SELECT executed_at FROM pending_actions
     WHERE action = @action AND status = 'executed'
@@ -1617,9 +1610,6 @@ const deactivateRuleById = (id) => stmts.deactivateRuleById.run({ id }).changes 
 const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ status });
 const getRecentPendingActions = (limit = 20) => stmts.getRecentPendingActions.all({ limit });
 const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
-const hasPendingActionForInstrumentAction = (action, instrumentName) => (
-  stmts.hasPendingActionForInstrumentAction.get({ action, instrument_name: instrumentName })?.count || 0
-) > 0;
 const getLastExecutedAction = (action) => stmts.getLastExecutedAction.get({ action })?.executed_at || null;
 const getLastRejectedAction = (action, instrumentName) => stmts.getLastRejectedAction.get({ action, instrument_name: instrumentName })?.triggered_at || null;
 const getLastFailedAction = (action, instrumentName) => stmts.getLastFailedAction.get({ action, instrument_name: instrumentName }) || null;
@@ -1819,7 +1809,6 @@ module.exports = {
   getPendingActions,
   getRecentPendingActions,
   hasPendingActionForRule,
-  hasPendingActionForInstrumentAction,
   getLastExecutedAction,
   getLastRejectedAction,
   getLastFailedAction,
