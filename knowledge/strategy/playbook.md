@@ -4,7 +4,7 @@
 
 ## Core Rules
 
-_No rules distilled yet._
+- `buyback_call` may use patient resting pricing when urgency is low. That is treated differently because it reduces short-call exposure rather than removing downside protection.
 
 ## Regime-Specific Actions
 

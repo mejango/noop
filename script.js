@@ -4239,6 +4239,75 @@ const parseTalebSecondOpinion = (text) => {
   };
 };
 
+const ASSESSMENT_UNSUPPORTED_PATTERNS = [
+  /\befficiency\b/i,
+  /\bthreshold\b/i,
+];
+
+const assessmentUsesUnsupportedMetricLanguage = (text) => {
+  const normalized = String(text || '').trim();
+  if (!normalized) return null;
+  for (const pattern of ASSESSMENT_UNSUPPORTED_PATTERNS) {
+    if (pattern.test(normalized)) return pattern;
+  }
+  return null;
+};
+
+const buildFactualAdvisoryAssessment = ({
+  spotPrice,
+  momentum,
+  mandelbrotContext,
+  sentiment,
+  putBudgetRemaining,
+  secondOpinion = null,
+  entryRulesCount = 0,
+  exitRulesCount = 0,
+}) => {
+  const parts = [];
+  if (Number.isFinite(spotPrice) && spotPrice > 0) {
+    parts.push(`ETH at $${spotPrice.toFixed(0)}.`);
+  }
+
+  if (mandelbrotContext?.regime) {
+    const regimeLabel = String(mandelbrotContext.regime).replace(/_/g, ' ');
+    const confidence = Number(mandelbrotContext.confidence || 0);
+    parts.push(confidence > 0
+      ? `${regimeLabel} regime (${(confidence * 100).toFixed(0)}% confidence).`
+      : `${regimeLabel} regime.`);
+  } else if (momentum?.mediumTerm?.main) {
+    parts.push(`Medium-term momentum ${momentum.mediumTerm.main}.`);
+  }
+
+  const sentiment24h = summarizeSentimentWindowsForLLM(sentiment?.windows || {})['24h'];
+  if (sentiment24h) {
+    const skew = sentiment24h.options_skew;
+    const oi = sentiment24h.aggregate_oi;
+    const skewText = skew?.current_pct != null
+      ? `options skew ${formatSignedPct(skew.current_pct, 2)} (${skew.direction || 'unknown'})`
+      : null;
+    const oiText = oi?.change_pct != null
+      ? `open interest ${formatSignedPct(oi.change_pct, 1)}`
+      : null;
+    if (skewText || oiText) {
+      parts.push([skewText, oiText].filter(Boolean).join(', ') + '.');
+    }
+  }
+
+  if (secondOpinion?.vetoes?.length) {
+    parts.push(`Taleb vetoed ${secondOpinion.vetoes.length} proposed rule${secondOpinion.vetoes.length === 1 ? '' : 's'}.`);
+  }
+
+  if (Number.isFinite(putBudgetRemaining)) {
+    parts.push(`Put budget remaining $${Number(putBudgetRemaining).toFixed(2)}.`);
+  }
+
+  if (entryRulesCount === 0 && exitRulesCount === 0) {
+    parts.push('No new rules proposed.');
+  }
+
+  return parts.join(' ').replace(/\s+/g, ' ').trim() || 'No assessment produced.';
+};
+
 const generateMandelbrotRegimeContext = async ({
   spotPrice,
   momentum,
@@ -5262,6 +5331,9 @@ const formatOrderTypeList = (orderTypes) => orderTypes.map((orderType) => `"${or
 const getActionOrderTypeHardRule = (action) => {
   const policy = getActionPolicy(action);
   if (!policy) return '- HARD RULE: use a valid order type for the action.';
+  if (action === 'buyback_call') {
+    return `- HARD RULE: buyback_call is a reduce_only exit. Choose ${formatOrderTypeList(policy.allowedOrderTypes)} based on urgency and book quality. Patient resting buyback pricing is allowed when there is no urgent threat.`;
+  }
   if (policy.phase === 'exit') {
     return `- HARD RULE: if action is ${EXIT_ACTIONS.join(' or ')}, this is a reduce_only exit. Reduce-only exits must use a non-resting order type. Choose ${formatOrderTypeList(policy.allowedOrderTypes)} only. Never choose "gtc" or "post_only" for reduce_only exits.`;
   }
@@ -6225,6 +6297,12 @@ Things to consider in your assessment:
 
 Use your judgment. Look at the actual Greeks, DTE, IV, momentum, and position characteristics. There are no absolute rules — only the principle that well-priced insurance is bought in calm and sold in fear, and that ETH selloffs tend to be deeper and faster than anyone expects.
 
+## Assessment Writing Constraints
+- In "assessment", use only facts and metric names explicitly present in this prompt or policy constants stated here.
+- Never invent metric labels such as "put efficiency", "call efficiency", "deployment efficiency", "antifragility score", or any unnamed ratio.
+- Never invent thresholds. If you mention a percentage threshold, it must be one of the explicit policy constants stated here and you must name it precisely. Otherwise omit threshold language.
+- For put-budget commentary, use only the supplied budget fields and plain language such as spent, remaining, rollover, or days left. Do not rename budget usage into a new score, efficiency, or threshold.
+
 Given market data, produce a JSON trading agenda with:
 {
   "assessment": "1-3 sentence market assessment and overall stance",
@@ -6366,6 +6444,21 @@ Produce your trading agenda JSON now.`;
     try {
       primaryAgenda = extractJSON(primaryText);
       if (primaryAgenda) {
+        if (typeof primaryAgenda.assessment === 'string') {
+          const unsupportedPattern = assessmentUsesUnsupportedMetricLanguage(primaryAgenda.assessment);
+          if (unsupportedPattern) {
+            primaryAgenda.assessment = buildFactualAdvisoryAssessment({
+              spotPrice,
+              momentum,
+              mandelbrotContext,
+              sentiment,
+              putBudgetRemaining,
+              entryRulesCount: primaryAgenda.entry_rules?.length || 0,
+              exitRulesCount: primaryAgenda.exit_rules?.length || 0,
+            });
+            console.log(`📋 Advisory Step 1: replaced unsupported assessment wording (${unsupportedPattern}) with factual summary`);
+          }
+        }
         console.log(`📋 Advisory Step 1: got ${primaryAgenda.entry_rules?.length || 0} entry rules, ${primaryAgenda.exit_rules?.length || 0} exit rules`);
       } else {
         throw new Error('No JSON block found in primary response');
@@ -6421,7 +6514,11 @@ ETH crashes cascade — they accelerate, not slow down. Your critique should con
 - Buying puts when IV is spiked means overpaying for insurance alongside the crowd. Question the arithmetic.
 - In recovery (price stabilizing, IV still elevated), selling puts to fearful buyers can capture inflated premiums.
 - But these are tendencies, not absolutes. The actual Greeks, DTE, position size, and portfolio shape matter. Use your judgment.
-- Ask: is this trade benefiting from disorder (antifragile) or just reacting to it (fragile)?`;
+- Ask: is this trade benefiting from disorder (antifragile) or just reacting to it (fragile)?
+
+## Writing Constraints
+- Do not invent metric labels or threshold language that is not explicitly present in the shared advisory input.
+- If you discuss put budget, refer only to the supplied budget fields in plain language. Do not rename them into efficiencies, scores, or deployment thresholds.`;
 
     const talebPrompt = `## Shared Advisory Input
 ${sharedAdvisoryInputBlock}
@@ -6471,6 +6568,7 @@ Output JSON only:
 CRITICAL: criteria must be a JSON OBJECT, not a string.
 - Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
 - Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all" }
+- In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 
 Return the FINAL trading agenda as JSON:
 {
@@ -6489,6 +6587,7 @@ Return ONLY valid JSON, no markdown fences.`
 CRITICAL: criteria must be a JSON OBJECT, not a string.
 - Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
 - Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all" }
+- In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 
 Return the FINAL trading agenda as JSON:
 {
@@ -6558,6 +6657,22 @@ Synthesize the final agenda now.`;
       const synthesized = extractJSON(synthesisText);
       if (synthesized) {
         finalAgenda = synthesized;
+        if (typeof finalAgenda.assessment === 'string') {
+          const unsupportedPattern = assessmentUsesUnsupportedMetricLanguage(finalAgenda.assessment);
+          if (unsupportedPattern) {
+            finalAgenda.assessment = buildFactualAdvisoryAssessment({
+              spotPrice,
+              momentum,
+              mandelbrotContext,
+              sentiment,
+              putBudgetRemaining,
+              secondOpinion,
+              entryRulesCount: finalAgenda.entry_rules?.length || 0,
+              exitRulesCount: finalAgenda.exit_rules?.length || 0,
+            });
+            console.log(`📋 Advisory Step 3: replaced unsupported assessment wording (${unsupportedPattern}) with factual summary`);
+          }
+        }
         console.log(`📋 Advisory Step 3: synthesized ${finalAgenda.entry_rules?.length || 0} entry rules, ${finalAgenda.exit_rules?.length || 0} exit rules`);
       } else {
         console.log('📋 Advisory Step 3: no JSON in synthesis response, using primary agenda');

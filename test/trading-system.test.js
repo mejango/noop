@@ -75,6 +75,54 @@ const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => 
   };
 };
 
+const ASSESSMENT_UNSUPPORTED_PATTERNS = [
+  /\befficiency\b/i,
+  /\bthreshold\b/i,
+];
+
+const assessmentUsesUnsupportedMetricLanguage = (text) => {
+  const normalized = String(text || '').trim();
+  if (!normalized) return null;
+  for (const pattern of ASSESSMENT_UNSUPPORTED_PATTERNS) {
+    if (pattern.test(normalized)) return pattern;
+  }
+  return null;
+};
+
+const buildFactualAdvisoryAssessment = ({
+  spotPrice,
+  momentum,
+  mandelbrotContext,
+  putBudgetRemaining,
+  secondOpinion = null,
+  entryRulesCount = 0,
+  exitRulesCount = 0,
+}) => {
+  const parts = [];
+  if (Number.isFinite(spotPrice) && spotPrice > 0) {
+    parts.push(`ETH at $${spotPrice.toFixed(0)}.`);
+  }
+  if (mandelbrotContext?.regime) {
+    const regimeLabel = String(mandelbrotContext.regime).replace(/_/g, ' ');
+    const confidence = Number(mandelbrotContext.confidence || 0);
+    parts.push(confidence > 0
+      ? `${regimeLabel} regime (${(confidence * 100).toFixed(0)}% confidence).`
+      : `${regimeLabel} regime.`);
+  } else if (momentum?.mediumTerm?.main) {
+    parts.push(`Medium-term momentum ${momentum.mediumTerm.main}.`);
+  }
+  if (secondOpinion?.vetoes?.length) {
+    parts.push(`Taleb vetoed ${secondOpinion.vetoes.length} proposed rule${secondOpinion.vetoes.length === 1 ? '' : 's'}.`);
+  }
+  if (Number.isFinite(putBudgetRemaining)) {
+    parts.push(`Put budget remaining $${Number(putBudgetRemaining).toFixed(2)}.`);
+  }
+  if (entryRulesCount === 0 && exitRulesCount === 0) {
+    parts.push('No new rules proposed.');
+  }
+  return parts.join(' ').replace(/\s+/g, ' ').trim() || 'No assessment produced.';
+};
+
 const evaluateConditions = (conditions, logic, values) => {
   if (!Array.isArray(conditions) || conditions.length === 0) return false;
   const results = conditions.map(c => {
@@ -714,6 +762,33 @@ describe('computeCurrentValues', () => {
     assert.strictEqual(result.mark_price, 0.15);
     assert.strictEqual(result.delta, -0.5);
     assert.strictEqual(result.theta, -0.03);
+  });
+});
+
+describe('advisory assessment terminology guard', () => {
+  test('flags invented efficiency language', () => {
+    const pattern = assessmentUsesUnsupportedMetricLanguage('Put efficiency at 84.9% approaching 80% threshold.');
+    assert.ok(pattern instanceof RegExp);
+  });
+
+  test('allows plain factual budget language', () => {
+    const pattern = assessmentUsesUnsupportedMetricLanguage('ETH at $2305. Put budget remaining $0.15.');
+    assert.strictEqual(pattern, null);
+  });
+
+  test('fallback summary avoids unsupported labels', () => {
+    const summary = buildFactualAdvisoryAssessment({
+      spotPrice: 2305,
+      momentum: { mediumTerm: { main: 'transitional' } },
+      mandelbrotContext: { regime: 'transitional', confidence: 0.62 },
+      putBudgetRemaining: 0.15,
+      secondOpinion: { vetoes: [{ rule_index: 0 }] },
+      entryRulesCount: 0,
+      exitRulesCount: 1,
+    });
+    assert.strictEqual(/efficiency|threshold/i.test(summary), false);
+    assert.strictEqual(summary.includes('Put budget remaining $0.15.'), true);
+    assert.strictEqual(summary.includes('Taleb vetoed 1 proposed rule.'), true);
   });
 });
 
