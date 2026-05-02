@@ -89,10 +89,76 @@ const assessmentUsesUnsupportedMetricLanguage = (text) => {
   return null;
 };
 
+const buildAdvisoryObservationThesis = (sentiment24h) => {
+  if (!sentiment24h || typeof sentiment24h !== 'object') return null;
+
+  const skewDirection = String(sentiment24h.options_skew?.direction || '').toLowerCase();
+  const oiChangePct = Number(sentiment24h.aggregate_oi?.change_pct);
+  const oiIsFinite = Number.isFinite(oiChangePct);
+
+  if (skewDirection.includes('narrow') && oiIsFinite && oiChangePct > 0) {
+    return 'Narrowing skew with rising open interest suggests repositioning rather than one-way panic.';
+  }
+  if (skewDirection.includes('narrow') && oiIsFinite && oiChangePct < 0) {
+    return 'Narrowing skew with fading open interest suggests compression and weaker conviction.';
+  }
+  if (skewDirection.includes('widen') && oiIsFinite && oiChangePct > 0) {
+    return 'Widening skew with rising open interest suggests demand for protection is building.';
+  }
+  if (skewDirection.includes('widen') && oiIsFinite && oiChangePct < 0) {
+    return 'Widening skew with falling open interest suggests fear is lingering but participation is thinning.';
+  }
+  if (oiIsFinite && oiChangePct > 0) {
+    return 'Open interest is expanding, so participation is building rather than clearing.';
+  }
+  if (oiIsFinite && oiChangePct < 0) {
+    return 'Open interest is fading, so participation is thinning.';
+  }
+  if (skewDirection.includes('narrow')) {
+    return 'Skew is narrowing, which points to less urgency for downside protection.';
+  }
+  if (skewDirection.includes('widen')) {
+    return 'Skew is widening, which points to a more defensive options posture.';
+  }
+  return null;
+};
+
+const buildAdvisoryStanceSummary = ({
+  putBudgetRemaining,
+  secondOpinion = null,
+  entryRulesCount = 0,
+  exitRulesCount = 0,
+}) => {
+  const vetoCount = secondOpinion?.vetoes?.length || 0;
+  const noEntryRules = entryRulesCount === 0;
+  const noExitRules = exitRulesCount === 0;
+
+  if (noEntryRules && noExitRules) {
+    if (vetoCount > 0) {
+      return `Taleb vetoed ${vetoCount} proposed rule${vetoCount === 1 ? '' : 's'}, so the stance is to sit on hands and wait for cleaner asymmetry.`;
+    }
+    if (Number.isFinite(putBudgetRemaining) && putBudgetRemaining < 1) {
+      return `Put budget remaining $${Number(putBudgetRemaining).toFixed(2)} leaves little room for fresh deployment, so the stance is to sit on hands and wait for cleaner asymmetry.`;
+    }
+    return 'The stance is to sit on hands and wait for cleaner asymmetry.';
+  }
+
+  if (!noEntryRules && noExitRules) {
+    return 'The stance is selective deployment where pricing is favorable.';
+  }
+
+  if (noEntryRules && !noExitRules) {
+    return 'The stance is maintenance over fresh deployment: manage existing risk, do not add new exposure.';
+  }
+
+  return 'The stance is active repositioning: add selectively while cleaning up existing risk.';
+};
+
 const buildFactualAdvisoryAssessment = ({
   spotPrice,
   momentum,
   mandelbrotContext,
+  sentiment,
   putBudgetRemaining,
   secondOpinion = null,
   entryRulesCount = 0,
@@ -106,20 +172,37 @@ const buildFactualAdvisoryAssessment = ({
     const regimeLabel = String(mandelbrotContext.regime).replace(/_/g, ' ');
     const confidence = Number(mandelbrotContext.confidence || 0);
     parts.push(confidence > 0
-      ? `${regimeLabel} regime (${(confidence * 100).toFixed(0)}% confidence).`
+      ? `ETH is in a ${regimeLabel} regime (${(confidence * 100).toFixed(0)}% confidence).`
       : `${regimeLabel} regime.`);
   } else if (momentum?.mediumTerm?.main) {
-    parts.push(`Medium-term momentum ${momentum.mediumTerm.main}.`);
+    parts.push(`Medium-term momentum is ${momentum.mediumTerm.main}.`);
   }
-  if (secondOpinion?.vetoes?.length) {
-    parts.push(`Taleb vetoed ${secondOpinion.vetoes.length} proposed rule${secondOpinion.vetoes.length === 1 ? '' : 's'}.`);
+
+  const sentiment24h = sentiment?.windows?.['24h'] || null;
+  if (sentiment24h) {
+    const skewText = sentiment24h.options_skew?.current_pct != null
+      ? `options skew ${sentiment24h.options_skew.current_pct > 0 ? '+' : ''}${Number(sentiment24h.options_skew.current_pct).toFixed(2)}% (${sentiment24h.options_skew.direction || 'unknown'})`
+      : null;
+    const oiText = sentiment24h.aggregate_oi?.change_pct != null
+      ? `open interest ${sentiment24h.aggregate_oi.change_pct > 0 ? '+' : ''}${Number(sentiment24h.aggregate_oi.change_pct).toFixed(1)}%`
+      : null;
+    if (skewText || oiText) {
+      parts.push([skewText, oiText].filter(Boolean).join(', ') + '.');
+    }
   }
-  if (Number.isFinite(putBudgetRemaining)) {
-    parts.push(`Put budget remaining $${Number(putBudgetRemaining).toFixed(2)}.`);
+
+  const observationThesis = buildAdvisoryObservationThesis(sentiment24h);
+  if (observationThesis) {
+    parts.push(observationThesis);
   }
-  if (entryRulesCount === 0 && exitRulesCount === 0) {
-    parts.push('No new rules proposed.');
-  }
+
+  parts.push(buildAdvisoryStanceSummary({
+    putBudgetRemaining,
+    secondOpinion,
+    entryRulesCount,
+    exitRulesCount,
+  }));
+
   return parts.join(' ').replace(/\s+/g, ' ').trim() || 'No assessment produced.';
 };
 
@@ -781,14 +864,42 @@ describe('advisory assessment terminology guard', () => {
       spotPrice: 2305,
       momentum: { mediumTerm: { main: 'transitional' } },
       mandelbrotContext: { regime: 'transitional', confidence: 0.62 },
+      sentiment: {
+        windows: {
+          '24h': {
+            options_skew: { current_pct: 1.34, direction: 'narrowing' },
+            aggregate_oi: { change_pct: 6.8 },
+          },
+        },
+      },
       putBudgetRemaining: 0.15,
       secondOpinion: { vetoes: [{ rule_index: 0 }] },
       entryRulesCount: 0,
-      exitRulesCount: 1,
+      exitRulesCount: 0,
     });
     assert.strictEqual(/efficiency|threshold/i.test(summary), false);
-    assert.strictEqual(summary.includes('Put budget remaining $0.15.'), true);
-    assert.strictEqual(summary.includes('Taleb vetoed 1 proposed rule.'), true);
+    assert.strictEqual(summary.includes('Narrowing skew with rising open interest suggests repositioning rather than one-way panic.'), true);
+    assert.strictEqual(summary.includes('Taleb vetoed 1 proposed rule, so the stance is to sit on hands and wait for cleaner asymmetry.'), true);
+  });
+
+  test('fallback summary states patience plainly when no rules survive', () => {
+    const summary = buildFactualAdvisoryAssessment({
+      spotPrice: 2311,
+      mandelbrotContext: { regime: 'transitional', confidence: 0.6 },
+      sentiment: {
+        windows: {
+          '24h': {
+            options_skew: { current_pct: 1.34, direction: 'narrowing' },
+            aggregate_oi: { change_pct: 6.8 },
+          },
+        },
+      },
+      putBudgetRemaining: 0.15,
+      entryRulesCount: 0,
+      exitRulesCount: 0,
+    });
+    assert.strictEqual(summary.includes('sit on hands'), true);
+    assert.strictEqual(summary.includes('Put budget remaining $0.15 leaves little room for fresh deployment'), true);
   });
 });
 

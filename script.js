@@ -4253,6 +4253,71 @@ const assessmentUsesUnsupportedMetricLanguage = (text) => {
   return null;
 };
 
+const buildAdvisoryObservationThesis = (sentiment24h) => {
+  if (!sentiment24h || typeof sentiment24h !== 'object') return null;
+
+  const skewDirection = String(sentiment24h.options_skew?.direction || '').toLowerCase();
+  const oiChangePct = Number(sentiment24h.aggregate_oi?.change_pct);
+  const oiIsFinite = Number.isFinite(oiChangePct);
+
+  if (skewDirection.includes('narrow') && oiIsFinite && oiChangePct > 0) {
+    return 'Narrowing skew with rising open interest suggests repositioning rather than one-way panic.';
+  }
+  if (skewDirection.includes('narrow') && oiIsFinite && oiChangePct < 0) {
+    return 'Narrowing skew with fading open interest suggests compression and weaker conviction.';
+  }
+  if (skewDirection.includes('widen') && oiIsFinite && oiChangePct > 0) {
+    return 'Widening skew with rising open interest suggests demand for protection is building.';
+  }
+  if (skewDirection.includes('widen') && oiIsFinite && oiChangePct < 0) {
+    return 'Widening skew with falling open interest suggests fear is lingering but participation is thinning.';
+  }
+  if (oiIsFinite && oiChangePct > 0) {
+    return 'Open interest is expanding, so participation is building rather than clearing.';
+  }
+  if (oiIsFinite && oiChangePct < 0) {
+    return 'Open interest is fading, so participation is thinning.';
+  }
+  if (skewDirection.includes('narrow')) {
+    return 'Skew is narrowing, which points to less urgency for downside protection.';
+  }
+  if (skewDirection.includes('widen')) {
+    return 'Skew is widening, which points to a more defensive options posture.';
+  }
+  return null;
+};
+
+const buildAdvisoryStanceSummary = ({
+  putBudgetRemaining,
+  secondOpinion = null,
+  entryRulesCount = 0,
+  exitRulesCount = 0,
+}) => {
+  const vetoCount = secondOpinion?.vetoes?.length || 0;
+  const noEntryRules = entryRulesCount === 0;
+  const noExitRules = exitRulesCount === 0;
+
+  if (noEntryRules && noExitRules) {
+    if (vetoCount > 0) {
+      return `Taleb vetoed ${vetoCount} proposed rule${vetoCount === 1 ? '' : 's'}, so the stance is to sit on hands and wait for cleaner asymmetry.`;
+    }
+    if (Number.isFinite(putBudgetRemaining) && putBudgetRemaining < 1) {
+      return `Put budget remaining $${Number(putBudgetRemaining).toFixed(2)} leaves little room for fresh deployment, so the stance is to sit on hands and wait for cleaner asymmetry.`;
+    }
+    return 'The stance is to sit on hands and wait for cleaner asymmetry.';
+  }
+
+  if (!noEntryRules && noExitRules) {
+    return 'The stance is selective deployment where pricing is favorable.';
+  }
+
+  if (noEntryRules && !noExitRules) {
+    return 'The stance is maintenance over fresh deployment: manage existing risk, do not add new exposure.';
+  }
+
+  return 'The stance is active repositioning: add selectively while cleaning up existing risk.';
+};
+
 const buildFactualAdvisoryAssessment = ({
   spotPrice,
   momentum,
@@ -4272,10 +4337,10 @@ const buildFactualAdvisoryAssessment = ({
     const regimeLabel = String(mandelbrotContext.regime).replace(/_/g, ' ');
     const confidence = Number(mandelbrotContext.confidence || 0);
     parts.push(confidence > 0
-      ? `${regimeLabel} regime (${(confidence * 100).toFixed(0)}% confidence).`
+      ? `ETH is in a ${regimeLabel} regime (${(confidence * 100).toFixed(0)}% confidence).`
       : `${regimeLabel} regime.`);
   } else if (momentum?.mediumTerm?.main) {
-    parts.push(`Medium-term momentum ${momentum.mediumTerm.main}.`);
+    parts.push(`Medium-term momentum is ${momentum.mediumTerm.main}.`);
   }
 
   const sentiment24h = summarizeSentimentWindowsForLLM(sentiment?.windows || {})['24h'];
@@ -4293,17 +4358,17 @@ const buildFactualAdvisoryAssessment = ({
     }
   }
 
-  if (secondOpinion?.vetoes?.length) {
-    parts.push(`Taleb vetoed ${secondOpinion.vetoes.length} proposed rule${secondOpinion.vetoes.length === 1 ? '' : 's'}.`);
+  const observationThesis = buildAdvisoryObservationThesis(sentiment24h);
+  if (observationThesis) {
+    parts.push(observationThesis);
   }
 
-  if (Number.isFinite(putBudgetRemaining)) {
-    parts.push(`Put budget remaining $${Number(putBudgetRemaining).toFixed(2)}.`);
-  }
-
-  if (entryRulesCount === 0 && exitRulesCount === 0) {
-    parts.push('No new rules proposed.');
-  }
+  parts.push(buildAdvisoryStanceSummary({
+    putBudgetRemaining,
+    secondOpinion,
+    entryRulesCount,
+    exitRulesCount,
+  }));
 
   return parts.join(' ').replace(/\s+/g, ' ').trim() || 'No assessment produced.';
 };
@@ -6298,6 +6363,8 @@ Things to consider in your assessment:
 Use your judgment. Look at the actual Greeks, DTE, IV, momentum, and position characteristics. There are no absolute rules — only the principle that well-priced insurance is bought in calm and sold in fear, and that ETH selloffs tend to be deeper and faster than anyone expects.
 
 ## Assessment Writing Constraints
+- Every assessment must do two jobs: state the clearest current market observation or thesis from the supplied data, and state the operational stance it implies for the bot.
+- If the correct stance is to wait, say so explicitly in plain language such as "sit on hands", "stand aside", or "wait for cleaner asymmetry", and explain why.
 - In "assessment", use only facts and metric names explicitly present in this prompt or policy constants stated here.
 - Never invent metric labels such as "put efficiency", "call efficiency", "deployment efficiency", "antifragility score", or any unnamed ratio.
 - Never invent thresholds. If you mention a percentage threshold, it must be one of the explicit policy constants stated here and you must name it precisely. Otherwise omit threshold language.
@@ -6517,6 +6584,7 @@ ETH crashes cascade — they accelerate, not slow down. Your critique should con
 - Ask: is this trade benefiting from disorder (antifragile) or just reacting to it (fragile)?
 
 ## Writing Constraints
+- In your critique and any replacement assessment language, include a concrete stance. If the correct answer is patience, say so plainly.
 - Do not invent metric labels or threshold language that is not explicitly present in the shared advisory input.
 - If you discuss put budget, refer only to the supplied budget fields in plain language. Do not rename them into efficiencies, scores, or deployment thresholds.`;
 
@@ -6568,6 +6636,7 @@ Output JSON only:
 CRITICAL: criteria must be a JSON OBJECT, not a string.
 - Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
 - Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all" }
+- The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 
 Return the FINAL trading agenda as JSON:
@@ -6587,6 +6656,7 @@ Return ONLY valid JSON, no markdown fences.`
 CRITICAL: criteria must be a JSON OBJECT, not a string.
 - Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
 - Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all" }
+- The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 
 Return the FINAL trading agenda as JSON:
