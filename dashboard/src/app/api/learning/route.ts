@@ -42,6 +42,7 @@ type PendingCampaign = {
   review_state: 'awaiting_horizon' | 'ready_for_review' | 'reviewed';
   next_review_at: string | null;
   review_window_days: number;
+  completed_review_windows: number[];
 };
 
 const TRADE_REVIEW_WINDOWS_DAYS = [1, 3, 7];
@@ -150,7 +151,7 @@ function deriveClosedTradeCampaigns(orders: TradeOrder[]): PendingCampaign[] {
   for (const [instrumentName, instrumentOrders] of Array.from(byInstrument.entries())) {
     instrumentOrders.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     let netExposure = 0;
-    let active: Omit<PendingCampaign, 'id' | 'review_state' | 'next_review_at' | 'review_window_days'> | null = null;
+    let active: Omit<PendingCampaign, 'id' | 'review_state' | 'next_review_at' | 'review_window_days' | 'completed_review_windows'> | null = null;
 
     for (const order of instrumentOrders) {
       const qty = Math.abs(Number(order.filled_amount ?? 0));
@@ -195,6 +196,7 @@ function deriveClosedTradeCampaigns(orders: TradeOrder[]): PendingCampaign[] {
           review_state: 'awaiting_horizon',
           next_review_at: null,
           review_window_days: 1,
+          completed_review_windows: [],
         });
         active = null;
         netExposure = 0;
@@ -253,6 +255,7 @@ export async function GET() {
         let reviewState: PendingCampaign['review_state'] = 'awaiting_horizon';
         let nextReviewAt: string | null = null;
         let reviewWindowDays = 1;
+        const completedReviewWindows: number[] = [];
 
         for (const windowDays of TRADE_REVIEW_WINDOWS_DAYS) {
           const horizonEndAt = new Date(new Date(campaign.closed_at).getTime() + windowDays * 24 * 60 * 60 * 1000).toISOString();
@@ -261,6 +264,7 @@ export async function GET() {
             reviewState = 'reviewed';
             nextReviewAt = horizonEndAt;
             reviewWindowDays = windowDays;
+            completedReviewWindows.push(windowDays);
             continue;
           }
           reviewState = now >= new Date(horizonEndAt).getTime() ? 'ready_for_review' : 'awaiting_horizon';
@@ -274,6 +278,7 @@ export async function GET() {
           review_state: reviewState,
           next_review_at: nextReviewAt,
           review_window_days: reviewWindowDays,
+          completed_review_windows: completedReviewWindows,
         };
       })
       .filter((campaign) => new Date(campaign.closed_at).getTime() >= recentCampaignCutoffMs)

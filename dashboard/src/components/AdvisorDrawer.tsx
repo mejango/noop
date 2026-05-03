@@ -98,11 +98,22 @@ const HIDDEN_JOURNAL_ENTRY_TYPES = new Set([
 
 function timeUntil(ts: string): string {
   const diff = new Date(ts).getTime() - Date.now();
-  if (diff <= 0) return 'reviewing...';
-  const hrs = Math.floor(diff / 3600000);
-  const mins = Math.floor((diff % 3600000) / 60000);
-  if (hrs > 0) return `verdict in ${hrs}h ${mins}m`;
-  return `verdict in ${mins}m`;
+  if (diff <= 0) return 'now';
+  const days = Math.ceil(diff / (24 * 60 * 60 * 1000));
+  if (days >= 1) return `in ${days}d`;
+  const hrs = Math.ceil(diff / (60 * 60 * 1000));
+  if (hrs >= 1) return `in ${hrs}h`;
+  const mins = Math.ceil(diff / 60000);
+  return `in ${Math.max(1, mins)}m`;
+}
+
+function formatCampaignReviewProgress(campaign: PendingTradeCampaign): string {
+  const completed = Array.isArray(campaign.completed_review_windows) ? campaign.completed_review_windows : [];
+  const reviewedPrefix = completed.length > 0 ? `reviewed ${completed.map((days) => `${days}d`).join(', ')}` : null;
+  const currentState = campaign.review_state === 'ready_for_review'
+    ? 'review ready'
+    : `awaiting ${campaign.review_window_days}d`;
+  return reviewedPrefix ? `${reviewedPrefix} • ${currentState}` : currentState;
 }
 
 const STARTERS = [
@@ -369,6 +380,7 @@ interface PendingTradeCampaign {
   review_state: 'awaiting_horizon' | 'ready_for_review' | 'reviewed';
   next_review_at: string | null;
   review_window_days: number;
+  completed_review_windows: number[];
 }
 
 interface LearningStatus {
@@ -1101,11 +1113,11 @@ export default function AdvisorDrawer() {
                       </div>
                       <div className="text-right shrink-0">
                         <p className={`text-[10px] ${campaign.review_state === 'ready_for_review' ? 'text-amber-300' : 'text-blue-300'}`}>
-                          {campaign.review_state === 'ready_for_review' ? 'review ready' : `awaiting ${campaign.review_window_days}d`}
+                          {formatCampaignReviewProgress(campaign)}
                         </p>
                         {campaign.next_review_at && (
                           <p className="text-[10px] text-gray-600">
-                            {campaign.review_state === 'ready_for_review' ? `since ${timeAgo(campaign.next_review_at)}` : `at ${timeAgo(campaign.next_review_at)}`}
+                            {campaign.review_state === 'ready_for_review' ? `since ${timeAgo(campaign.next_review_at)}` : timeUntil(campaign.next_review_at)}
                           </p>
                         )}
                       </div>
