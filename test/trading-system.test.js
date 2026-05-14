@@ -75,6 +75,145 @@ const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => 
   };
 };
 
+const getTradeCashflow = (order) => {
+  const totalValue = Number(order.total_value || 0);
+  if (order.action === 'sell_call' || order.action === 'sell_put') return totalValue;
+  if (order.action === 'buy_put' || order.action === 'buyback_call') return -totalValue;
+  return 0;
+};
+
+const getTradeActionFamily = (action) => {
+  if (action === 'sell_call' || action === 'buyback_call') return 'short_call_campaign';
+  if (action === 'buy_put' || action === 'sell_put') return 'long_put_campaign';
+  return null;
+};
+
+const getExpiryTimestampFromInstrument = (instrumentName) => {
+  const expiry = parseExpiryFromInstrument(instrumentName);
+  const timestamp = expiry?.getTime?.();
+  return Number.isFinite(timestamp) ? timestamp : null;
+};
+
+const getExpiryCloseAction = (instrumentName) => {
+  if (instrumentName?.endsWith('-C')) return 'expire_call';
+  if (instrumentName?.endsWith('-P')) return 'expire_put';
+  return 'expire_option';
+};
+
+const buildSyntheticExpiryCloseOrder = (active, instrumentName, expiryMs, netExposure) => ({
+  id: `expiry:${instrumentName}:${new Date(expiryMs).toISOString()}`,
+  timestamp: new Date(expiryMs).toISOString(),
+  action: getExpiryCloseAction(instrumentName),
+  success: 1,
+  reason: 'Synthetic expiry close for trade review',
+  instrument_name: instrumentName,
+  intended_amount: Math.max(0, netExposure),
+  filled_amount: Math.max(0, netExposure),
+  fill_price: 0,
+  total_value: 0,
+  spot_price: null,
+  family: active?.action_family || getTradeActionFamily(active?.open_orders?.[0]?.action),
+  _source: 'synthetic_expiry',
+});
+
+const closeCampaignAtExpiry = (campaigns, active, instrumentName, expiryMs, netExposure) => {
+  const expiryOrder = buildSyntheticExpiryCloseOrder(active, instrumentName, expiryMs, netExposure);
+  active.order_ids.push(expiryOrder.id);
+  active.orders.push(expiryOrder);
+  active.close_orders.push(expiryOrder);
+  active.pnl_realized += getTradeCashflow(expiryOrder);
+  active.premium_closed += Number(expiryOrder.total_value || 0);
+  active.closed_at = expiryOrder.timestamp;
+  active.spot_close = null;
+  campaigns.push(active);
+};
+
+const deriveClosedTradeCampaigns = (orders, now = Date.now()) => {
+  const byInstrument = new Map();
+  for (const order of orders) {
+    if (!order?.instrument_name || Number(order?.success || 0) !== 1) continue;
+    const family = getTradeActionFamily(order.action);
+    if (!family) continue;
+    const list = byInstrument.get(order.instrument_name) || [];
+    list.push({ ...order, family });
+    byInstrument.set(order.instrument_name, list);
+  }
+
+  const campaigns = [];
+  const EPS = 1e-9;
+
+  for (const [instrumentName, instrumentOrders] of byInstrument.entries()) {
+    instrumentOrders.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const expiryMs = getExpiryTimestampFromInstrument(instrumentName);
+    let netExposure = 0;
+    let active = null;
+
+    for (const order of instrumentOrders) {
+      const orderMs = new Date(order.timestamp).getTime();
+      if (active && netExposure > EPS && expiryMs != null && Number.isFinite(orderMs) && expiryMs <= Math.min(orderMs, now)) {
+        closeCampaignAtExpiry(campaigns, active, instrumentName, expiryMs, netExposure);
+        active = null;
+        netExposure = 0;
+      }
+
+      const qty = Math.abs(Number(order.filled_amount || 0));
+      if (!(qty > 0)) continue;
+
+      const isOpen = order.action === 'sell_call' || order.action === 'buy_put';
+      const exposureDelta = isOpen ? qty : -qty;
+
+      if (!active && isOpen) {
+        active = {
+          instrument_name: instrumentName,
+          action_family: order.family,
+          opened_at: order.timestamp,
+          closed_at: null,
+          order_ids: [],
+          orders: [],
+          open_orders: [],
+          close_orders: [],
+          premium_opened: 0,
+          premium_closed: 0,
+          pnl_realized: 0,
+          spot_open: Number(order.spot_price || 0) || null,
+          spot_close: null,
+        };
+      }
+
+      if (!active) continue;
+
+      active.order_ids.push(order.id);
+      active.orders.push(order);
+      active.pnl_realized += getTradeCashflow(order);
+      if (isOpen) {
+        active.open_orders.push(order);
+        active.premium_opened += Number(order.total_value || 0);
+      } else {
+        active.close_orders.push(order);
+        active.premium_closed += Number(order.total_value || 0);
+      }
+
+      netExposure += exposureDelta;
+
+      if (netExposure <= EPS) {
+        active.closed_at = order.timestamp;
+        active.spot_close = Number(order.spot_price || 0) || null;
+        campaigns.push(active);
+        active = null;
+        netExposure = 0;
+      }
+    }
+
+    if (active && netExposure > EPS) {
+      if (expiryMs != null && expiryMs <= now) {
+        closeCampaignAtExpiry(campaigns, active, instrumentName, expiryMs, netExposure);
+      }
+    }
+  }
+
+  return campaigns;
+};
+
 const ASSESSMENT_UNSUPPORTED_PATTERNS = [
   /\befficiency\b/i,
   /\bthreshold\b/i,
@@ -845,6 +984,109 @@ describe('computeCurrentValues', () => {
     assert.strictEqual(result.mark_price, 0.15);
     assert.strictEqual(result.delta, -0.5);
     assert.strictEqual(result.theta, -0.03);
+  });
+});
+
+describe('deriveClosedTradeCampaigns expiry closure', () => {
+  test('expired short call closes synthetically at option expiry', () => {
+    const instrument = 'ETH-20200102-2000-C';
+    const campaigns = deriveClosedTradeCampaigns([
+      {
+        id: 1,
+        timestamp: '2020-01-01T12:00:00.000Z',
+        action: 'sell_call',
+        success: 1,
+        instrument_name: instrument,
+        filled_amount: 2,
+        total_value: 10,
+        spot_price: 1800,
+      },
+    ], new Date('2020-01-03T00:00:00.000Z').getTime());
+
+    assert.strictEqual(campaigns.length, 1);
+    assert.strictEqual(campaigns[0].closed_at, '2020-01-02T08:00:00.000Z');
+    assert.strictEqual(campaigns[0].close_orders[0].action, 'expire_call');
+    assert.strictEqual(campaigns[0].premium_closed, 0);
+    assert.strictEqual(campaigns[0].pnl_realized, 10);
+  });
+
+  test('future expiry does not close residual exposure', () => {
+    const campaigns = deriveClosedTradeCampaigns([
+      {
+        id: 1,
+        timestamp: '2099-01-01T12:00:00.000Z',
+        action: 'buy_put',
+        success: 1,
+        instrument_name: 'ETH-20990105-1000-P',
+        filled_amount: 1,
+        total_value: 4,
+        spot_price: 1800,
+      },
+    ], new Date('2099-01-03T00:00:00.000Z').getTime());
+
+    assert.strictEqual(campaigns.length, 0);
+  });
+
+  test('explicit close before expiry still closes at explicit order', () => {
+    const instrument = 'ETH-20990105-2000-C';
+    const campaigns = deriveClosedTradeCampaigns([
+      {
+        id: 1,
+        timestamp: '2099-01-01T12:00:00.000Z',
+        action: 'sell_call',
+        success: 1,
+        instrument_name: instrument,
+        filled_amount: 1,
+        total_value: 5,
+        spot_price: 1800,
+      },
+      {
+        id: 2,
+        timestamp: '2099-01-02T12:00:00.000Z',
+        action: 'buyback_call',
+        success: 1,
+        instrument_name: instrument,
+        filled_amount: 1,
+        total_value: 1,
+        spot_price: 1850,
+      },
+    ], new Date('2099-01-06T00:00:00.000Z').getTime());
+
+    assert.strictEqual(campaigns.length, 1);
+    assert.strictEqual(campaigns[0].closed_at, '2099-01-02T12:00:00.000Z');
+    assert.strictEqual(campaigns[0].close_orders[0].action, 'buyback_call');
+    assert.strictEqual(campaigns[0].pnl_realized, 4);
+  });
+
+  test('post-expiry recovered close does not override expiry close timestamp', () => {
+    const instrument = 'ETH-20200102-2000-C';
+    const campaigns = deriveClosedTradeCampaigns([
+      {
+        id: 1,
+        timestamp: '2020-01-01T12:00:00.000Z',
+        action: 'sell_call',
+        success: 1,
+        instrument_name: instrument,
+        filled_amount: 1,
+        total_value: 5,
+        spot_price: 1800,
+      },
+      {
+        id: 2,
+        timestamp: '2020-01-03T12:00:00.000Z',
+        action: 'buyback_call',
+        success: 1,
+        instrument_name: instrument,
+        filled_amount: 1,
+        total_value: 1,
+        spot_price: 1850,
+      },
+    ], new Date('2020-01-04T00:00:00.000Z').getTime());
+
+    assert.strictEqual(campaigns.length, 1);
+    assert.strictEqual(campaigns[0].closed_at, '2020-01-02T08:00:00.000Z');
+    assert.strictEqual(campaigns[0].close_orders[0].action, 'expire_call');
+    assert.strictEqual(campaigns[0].pnl_realized, 5);
   });
 });
 

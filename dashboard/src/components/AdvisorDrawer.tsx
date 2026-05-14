@@ -381,7 +381,7 @@ interface PendingTradeCampaign {
   action_family: string;
   opened_at: string | null;
   closed_at: string;
-  order_ids: number[];
+  order_ids: Array<number | string>;
   pnl_realized: number;
   premium_opened: number;
   premium_closed: number;

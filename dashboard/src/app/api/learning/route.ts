@@ -5,6 +5,7 @@ import {
   getOrdersInRange,
   getRecentTradeOrderStats,
   getRecentTradeReviews,
+  getSpotPrices,
   getTradeReviewSummary,
   hasTable,
 } from '@/lib/db';
@@ -13,9 +14,10 @@ import { getTradeHistory } from '@/lib/lyra';
 export const dynamic = 'force-dynamic';
 
 const LEARNING_RECENT_LOOKBACK_DAYS = 5;
+const TRADE_REVIEW_LOOKBACK_DAYS = 120;
 
 type TradeOrder = {
-  id: number;
+  id: number | string;
   timestamp: string;
   action: string;
   success: number;
@@ -33,7 +35,7 @@ type PendingCampaign = {
   action_family: string;
   opened_at: string | null;
   closed_at: string;
-  order_ids: number[];
+  order_ids: Array<number | string>;
   pnl_realized: number;
   premium_opened: number;
   premium_closed: number;
@@ -43,6 +45,8 @@ type PendingCampaign = {
   next_review_at: string | null;
   review_window_days: number;
   completed_review_windows: number[];
+  close_reason?: 'expiry' | 'offsetting_order';
+  expiry_amount?: number | null;
 };
 
 const TRADE_REVIEW_WINDOWS_DAYS = [1, 3, 7];
@@ -58,6 +62,116 @@ function getTradeActionFamily(action: string) {
   if (action === 'sell_call' || action === 'buyback_call') return 'short_call_campaign';
   if (action === 'buy_put' || action === 'sell_put') return 'long_put_campaign';
   return null;
+}
+
+function parseExpiryFromInstrument(instrumentName: string | null) {
+  const parts = String(instrumentName || '').split('-');
+  if (parts.length < 4) return null;
+  const expiryKey = parts[1];
+  if (!/^\d{8}$/.test(expiryKey)) return null;
+  const expiry = new Date(`${expiryKey.slice(0, 4)}-${expiryKey.slice(4, 6)}-${expiryKey.slice(6, 8)}T08:00:00Z`);
+  const timestamp = expiry.getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function parseTradeInstrumentParts(instrumentName: string | null) {
+  const parts = String(instrumentName || '').split('-');
+  if (parts.length !== 4) return null;
+  const strike = Number(parts[2]);
+  if (!Number.isFinite(strike)) return null;
+  return { strike, optionType: parts[3] };
+}
+
+function getExpiryCloseAction(instrumentName: string | null) {
+  if (instrumentName?.endsWith('-C')) return 'expire_call';
+  if (instrumentName?.endsWith('-P')) return 'expire_put';
+  return 'expire_option';
+}
+
+function buildSyntheticExpiryCloseOrder(
+  active: Omit<PendingCampaign, 'id' | 'review_state' | 'next_review_at' | 'review_window_days' | 'completed_review_windows'>,
+  instrumentName: string,
+  expiryMs: number,
+  netExposure: number
+): TradeOrder & { family: string } {
+  return {
+    id: `expiry:${instrumentName}:${new Date(expiryMs).toISOString()}`,
+    timestamp: new Date(expiryMs).toISOString(),
+    action: getExpiryCloseAction(instrumentName),
+    success: 1,
+    instrument_name: instrumentName,
+    intended_amount: Math.max(0, netExposure),
+    filled_amount: Math.max(0, netExposure),
+    total_value: 0,
+    spot_price: null,
+    fill_price: 0,
+    family: active.action_family,
+  };
+}
+
+function closeCampaignAtExpiry(
+  campaigns: PendingCampaign[],
+  active: Omit<PendingCampaign, 'id' | 'review_state' | 'next_review_at' | 'review_window_days' | 'completed_review_windows'>,
+  instrumentName: string,
+  expiryMs: number,
+  netExposure: number
+) {
+  const expiryOrder = buildSyntheticExpiryCloseOrder(active, instrumentName, expiryMs, netExposure);
+  active.order_ids.push(expiryOrder.id);
+  active.pnl_realized += getTradeCashflow(expiryOrder);
+  active.premium_closed += Number(expiryOrder.total_value ?? 0);
+  active.closed_at = expiryOrder.timestamp;
+  active.spot_close = null;
+  campaigns.push({
+    ...active,
+    id: `${instrumentName}:${expiryOrder.timestamp}`,
+    review_state: 'awaiting_horizon',
+    next_review_at: null,
+    review_window_days: 1,
+    completed_review_windows: [],
+    close_reason: 'expiry',
+    expiry_amount: Math.max(0, netExposure),
+  });
+}
+
+function getSpotAtOrBefore(rows: Array<{ timestamp: string; price: number }>, timestamp: string) {
+  const targetMs = new Date(timestamp).getTime();
+  if (!Number.isFinite(targetMs) || !Array.isArray(rows) || rows.length === 0) return null;
+  let best: number | null = null;
+  let bestMs = -Infinity;
+  for (const row of rows) {
+    const rowMs = new Date(row.timestamp).getTime();
+    const price = Number(row.price);
+    if (!Number.isFinite(rowMs) || !Number.isFinite(price)) continue;
+    if (rowMs <= targetMs && rowMs > bestMs) {
+      best = price;
+      bestMs = rowMs;
+    }
+  }
+  return best;
+}
+
+function applyExpirySettlementToCampaign(campaign: PendingCampaign, spotRows: Array<{ timestamp: string; price: number }>) {
+  if (campaign.close_reason !== 'expiry') return campaign;
+  const parsed = parseTradeInstrumentParts(campaign.instrument_name);
+  const spotClose = campaign.spot_close ?? getSpotAtOrBefore(spotRows, campaign.closed_at);
+  const amount = Math.abs(Number(campaign.expiry_amount || 0));
+  if (!parsed || spotClose == null || !Number.isFinite(spotClose) || !(amount > 0)) return campaign;
+  const intrinsic = parsed.optionType === 'C'
+    ? Math.max(0, spotClose - parsed.strike)
+    : parsed.optionType === 'P'
+      ? Math.max(0, parsed.strike - spotClose)
+      : 0;
+  const settlementValue = intrinsic * amount;
+  const settlementCashflow = campaign.action_family === 'short_call_campaign'
+    ? -settlementValue
+    : settlementValue;
+  return {
+    ...campaign,
+    pnl_realized: campaign.pnl_realized + settlementCashflow,
+    premium_closed: campaign.premium_closed + settlementValue,
+    spot_close: spotClose,
+  };
 }
 
 function getActionFromTradeDirection(instrumentName: string | null, direction: string | null | undefined) {
@@ -134,7 +248,7 @@ function mergeOrdersForTradeReview(localOrders: TradeOrder[], lyraTradesRaw: Rec
   return merged;
 }
 
-function deriveClosedTradeCampaigns(orders: TradeOrder[]): PendingCampaign[] {
+function deriveClosedTradeCampaigns(orders: TradeOrder[], now = Date.now()): PendingCampaign[] {
   const byInstrument = new Map<string, Array<TradeOrder & { family: string }>>();
   for (const order of orders) {
     if (!order.instrument_name || Number(order.success || 0) !== 1) continue;
@@ -150,10 +264,18 @@ function deriveClosedTradeCampaigns(orders: TradeOrder[]): PendingCampaign[] {
 
   for (const [instrumentName, instrumentOrders] of Array.from(byInstrument.entries())) {
     instrumentOrders.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const expiryMs = parseExpiryFromInstrument(instrumentName);
     let netExposure = 0;
     let active: Omit<PendingCampaign, 'id' | 'review_state' | 'next_review_at' | 'review_window_days' | 'completed_review_windows'> | null = null;
 
     for (const order of instrumentOrders) {
+      const orderMs = new Date(order.timestamp).getTime();
+      if (active && netExposure > EPS && expiryMs != null && Number.isFinite(orderMs) && expiryMs <= Math.min(orderMs, now)) {
+        closeCampaignAtExpiry(campaigns, active, instrumentName, expiryMs, netExposure);
+        active = null;
+        netExposure = 0;
+      }
+
       const qty = Math.abs(Number(order.filled_amount ?? 0));
       if (!(qty > 0)) continue;
 
@@ -197,9 +319,17 @@ function deriveClosedTradeCampaigns(orders: TradeOrder[]): PendingCampaign[] {
           next_review_at: null,
           review_window_days: 1,
           completed_review_windows: [],
+          close_reason: 'offsetting_order',
+          expiry_amount: null,
         });
         active = null;
         netExposure = 0;
+      }
+    }
+
+    if (active && netExposure > EPS) {
+      if (expiryMs != null && expiryMs <= now) {
+        closeCampaignAtExpiry(campaigns, active, instrumentName, expiryMs, netExposure);
       }
     }
   }
@@ -218,11 +348,13 @@ export async function GET() {
       last_timestamp: null,
     };
     const now = Date.now();
+    const reviewLookbackStart = now - TRADE_REVIEW_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
     const recentOrders = getOrdersInRange(
-      new Date(now - 21 * 24 * 60 * 60 * 1000).toISOString(),
+      new Date(reviewLookbackStart).toISOString(),
       new Date(now).toISOString()
     ) as TradeOrder[];
-    const lyraTradesRaw = await getTradeHistory(now - 21 * 24 * 60 * 60 * 1000);
+    const spotRows = getSpotPrices(new Date(reviewLookbackStart).toISOString(), 10000) as Array<{ timestamp: string; price: number }>;
+    const lyraTradesRaw = await getTradeHistory(reviewLookbackStart);
     const reviewSummary = hasTradeReviewsTable
       ? (getTradeReviewSummary() || { review_count: 0, instrument_count: 0, last_created_at: null })
       : { review_count: 0, instrument_count: 0, last_created_at: null };
@@ -248,7 +380,8 @@ export async function GET() {
     const reviewKeys = new Set(
       reviews.map((review) => `${review.instrument_name}:${review.closed_at}:${review.review_window_days}`)
     );
-    const derivedCampaigns = deriveClosedTradeCampaigns(mergedOrders);
+    const derivedCampaigns = deriveClosedTradeCampaigns(mergedOrders, now)
+      .map((campaign) => applyExpirySettlementToCampaign(campaign, spotRows));
     const recentCampaignCutoffMs = now - LEARNING_RECENT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
     const pendingCampaigns = derivedCampaigns
       .map((campaign) => {

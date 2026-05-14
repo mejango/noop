@@ -2259,6 +2259,91 @@ const getTradeActionFamily = (action) => {
   return null;
 };
 
+const getExpiryTimestampFromInstrument = (instrumentName) => {
+  const expiry = parseExpiryFromInstrument(instrumentName);
+  const timestamp = expiry?.getTime?.();
+  return Number.isFinite(timestamp) ? timestamp : null;
+};
+
+const getExpiryCloseAction = (instrumentName) => {
+  if (instrumentName?.endsWith('-C')) return 'expire_call';
+  if (instrumentName?.endsWith('-P')) return 'expire_put';
+  return 'expire_option';
+};
+
+const buildSyntheticExpiryCloseOrder = (active, instrumentName, expiryMs, netExposure) => ({
+  id: `expiry:${instrumentName}:${new Date(expiryMs).toISOString()}`,
+  timestamp: new Date(expiryMs).toISOString(),
+  action: getExpiryCloseAction(instrumentName),
+  success: 1,
+  reason: 'Synthetic expiry close for trade review',
+  instrument_name: instrumentName,
+  strike: null,
+  expiry: Math.floor(expiryMs / 1000),
+  delta: null,
+  price: 0,
+  intended_amount: Math.max(0, netExposure),
+  filled_amount: Math.max(0, netExposure),
+  fill_price: 0,
+  total_value: 0,
+  spot_price: null,
+  raw_response: { synthetic: true, reason: 'expired' },
+  family: active?.action_family || getTradeActionFamily(active?.open_orders?.[0]?.action),
+  _source: 'synthetic_expiry',
+});
+
+const parseTradeInstrumentParts = (instrumentName) => {
+  const parts = String(instrumentName || '').split('-');
+  if (parts.length !== 4) return null;
+  const strike = Number(parts[2]);
+  if (!Number.isFinite(strike)) return null;
+  return { strike, optionType: parts[3] };
+};
+
+const getSpotAtOrBefore = (rows, timestamp) => {
+  const targetMs = new Date(timestamp).getTime();
+  if (!Number.isFinite(targetMs) || !Array.isArray(rows) || rows.length === 0) return null;
+  let best = null;
+  let bestMs = -Infinity;
+  for (const row of rows) {
+    const rowMs = new Date(row.timestamp).getTime();
+    const price = Number(row.price);
+    if (!Number.isFinite(rowMs) || !Number.isFinite(price)) continue;
+    if (rowMs <= targetMs && rowMs > bestMs) {
+      best = price;
+      bestMs = rowMs;
+    }
+  }
+  return best;
+};
+
+const getExpirySettlementValue = (campaign, spotClose) => {
+  const expiryClose = campaign?.close_orders?.find((order) => order?._source === 'synthetic_expiry');
+  if (!expiryClose || !Number.isFinite(spotClose)) return null;
+  const parsed = parseTradeInstrumentParts(campaign.instrument_name);
+  if (!parsed) return null;
+  const amount = Math.abs(Number(expiryClose.filled_amount || expiryClose.intended_amount || 0));
+  if (!(amount > 0)) return null;
+  const intrinsic = parsed.optionType === 'C'
+    ? Math.max(0, spotClose - parsed.strike)
+    : parsed.optionType === 'P'
+      ? Math.max(0, parsed.strike - spotClose)
+      : 0;
+  return intrinsic * amount;
+};
+
+const closeCampaignAtExpiry = (campaigns, active, instrumentName, expiryMs, netExposure) => {
+  const expiryOrder = buildSyntheticExpiryCloseOrder(active, instrumentName, expiryMs, netExposure);
+  active.order_ids.push(expiryOrder.id);
+  active.orders.push(expiryOrder);
+  active.close_orders.push(expiryOrder);
+  active.pnl_realized += getTradeCashflow(expiryOrder);
+  active.premium_closed += Number(expiryOrder.total_value || 0);
+  active.closed_at = expiryOrder.timestamp;
+  active.spot_close = null;
+  campaigns.push(active);
+};
+
 const getActionFromTradeDirection = (instrumentName, direction) => {
   if (!instrumentName || !direction) return null;
   const normalized = String(direction).toLowerCase();
@@ -2342,7 +2427,7 @@ const mergeOrdersForTradeReview = (localOrders, lyraTrades) => {
   return merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 };
 
-const deriveClosedTradeCampaigns = (orders) => {
+const deriveClosedTradeCampaigns = (orders, now = Date.now()) => {
   const byInstrument = new Map();
   for (const order of orders) {
     if (!order?.instrument_name || Number(order?.success || 0) !== 1) continue;
@@ -2358,10 +2443,18 @@ const deriveClosedTradeCampaigns = (orders) => {
 
   for (const [instrumentName, instrumentOrders] of byInstrument.entries()) {
     instrumentOrders.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    const expiryMs = getExpiryTimestampFromInstrument(instrumentName);
     let netExposure = 0;
     let active = null;
 
     for (const order of instrumentOrders) {
+      const orderMs = new Date(order.timestamp).getTime();
+      if (active && netExposure > EPS && expiryMs != null && Number.isFinite(orderMs) && expiryMs <= Math.min(orderMs, now)) {
+        closeCampaignAtExpiry(campaigns, active, instrumentName, expiryMs, netExposure);
+        active = null;
+        netExposure = 0;
+      }
+
       const qty = Math.abs(Number(order.filled_amount || 0));
       if (!(qty > 0)) continue;
 
@@ -2409,11 +2502,18 @@ const deriveClosedTradeCampaigns = (orders) => {
         netExposure = 0;
       }
     }
+
+    if (active && netExposure > EPS) {
+      if (expiryMs != null && expiryMs <= now) {
+        closeCampaignAtExpiry(campaigns, active, instrumentName, expiryMs, netExposure);
+      }
+    }
   }
 
   return campaigns;
 };
 
+const TRADE_REVIEW_LOOKBACK_DAYS = 120;
 const TRADE_REVIEW_WINDOWS_DAYS = [1, 3, 7];
 const collectPendingTradeReviews = (campaigns, now) => {
   const pendingReviews = [];
@@ -2443,13 +2543,13 @@ const reviewClosedTrades = async () => {
     botData.lastTradeReviewError = null;
     persistCycleState();
     const now = Date.now();
-    const fromMs = now - 21 * 24 * 60 * 60 * 1000;
+    const fromMs = now - TRADE_REVIEW_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
     const since = new Date(fromMs).toISOString();
     const recentOrders = db.getOrdersInRange
       ? (db.getOrdersInRange(since, new Date(now).toISOString()) || [])
       : (db.getRecentOrders(since, 1000) || []);
     const lyraTrades = await fetchTradeHistory(fromMs, now);
-    const campaigns = deriveClosedTradeCampaigns(mergeOrdersForTradeReview(recentOrders, lyraTrades));
+    const campaigns = deriveClosedTradeCampaigns(mergeOrdersForTradeReview(recentOrders, lyraTrades), now);
     const pendingReviews = collectPendingTradeReviews(campaigns, now);
     botData.lastTradeReviewReadyCount = pendingReviews.length;
     botData.lastTradeReviewTargets = pendingReviews.map((campaign) => ({
@@ -2475,6 +2575,16 @@ const reviewClosedTrades = async () => {
         const priceWindow = db.getRecentSpotPrices(campaign.opened_at) || [];
         const whileOpen = priceWindow.filter(p => p.timestamp >= campaign.opened_at && p.timestamp <= campaign.closed_at);
         const afterClose = priceWindow.filter(p => p.timestamp > campaign.closed_at && p.timestamp <= campaign.horizon_end_at);
+        const spotAtClose = campaign.spot_close ?? getSpotAtOrBefore(whileOpen, campaign.closed_at);
+        const expirySettlementValue = getExpirySettlementValue(campaign, spotAtClose);
+        const expirySettlementCashflow = expirySettlementValue == null
+          ? 0
+          : campaign.action_family === 'short_call_campaign'
+            ? -expirySettlementValue
+            : expirySettlementValue;
+        const effectivePnlRealized = campaign.pnl_realized + expirySettlementCashflow;
+        const effectivePremiumClosed = campaign.premium_closed + (expirySettlementValue || 0);
+        const closeReason = campaign.close_orders?.some((order) => order?._source === 'synthetic_expiry') ? 'expiry' : 'offsetting order';
 
         const reviewPrompt = `You are reviewing a CLOSED options trade campaign for a Spitznagel-style ETH tail-hedging bot.
 
@@ -2498,12 +2608,14 @@ Campaign:
 - Family: ${campaign.action_family}
 - Opened: ${campaign.opened_at}
 - Closed: ${campaign.closed_at}
+- Close reason: ${closeReason}
 - Review horizon: ${campaign.review_window_days} day(s) after close, through ${campaign.horizon_end_at}
-- Realized campaign cashflow: $${campaign.pnl_realized.toFixed(4)}
+- Realized campaign cashflow: $${effectivePnlRealized.toFixed(4)}
 - Premium opened: $${campaign.premium_opened.toFixed(4)}
-- Premium closed: $${campaign.premium_closed.toFixed(4)}
+- Premium closed: $${effectivePremiumClosed.toFixed(4)}
 - Spot at open: ${campaign.spot_open != null ? `$${campaign.spot_open}` : 'N/A'}
-- Spot at close: ${campaign.spot_close != null ? `$${campaign.spot_close}` : 'N/A'}
+- Spot at close: ${spotAtClose != null ? `$${spotAtClose}` : 'N/A'}
+- Expiry settlement value: ${expirySettlementValue != null ? `$${expirySettlementValue.toFixed(4)}` : 'N/A'}
 - Spot range while open: ${whileOpen.length > 0 ? `$${Math.min(...whileOpen.map(p => p.price)).toFixed(2)} -> $${Math.max(...whileOpen.map(p => p.price)).toFixed(2)}` : 'N/A'}
 - Spot range after close through horizon: ${afterClose.length > 0 ? `$${Math.min(...afterClose.map(p => p.price)).toFixed(2)} -> $${Math.max(...afterClose.map(p => p.price)).toFixed(2)}` : 'N/A'}
 
@@ -2556,11 +2668,11 @@ Output JSON only:
           review_confidence: result.confidence || null,
           summary: result.summary,
           lessons: Array.isArray(result.lessons) ? result.lessons.slice(0, 3) : [],
-          pnl_realized: campaign.pnl_realized,
+          pnl_realized: effectivePnlRealized,
           premium_opened: campaign.premium_opened,
-          premium_closed: campaign.premium_closed,
+          premium_closed: effectivePremiumClosed,
           spot_open: campaign.spot_open,
-          spot_close: campaign.spot_close,
+          spot_close: spotAtClose,
           spot_min_while_open: whileOpen.length > 0 ? Math.min(...whileOpen.map(p => p.price)) : null,
           spot_max_while_open: whileOpen.length > 0 ? Math.max(...whileOpen.map(p => p.price)) : null,
           spot_min_after_close: afterClose.length > 0 ? Math.min(...afterClose.map(p => p.price)) : null,
