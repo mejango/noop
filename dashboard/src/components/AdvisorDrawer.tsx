@@ -90,6 +90,7 @@ const VERDICT_STYLES: Record<string, { label: string; color: string }> = {
 };
 
 const HIDDEN_JOURNAL_ENTRY_TYPES = new Set([
+  'advisory',
   'advisory_main',
   'advisory_spitznagel',
   'advisory_taleb',
@@ -209,6 +210,10 @@ function splitThesisBreakdown(content: string) {
   const summary = content.slice(0, match.index).trim();
   const thesis = content.slice(match.index + match[0].length).trim();
   return { summary, thesis: thesis.length > 0 ? thesis : null };
+}
+
+function countThesisItems(thesis: string): number {
+  return thesis.split('\n').filter((line) => line.trim().startsWith('- ')).length;
 }
 
 function renderTalebArtifact(content: string) {
@@ -1339,13 +1344,23 @@ export default function AdvisorDrawer() {
                         {(() => {
                           const assessment = (opsData.advisoryArtifacts?.main || opsData.assessment)!.content;
                           const { summary, thesis } = splitThesisBreakdown(assessment);
+                          const thesisItems = thesis ? countThesisItems(thesis) : 0;
                           return (
                             <>
                               <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{summary}</p>
                               {thesis && (
                                 <div className="mt-3 pt-2 border-t border-white/5">
-                                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Thesis Breakdown</p>
-                                  <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{thesis}</p>
+                                  <details className="border border-white/5 bg-black/10 px-2.5 py-2 group">
+                                    <summary className="cursor-pointer list-none flex items-center justify-between text-[10px] uppercase tracking-wider text-gray-400">
+                                      <span>Thesis Breakdown</span>
+                                      {thesisItems > 0 && (
+                                        <span className="text-gray-600 normal-case">
+                                          {thesisItems} position{thesisItems === 1 ? '' : 's'}
+                                        </span>
+                                      )}
+                                    </summary>
+                                    <p className="mt-2 text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{thesis}</p>
+                                  </details>
                                 </div>
                               )}
                             </>

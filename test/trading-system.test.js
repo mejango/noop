@@ -2891,6 +2891,45 @@ describe('Resting order dedup for entry rules', () => {
   });
 });
 
+describe('Resting order dedup for advisor-led exit rules', () => {
+  const findRestingExitOrderForRule = (restingOrders, rule) => {
+    if (!Array.isArray(restingOrders) || !rule) return null;
+    return restingOrders.find(order =>
+      order?.instrument_name === rule.instrument_name
+      && order?.action === rule.action
+    ) || null;
+  };
+
+  test('existing buyback_call resting order blocks duplicate trigger for same advisor rule target', () => {
+    const existing = findRestingExitOrderForRule([
+      {
+        order_id: 'resting-1',
+        instrument_name: 'ETH-20260515-2600-C',
+        action: 'buyback_call',
+        limit_price: 0.6,
+      },
+    ], {
+      instrument_name: 'ETH-20260515-2600-C',
+      action: 'buyback_call',
+    });
+
+    assert.ok(existing);
+    assert.strictEqual(existing.order_id, 'resting-1');
+  });
+
+  test('different action or instrument does not block advisor exit trigger', () => {
+    const restingOrders = [
+      { instrument_name: 'ETH-20260515-2600-C', action: 'sell_call' },
+      { instrument_name: 'ETH-20260529-3000-C', action: 'buyback_call' },
+    ];
+
+    assert.strictEqual(findRestingExitOrderForRule(restingOrders, {
+      instrument_name: 'ETH-20260515-2600-C',
+      action: 'buyback_call',
+    }), null);
+  });
+});
+
 // ── Test 28: extractJSON (balanced brace parser) ────────────────────────────
 
 // Copy of extractJSON from script.js
@@ -4534,6 +4573,43 @@ describe('Voter limit_price sanity check', () => {
 
   test('voter price zero → use market', () => {
     assert.strictEqual(resolvePrice(0, 5.50), 5.50);
+  });
+});
+
+describe('buyback_call limit discipline', () => {
+  const resolveBuybackPrice = ({ voterLimitPrice, liveMarketPrice }) => {
+    if (!(Number(liveMarketPrice) > 0)) {
+      return { failed: true, price: null };
+    }
+    let executionPrice = liveMarketPrice;
+    if (typeof voterLimitPrice === 'number' && voterLimitPrice > 0) {
+      const ratio = voterLimitPrice / liveMarketPrice;
+      if (ratio >= 0.5 && ratio <= 2.0) {
+        executionPrice = voterLimitPrice > liveMarketPrice ? liveMarketPrice : voterLimitPrice;
+      }
+    }
+    return { failed: false, price: executionPrice };
+  };
+
+  test('refuses threshold-style buyback without a live market price', () => {
+    assert.deepStrictEqual(resolveBuybackPrice({ voterLimitPrice: 1.4, liveMarketPrice: null }), {
+      failed: true,
+      price: null,
+    });
+  });
+
+  test('caps buyback limit to live ask when voter threshold is worse for us', () => {
+    assert.deepStrictEqual(resolveBuybackPrice({ voterLimitPrice: 1.4, liveMarketPrice: 0.6 }), {
+      failed: false,
+      price: 0.6,
+    });
+  });
+
+  test('keeps lower patient buyback bid when it is better than live ask', () => {
+    assert.deepStrictEqual(resolveBuybackPrice({ voterLimitPrice: 0.1, liveMarketPrice: 0.18 }), {
+      failed: false,
+      price: 0.1,
+    });
   });
 });
 

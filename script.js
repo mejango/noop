@@ -4788,6 +4788,19 @@ const getOpenRestingEntryOrders = () => {
   return db.getOpenRestingOrders().filter(order => order.action === 'buy_put' || order.action === 'sell_call');
 };
 
+const getOpenRestingExitOrders = () => {
+  if (!db) return [];
+  return db.getOpenRestingOrders().filter(order => order.action === 'buyback_call');
+};
+
+const findRestingExitOrderForRule = (restingOrders, rule) => {
+  if (!Array.isArray(restingOrders) || !rule) return null;
+  return restingOrders.find(order =>
+    order?.instrument_name === rule.instrument_name
+    && order?.action === rule.action
+  ) || null;
+};
+
 const summarizeReservedEntryCapacity = (restingOrders) => {
   return restingOrders.reduce((acc, order) => {
     if (order.action === 'buy_put') {
@@ -5022,6 +5035,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
   // ── Exit rules ─────────────────────────────────────────────────────────────
   try {
     const exitRules = db.getActiveRulesByType('exit');
+    const openRestingExitOrders = getOpenRestingExitOrders();
     for (const rule of exitRules) {
       try {
         const position = positions.find(p => p.instrument_name === rule.instrument_name);
@@ -5041,6 +5055,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
         // Dedup: skip if there's already a pending/confirmed action for this rule
         if (db.hasPendingActionForRule(rule.id)) continue;
+
+        const existingRestingExit = findRestingExitOrderForRule(openRestingExitOrders, rule);
+        if (existingRestingExit) {
+          console.log(`📋 Keep resting ${rule.action} ${rule.instrument_name}: existing advisor-backed order already on book @ $${Number(existingRestingExit.limit_price).toFixed(4)} x ${Number(existingRestingExit.amount).toFixed(2)}`);
+          continue;
+        }
 
         const askPrice = Number(ticker?.a) || 0;
         const bidPrice = Number(ticker?.b) || 0;
@@ -6061,7 +6081,8 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
 
       // Build context for confirmation
       const ticker = tickerMap[action.instrument_name];
-      const currentPrice = ticker ? (action.action.includes('buy') ? Number(ticker.a) : Number(ticker.b)) : action.price;
+      const liveMarketPrice = ticker ? (action.action.includes('buy') ? Number(ticker.a) : Number(ticker.b)) : null;
+      const currentPrice = liveMarketPrice || action.price;
       const momentum = botData.mediumTermMomentum;
 
       // Determine what details to show
@@ -6128,7 +6149,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
 ${getSharedActionPolicyPrompt()}
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
 CALL DISCIPLINE: Short calls normally have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active cap may widen up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the active cap or are too small to matter.
-CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove the tail risk of further upside continuation. Confirm buybacks when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by actual breakout evidence. Reject buybacks driven by price action alone when theta is still working, the call remains OTM, and the position is not under real threat. There is one explicit house-rule exception: deterministic theta harvesting. If the trigger details show unrealized_pnl_pct at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, treat that as a valid profit-harvest/capacity-reset trigger, but read it as executable buyback economics using the live buy price rather than midpoint fantasy. Treat any extra DTE or margin context as informational, not as a required hurdle. If there is no urgency and the book is wide, patient limit-style buyback pricing is acceptable.
+CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove the tail risk of further upside continuation. Confirm buybacks when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by actual breakout evidence. Reject buybacks driven by price action alone when theta is still working, the call remains OTM, and the position is not under real threat. There is one explicit house-rule exception: deterministic theta harvesting. If the trigger details show unrealized_pnl_pct at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, treat that as a valid profit-harvest/capacity-reset trigger, but read it as executable buyback economics using the live buy price rather than midpoint fantasy. ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is a minimum acceptable capture, not a target to give back to. If the live executable buyback price already implies strictly better capture, do not bid back up to the threshold; either hold/let expire, or use a lower patient bid only if the advisor is genuinely happy with that price. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger. If there is no urgency and the book is wide, patient limit-style buyback pricing is acceptable.
 PUT EXIT DISCIPLINE: For sell_put — evaluate it as monetizing or rolling an existing long put. Do not analyze it as short put selling or naked downside exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin. The question is whether closing this owned hedge now is prudent, not whether opening short put risk is acceptable.
 REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.
 Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.`,
@@ -6175,7 +6196,7 @@ ${getSharedActionPolicyPrompt()}
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
 CALL DISCIPLINE: Short calls normally have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active cap may widen up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the active cap or are too small to matter.
-CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous, but the premium was already collected and temporary mark pain is not the same as final loss. A buyback below strike is an explicit purchase of upside insurance. Confirm buybacks only when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by real continuation evidence. Reject buybacks driven by price noise when theta is still working. One explicit house-rule exception is deterministic theta harvesting: when unrealized_pnl_pct is at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, treat the buyback as an allowed profit-harvest/capacity-reset by policy, judged on executable buyback price rather than midpoint mark. Extra DTE or margin-release metrics are context, not gating requirements for that case. If urgency is low and the book is wide, patient limit-style buyback pricing is acceptable.
+CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous, but the premium was already collected and temporary mark pain is not the same as final loss. A buyback below strike is an explicit purchase of upside insurance. Confirm buybacks only when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by real continuation evidence. Reject buybacks driven by price noise when theta is still working. One explicit house-rule exception is deterministic theta harvesting: when unrealized_pnl_pct is at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, treat the buyback as an allowed profit-harvest/capacity-reset by policy, judged on executable buyback price rather than midpoint mark. ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is a minimum acceptable capture, not a target to give back to. If the live executable buyback price already implies strictly better capture, do not bid back up to the threshold; either hold/let expire, or use a lower patient bid only if the advisor is genuinely happy with that price. Never confirm a threshold-style buyback when live market price is unavailable. Extra DTE or margin-release metrics are context, not gating requirements for that case. Margin utilization by itself is not a buyback trigger. If urgency is low and the book is wide, patient limit-style buyback pricing is acceptable.
 PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
 REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV overpays alongside the crowd. Use actual Greeks, DTE, and momentum to judge.
 Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.
@@ -6246,13 +6267,29 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       if (typeof voterLimitPrice === 'number' && voterLimitPrice > 0 && marketPrice > 0) {
         const ratio = voterLimitPrice / marketPrice;
         if (ratio >= 0.5 && ratio <= 2.0) {
-          executionPrice = voterLimitPrice;
+          if (action.action === 'buyback_call' && voterLimitPrice > marketPrice) {
+            executionPrice = marketPrice;
+            console.log(`📋 Buyback limit capped: voter $${voterLimitPrice} is worse than live ask $${marketPrice}; using live ask instead`);
+          } else {
+            executionPrice = voterLimitPrice;
+          }
         } else {
           console.log(`⚠️ Voter price $${voterLimitPrice} rejected (${(ratio * 100).toFixed(0)}% of market $${marketPrice}) — using market price`);
         }
       }
 
-      if (!(Number(executionPrice) > 0)) {
+      if (decision === 'confirmed' && action.action === 'buyback_call' && !(Number(liveMarketPrice) > 0)) {
+        const failureReason = `No live buyback market price for ${action.action} ${action.instrument_name}; refusing stale threshold-based buyback`;
+        db.updatePendingAction(action.id, {
+          status: 'failed',
+          execution_result: failureReason,
+          confirmation_reasoning: reasoning,
+        });
+        console.log(`⚠️ ${failureReason}`);
+        continue;
+      }
+
+      if (decision === 'confirmed' && !(Number(executionPrice) > 0)) {
         const failureReason = `No executable market price for ${action.action} ${action.instrument_name}`;
         db.updatePendingAction(action.id, {
           status: 'failed',
@@ -6620,6 +6657,7 @@ For calls: **base hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% infer
 We sell short-dated calls. The arithmetic of buybacks is simple: don't pay fear premiums to exit positions that are working.
 - **Premium already collected matters**: A sold call keeps the upfront premium unless it is later paid back. If spot finishes at or below strike, including exactly at strike, the option expires worthless and the trade keeps that premium.
 - **Profit capture over panic**: When a meaningful chunk of premium has decayed, locking it in and redeploying is disciplined. Buying back because the mark expanded is different: that is paying for upside insurance. It can be rational, but only if the continuation risk is real enough to justify the cost.
+- **Advisor-led limit buybacks are allowed**: When live executable buyback economics are worse than the ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line but close enough that decay could fill a better bid, it is valid to place a patient gtc/post_only buyback bid at a price the advisor is happy with. The goal is take-profit plus margin/slot recycling for future call sales, not a generic passive buyback program. If the live executable price already captures more than that, do not bid back up to the threshold; hold/let expire or only bid lower.
 - **Let theta work**: Short calls are a time-decay trade. A price move against you does not by itself invalidate the thesis. Distinguish temporary mark stress from final payoff geometry, and use the Greeks plus the position's actual risk profile to judge.
 - **Safety is not free**: Farther OTM strikes reduce buyback pressure and assignment risk, but they also pay materially less premium. Optimize for premium income that can still be managed systematically, not for maximum distance from spot at any price.
 - **Breakout upside can be a sale, not just a threat**: When spot breaks upward while short calls are already on, the instinct is to buy back into elevated bullish sentiment to relieve margin. That is often when call premium is emotionally richest. Consider whether selling more calls at the higher level is the better use of margin, provided the active cap and ruin constraints still hold.
@@ -6699,7 +6737,7 @@ Rules:
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
 - For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
-- For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. When unrealized_pnl_pct is very high and most premium has already been harvested, buying back to free meaningful margin for fresh short-call entries can be correct. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. If urgency is low and the book is wide, patient limit-style buyback pricing via gtc/post_only is acceptable. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
+- For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. The ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line is a minimum acceptable capture, not a target. Use patient gtc/post_only buyback rules when the current executable buyback price is worse than that line and the advisor wants to name a better price; if the live price is already strictly better, do not give back edge by bidding at the threshold. Near expiry, hold/let expire is often superior unless a penny-on-the-dollar bid is available. Never create a threshold-style buyback rule without a live buyback market price. Do not use margin utilization by itself as the buyback trigger. Margin release is a benefit of a good profit-harvest close, not a reason to panic-close. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending.
@@ -6859,6 +6897,7 @@ Interpret "Taleb" operationally, not stylistically:
 Panic buybacks are the opposite of antifragility. The crowd buys back calls when price rises because it FEELS dangerous. That's paying a fear premium — the exact behavior we profit from.
 - The asymmetry of short calls is known and bounded. You sold time decay. The question is always: is the position genuinely threatened, or does it just feel that way?
 - Scrutinize any buyback rule that triggers on price movement alone. Ask: is the portfolio actually at risk of ruin, or is this noise?
+- Do not veto advisor-led take-profit buyback rules merely because they free margin. If live executable economics are worse than the ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line and the advisor names a patient gtc/post_only price that would improve the exit, that is disciplined harvesting, not panic. If live economics already beat that line, do not let the agenda bid back up to the threshold.
 - Rolling for a net debit is paying to extend exposure. If you can't roll favorably, accepting assignment is the antifragile response — it means you were right about the price level when you sold.
 - Use your judgment on what constitutes a real threat vs. noise. The Greeks, remaining DTE, premium captured, and portfolio shape tell the story — not the last candle.
 
@@ -6926,6 +6965,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
+- Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
 {
@@ -6947,6 +6987,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
+- Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
 {
