@@ -575,6 +575,17 @@ function prepareAll(d: Database.Database) {
       WHERE timestamp >= ? AND timestamp <= ?
       ORDER BY timestamp ASC
     `),
+    getOrderCashflowTotalsBefore: d.prepare(`
+      SELECT
+        COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 THEN total_value ELSE 0 END), 0) as revenue,
+        COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0) as expenses,
+        COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+          - COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+          as profit,
+        COUNT(CASE WHEN success = 1 AND action IN ('sell_call', 'buyback_call', 'buy_put', 'sell_put') THEN 1 END) as order_count
+      FROM orders
+      WHERE timestamp < ?
+    `),
     getRealizedPnL: d.prepare(`
       SELECT
         COALESCE(SUM(CASE WHEN action IN ('sell_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0)
@@ -1325,6 +1336,17 @@ export function getOrdersInRange(from: string, to: string) {
       fill_price: number | null; total_value: number | null; spot_price: number | null;
     }[];
   } catch { return []; }
+}
+
+export function getOrderCashflowTotalsBefore(ts: string) {
+  try {
+    return getStmts().getOrderCashflowTotalsBefore.get(ts) as {
+      revenue: number;
+      expenses: number;
+      profit: number;
+      order_count: number;
+    } | undefined;
+  } catch { return undefined; }
 }
 
 export function getRealizedPnL() {

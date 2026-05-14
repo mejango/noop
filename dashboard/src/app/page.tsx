@@ -323,6 +323,10 @@ interface PnlReportData {
     openingUnrealized: number;
     closingUnrealized: number;
     unrealizedChange: number;
+    openingTradeRevenue: number;
+    openingTradeExpenses: number;
+    openingTradeProfit: number;
+    openingTradeOrderCount: number;
     netTradeCashflow: number;
     putNetCashflow: number;
     callNetCashflow: number;
@@ -425,6 +429,10 @@ const emptyPnlReport: PnlReportData = {
     openingUnrealized: 0,
     closingUnrealized: 0,
     unrealizedChange: 0,
+    openingTradeRevenue: 0,
+    openingTradeExpenses: 0,
+    openingTradeProfit: 0,
+    openingTradeOrderCount: 0,
     netTradeCashflow: 0,
     putNetCashflow: 0,
     callNetCashflow: 0,
@@ -726,8 +734,14 @@ export default function OverviewPage() {
   }, [chart.optionsCoverage]);
 
   const pnlChartData = useMemo(() => {
-    let cumulativeRevenue = 0;
-    let cumulativeExpenses = 0;
+    const openingRevenue = Number.isFinite(pnlReport.summary.openingTradeRevenue)
+      ? pnlReport.summary.openingTradeRevenue
+      : 0;
+    const openingExpenses = Number.isFinite(pnlReport.summary.openingTradeExpenses)
+      ? pnlReport.summary.openingTradeExpenses
+      : 0;
+    let cumulativeRevenue = openingRevenue;
+    let cumulativeExpenses = openingExpenses;
     let lastPortfolioValue = Number.isFinite(pnlReport.summary.openingValue) ? pnlReport.summary.openingValue : 0;
     const rows = pnlReport.series.buckets.map((bucket) => {
       const net = Number(bucket.tradeCashflow ?? 0);
@@ -758,9 +772,9 @@ export default function OverviewPage() {
     if (fromTs != null && Number.isFinite(fromTs) && (padded.length === 0 || padded[0].ts > fromTs)) {
       padded.unshift({
         ts: fromTs,
-        cumulativeRevenue: 0,
-        cumulativeExpenses: 0,
-        cumulativeProfit: 0,
+        cumulativeRevenue: openingRevenue,
+        cumulativeExpenses: openingExpenses,
+        cumulativeProfit: openingRevenue - openingExpenses,
         periodRevenue: 0,
         periodExpenses: 0,
         periodNet: 0,
@@ -788,6 +802,8 @@ export default function OverviewPage() {
     pnlReport.meta.to,
     pnlReport.series.buckets,
     pnlReport.summary.closingValue,
+    pnlReport.summary.openingTradeExpenses,
+    pnlReport.summary.openingTradeRevenue,
     pnlReport.summary.openingValue,
   ]);
 

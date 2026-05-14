@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange } from '@/lib/db';
+import { getOrderCashflowTotalsBefore, getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -108,6 +108,12 @@ export function GET(req: NextRequest) {
     const rawSnapshots = getPortfolioSnapshotsInRange(fromIso, toIso) as SnapshotRow[];
     const baseline = getPortfolioSnapshotBefore(fromIso) as SnapshotRow | undefined;
     const orders = (getOrdersInRange(fromIso, toIso) as OrderRow[]).filter(o => o.success === 1);
+    const openingCashflow = getOrderCashflowTotalsBefore(fromIso) || {
+      revenue: 0,
+      expenses: 0,
+      profit: 0,
+      order_count: 0,
+    };
 
     const opening = baseline ?? rawSnapshots[0] ?? null;
     const closing = rawSnapshots[rawSnapshots.length - 1] ?? opening;
@@ -251,6 +257,10 @@ export function GET(req: NextRequest) {
         openingUnrealized,
         closingUnrealized,
         unrealizedChange,
+        openingTradeRevenue: Number(openingCashflow.revenue ?? 0),
+        openingTradeExpenses: Number(openingCashflow.expenses ?? 0),
+        openingTradeProfit: Number(openingCashflow.profit ?? 0),
+        openingTradeOrderCount: Number(openingCashflow.order_count ?? 0),
         netTradeCashflow,
         putNetCashflow,
         callNetCashflow,
