@@ -4195,6 +4195,161 @@ const summarizeOpenOrdersForAdvisor = (openOrders = []) => {
   return [headline, ...details].join('\n');
 };
 
+const parseOptionInstrumentParts = (name) => {
+  const parts = String(name || '').split('-');
+  if (parts.length !== 4) return null;
+  const strike = Number(parts[2]);
+  return {
+    expiryKey: parts[1],
+    strike: Number.isFinite(strike) ? strike : null,
+    optionType: parts[3],
+  };
+};
+
+const formatMaybeMoney = (value, digits = 2) => (
+  Number.isFinite(value) ? `$${Number(value).toFixed(digits)}` : 'n/a'
+);
+
+const roundMetric = (value, digits = 4) => (
+  Number.isFinite(value) ? Number(Number(value).toFixed(digits)) : null
+);
+
+const getExecutableExitPrice = (position, ticker, values) => {
+  const bid = Number(ticker?.b) || 0;
+  const ask = Number(ticker?.a) || 0;
+  if (position?.direction === 'short') return ask || values.mark_price || 0;
+  return bid || values.mark_price || 0;
+};
+
+const buildPositionAdviceSnapshots = (positions = [], tickerMap = {}, spotPrice = null) => {
+  if (!Array.isArray(positions)) return [];
+  return positions.map((position) => {
+    const instrument = position.instrument_name;
+    const parsed = parseOptionInstrumentParts(instrument);
+    const ticker = tickerMap?.[instrument] || null;
+    const actionForExecutablePnl = position.direction === 'short' && parsed?.optionType === 'C'
+      ? 'buyback_call'
+      : null;
+    const values = getRuleEvaluationValues(position, ticker, spotPrice, actionForExecutablePnl);
+    const executableExitPrice = getExecutableExitPrice(position, ticker, values);
+    const entryPrice = Number(position?.avg_entry_price) || 0;
+    const executableExitPnlPct = entryPrice > 0 && executableExitPrice > 0
+      ? (position.direction === 'short'
+        ? ((entryPrice - executableExitPrice) / entryPrice) * 100
+        : ((executableExitPrice - entryPrice) / entryPrice) * 100)
+      : null;
+    const strikeDistancePct = parsed?.strike && Number.isFinite(spotPrice) && spotPrice > 0
+      ? ((parsed.optionType === 'C' ? parsed.strike - spotPrice : spotPrice - parsed.strike) / spotPrice) * 100
+      : null;
+
+    return {
+      instrument,
+      direction: position.direction,
+      amount: roundMetric(Number(position.amount), 4),
+      option_type: parsed?.optionType || null,
+      strike: parsed?.strike ?? null,
+      dte: roundMetric(values.dte, 2),
+      strike_distance_pct: roundMetric(strikeDistancePct, 2),
+      delta: roundMetric(values.delta, 4),
+      theta: roundMetric(values.theta, 4),
+      mark_price: roundMetric(values.mark_price, 4),
+      bid_price: roundMetric(Number(ticker?.b) || null, 4),
+      ask_price: roundMetric(Number(ticker?.a) || null, 4),
+      avg_entry_price: roundMetric(entryPrice || null, 4),
+      executable_exit_price: roundMetric(executableExitPrice || null, 4),
+      executable_exit_pnl_pct: roundMetric(executableExitPnlPct, 2),
+      mark_pnl_pct: roundMetric(values.unrealized_pnl_pct, 2),
+      unrealized_pnl: roundMetric(Number(position.unrealized_pnl), 2),
+    };
+  });
+};
+
+const parseCriteriaForSummary = (criteria) => {
+  if (!criteria) return null;
+  if (typeof criteria === 'object') return criteria;
+  try { return JSON.parse(criteria); } catch { return null; }
+};
+
+const summarizeExitRuleTrigger = (rule) => {
+  const criteria = parseCriteriaForSummary(rule?.criteria);
+  const conditions = Array.isArray(criteria?.conditions) ? criteria.conditions : [];
+  if (conditions.length === 0) return 'no structured trigger';
+  const logic = criteria.condition_logic || 'all';
+  const body = conditions.map((condition) =>
+    `${condition.field} ${condition.op} ${condition.value}`
+  ).join(logic === 'any' ? ' OR ' : ' AND ');
+  return body || 'no structured trigger';
+};
+
+const buildPositionRationale = (snapshot) => {
+  const parts = [];
+  if (Number.isFinite(snapshot.dte)) parts.push(`${snapshot.dte.toFixed(1)} DTE`);
+  if (Number.isFinite(snapshot.strike_distance_pct)) {
+    const distanceLabel = snapshot.strike_distance_pct >= 0 ? 'OTM' : 'ITM';
+    parts.push(`${Math.abs(snapshot.strike_distance_pct).toFixed(1)}% ${distanceLabel}`);
+  }
+  if (Number.isFinite(snapshot.executable_exit_pnl_pct)) {
+    const exitLabel = snapshot.direction === 'short' ? 'executable capture' : 'executable exit PnL';
+    parts.push(`${exitLabel} ${snapshot.executable_exit_pnl_pct.toFixed(1)}%`);
+  } else if (Number.isFinite(snapshot.mark_pnl_pct)) {
+    parts.push(`mark PnL ${snapshot.mark_pnl_pct.toFixed(1)}%`);
+  }
+  if (Number.isFinite(snapshot.bid_price) || Number.isFinite(snapshot.ask_price)) {
+    parts.push(`bid/ask ${formatMaybeMoney(snapshot.bid_price, 2)}/${formatMaybeMoney(snapshot.ask_price, 2)}`);
+  }
+  return parts.join(', ') || 'live metrics unavailable';
+};
+
+const buildPositionPlanLines = ({
+  positionSnapshots = [],
+  exitRules = [],
+}) => {
+  if (!Array.isArray(positionSnapshots) || positionSnapshots.length === 0) return [];
+  const activeExitRules = Array.isArray(exitRules) ? exitRules : [];
+
+  return positionSnapshots.map((snapshot) => {
+    const matchingRules = activeExitRules.filter((rule) => rule?.instrument_name === snapshot.instrument);
+    const rationale = buildPositionRationale(snapshot);
+    if (matchingRules.length > 0) {
+      const ruleText = matchingRules.map((rule) => {
+        const orderType = rule.preferred_order_type ? `, ${rule.preferred_order_type}` : '';
+        return `${rule.action} ${rule.priority || 'medium'}${orderType}; trigger: ${summarizeExitRuleTrigger(rule)}`;
+      }).join(' | ');
+      return `${snapshot.instrument}: follow active exit plan (${ruleText}). Why: ${rationale}.`;
+    }
+
+    if (snapshot.direction === 'short' && snapshot.option_type === 'C') {
+      return `${snapshot.instrument}: hold / no buyback order. No active buyback_call rule is live, so the bot will not post a bid unless a later advisory adds one. Why: ${rationale}.`;
+    }
+
+    if (snapshot.direction === 'long' && snapshot.option_type === 'P') {
+      return `${snapshot.instrument}: hold protection. No active sell_put rule is live, so the bot is keeping the hedge unless a later advisory adds a roll or monetization trigger. Why: ${rationale}.`;
+    }
+
+    return `${snapshot.instrument}: hold / monitor. No active exit rule is live. Why: ${rationale}.`;
+  });
+};
+
+const ensureAssessmentHasPositionPlan = ({
+  assessment,
+  positionSnapshots,
+  exitRules,
+}) => {
+  const base = String(assessment || '').trim() || 'No assessment produced.';
+  const snapshots = Array.isArray(positionSnapshots) ? positionSnapshots : [];
+  if (snapshots.length === 0) return base;
+
+  const missingSnapshots = snapshots.filter((snapshot) => !base.includes(snapshot.instrument));
+  if (missingSnapshots.length === 0 && /thesis breakdown|position plan/i.test(base)) return base;
+
+  const lines = buildPositionPlanLines({
+    positionSnapshots: missingSnapshots.length > 0 ? missingSnapshots : snapshots,
+    exitRules,
+  });
+  if (lines.length === 0) return base;
+  return `${base}\n\nThesis breakdown:\n${lines.map((line) => `- ${line}`).join('\n')}`;
+};
+
 const buildMandelbrotContextBlock = (mandelbrotContext) => {
   if (!mandelbrotContext) return 'No Mandelbrot regime context available.';
   return JSON.stringify(mandelbrotContext, null, 2);
@@ -4327,6 +4482,8 @@ const buildFactualAdvisoryAssessment = ({
   secondOpinion = null,
   entryRulesCount = 0,
   exitRulesCount = 0,
+  positionSnapshots = [],
+  exitRules = [],
 }) => {
   const parts = [];
   if (Number.isFinite(spotPrice) && spotPrice > 0) {
@@ -4370,7 +4527,12 @@ const buildFactualAdvisoryAssessment = ({
     exitRulesCount,
   }));
 
-  return parts.join(' ').replace(/\s+/g, ' ').trim() || 'No assessment produced.';
+  const summary = parts.join(' ').replace(/\s+/g, ' ').trim() || 'No assessment produced.';
+  return ensureAssessmentHasPositionPlan({
+    assessment: summary,
+    positionSnapshots,
+    exitRules,
+  });
 };
 
 const generateMandelbrotRegimeContext = async ({
@@ -6289,6 +6451,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
   scoredCalls.sort((a, b) => b.score - a.score);
   const top5Puts = scoredPuts.slice(0, 8);
   const top5Calls = scoredCalls.slice(0, 8);
+  const positionAdviceSnapshots = buildPositionAdviceSnapshots(positions, tickerMap, spotPrice);
 
   // ── Step 0: Regime Examiner (OpenAI, Mandelbrot temperament) ──────────────
 
@@ -6364,6 +6527,13 @@ Use your judgment. Look at the actual Greeks, DTE, IV, momentum, and position ch
 
 ## Assessment Writing Constraints
 - Every assessment must do two jobs: state the clearest current market observation or thesis from the supplied data, and state the operational stance it implies for the bot.
+- The assessment must be an operating note, not just a market summary. Use this format:
+  Global stance: <1-3 concise sentences on regime, account posture, and whether to deploy, wait, or manage risk>.
+
+  Thesis breakdown:
+  - <exact open instrument name>: <hold / buyback_call / sell_put / roll / let expire / monitor>. Why: <specific DTE, moneyness, bid/ask, executable PnL, margin, or hedge role facts>.
+- The Thesis breakdown must include one bullet for every instrument in OPEN POSITIONS REQUIRING ADVICE, even when the right action is no trade. If no exit rule is warranted for a position, say that plainly and explain why.
+- If you emit an exit rule for a position, the matching Thesis breakdown bullet must name that rule and the reason. If you do not emit an exit rule for a position, the bullet must say the stance is hold/monitor/let expire/no buyback/no roll as appropriate.
 - If the correct stance is to wait, say so explicitly in plain language such as "sit on hands", "stand aside", or "wait for cleaner asymmetry", and explain why.
 - In "assessment", use only facts and metric names explicitly present in this prompt or policy constants stated here.
 - Never invent metric labels such as "put efficiency", "call efficiency", "deployment efficiency", "antifragility score", or any unnamed ratio.
@@ -6372,7 +6542,7 @@ Use your judgment. Look at the actual Greeks, DTE, IV, momentum, and position ch
 
 Given market data, produce a JSON trading agenda with:
 {
-  "assessment": "1-3 sentence market assessment and overall stance",
+  "assessment": "multi-line operating note with Global stance and Thesis breakdown covering every open position",
   "entry_rules": [
     {
       "action": "buy_put" | "sell_call",
@@ -6446,6 +6616,9 @@ Positions: ${JSON.stringify(positions.map(p => ({
   delta: p.delta, theta: p.theta, unrealized_pnl: p.unrealized_pnl
 })), null, 1)}
 
+=== OPEN POSITIONS REQUIRING ADVICE ===
+${positionAdviceSnapshots.length > 0 ? JSON.stringify(positionAdviceSnapshots, null, 2) : 'No open positions'}
+
 Balances: ${JSON.stringify(balances, null, 1)}
 
 === ACCOUNT HEALTH (margin-aware sizing) ===
@@ -6501,7 +6674,7 @@ Produce your trading agenda JSON now.`;
     const primaryResponse = await callAnthropicWithMinuteBoundaryRetry({
       label: 'Advisory Step 1',
       model: advisoryAnthropicModel,
-      maxTokens: 3000,
+      maxTokens: 4096,
       system: primarySystemPrompt,
       messages: [{ role: 'user', content: primaryUserPrompt }],
       timeout: 120000,
@@ -6522,6 +6695,8 @@ Produce your trading agenda JSON now.`;
               putBudgetRemaining,
               entryRulesCount: primaryAgenda.entry_rules?.length || 0,
               exitRulesCount: primaryAgenda.exit_rules?.length || 0,
+              positionSnapshots: positionAdviceSnapshots,
+              exitRules: primaryAgenda.exit_rules || [],
             });
             console.log(`📋 Advisory Step 1: replaced unsupported assessment wording (${unsupportedPattern}) with factual summary`);
           }
@@ -6637,6 +6812,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
 - Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all" }
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
+- The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 
 Return the FINAL trading agenda as JSON:
@@ -6657,6 +6833,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
 - Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all" }
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
+- The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 
 Return the FINAL trading agenda as JSON:
@@ -6693,6 +6870,9 @@ ${JSON.stringify(accountHealth, null, 2)}
 - Current positions: ${positions.length} open
 - Spot: $${spotPrice.toFixed(2)}
 
+=== OPEN POSITIONS REQUIRING THESIS BREAKDOWN ===
+${positionAdviceSnapshots.length > 0 ? JSON.stringify(positionAdviceSnapshots, null, 2) : 'No open positions'}
+
 Output the FINAL trading agenda JSON (same format as Spitznagel's output — with assessment, entry_rules, exit_rules).`
     : `=== PRIMARY ADVISOR AGENDA ===
 ${JSON.stringify(primaryAgenda, null, 2)}
@@ -6708,6 +6888,9 @@ ${JSON.stringify(accountHealth, null, 2)}
 - Current positions: ${positions.length} open
 - Spot: $${spotPrice.toFixed(2)}
 
+=== OPEN POSITIONS REQUIRING THESIS BREAKDOWN ===
+${positionAdviceSnapshots.length > 0 ? JSON.stringify(positionAdviceSnapshots, null, 2) : 'No open positions'}
+
 Synthesize the final agenda now.`;
 
   try {
@@ -6715,7 +6898,7 @@ Synthesize the final agenda now.`;
     const synthesisResponse = await callAnthropicWithMinuteBoundaryRetry({
       label: 'Advisory Step 3',
       model: synthesisAnthropicModel,
-      maxTokens: 2048,
+      maxTokens: 3072,
       system: synthesisSystemPrompt,
       messages: [{ role: 'user', content: synthesisUserPrompt }],
       timeout: 60000,
@@ -6739,6 +6922,8 @@ Synthesize the final agenda now.`;
               secondOpinion,
               entryRulesCount: finalAgenda.entry_rules?.length || 0,
               exitRulesCount: finalAgenda.exit_rules?.length || 0,
+              positionSnapshots: positionAdviceSnapshots,
+              exitRules: finalAgenda.exit_rules || [],
             });
             console.log(`📋 Advisory Step 3: replaced unsupported assessment wording (${unsupportedPattern}) with factual summary`);
           }
@@ -6753,6 +6938,12 @@ Synthesize the final agenda now.`;
   } catch (e) {
     console.log('📋 Advisory Step 3 FAILED, using primary agenda:', getAnthropicErrorMessage(e));
   }
+
+  finalAgenda.assessment = ensureAssessmentHasPositionPlan({
+    assessment: finalAgenda.assessment || primaryAgenda.assessment || 'No assessment produced',
+    positionSnapshots: positionAdviceSnapshots,
+    exitRules: finalAgenda.exit_rules || [],
+  });
 
   // ── Persist rules to database ───────────────────────────────────────────────
 

@@ -201,6 +201,16 @@ function formatArtifactValue(value: unknown) {
   return JSON.stringify(value);
 }
 
+function splitThesisBreakdown(content: string) {
+  const match = content.match(/\n\s*(Thesis breakdown|Position plan):\s*\n/i);
+  if (!match || match.index == null) {
+    return { summary: content.trim(), thesis: null as string | null };
+  }
+  const summary = content.slice(0, match.index).trim();
+  const thesis = content.slice(match.index + match[0].length).trim();
+  return { summary, thesis: thesis.length > 0 ? thesis : null };
+}
+
 function renderTalebArtifact(content: string) {
   const parsed = parseArtifactContent(content);
   if (!isPlainObject(parsed)) {
@@ -1326,7 +1336,21 @@ export default function AdvisorDrawer() {
                           <span className="text-[10px] text-gray-500 uppercase tracking-wider">Main Advisory Assessment</span>
                           <span className="text-[10px] text-gray-600">{timeAgo((opsData.advisoryArtifacts?.main || opsData.assessment)!.timestamp)}</span>
                         </div>
-                        <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{(opsData.advisoryArtifacts?.main || opsData.assessment)!.content}</p>
+                        {(() => {
+                          const assessment = (opsData.advisoryArtifacts?.main || opsData.assessment)!.content;
+                          const { summary, thesis } = splitThesisBreakdown(assessment);
+                          return (
+                            <>
+                              <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{summary}</p>
+                              {thesis && (
+                                <div className="mt-3 pt-2 border-t border-white/5">
+                                  <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Thesis Breakdown</p>
+                                  <p className="text-[11px] text-gray-300 leading-relaxed whitespace-pre-wrap">{thesis}</p>
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                         {(opsData.advisoryArtifacts?.mandelbrot || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb) && (
                           <div className="mt-3 pt-2 border-t border-white/5 space-y-2">
                             <p className="text-[10px] text-gray-500 uppercase tracking-wider">Council Breakdown</p>
