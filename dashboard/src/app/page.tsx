@@ -464,6 +464,50 @@ function normalizeEthSpot(value: unknown): number | null {
   return Number.isFinite(n) && n >= ETH_SPOT_MIN && n <= ETH_SPOT_MAX ? n : null;
 }
 
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+function spotBandPctForRange(range: string): number {
+  switch (range) {
+    case '1h': return 0.05;
+    case '6h': return 0.08;
+    case '24h': return 0.12;
+    case '3d': return 0.18;
+    case '6.2d':
+    case '7d': return 0.25;
+    case '14d': return 0.35;
+    case '30d': return 0.45;
+    case '90d': return 0.75;
+    case '365d': return 1.5;
+    default: return 0.35;
+  }
+}
+
+function robustSpotBand(values: number[], range: string): [number, number] | null {
+  const normalized = values
+    .map(normalizeEthSpot)
+    .filter((value): value is number => value != null);
+  const center = median(normalized);
+  if (center == null) return null;
+  const deviations = normalized.map((value) => Math.abs(value - center));
+  const mad = median(deviations) ?? 0;
+  const spread = Math.max(35, center * spotBandPctForRange(range), mad * 8);
+  return [Math.max(ETH_SPOT_MIN, center - spread), Math.min(ETH_SPOT_MAX, center + spread)];
+}
+
+function spotInBand(value: unknown, band: [number, number] | null): number | null {
+  const spot = normalizeEthSpot(value);
+  if (spot == null) return null;
+  if (!band) return spot;
+  return spot >= band[0] && spot <= band[1] ? spot : null;
+}
+
 // Momentum color helpers for bar cells (derivative-aware shading)
 const momentumBarColorMedium = (m: string | undefined | null, derivative: string | undefined | null) => {
   if (m === 'upward') return derivative === 'accelerating' ? '#4ade80' : '#166534';
@@ -862,6 +906,13 @@ export default function OverviewPage() {
 
   // Merge all data series by snapping to nearest price point via binary search
   const merged = useMemo(() => {
+    const spotBand = robustSpotBand([
+      ...chart.prices.map((point) => Number(point.price)),
+      ...chart.options.map((point) => Number(point.lyra_spot)),
+      Number(stats.last_price),
+      Number(stats.lyra_spot),
+    ], range);
+
     type OptionDetail = {
       delta: number | null;
       price: number | null;
@@ -889,7 +940,7 @@ export default function OverviewPage() {
       const m = p.medium_momentum_main || 'neutral';
       return {
         ts: new Date(p.timestamp).getTime(),
-        price: normalizeEthSpot(p.price) ?? undefined,
+        price: spotInBand(p.price, spotBand) ?? undefined,
         momentum: m,
         shortMomentum: p.short_momentum_main || 'neutral',
         mediumDerivative: p.medium_momentum_derivative || undefined,
@@ -953,7 +1004,7 @@ export default function OverviewPage() {
       const idx = snapToNearest(new Date(o.timestamp).getTime());
       rows[idx].bestPut = o.best_put_value;
       rows[idx].bestCall = o.best_call_value;
-      const lyraSpot = normalizeEthSpot(o.lyra_spot);
+      const lyraSpot = spotInBand(o.lyra_spot, spotBand);
       if (lyraSpot != null) rows[idx].lyraSpot = lyraSpot;
       // Attach option details from heatmap data
       const putSnap = bestPutByTs.get(o.timestamp);
@@ -966,8 +1017,8 @@ export default function OverviewPage() {
     if (liveTs && Number.isFinite(liveTs)) {
       const liveRow: Row = {
         ts: liveTs,
-        price: normalizeEthSpot(stats.last_price) ?? undefined,
-        lyraSpot: normalizeEthSpot(stats.lyra_spot),
+        price: spotInBand(stats.last_price, spotBand) ?? undefined,
+        lyraSpot: spotInBand(stats.lyra_spot, spotBand),
         momentum: stats.medium_momentum || 'neutral',
         shortMomentum: stats.short_momentum || 'neutral',
         mediumDerivative: stats.medium_derivative || undefined,
@@ -1011,7 +1062,7 @@ export default function OverviewPage() {
     }
 
     return rows;
-  }, [chart, latestTick, stats]);
+  }, [chart, latestTick, range, stats]);
 
   // Data for momentum bar (only points with momentum data)
   const momentumData = useMemo(() =>
@@ -1539,7 +1590,7 @@ export default function OverviewPage() {
                 yAxisId="price"
                 domain={priceDomain}
                 allowDataOverflow
-                tickFormatter={(v) => `$${v}`}
+                tickFormatter={(v) => formatUSD(Number(v))}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
                 width={primaryYAxisWidth}
@@ -1652,6 +1703,7 @@ export default function OverviewPage() {
               {visibleTradesEnriched.map((trade) => {
                 const markerSpot = normalizeEthSpot(trade.index_price)
                   ?? findNearestMergedRow(trade.ts)?.price
+                  ?? findNearestMergedRow(trade.ts)?.lyraSpot
                   ?? null;
                 if (markerSpot == null) return null;
                 return (
