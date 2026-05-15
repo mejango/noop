@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { getPositions, getCollaterals, getTradeHistory } from '@/lib/lyra';
-import { getLocalTrades } from '@/lib/db';
+import { getPositions, getCollaterals } from '@/lib/lyra';
+import { getOrderTradesSince } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,38 +9,34 @@ export async function GET() {
     const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
     const since = new Date(thirtyDaysAgo).toISOString();
 
-    const [positions, collaterals, lyraTradesRaw] = await Promise.all([
+    const [positions, collaterals] = await Promise.all([
       getPositions(),
       getCollaterals(),
-      getTradeHistory(thirtyDaysAgo),
     ]);
 
-    // Get local bot trades for cross-referencing
-    const localTrades = getLocalTrades(since);
-
-    // Cross-reference Lyra trades with local bot trades (±60s window + instrument match)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const trades = (Array.isArray(lyraTradesRaw) ? lyraTradesRaw : []).map((t: any) => {
-      const tradeTs = typeof t.timestamp === 'number' ? t.timestamp : new Date(t.timestamp).getTime();
-      const isBot = localTrades.some(lt => {
-        const localTs = new Date(lt.timestamp).getTime();
-        return Math.abs(localTs - tradeTs) < 60_000
-          && lt.instrument_name === t.instrument_name;
-      });
-
-      return {
-        trade_id: t.trade_id,
-        instrument_name: t.instrument_name,
-        direction: t.direction,
-        trade_amount: Number(t.trade_amount ?? t.amount ?? 0),
-        trade_price: Number(t.trade_price ?? t.price ?? 0),
-        trade_fee: Number(t.trade_fee ?? t.fee ?? 0),
-        timestamp: tradeTs,
-        index_price: Number(t.index_price ?? 0),
-        realized_pnl: Number(t.realized_pnl ?? 0),
-        is_bot: isBot,
-      };
-    });
+    const trades = getOrderTradesSince(since)
+      .map((order) => {
+        const tradeTs = new Date(order.timestamp).getTime();
+        return {
+          trade_id: `order-${order.id}`,
+          instrument_name: order.instrument_name,
+          direction: order.action === 'buy_put' || order.action === 'buyback_call' ? 'buy' : 'sell',
+          trade_amount: Number(order.filled_amount ?? order.intended_amount ?? 0),
+          trade_price: Number(order.fill_price ?? order.price ?? 0),
+          trade_fee: 0,
+          timestamp: tradeTs,
+          index_price: Number(order.spot_price ?? 0),
+          realized_pnl: 0,
+          is_bot: true,
+        };
+      })
+      .filter((trade) =>
+        trade.instrument_name
+        && Number.isFinite(trade.timestamp)
+        && trade.trade_amount > 0
+        && trade.trade_price > 0
+        && trade.index_price > 0
+      );
 
     return NextResponse.json({
       collaterals: (Array.isArray(collaterals) ? collaterals : []).map((c: Record<string, unknown>) => ({

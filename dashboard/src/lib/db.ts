@@ -412,6 +412,16 @@ function prepareAll(d: Database.Database) {
       ORDER BY timestamp DESC
     `),
 
+    getOrderTradesSince: d.prepare(`
+      SELECT id, timestamp, action, instrument_name, filled_amount, intended_amount,
+        fill_price, price, spot_price, total_value
+      FROM orders
+      WHERE timestamp > ?
+        AND success = 1
+        AND action IN ('buy_put', 'sell_put', 'sell_call', 'buyback_call')
+      ORDER BY timestamp DESC
+    `),
+
     getBotState: d.prepare('SELECT * FROM bot_state WHERE id = 1'),
 
     // ─── Hourly Rollup Queries ──────────────────────────────────────────
@@ -1050,6 +1060,25 @@ export function getLocalTrades(since: string) {
     }[];
   } catch {
     return []; // table may not exist yet
+  }
+}
+
+export function getOrderTradesSince(since: string) {
+  try {
+    return getStmts().getOrderTradesSince.all(since) as {
+      id: number;
+      timestamp: string;
+      action: string;
+      instrument_name: string | null;
+      filled_amount: number | null;
+      intended_amount: number | null;
+      fill_price: number | null;
+      price: number | null;
+      spot_price: number | null;
+      total_value: number | null;
+    }[];
+  } catch {
+    return [];
   }
 }
 
