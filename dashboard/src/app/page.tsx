@@ -10,8 +10,8 @@ import { Bot, User } from 'lucide-react';
 import {
   ComposedChart, Line, Bar, Scatter, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Legend, ReferenceLine, ScatterChart, ReferenceArea,
+  ReferenceDot,
 } from 'recharts';
-import type { ScatterShapeProps } from 'recharts';
 
 /** Hook: hover shows tooltip, click pins it, next click anywhere unpins */
 function usePinnableTooltip() {
@@ -564,20 +564,6 @@ function formatExpiryLabel(expiryDate: Date | null, fallback: string | null) {
 function getPositionColor(optionType: 'put' | 'call' | null) {
   return optionType === 'put' ? chartColors.red : optionType === 'call' ? chartColors.secondary : '#a1a1aa';
 }
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const TradeMarkerShape = ({ cx, cy, payload }: any) => {
-  if (!cx || !cy || !payload) return null;
-  const isBuy = payload.direction === 'buy';
-  const isBot = Boolean(payload.is_bot);
-  const fill = isBot ? chartColors.trade : '#111111';
-  const stroke = chartColors.trade;
-  const size = isBot ? 7 : 6;
-  const points = isBuy
-    ? `${cx},${cy - size} ${cx - size},${cy + size * 0.65} ${cx + size},${cy + size * 0.65}`
-    : `${cx},${cy + size} ${cx - size},${cy - size * 0.65} ${cx + size},${cy - size * 0.65}`;
-  return <polygon points={points} fill={fill} stroke={stroke} strokeWidth={1.5} />;
-};
 
 function buildInstrumentSeries<T extends { instrument: string; ts: number }>(data: T[]): T[][] {
   const groups = new Map<string, T[]>();
@@ -1374,17 +1360,6 @@ export default function OverviewPage() {
     };
   }), [positionsByInstrument, visibleTrades]);
 
-  const tradeMarkers = useMemo(() => ({
-    buys: visibleTradesEnriched.filter((trade) => trade.direction === 'buy').map((trade) => ({
-      ...trade,
-      price: trade.index_price,
-    })),
-    sells: visibleTradesEnriched.filter((trade) => trade.direction !== 'buy').map((trade) => ({
-      ...trade,
-      price: trade.index_price,
-    })),
-  }), [visibleTradesEnriched]);
-
   return (
     <div className="space-y-6">
       {/* Left: Range + Best Options | Right: Momentum */}
@@ -1666,24 +1641,35 @@ export default function OverviewPage() {
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
 
-              <Scatter
-                yAxisId="price"
-                data={tradeMarkers.buys}
-                dataKey="price"
-                name="tradeMarkerBuys"
-                fill={chartColors.trade}
-                shape={(props: ScatterShapeProps) => <TradeMarkerShape {...props} />}
-                isAnimationActive={false}
-              />
-              <Scatter
-                yAxisId="price"
-                data={tradeMarkers.sells}
-                dataKey="price"
-                name="tradeMarkerSells"
-                fill={chartColors.trade}
-                shape={(props: ScatterShapeProps) => <TradeMarkerShape {...props} />}
-                isAnimationActive={false}
-              />
+              {visibleTradesEnriched.map((trade) => (
+                <ReferenceDot
+                  key={trade.trade_id}
+                  x={trade.ts}
+                  y={trade.index_price}
+                  yAxisId="price"
+                  ifOverflow="extendDomain"
+                  r={5}
+                  fill={trade.is_bot ? chartColors.trade : '#111111'}
+                  stroke={chartColors.trade}
+                  strokeWidth={1.5}
+                  shape={({ cx, cy }: { cx?: number; cy?: number }) => {
+                    if (!cx || !cy) return <></>;
+                    const isBuy = trade.direction === 'buy';
+                    const size = trade.is_bot ? 7 : 6;
+                    const points = isBuy
+                      ? `${cx},${cy - size} ${cx - size},${cy + size * 0.65} ${cx + size},${cy + size * 0.65}`
+                      : `${cx},${cy + size} ${cx - size},${cy - size * 0.65} ${cx + size},${cy - size * 0.65}`;
+                    return (
+                      <polygon
+                        points={points}
+                        fill={trade.is_bot ? chartColors.trade : '#111111'}
+                        stroke={chartColors.trade}
+                        strokeWidth={1.5}
+                      />
+                    );
+                  }}
+                />
+              ))}
             </ComposedChart>
           </ResponsiveContainer>
           </div>

@@ -54,7 +54,7 @@ function prepareAll(d: Database.Database) {
 
     getLyraSpot: d.prepare(`
       SELECT index_price as lyra_spot FROM options_snapshots
-      WHERE index_price IS NOT NULL
+      WHERE index_price BETWEEN 100 AND 20000
       ORDER BY timestamp DESC LIMIT 1
     `),
 
@@ -106,7 +106,7 @@ function prepareAll(d: Database.Database) {
         MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
           AND delta >= 0.04 AND delta <= 0.12
           THEN bid_delta_value END) as best_call_value,
-        MAX(index_price) as lyra_spot
+        MAX(CASE WHEN index_price BETWEEN 100 AND 20000 THEN index_price END) as lyra_spot
       FROM options_snapshots
       WHERE timestamp > ?
       GROUP BY timestamp
