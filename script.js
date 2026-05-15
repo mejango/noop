@@ -222,7 +222,7 @@ const BOT_DATA_PATH = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'bo
 const PERIOD = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 
 // Trading parameters - PUTS
-const PUT_EXPIRATION_RANGE = [45, 75];
+const PUT_EXPIRATION_RANGE = [45, 78];
 const PUT_DELTA_RANGE = [-0.12, -0.02]; // Negative delta for puts
 
 // Trading parameters - CALLS  
