@@ -4,6 +4,11 @@ import { getOrderTradesSince } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
 
+function normalizeSpotPrice(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 100 && n <= 20000 ? n : 0;
+}
+
 export async function GET() {
   try {
     const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
@@ -25,7 +30,7 @@ export async function GET() {
           trade_price: Number(order.fill_price ?? order.price ?? 0),
           trade_fee: 0,
           timestamp: tradeTs,
-          index_price: Number(order.spot_price ?? 0),
+          index_price: normalizeSpotPrice(order.spot_price),
           realized_pnl: 0,
           is_bot: true,
         };
@@ -35,7 +40,6 @@ export async function GET() {
         && Number.isFinite(trade.timestamp)
         && trade.trade_amount > 0
         && trade.trade_price > 0
-        && trade.index_price > 0
       );
 
     return NextResponse.json({

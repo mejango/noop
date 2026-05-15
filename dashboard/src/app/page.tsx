@@ -456,6 +456,13 @@ const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d', '365
 
 const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 18 };
 const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 18 };
+const ETH_SPOT_MIN = 100;
+const ETH_SPOT_MAX = 20000;
+
+function normalizeEthSpot(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= ETH_SPOT_MIN && n <= ETH_SPOT_MAX ? n : null;
+}
 
 // Momentum color helpers for bar cells (derivative-aware shading)
 const momentumBarColorMedium = (m: string | undefined | null, derivative: string | undefined | null) => {
@@ -882,7 +889,7 @@ export default function OverviewPage() {
       const m = p.medium_momentum_main || 'neutral';
       return {
         ts: new Date(p.timestamp).getTime(),
-        price: p.price,
+        price: normalizeEthSpot(p.price) ?? undefined,
         momentum: m,
         shortMomentum: p.short_momentum_main || 'neutral',
         mediumDerivative: p.medium_momentum_derivative || undefined,
@@ -946,7 +953,8 @@ export default function OverviewPage() {
       const idx = snapToNearest(new Date(o.timestamp).getTime());
       rows[idx].bestPut = o.best_put_value;
       rows[idx].bestCall = o.best_call_value;
-      if (o.lyra_spot != null && o.lyra_spot > 0) rows[idx].lyraSpot = o.lyra_spot;
+      const lyraSpot = normalizeEthSpot(o.lyra_spot);
+      if (lyraSpot != null) rows[idx].lyraSpot = lyraSpot;
       // Attach option details from heatmap data
       const putSnap = bestPutByTs.get(o.timestamp);
       if (putSnap) rows[idx].bestPutDetail = makeDetail(putSnap, true);
@@ -958,8 +966,8 @@ export default function OverviewPage() {
     if (liveTs && Number.isFinite(liveTs)) {
       const liveRow: Row = {
         ts: liveTs,
-        price: stats.last_price || undefined,
-        lyraSpot: stats.lyra_spot != null ? Number(stats.lyra_spot) : undefined,
+        price: normalizeEthSpot(stats.last_price) ?? undefined,
+        lyraSpot: normalizeEthSpot(stats.lyra_spot),
         momentum: stats.medium_momentum || 'neutral',
         shortMomentum: stats.short_momentum || 'neutral',
         mediumDerivative: stats.medium_derivative || undefined,
@@ -1641,35 +1649,41 @@ export default function OverviewPage() {
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
 
-              {visibleTradesEnriched.map((trade) => (
-                <ReferenceDot
-                  key={trade.trade_id}
-                  x={trade.ts}
-                  y={trade.index_price}
-                  yAxisId="price"
-                  ifOverflow="extendDomain"
-                  r={5}
-                  fill={trade.is_bot ? chartColors.trade : '#111111'}
-                  stroke={chartColors.trade}
-                  strokeWidth={1.5}
-                  shape={({ cx, cy }: { cx?: number; cy?: number }) => {
-                    if (!cx || !cy) return <></>;
-                    const isBuy = trade.direction === 'buy';
-                    const size = trade.is_bot ? 7 : 6;
-                    const points = isBuy
-                      ? `${cx},${cy - size} ${cx - size},${cy + size * 0.65} ${cx + size},${cy + size * 0.65}`
-                      : `${cx},${cy + size} ${cx - size},${cy - size * 0.65} ${cx + size},${cy - size * 0.65}`;
-                    return (
-                      <polygon
-                        points={points}
-                        fill={trade.is_bot ? chartColors.trade : '#111111'}
-                        stroke={chartColors.trade}
-                        strokeWidth={1.5}
-                      />
-                    );
-                  }}
-                />
-              ))}
+              {visibleTradesEnriched.map((trade) => {
+                const markerSpot = normalizeEthSpot(trade.index_price)
+                  ?? findNearestMergedRow(trade.ts)?.price
+                  ?? null;
+                if (markerSpot == null) return null;
+                return (
+                  <ReferenceDot
+                    key={trade.trade_id}
+                    x={trade.ts}
+                    y={markerSpot}
+                    yAxisId="price"
+                    ifOverflow="discard"
+                    r={5}
+                    fill={trade.is_bot ? chartColors.trade : '#111111'}
+                    stroke={chartColors.trade}
+                    strokeWidth={1.5}
+                    shape={({ cx, cy }: { cx?: number; cy?: number }) => {
+                      if (!cx || !cy) return <></>;
+                      const isBuy = trade.direction === 'buy';
+                      const size = trade.is_bot ? 7 : 6;
+                      const points = isBuy
+                        ? `${cx},${cy - size} ${cx - size},${cy + size * 0.65} ${cx + size},${cy + size * 0.65}`
+                        : `${cx},${cy + size} ${cx - size},${cy - size * 0.65} ${cx + size},${cy - size * 0.65}`;
+                      return (
+                        <polygon
+                          points={points}
+                          fill={trade.is_bot ? chartColors.trade : '#111111'}
+                          stroke={chartColors.trade}
+                          strokeWidth={1.5}
+                        />
+                      );
+                    }}
+                  />
+                );
+              })}
             </ComposedChart>
           </ResponsiveContainer>
           </div>

@@ -1276,6 +1276,13 @@ const determineCheckInterval = (mediumTermMomentum, shortTermMomentum) => {
 let coinGeckoCooldownUntil = 0;
 let coinGeckoCooldownNoticeUntil = 0;
 let lastSuccessfulCoinGeckoSpot = null;
+const ETH_SPOT_MIN = 100;
+const ETH_SPOT_MAX = 20000;
+
+const normalizeEthSpotPrice = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= ETH_SPOT_MIN && n <= ETH_SPOT_MAX ? n : null;
+};
 
 const extractTickerSpotPrice = (ticker) => {
   if (!ticker || typeof ticker !== 'object') return null;
@@ -1295,8 +1302,8 @@ const extractTickerSpotPrice = (ticker) => {
     ticker.markPrice,
   ];
   for (const candidate of candidates) {
-    const value = Number(candidate);
-    if (value > 0) return value;
+    const value = normalizeEthSpotPrice(candidate);
+    if (value != null) return value;
   }
   return null;
 };
@@ -1310,7 +1317,9 @@ const fetchDeriveSpotPrice = async () => {
     const raw = response.data?.result;
     const tickers = Array.isArray(raw)
       ? raw
-      : (Array.isArray(raw?.tickers) ? raw.tickers : []);
+      : (Array.isArray(raw?.tickers)
+        ? raw.tickers
+        : (raw?.tickers && typeof raw.tickers === 'object' ? Object.values(raw.tickers) : []));
     const ethPerp = tickers.find(t => t.instrument_name === 'ETH-PERP') || tickers[0];
     return extractTickerSpotPrice(ethPerp);
   } catch (error) {
@@ -7206,6 +7215,7 @@ const runBot = async () => {
   if (!spotPrice) {
     spotPrice = await fetchCoinGeckoSpotPrice();
   }
+  spotPrice = normalizeEthSpotPrice(spotPrice);
 
   // Shared timestamp for all DB writes this tick
   const tickTimestamp = new Date().toISOString();
@@ -7374,8 +7384,8 @@ const runBot = async () => {
   // Prefer option-ticker index price over early spot (more timely, matches options pricing)
   if (Object.keys(tickerMap).length > 0) {
     const firstTicker = Object.values(tickerMap)[0];
-    const lyraIndex = Number(firstTicker.I);
-    if (lyraIndex > 0) {
+    const lyraIndex = normalizeEthSpotPrice(firstTicker.I);
+    if (lyraIndex != null) {
       if (spotPrice) {
         console.log(`🔄 Upgrading spot from early quote $${spotPrice.toFixed(2)} → Lyra index $${lyraIndex.toFixed(2)} (Δ${(lyraIndex - spotPrice).toFixed(2)})`);
       } else {

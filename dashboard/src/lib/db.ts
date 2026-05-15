@@ -49,7 +49,9 @@ function prepareAll(d: Database.Database) {
         short_momentum_main as short_momentum, short_momentum_derivative as short_derivative,
         medium_momentum_main as medium_momentum, medium_momentum_derivative as medium_derivative,
         three_day_high, three_day_low, seven_day_high, seven_day_low
-      FROM spot_prices ORDER BY timestamp DESC LIMIT 1
+      FROM spot_prices
+      WHERE price BETWEEN 100 AND 20000
+      ORDER BY timestamp DESC LIMIT 1
     `),
 
     getLyraSpot: d.prepare(`
@@ -61,6 +63,7 @@ function prepareAll(d: Database.Database) {
     getSpotPrices: d.prepare(`
       SELECT * FROM spot_prices
       WHERE timestamp > ?
+        AND price BETWEEN 100 AND 20000
       ORDER BY timestamp ASC
       LIMIT ?
     `),
@@ -263,6 +266,7 @@ function prepareAll(d: Database.Database) {
              AVG(price) as avg_price
       FROM spot_prices
       WHERE timestamp > ?
+        AND price BETWEEN 100 AND 20000
       GROUP BY hour
       ORDER BY hour ASC
     `),
@@ -429,7 +433,10 @@ function prepareAll(d: Database.Database) {
       SELECT hour as timestamp, open as price, high, low, close,
         avg_price, short_momentum as short_momentum_main,
         medium_momentum as medium_momentum_main
-      FROM spot_prices_hourly WHERE hour > ? ORDER BY hour ASC
+      FROM spot_prices_hourly
+      WHERE hour > ?
+        AND open BETWEEN 100 AND 20000
+      ORDER BY hour ASC
     `),
 
     getBestOptionsHourlyRollup: d.prepare(`
