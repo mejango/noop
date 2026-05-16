@@ -4792,6 +4792,119 @@ const evaluateConditions = (conditions, logic, values) => {
   return logic === 'all' ? results.every(Boolean) : results.some(Boolean);
 };
 
+const parseMaybeJsonObject = (value) => {
+  if (!value) return null;
+  if (typeof value === 'object' && !Array.isArray(value)) return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+};
+
+const isBuybackProfitCaptureCondition = (condition) => {
+  if (!condition || condition.field !== 'unrealized_pnl_pct') return false;
+  if (!['gte', 'gt'].includes(condition.op)) return false;
+  return Number.isFinite(Number(condition.value ?? condition.threshold));
+};
+
+const getBuybackProfitCaptureCondition = (criteria) => {
+  const parsed = parseMaybeJsonObject(criteria);
+  if (!parsed || !Array.isArray(parsed.conditions)) return null;
+  const condition = parsed.conditions.find(isBuybackProfitCaptureCondition);
+  if (!condition) return null;
+  return {
+    op: condition.op,
+    threshold: Number(condition.value ?? condition.threshold),
+  };
+};
+
+const conditionPasses = (actual, op, threshold) => {
+  if (!Number.isFinite(actual) || !Number.isFinite(threshold)) return false;
+  if (op === 'gt') return actual > threshold;
+  if (op === 'gte') return actual >= threshold;
+  if (op === 'lt') return actual < threshold;
+  if (op === 'lte') return actual <= threshold;
+  return false;
+};
+
+const normalizeBuybackCaptureFloor = (rule) => {
+  if (!rule || rule.rule_type !== 'exit' || rule.action !== 'buyback_call') return { rule, changed: false };
+
+  const criteria = parseMaybeJsonObject(rule.criteria);
+  if (!criteria || !Array.isArray(criteria.conditions)) return { rule, changed: false };
+  if (criteria.allow_below_profit_floor === true) return { rule, changed: false };
+
+  let changed = false;
+  let previousFloor = null;
+  const conditions = criteria.conditions.map(condition => {
+    if (!isBuybackProfitCaptureCondition(condition)) return condition;
+    const threshold = Number(condition.value ?? condition.threshold);
+    if (threshold >= CALL_BUYBACK_PROFIT_THRESHOLD) return condition;
+    previousFloor = previousFloor == null ? threshold : Math.min(previousFloor, threshold);
+    changed = true;
+    return { ...condition, value: CALL_BUYBACK_PROFIT_THRESHOLD };
+  });
+
+  if (!changed) return { rule, changed: false };
+
+  const suffix = `normalized buyback capture floor: ${previousFloor}% -> ${CALL_BUYBACK_PROFIT_THRESHOLD}%`;
+  return {
+    rule: {
+      ...rule,
+      criteria: { ...criteria, conditions },
+      reasoning: rule.reasoning ? `${rule.reasoning} [${suffix}]` : suffix,
+    },
+    changed: true,
+    reason: suffix,
+  };
+};
+
+const buildBuybackConfirmationContext = (action, triggerData) => {
+  if (action?.action !== 'buyback_call') return null;
+
+  const ruleCondition = getBuybackProfitCaptureCondition(action.rule_criteria);
+  const triggerCondition = Array.isArray(triggerData?.conditions_met)
+    ? triggerData.conditions_met.find(isBuybackProfitCaptureCondition)
+    : null;
+
+  const threshold = Number(ruleCondition?.threshold ?? triggerCondition?.threshold ?? triggerCondition?.value);
+  const op = ruleCondition?.op || triggerCondition?.op || 'gte';
+  const actual = Number(
+    triggerCondition?.actual
+    ?? triggerData?.current_values?.unrealized_pnl_pct
+    ?? triggerData?.unrealized_pnl_pct
+  );
+  const executionPrice = Number(triggerData?.current_values?.execution_price);
+
+  if (!Number.isFinite(threshold)) return null;
+
+  return {
+    threshold,
+    op,
+    actual: Number.isFinite(actual) ? actual : null,
+    executionPrice: Number.isFinite(executionPrice) && executionPrice > 0 ? executionPrice : null,
+    satisfied: conditionPasses(actual, op, threshold),
+  };
+};
+
+const formatBuybackConfirmationContext = (context, liveMarketPrice) => {
+  if (!context) return '';
+  const actualText = Number.isFinite(context.actual) ? `${context.actual.toFixed(2)}%` : 'N/A';
+  const opText = context.op === 'gt' ? '>' : '>=';
+  const liveText = Number(liveMarketPrice) > 0 ? `$${Number(liveMarketPrice).toFixed(4)}` : 'unavailable';
+  const executionText = context.executionPrice ? `$${context.executionPrice.toFixed(4)}` : 'N/A';
+  return [
+    'Advisor-rule buyback context:',
+    `- Active buyback_call rule threshold: executable unrealized_pnl_pct ${opText} ${context.threshold}%`,
+    `- Current executable capture from trigger details: ${actualText}; rule_satisfied=${context.satisfied ? 'yes' : 'no'}`,
+    `- Live buyback ask: ${liveText}; trigger execution_price=${executionText}`,
+    `- Confirmation should validate live price, reduce-only semantics, and rule consistency. Do not reject solely because the call is OTM, delta is low, theta remains, or the rule is a profit-harvest/capacity-reset rather than a threat signal. The advisor rule is the source of strategic intent for this pending exit.`,
+  ].join('\n');
+};
+
 const getOpenRestingEntryOrders = () => {
   if (!db) return [];
   return db.getOpenRestingOrders().filter(order => order.action === 'buy_put' || order.action === 'sell_call');
@@ -6109,6 +6222,8 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       let triggerData = {};
       try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
       const advisoryOrderPref = normalizePreferredOrderType(action.action, triggerData.preferred_order_type);
+      const buybackConfirmationContext = buildBuybackConfirmationContext(action, triggerData);
+      const buybackConfirmationPrompt = formatBuybackConfirmationContext(buybackConfirmationContext, liveMarketPrice);
       const recentFailedEntry = getRecentFailedEntry(action.action, action.instrument_name);
       const callMarginContext = getCallMarginContext(
         action.action,
@@ -6133,6 +6248,7 @@ Action semantics: ${describeActionSemantics(action.action)}
 Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
 ${callMarginContext}
+${buybackConfirmationPrompt}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
 ${recentFailedEntry?.reason ? `Recent execution friction on this exact instrument/action: ${recentFailedEntry.reason}` : ''}
 ${recentTradeReviews.length > 0 ? `Recent trade reviews:\n${recentTradeReviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}` : ''}
@@ -6158,7 +6274,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
 ${getSharedActionPolicyPrompt()}
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
 CALL DISCIPLINE: Short calls normally have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active cap may widen up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the active cap or are too small to matter.
-CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove the tail risk of further upside continuation. Confirm buybacks when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by actual breakout evidence. Reject buybacks driven by price action alone when theta is still working, the call remains OTM, and the position is not under real threat. There is one explicit house-rule exception: deterministic theta harvesting. If the trigger details show unrealized_pnl_pct at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, treat that as a valid profit-harvest/capacity-reset trigger, but read it as executable buyback economics using the live buy price rather than midpoint fantasy. ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is a minimum acceptable capture, not a target to give back to. If the live executable buyback price already implies strictly better capture, do not bid back up to the threshold; either hold/let expire, or use a lower patient bid only if the advisor is genuinely happy with that price. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger. If there is no urgency and the book is wide, patient limit-style buyback pricing is acceptable.
+CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove the tail risk of further upside continuation. Confirm buybacks when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by actual breakout evidence. Reject buybacks driven by price action alone when theta is still working, the call remains OTM, and the position is not under real threat. There is one explicit house-rule exception: deterministic theta harvesting. If the trigger details show an active advisor-rule buyback context, treat that rule as the approved strategic intent and validate execution safety against the rule's own executable unrealized_pnl_pct threshold; do not substitute a different threshold during confirmation. For newly-created harvest rules, ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is the minimum acceptable capture, not a target to give back to. If the live executable buyback price already implies strictly better capture, do not bid back up to the threshold; either hold/let expire, or use a lower patient bid only if the advisor is genuinely happy with that price. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger. If there is no urgency and the book is wide, patient limit-style buyback pricing is acceptable.
 PUT EXIT DISCIPLINE: For sell_put — evaluate it as monetizing or rolling an existing long put. Do not analyze it as short put selling or naked downside exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin. The question is whether closing this owned hedge now is prudent, not whether opening short put risk is acceptable.
 REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.
 Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.`,
@@ -6205,7 +6321,7 @@ ${getSharedActionPolicyPrompt()}
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
 CALL DISCIPLINE: Short calls normally have a hard cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized down into the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% caution zone when the size still matters. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active cap may widen up to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the active cap or are too small to matter.
-CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous, but the premium was already collected and temporary mark pain is not the same as final loss. A buyback below strike is an explicit purchase of upside insurance. Confirm buybacks only when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by real continuation evidence. Reject buybacks driven by price noise when theta is still working. One explicit house-rule exception is deterministic theta harvesting: when unrealized_pnl_pct is at or above ${CALL_BUYBACK_PROFIT_THRESHOLD}%, treat the buyback as an allowed profit-harvest/capacity-reset by policy, judged on executable buyback price rather than midpoint mark. ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is a minimum acceptable capture, not a target to give back to. If the live executable buyback price already implies strictly better capture, do not bid back up to the threshold; either hold/let expire, or use a lower patient bid only if the advisor is genuinely happy with that price. Never confirm a threshold-style buyback when live market price is unavailable. Extra DTE or margin-release metrics are context, not gating requirements for that case. Margin utilization by itself is not a buyback trigger. If urgency is low and the book is wide, patient limit-style buyback pricing is acceptable.
+CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous, but the premium was already collected and temporary mark pain is not the same as final loss. A buyback below strike is an explicit purchase of upside insurance. Confirm buybacks only when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by real continuation evidence. Reject buybacks driven by price noise when theta is still working. One explicit house-rule exception is deterministic theta harvesting: when trigger details show an active advisor-rule buyback context, the confirmation job is to validate execution safety against that rule's own executable unrealized_pnl_pct threshold, not to re-litigate the strategy with a different threshold. For newly-created harvest rules, ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is the minimum acceptable capture, not a target to give back to. If the live executable buyback price already implies strictly better capture, do not bid back up to the threshold; either hold/let expire, or use a lower patient bid only if the advisor is genuinely happy with that price. Never confirm a threshold-style buyback when live market price is unavailable. Extra DTE or margin-release metrics are context, not gating requirements for that case. Margin utilization by itself is not a buyback trigger. If urgency is low and the book is wide, patient limit-style buyback pricing is acceptable.
 PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
 REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV overpays alongside the crowd. Use actual Greeks, DTE, and momentum to judge.
 Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.
@@ -6241,13 +6357,35 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         continue;
       }
 
+      let decisionOverrideReason = null;
+      const advisorBuybackRuleSatisfied = action.action === 'buyback_call'
+        && buybackConfirmationContext?.satisfied === true
+        && Number(liveMarketPrice) > 0;
+      if (
+        decision === 'rejected'
+        && advisorBuybackRuleSatisfied
+        && haikuVote
+        && codexVote
+        && (haikuVote.confirm || codexVote.confirm)
+      ) {
+        decision = 'confirmed';
+        decisionOverrideReason = `advisor_rule_buyback_override: active rule capture ${buybackConfirmationContext.actual.toFixed(2)}% satisfies ${buybackConfirmationContext.op} ${buybackConfirmationContext.threshold}% and one reviewer confirmed`;
+      }
+
       const reasoning = [
         haikuVote ? `Haiku: ${haikuVote.confirm ? 'CONFIRM' : 'REJECT'} — ${haikuVote.reasoning || 'no reason'}` : `Haiku: FAILED — ${haikuFailure || 'unknown error'}`,
         codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : `OpenAI: FAILED — ${codexFailure || 'unknown error'}`,
-      ].join(' | ');
+        decisionOverrideReason,
+      ].filter(Boolean).join(' | ');
 
       // Resolve order type from voter consensus (prefer haiku's pick, fallback to codex)
-      const confirmedOrderType = (haikuVote?.order_type || codexVote?.order_type || 'ioc');
+      const confirmedOrderType = (
+        (haikuVote?.confirm ? haikuVote.order_type : null)
+        || (codexVote?.confirm ? codexVote.order_type : null)
+        || haikuVote?.order_type
+        || codexVote?.order_type
+        || 'ioc'
+      );
       const validOrderTypes = getAllowedOrderTypesForAction(action.action);
       const baseOrderType = validOrderTypes.includes(confirmedOrderType) ? confirmedOrderType : 'ioc';
 
@@ -6270,7 +6408,12 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
 
       // Resolve limit price: voter can override, otherwise use current market price
       // Sanity check: voter price must be within 50% of market price (prevents LLM hallucinating insane prices)
-      const voterLimitPrice = haikuVote?.limit_price || codexVote?.limit_price;
+      const voterLimitPrice = (
+        (haikuVote?.confirm ? haikuVote.limit_price : null)
+        || (codexVote?.confirm ? codexVote.limit_price : null)
+        || haikuVote?.limit_price
+        || codexVote?.limit_price
+      );
       const marketPrice = currentPrice || action.price;
       let executionPrice = marketPrice;
       if (typeof voterLimitPrice === 'number' && voterLimitPrice > 0 && marketPrice > 0) {
@@ -7131,7 +7274,7 @@ Synthesize the final agenda now.`;
   // Parse exit rules
   if (finalAgenda.exit_rules && Array.isArray(finalAgenda.exit_rules)) {
     for (const rule of finalAgenda.exit_rules) {
-      allRules.push({
+      const rawRule = {
         rule_type: 'exit',
         action: rule.action,
         instrument_name: rule.instrument_name || null,
@@ -7141,7 +7284,12 @@ Synthesize the final agenda now.`;
         reasoning: rule.reasoning || null,
         advisory_id: advisoryId,
         preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
-      });
+      };
+      const normalized = normalizeBuybackCaptureFloor(rawRule);
+      if (normalized.changed) {
+        console.log(`📋 Advisory ${advisoryId}: ${normalized.reason} for ${rawRule.instrument_name}`);
+      }
+      allRules.push(normalized.rule);
     }
   }
 

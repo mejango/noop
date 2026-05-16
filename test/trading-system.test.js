@@ -4613,6 +4613,117 @@ describe('buyback_call limit discipline', () => {
   });
 });
 
+describe('advisor-led buyback confirmation discipline', () => {
+  const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
+
+  const isProfitCaptureCondition = (condition) =>
+    condition?.field === 'unrealized_pnl_pct'
+    && ['gte', 'gt'].includes(condition.op)
+    && Number.isFinite(Number(condition.value ?? condition.threshold));
+
+  const normalizeCaptureFloor = (rule) => {
+    if (rule.rule_type !== 'exit' || rule.action !== 'buyback_call') return { rule, changed: false };
+    if (rule.criteria?.allow_below_profit_floor === true) return { rule, changed: false };
+
+    let changed = false;
+    const conditions = rule.criteria.conditions.map(condition => {
+      if (!isProfitCaptureCondition(condition)) return condition;
+      if (Number(condition.value ?? condition.threshold) >= CALL_BUYBACK_PROFIT_THRESHOLD) return condition;
+      changed = true;
+      return { ...condition, value: CALL_BUYBACK_PROFIT_THRESHOLD };
+    });
+
+    return changed
+      ? { rule: { ...rule, criteria: { ...rule.criteria, conditions } }, changed }
+      : { rule, changed: false };
+  };
+
+  const resolveVote = ({ haikuVote, codexVote, buybackContext, liveMarketPrice }) => {
+    let decision;
+    if (haikuVote && codexVote) {
+      decision = (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
+    } else if (haikuVote) {
+      decision = haikuVote.confirm ? 'confirmed' : 'rejected';
+    } else if (codexVote) {
+      decision = codexVote.confirm ? 'confirmed' : 'rejected';
+    } else {
+      decision = 'retry';
+    }
+
+    const advisorBuybackRuleSatisfied = buybackContext?.satisfied === true && Number(liveMarketPrice) > 0;
+    if (
+      decision === 'rejected'
+      && advisorBuybackRuleSatisfied
+      && haikuVote
+      && codexVote
+      && (haikuVote.confirm || codexVote.confirm)
+    ) {
+      decision = 'confirmed';
+    }
+    return decision;
+  };
+
+  test('normalizes advisor buyback harvest rules below the configured capture floor', () => {
+    const normalized = normalizeCaptureFloor({
+      rule_type: 'exit',
+      action: 'buyback_call',
+      criteria: {
+        conditions: [
+          { field: 'unrealized_pnl_pct', op: 'gte', value: 70 },
+          { field: 'dte', op: 'lte', value: 7 },
+        ],
+        condition_logic: 'all',
+      },
+    });
+
+    assert.strictEqual(normalized.changed, true);
+    assert.strictEqual(normalized.rule.criteria.conditions[0].value, 80);
+    assert.strictEqual(normalized.rule.criteria.conditions[1].value, 7);
+  });
+
+  test('explicit below-floor allowance is left untouched', () => {
+    const normalized = normalizeCaptureFloor({
+      rule_type: 'exit',
+      action: 'buyback_call',
+      criteria: {
+        allow_below_profit_floor: true,
+        conditions: [{ field: 'unrealized_pnl_pct', op: 'gte', value: 70 }],
+        condition_logic: 'all',
+      },
+    });
+
+    assert.strictEqual(normalized.changed, false);
+    assert.strictEqual(normalized.rule.criteria.conditions[0].value, 70);
+  });
+
+  test('split review confirms when an active advisor buyback rule is satisfied', () => {
+    const decision = resolveVote({
+      haikuVote: { confirm: false, reasoning: 'mechanical exit' },
+      codexVote: { confirm: true, reasoning: 'advisor rule triggered' },
+      buybackContext: { satisfied: true },
+      liveMarketPrice: 0.6,
+    });
+
+    assert.strictEqual(decision, 'confirmed');
+  });
+
+  test('split review still rejects when the buyback rule is not satisfied or price is missing', () => {
+    assert.strictEqual(resolveVote({
+      haikuVote: { confirm: false },
+      codexVote: { confirm: true },
+      buybackContext: { satisfied: false },
+      liveMarketPrice: 0.6,
+    }), 'rejected');
+
+    assert.strictEqual(resolveVote({
+      haikuVote: { confirm: false },
+      codexVote: { confirm: true },
+      buybackContext: { satisfied: true },
+      liveMarketPrice: null,
+    }), 'rejected');
+  });
+});
+
 describe('confirmation prompt margin context', () => {
   test('sell_call includes concrete current and projected utilization', () => {
     const context = getCallMarginContext(
