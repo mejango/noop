@@ -605,8 +605,8 @@ function prepareAll(d: Database.Database) {
     `),
     getRealizedPnL: d.prepare(`
       SELECT
-        COALESCE(SUM(CASE WHEN action IN ('sell_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0)
-        - COALESCE(SUM(CASE WHEN action IN ('buy_put','sell_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+        COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+        - COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0)
         as net_realized_pnl,
         COALESCE(SUM(CASE WHEN action = 'buy_put' AND success = 1 THEN total_value ELSE 0 END), 0) as total_put_cost,
         COALESCE(SUM(CASE WHEN action = 'sell_put' AND success = 1 THEN total_value ELSE 0 END), 0) as total_put_revenue,

@@ -75,6 +75,32 @@ function signedCashflow(action: string, totalValue: number | null | undefined): 
   }
 }
 
+function cashflowParts(action: string, totalValue: number | null | undefined) {
+  const value = Number(totalValue ?? 0);
+  const zero = {
+    revenue: 0,
+    expenses: 0,
+    putRevenue: 0,
+    putExpenses: 0,
+    callRevenue: 0,
+    callExpenses: 0,
+  };
+  if (!Number.isFinite(value) || value === 0) return zero;
+
+  switch (action) {
+    case 'sell_put':
+      return { ...zero, revenue: value, putRevenue: value };
+    case 'sell_call':
+      return { ...zero, revenue: value, callRevenue: value };
+    case 'buy_put':
+      return { ...zero, expenses: value, putExpenses: value };
+    case 'buyback_call':
+      return { ...zero, expenses: value, callExpenses: value };
+    default:
+      return zero;
+  }
+}
+
 function downsampleKeepLast<T>(rows: T[], maxPoints: number, getTs: (row: T) => number): T[] {
   if (rows.length <= maxPoints) return rows;
   const start = getTs(rows[0]);
@@ -184,8 +210,14 @@ export function GET(req: NextRequest) {
     const bucketMap = new Map<number, {
       bucketTs: number;
       tradeCashflow: number;
+      tradeRevenue: number;
+      tradeExpenses: number;
       putCashflow: number;
+      putRevenue: number;
+      putExpenses: number;
       callCashflow: number;
+      callRevenue: number;
+      callExpenses: number;
       orderCount: number;
       endPortfolioValue: number | null;
       endUnrealizedPnl: number | null;
@@ -196,8 +228,14 @@ export function GET(req: NextRequest) {
       const bucket = bucketMap.get(key) || {
         bucketTs: key,
         tradeCashflow: 0,
+        tradeRevenue: 0,
+        tradeExpenses: 0,
         putCashflow: 0,
+        putRevenue: 0,
+        putExpenses: 0,
         callCashflow: 0,
+        callRevenue: 0,
+        callExpenses: 0,
         orderCount: 0,
         endPortfolioValue: null,
         endUnrealizedPnl: null,
@@ -213,14 +251,27 @@ export function GET(req: NextRequest) {
       const bucket = bucketMap.get(key) || {
         bucketTs: key,
         tradeCashflow: 0,
+        tradeRevenue: 0,
+        tradeExpenses: 0,
         putCashflow: 0,
+        putRevenue: 0,
+        putExpenses: 0,
         callCashflow: 0,
+        callRevenue: 0,
+        callExpenses: 0,
         orderCount: 0,
         endPortfolioValue: null,
         endUnrealizedPnl: null,
       };
       const cashflow = signedCashflow(order.action, order.total_value);
+      const parts = cashflowParts(order.action, order.total_value);
       bucket.tradeCashflow += cashflow;
+      bucket.tradeRevenue += parts.revenue;
+      bucket.tradeExpenses += parts.expenses;
+      bucket.putRevenue += parts.putRevenue;
+      bucket.putExpenses += parts.putExpenses;
+      bucket.callRevenue += parts.callRevenue;
+      bucket.callExpenses += parts.callExpenses;
       if (order.action === 'buy_put' || order.action === 'sell_put') bucket.putCashflow += cashflow;
       if (order.action === 'sell_call' || order.action === 'buyback_call') bucket.callCashflow += cashflow;
       bucket.orderCount += 1;
@@ -279,8 +330,14 @@ export function GET(req: NextRequest) {
           .map((bucket) => ({
             timestamp: new Date(bucket.bucketTs).toISOString(),
             tradeCashflow: bucket.tradeCashflow,
+            tradeRevenue: bucket.tradeRevenue,
+            tradeExpenses: bucket.tradeExpenses,
             putCashflow: bucket.putCashflow,
+            putRevenue: bucket.putRevenue,
+            putExpenses: bucket.putExpenses,
             callCashflow: bucket.callCashflow,
+            callRevenue: bucket.callRevenue,
+            callExpenses: bucket.callExpenses,
             orderCount: bucket.orderCount,
             endPortfolioValue: bucket.endPortfolioValue,
             endUnrealizedPnl: bucket.endUnrealizedPnl,

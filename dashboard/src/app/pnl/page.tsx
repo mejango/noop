@@ -64,8 +64,14 @@ type Report = {
     buckets: Array<{
       timestamp: string;
       tradeCashflow: number;
+      tradeRevenue?: number;
+      tradeExpenses?: number;
       putCashflow: number;
+      putRevenue?: number;
+      putExpenses?: number;
       callCashflow: number;
+      callRevenue?: number;
+      callExpenses?: number;
       orderCount: number;
       endPortfolioValue: number | null;
       endUnrealizedPnl: number | null;
@@ -193,6 +199,8 @@ export default function PnlReportPage() {
 
   const bucketSeries = useMemo(() => report.series.buckets.map((point) => ({
     ...point,
+    putExpenses: -Number(point.putExpenses ?? 0),
+    callExpenses: -Number(point.callExpenses ?? 0),
     label: dateLabel(point.timestamp, report.meta.bucketMs),
   })), [report]);
 
@@ -390,7 +398,10 @@ export default function PnlReportPage() {
                     <YAxis yAxisId="u" orientation="right" tickFormatter={(v) => `$${Math.round(v)}`} tick={{ fill: '#57534e', fontSize: 12 }} width={70} />
                     <Tooltip formatter={(value) => formatUSD(Number(value ?? 0))} />
                     <Legend />
-                    <Bar yAxisId="cash" dataKey="tradeCashflow" name="Trade Cashflow" fill="#0f766e" radius={[4, 4, 0, 0]} />
+                    <Bar yAxisId="cash" dataKey="callRevenue" name="Call Premium" stackId="grossFlow" fill="#059669" radius={[4, 4, 0, 0]} />
+                    <Bar yAxisId="cash" dataKey="putRevenue" name="Put Exits" stackId="grossFlow" fill="#0f766e" radius={[4, 4, 0, 0]} />
+                    <Bar yAxisId="cash" dataKey="putExpenses" name="Put Buys" stackId="grossFlow" fill="#dc2626" radius={[0, 0, 4, 4]} />
+                    <Bar yAxisId="cash" dataKey="callExpenses" name="Call Buybacks" stackId="grossFlow" fill="#ea580c" radius={[0, 0, 4, 4]} />
                     <Line yAxisId="u" type="monotone" dataKey="endUnrealizedPnl" name="Unrealized P&L" stroke="#dc2626" dot={false} strokeWidth={2} />
                   </ComposedChart>
                 </ResponsiveContainer>

@@ -297,8 +297,14 @@ interface ChartData {
 interface PnlBucketPoint {
   timestamp: string;
   tradeCashflow: number;
+  tradeRevenue?: number;
+  tradeExpenses?: number;
   putCashflow: number;
+  putRevenue?: number;
+  putExpenses?: number;
   callCashflow: number;
+  callRevenue?: number;
+  callExpenses?: number;
   orderCount: number;
   endPortfolioValue: number | null;
   endUnrealizedPnl: number | null;
@@ -782,14 +788,23 @@ export default function OverviewPage() {
     let lastPortfolioValue = Number.isFinite(pnlReport.summary.openingValue) ? pnlReport.summary.openingValue : 0;
     const rows = pnlReport.series.buckets.map((bucket) => {
       const net = Number(bucket.tradeCashflow ?? 0);
-      const periodRevenue = net > 0 ? net : 0;
-      const periodExpenses = net < 0 ? net : 0;
+      const fallbackRevenue = net > 0 ? net : 0;
+      const fallbackExpenses = net < 0 ? Math.abs(net) : 0;
+      const periodCallRevenue = Number(bucket.callRevenue ?? 0);
+      const periodPutRevenue = Number(bucket.putRevenue ?? 0);
+      const periodCallExpenseAmount = Number(bucket.callExpenses ?? 0);
+      const periodPutExpenseAmount = Number(bucket.putExpenses ?? 0);
+      const periodRevenue = Number(bucket.tradeRevenue ?? fallbackRevenue);
+      const periodExpenseAmount = Number(bucket.tradeExpenses ?? fallbackExpenses);
+      const periodExpenses = -periodExpenseAmount;
+      const periodCallExpenses = -periodCallExpenseAmount;
+      const periodPutExpenses = -periodPutExpenseAmount;
       const bucketPortfolioValue = Number(bucket.endPortfolioValue);
       if (Number.isFinite(bucketPortfolioValue) && bucketPortfolioValue > 0) {
         lastPortfolioValue = bucketPortfolioValue;
       }
       cumulativeRevenue += periodRevenue;
-      cumulativeExpenses += Math.abs(periodExpenses);
+      cumulativeExpenses += periodExpenseAmount;
       const profit = cumulativeRevenue - cumulativeExpenses;
       return {
         ts: new Date(bucket.timestamp).getTime(),
@@ -799,6 +814,10 @@ export default function OverviewPage() {
         periodRevenue,
         periodExpenses,
         periodNet: net,
+        periodCallRevenue,
+        periodPutRevenue,
+        periodCallExpenses,
+        periodPutExpenses,
         orderCount: bucket.orderCount,
         portfolioValueUsd: lastPortfolioValue,
       };
@@ -815,6 +834,10 @@ export default function OverviewPage() {
         periodRevenue: 0,
         periodExpenses: 0,
         periodNet: 0,
+        periodCallRevenue: 0,
+        periodPutRevenue: 0,
+        periodCallExpenses: 0,
+        periodPutExpenses: 0,
         orderCount: 0,
         portfolioValueUsd: pnlReport.summary.openingValue,
       });
@@ -829,6 +852,10 @@ export default function OverviewPage() {
         periodRevenue: 0,
         periodExpenses: 0,
         periodNet: 0,
+        periodCallRevenue: 0,
+        periodPutRevenue: 0,
+        periodCallExpenses: 0,
+        periodPutExpenses: 0,
         orderCount: 0,
         portfolioValueUsd: last?.portfolioValueUsd ?? pnlReport.summary.closingValue,
       });
@@ -858,7 +885,14 @@ export default function OverviewPage() {
   }, [pnlChartData]);
 
   const pnlBarDomain = useMemo<[number, number]>(() => {
-    const flows = pnlChartData.flatMap((row) => [row.periodRevenue, row.periodExpenses]).filter((value) => Number.isFinite(value));
+    const flows = pnlChartData.flatMap((row) => [
+      row.periodRevenue,
+      row.periodExpenses,
+      row.periodCallRevenue,
+      row.periodPutRevenue,
+      row.periodCallExpenses,
+      row.periodPutExpenses,
+    ]).filter((value) => Number.isFinite(value));
     if (flows.length === 0) return [-1, 1];
     const absMax = Math.max(...flows.map((value) => Math.abs(value)), 1);
     const pad = absMax * 0.12;
@@ -2647,6 +2681,10 @@ export default function OverviewPage() {
                     cumulativeProfit: 'Cum Profit',
                     periodRevenue: 'Revenue',
                     periodExpenses: 'Expenses',
+                    periodCallRevenue: 'Call Premium',
+                    periodPutRevenue: 'Put Exits',
+                    periodPutExpenses: 'Put Buys',
+                    periodCallExpenses: 'Call Buybacks',
                     portfolioValueUsd: 'Portfolio USD',
                   };
                   const numericValue = typeof value === 'number' ? value : Number(value ?? 0);
@@ -2664,14 +2702,20 @@ export default function OverviewPage() {
                      value === 'cumulativeProfit' ? 'profit' :
                      value === 'periodRevenue' ? 'rev bars' :
                      value === 'periodExpenses' ? 'exp bars' :
+                     value === 'periodCallRevenue' ? 'call rev' :
+                     value === 'periodPutRevenue' ? 'put rev' :
+                     value === 'periodPutExpenses' ? 'put buys' :
+                     value === 'periodCallExpenses' ? 'call buybacks' :
                      value === 'portfolioValueUsd' ? 'portfolio usd' : value}
                   </span>
                 )}
               />
               <ReferenceLine yAxisId="lines" y={0} stroke="rgba(255,255,255,0.12)" />
               <ReferenceLine yAxisId="bars" y={0} stroke="rgba(255,255,255,0.08)" />
-              <Bar yAxisId="bars" dataKey="periodRevenue" name="periodRevenue" fill="rgba(74, 222, 128, 0.45)" radius={[2, 2, 0, 0]} />
-              <Bar yAxisId="bars" dataKey="periodExpenses" name="periodExpenses" fill="rgba(248, 113, 113, 0.4)" radius={[0, 0, 2, 2]} />
+              <Bar yAxisId="bars" dataKey="periodCallRevenue" name="periodCallRevenue" stackId="grossFlow" fill="rgba(74, 222, 128, 0.46)" radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="bars" dataKey="periodPutRevenue" name="periodPutRevenue" stackId="grossFlow" fill="rgba(45, 212, 191, 0.38)" radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="bars" dataKey="periodPutExpenses" name="periodPutExpenses" stackId="grossFlow" fill="rgba(248, 113, 113, 0.34)" radius={[0, 0, 2, 2]} />
+              <Bar yAxisId="bars" dataKey="periodCallExpenses" name="periodCallExpenses" stackId="grossFlow" fill="rgba(251, 146, 60, 0.46)" radius={[0, 0, 2, 2]} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeRevenue" name="cumulativeRevenue" stroke="#4ade80" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeProfit" name="cumulativeProfit" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
