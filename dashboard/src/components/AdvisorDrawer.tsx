@@ -61,6 +61,42 @@ interface JournalEntry {
   trades_in_window: string | null;
 }
 
+interface SignalHorizonStat {
+  horizonHours: number;
+  samples: number;
+  hitRate: number | null;
+  medianForwardChange: number | null;
+  costlyFalsePositiveRate: number | null;
+}
+
+interface SignalPrior {
+  id: string;
+  label: string;
+  target: string;
+  description: string;
+  samples: number;
+  status: 'insufficient' | 'watch' | 'developing';
+  activeNow: boolean;
+  lastFired: string | null;
+  bestHorizonHours: number | null;
+  hitRate: number | null;
+  medianForwardChange: number | null;
+  costlyFalsePositiveRate: number | null;
+  changeFormat: 'pct' | 'pp';
+  horizons: SignalHorizonStat[];
+}
+
+interface SignalAnalytics {
+  meta: {
+    computedAt: string;
+    windowDays: number;
+    minSamples: number;
+    hours: number;
+    note: string;
+  };
+  priors: SignalPrior[];
+}
+
 function stripJournalTags(text: string): string {
   return text.replace(/<journal\s+type="[^"]*">[\s\S]*?<\/journal>/g, '').replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -89,6 +125,12 @@ const VERDICT_STYLES: Record<string, { label: string; color: string }> = {
   disproven_costly: { label: 'Costly Miss', color: 'bg-red-500/20 text-red-400' },
 };
 
+const SIGNAL_STATUS_STYLES: Record<SignalPrior['status'], { label: string; color: string }> = {
+  developing: { label: 'Developing', color: 'bg-green-500/15 text-green-400' },
+  watch: { label: 'Watch', color: 'bg-amber-500/15 text-amber-400' },
+  insufficient: { label: 'Collecting', color: 'bg-gray-500/15 text-gray-500' },
+};
+
 const HIDDEN_JOURNAL_ENTRY_TYPES = new Set([
   'advisory',
   'advisory_main',
@@ -106,6 +148,15 @@ function timeUntil(ts: string): string {
   if (hrs >= 1) return `in ${hrs}h`;
   const mins = Math.ceil(diff / 60000);
   return `in ${Math.max(1, mins)}m`;
+}
+
+function formatRate(value: number | null) {
+  return value == null ? 'n/a' : `${(value * 100).toFixed(0)}%`;
+}
+
+function formatSignalChange(value: number | null, format: 'pct' | 'pp') {
+  if (value == null) return 'n/a';
+  return format === 'pp' ? `${value.toFixed(2)}pp` : `${(value * 100).toFixed(1)}%`;
 }
 
 function formatCampaignReviewProgress(campaign: PendingTradeCampaign): string {
@@ -476,6 +527,7 @@ export default function AdvisorDrawer() {
     convexPostureRate: number; costlyRate: number;
   } | null>(null);
   const [lessons, setLessons] = useState<{ id: number; lesson: string; evidence_count: number; created_at: string }[]>([]);
+  const [signalAnalytics, setSignalAnalytics] = useState<SignalAnalytics | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -561,9 +613,10 @@ export default function AdvisorDrawer() {
 
   const fetchAnalytics = useCallback(async () => {
     try {
-      const [statsRes, lessonsRes] = await Promise.all([
+      const [statsRes, lessonsRes, signalsRes] = await Promise.all([
         fetch('/api/ai/hypothesis-stats'),
         fetch('/api/ai/hypothesis-lessons'),
+        fetch('/api/ai/signal-analytics'),
       ]);
       if (statsRes.ok) {
         const data = await statsRes.json();
@@ -572,6 +625,10 @@ export default function AdvisorDrawer() {
       if (lessonsRes.ok) {
         const data = await lessonsRes.json();
         setLessons(data.lessons || []);
+      }
+      if (signalsRes.ok) {
+        const data = await signalsRes.json();
+        setSignalAnalytics(data);
       }
     } catch { /* silent */ }
   }, []);
@@ -960,6 +1017,73 @@ export default function AdvisorDrawer() {
                         ))}
                       </div>
                     )}
+
+                    {/* Signal Priors */}
+                    <div className="space-y-2 border-t border-white/5 pt-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wider">Signal Priors</p>
+                        {signalAnalytics && (
+                          <span className="text-[10px] text-gray-600 shrink-0">
+                            {signalAnalytics.meta.windowDays}d · min n={signalAnalytics.meta.minSamples}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-gray-600 leading-relaxed">
+                        {signalAnalytics?.meta.note || 'Dashboard-only statistical priors are loading.'}
+                      </p>
+                      {!signalAnalytics ? (
+                        <p className="text-gray-500 text-xs">Loading signal priors...</p>
+                      ) : signalAnalytics.priors.length === 0 ? (
+                        <p className="text-gray-500 text-xs">No signal priors yet.</p>
+                      ) : (
+                        signalAnalytics.priors.map((prior) => {
+                          const status = SIGNAL_STATUS_STYLES[prior.status];
+                          return (
+                            <div key={prior.id} className="border border-white/5 px-3 py-2 space-y-2">
+                              <div className="flex items-start gap-2">
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs text-gray-200">{prior.label}</p>
+                                  <p className="text-[10px] text-gray-600 mt-0.5">
+                                    {prior.target} · {prior.samples} events
+                                    {prior.lastFired ? ` · last ${timeAgo(prior.lastFired)}` : ''}
+                                  </p>
+                                </div>
+                                {prior.activeNow && (
+                                  <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 bg-juice-orange/15 text-juice-orange shrink-0">
+                                    Active
+                                  </span>
+                                )}
+                                <span className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 shrink-0 ${status.color}`}>
+                                  {status.label}
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-gray-500 leading-relaxed">{prior.description}</p>
+                              <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-500">
+                                <span>best {prior.bestHorizonHours ? `${prior.bestHorizonHours}h` : 'n/a'}</span>
+                                <span>hit {formatRate(prior.hitRate)}</span>
+                                <span>median {formatSignalChange(prior.medianForwardChange, prior.changeFormat)}</span>
+                                <span>costly {formatRate(prior.costlyFalsePositiveRate)}</span>
+                              </div>
+                              <details className="group">
+                                <summary className="cursor-pointer list-none text-[10px] text-gray-600 hover:text-gray-400">
+                                  Horizon details
+                                </summary>
+                                <div className="mt-1 space-y-1">
+                                  {prior.horizons.map((horizon) => (
+                                    <div key={horizon.horizonHours} className="grid grid-cols-4 gap-2 text-[10px] text-gray-600">
+                                      <span>{horizon.horizonHours}h</span>
+                                      <span>n {horizon.samples}</span>
+                                      <span>hit {formatRate(horizon.hitRate)}</span>
+                                      <span>cost {formatRate(horizon.costlyFalsePositiveRate)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </details>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
                   </>
                 )}
               </div>

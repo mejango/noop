@@ -2135,11 +2135,11 @@ Total P&L attribution: $${totalPnl.toFixed(4)}
 
 ## Scoring Instructions
 
-Score this hypothesis using Spitznagel-aligned categories. The goal is NOT prediction accuracy — it's whether the hypothesis identified a genuine mispricing in protection cost and whether acting on it would have been asymmetric.
+Score this hypothesis using Spitznagel-aligned categories. The goal is NOT prediction accuracy — it's whether the hypothesis identified a genuine mispricing in protection cost, rich survivable call premium, or another asymmetric options-market setup. Whether ETH moved up or down is a second-order effect: notice it, but judge the hypothesis first by bang-for-buck risk mitigation and paid smart-risk opportunity.
 
 Categories:
 - confirmed_convex: Hypothesis identified a genuine mispricing in protection cost, and acting on it would have been asymmetric (bought cheap insurance before it got expensive)
-- confirmed_linear: Hypothesis was directionally right but didn't identify convexity — the opportunity was symmetric, not asymmetric
+- confirmed_linear: Hypothesis was directionally right but didn't identify convexity or rich premium — the opportunity was symmetric, not asymmetric
 - disproven_bounded: Hypothesis was wrong but the implied action (buying cheap puts) had bounded cost — THIS IS FINE, this IS the strategy. Cheap insurance that expires worthless is the expected outcome.
 - disproven_costly: Hypothesis led to buying expensive protection (chasing high IV) or missing a cheaper window — overpaid for insurance
 - partially_confirmed: Direction right but timing/magnitude was off
@@ -2147,7 +2147,7 @@ Categories:
 IMPORTANT: Most hypotheses SHOULD be disproven_bounded. That means the insurance was cheap and the bleed was small. A high disproven_bounded rate is GOOD — it means the bot is buying cheap protection consistently.
 
 Output ONLY this JSON:
-{"status":"<category>","confidence":<0-1>,"verdict":"<2-3 sentence explanation focusing on whether protection was cheap/expensive and the bleed cost, not just whether the price moved correctly>"}`;
+{"status":"<category>","confidence":<0-1>,"verdict":"<2-3 sentence explanation focusing on whether protection was cheap/expensive, call premium was rich/thin, and the bleed or risk was well paid, not just whether the price moved correctly>"}`;
 
       const response = await axios.post('https://api.anthropic.com/v1/messages', {
         model: ANTHROPIC_SONNET_MODEL,
@@ -2600,6 +2600,7 @@ const reviewClosedTrades = async () => {
 Your job is not to judge by P&L alone. Use hindsight carefully:
 - A losing trade can still have been the right decision at the time.
 - A profitable trade can still have been the wrong decision if it violated discipline.
+- Whether ETH moved up or down is second-order evidence. Care about it only insofar as it reveals whether protection was cheap, premium was rich, liquidity was good, or risk was mispriced.
 - Distinguish execution error, sizing error, strike-selection error, and acceptable arithmetic bleed.
 - This is a staged hindsight review. Only use post-close information through the specified horizon, not beyond it.
 
@@ -3879,7 +3880,7 @@ ${recentVerdicts.map(v => `#${v.id} [${v.outcome_status}]: ${v.outcome_verdict |
 
 ${lessons.length > 0 ? `Active lessons:\n${lessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}` : ''}
 
-IMPORTANT: A high disproven_bounded rate means the bot is buying cheap insurance that expires worthless — that IS the strategy working. Focus on reducing disproven_costly rate (buying expensive protection), not on increasing prediction accuracy. The best hypothesis identifies when protection is cheap, not where price goes. Each hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded? Where is the cheap convexity?`;
+IMPORTANT: A high disproven_bounded rate means the bot is buying cheap insurance that expires worthless — that IS the strategy working. Focus on reducing disproven_costly rate (buying expensive protection), not on increasing prediction accuracy. The best hypothesis identifies when protection is cheap or call premium is richly paid, not where price goes. ETH direction is second-order evidence that matters only through option pricing, liquidity, skew, OI, funding, and realized payoff geometry. Each hypothesis MUST identify what makes the opportunity asymmetric — why is the downside bounded, where is the cheap convexity, or why is the call risk well paid?`;
       }
 
       if (tradeLessons.length > 0 || recentTradeReviews.length > 0) {
@@ -3907,6 +3908,8 @@ The regime is the SAME for both sides — it's a property of the market, not of 
 - **Greed/euphoria:** Puts are cheap and ignored. Call premiums are RICHEST here — high IV on upside, crowd paying up for calls. Best window for call selling revenue.
 - **Fear:** Puts are expensive (don't chase). Call premium may spike but selling is dangerous — realized vol is high.
 - **Transition:** Both sides need reassessment — old pricing assumptions break down.
+
+ETH direction is second-order evidence. Notice spot moves, but do not let them outrank the primary question: are options mispriced in a way that improves bang-for-buck risk mitigation or pays us enough to take smart, survivable call risk?
 
 The journal (observation, hypothesis, regime_note) should track:
 - Is OTM put protection getting cheaper or more expensive? (IV environment, skew, put delta-value scores)
@@ -3965,7 +3968,7 @@ The snapshot includes a put_price_divergence section that detects when put optio
 
 This is critical for the Spitznagel strategy: we want to buy puts when they're CHEAP (before the market prices in risk), not after a spike. If put spikes reliably lead price drops, the bot should be accumulating protection during PUT_CHEAP_PRICE_STABLE windows.
 
-Ground everything in the data. Focus on: cost of protection (put pricing), revenue opportunity (call premium), crash probability (flow reversals), and portfolio geometry (how put+call positions work together).${hypothesisPerformance}${tradeLearningContext}`;
+Ground everything in the data. Focus on: cost of protection (put pricing), revenue opportunity (call premium), crash probability (flow reversals), and portfolio geometry (how put+call positions work together). Treat ETH direction as useful context only after those option-market questions are answered.${hypothesisPerformance}${tradeLearningContext}`;
 
     // Inject wiki context if available
     const wikiContext = queryWikiContext();
@@ -6805,6 +6808,7 @@ You advise a bot that accumulates OTM ETH puts (long insurance) and sells OTM ET
 This is an options bang-for-buck strategy, not a price-direction strategy. Lead with executable option value and market structure.
 - Primary evidence: bid/ask, spread/depth, IV/skew regime, DTE, delta, moneyness, open interest, funding, candidate score, position PnL, hedge role, and account margin impact.
 - Secondary evidence: short-term and medium-term momentum. Use momentum only as timing and path-risk context after option economics already justify attention.
+- ETH moving up or down is second-order evidence. It matters when it changes protection cost, call premium, liquidity, margin geometry, or realized payoff asymmetry; it is not the objective by itself.
 - Do not create, preserve, or justify a rule mainly because momentum is upward or downward. Momentum must be confirmed by option pricing, liquidity, skew, OI, funding, or position-specific risk.
 - If momentum conflicts with option-market structure, trust executable option economics first and state the mismatch plainly.
 
