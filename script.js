@@ -4672,11 +4672,16 @@ You are writing for a downstream Spitznagel-style strategist who will make the a
 Use Mandelbrot's finance framing from *The (Mis)Behavior of Markets* and *Fractals and Scaling in Finance*: markets are often discontinuous, concentrated, fat-tailed, and governed by scaling relationships that make Gaussian intuitions unreliable.
 
 Focus on:
-- roughness versus smoothness of the recent path
-- volatility clustering and repeated bursts
+- whether skew, funding, open interest, spread/depth, and option pricing suggest unstable distribution geometry
+- whether volatility and option-market participation are clustering across the supplied windows
+- roughness versus smoothness of the recent price path
 - whether movement is concentrated into bursts rather than dispersed smoothly
-- whether skew, funding, open interest, and option pricing suggest unstable distribution geometry
 - whether the process appears mild or wild, smooth or discontinuous
+
+Momentum discipline:
+- Treat spot momentum as secondary path context, not the main thesis.
+- Use momentum only to describe roughness, burstiness, discontinuity, or scaling instability.
+- Do not frame the regime primarily as upward/downward momentum unless skew, OI, funding, liquidity, or option pricing confirms that directional label matters.
 
 Operational definitions:
 - Roughness: the path is jagged, bursty, reversal-heavy, and unevenly distributed through time rather than unfolding gradually.
@@ -4707,12 +4712,12 @@ Return JSON only:
 
   const userPrompt = `Assess the market structure from a Mandelbrot lens.
 
-=== MARKET ===
-Spot: $${spotPrice}
-Momentum: ${JSON.stringify(momentum, null, 2)}
-
 === SENTIMENT / DISTRIBUTION BY WINDOW ===
 ${JSON.stringify(summarizeSentimentWindowsForLLM(sentiment?.windows || {}), null, 2)}
+
+=== PRICE PATH CONTEXT (SECONDARY) ===
+Spot: $${spotPrice}
+Momentum: ${JSON.stringify(momentum, null, 2)}
 
 === WIKI SIGNALS ===
 ${JSON.stringify(wikiSignals || null, null, 2)}
@@ -6796,6 +6801,13 @@ Interpret "Spitznagel" operationally, not stylistically:
 
 You advise a bot that accumulates OTM ETH puts (long insurance) and sells OTM ETH calls (premium harvesting).
 
+## Evidence Priority
+This is an options bang-for-buck strategy, not a price-direction strategy. Lead with executable option value and market structure.
+- Primary evidence: bid/ask, spread/depth, IV/skew regime, DTE, delta, moneyness, open interest, funding, candidate score, position PnL, hedge role, and account margin impact.
+- Secondary evidence: short-term and medium-term momentum. Use momentum only as timing and path-risk context after option economics already justify attention.
+- Do not create, preserve, or justify a rule mainly because momentum is upward or downward. Momentum must be confirmed by option pricing, liquidity, skew, OI, funding, or position-specific risk.
+- If momentum conflicts with option-market structure, trust executable option economics first and state the mismatch plainly.
+
 ## Account Model
 The account is ETH-collateralized. Puts are bought on leverage against ETH. Derive's margin engine recognizes that long puts offset ETH exposure, so buying puts can improve margin health. USDC from call premiums pays down margin debt first; excess gets converted to ETH manually.
 
@@ -6825,7 +6837,7 @@ Things to consider in your assessment:
 - In recovery, fear lingers and IV stays elevated even as price stabilizes. Panickers overpay for protection they no longer need as urgently. This can be an opportunity.
 - The full cycle: cash → cheap puts → crash → puts print → sell at the right time → buy cheap ETH → sell calls → premium → repeat.
 
-Use your judgment. Look at the actual Greeks, DTE, IV, momentum, and position characteristics. There are no absolute rules — only the principle that well-priced insurance is bought in calm and sold in fear, and that ETH selloffs tend to be deeper and faster than anyone expects.
+Use your judgment. Look at the actual Greeks, DTE, IV/skew, spread/depth, OI, executable bid/ask, position characteristics, and only then momentum as secondary path context. There are no absolute rules — only the principle that well-priced insurance is bought in calm and sold in fear, and that ETH selloffs tend to be deeper and faster than anyone expects.
 
 ## Assessment Writing Constraints
 - Every assessment must do two jobs: state the clearest current market observation or thesis from the supplied data, and state the operational stance it implies for the bot.
@@ -6910,7 +6922,12 @@ Order type guidance (fee matters — maker is 6x cheaper than taker):
 
   const sharedAdvisoryInputBlock = `=== CURRENT MARKET STATE ===
 Spot Price: $${spotPrice.toFixed(2)}
-Momentum: Medium-term ${momentum.mediumTerm.main} (${momentum.mediumTerm.derivative || 'n/a'}), Short-term ${momentum.shortTerm.main} (${momentum.shortTerm.derivative || 'n/a'})
+
+=== OPTIONS MARKET STRUCTURE (PRIMARY ADVISORY EVIDENCE) ===
+${summarizeSentimentForAdvisor(sentiment?.windows || {})}
+
+=== MOMENTUM (SECONDARY PATH CONTEXT; NOT A STANDALONE TRADE SIGNAL) ===
+Medium-term ${momentum.mediumTerm.main} (${momentum.mediumTerm.derivative || 'n/a'}), Short-term ${momentum.shortTerm.main} (${momentum.shortTerm.derivative || 'n/a'})
 
 === PORTFOLIO ===
 Positions: ${JSON.stringify(positions.map(p => ({
@@ -6929,10 +6946,8 @@ ${JSON.stringify(accountHealth, null, 2)}
 === SOURCE PRIORITY ===
 1. Current market, portfolio, account-health, and order-book state in this prompt are primary facts.
 2. Recent orders and closed-campaign trade reviews are recent empirical evidence.
-3. The knowledge wiki is compiled long-term memory. Use it for pattern recognition and discipline, but if live state conflicts with wiki memory, trust the live state and note the mismatch.
-
-=== MARKET SENTIMENT ===
-${summarizeSentimentForAdvisor(sentiment?.windows || {})}
+3. Momentum labels are secondary path context and must not outrank executable option economics, spread/depth, IV/skew, OI, funding, or position-specific risk.
+4. The knowledge wiki is compiled long-term memory. Use it for pattern recognition and discipline, but if live state conflicts with wiki memory, trust the live state and note the mismatch.
 
 === TOP PUT CANDIDATES (by delta/ask ratio, wide scan) ===
 ${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte} | score=${p.score.toFixed(4)}`).join('\n') : 'No qualifying puts found'}
@@ -7039,6 +7054,7 @@ Interpret "Taleb" operationally, not stylistically:
 - Treat convexity as real only if downside is small, explicit, and survivable while upside from disorder is meaningfully larger.
 - Be especially hostile to paying fear premiums, roll-for-relief logic, and exits that feel safe but worsen long-run asymmetry.
 - Evidence that matters most: bounded downside, tail sensitivity, concentration risk, hidden path dependence, and whether the portfolio becomes more fragile if the market gets wilder.
+- Treat momentum-only reasoning as fragile. If a rule is mainly justified by short-term or medium-term momentum, amend or veto it unless executable option pricing, liquidity, skew, OI, funding, or position-specific risk confirms the action.
 
 ## DTE Discipline (Non-Negotiable)
 - Buy puts at 45-75 DTE. Never below 35 DTE. Short-dated puts bleed theta — you're paying for time decay, not convexity. Veto any buy_put rule outside [45, 75].
@@ -7078,6 +7094,7 @@ Critique the agenda using the same advisory input set Spitznagel saw. For each r
 2. Where is the convexity? Is the asymmetry real or imagined?
 3. Are we being antifragile or just hedged?
 4. What would the naive crowd do here, and are we positioned opposite them?
+5. Is this rule justified by executable option value and market structure, or is it leaning too hard on momentum labels?
 
 Output JSON only:
 {
@@ -7117,6 +7134,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
+- Momentum is secondary path context. Remove or revise any agenda item whose main rationale is short-term or medium-term momentum unless option pricing, liquidity, skew, OI, funding, or position-specific risk confirms it.
 - Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
@@ -7139,6 +7157,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
+- Momentum is secondary path context. Remove or revise any agenda item whose main rationale is short-term or medium-term momentum unless option pricing, liquidity, skew, OI, funding, or position-specific risk confirms it.
 - Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
