@@ -3,6 +3,7 @@ import {
   getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap,
   getFundingRates, getFundingRatesHourlySeries, getOISnapshots, getOISnapshotsBucketed,
   getOptionsCoverage, getSpotPricesHourly_rollup, getBestOptionsHourly_rollup, getLiquidityHourly_rollup,
+  getSpotPricesBucketed, getBestOptionsBucketed,
 } from '@/lib/db';
 import { CHART_ROW_LIMITS } from '@/lib/limits';
 
@@ -37,6 +38,48 @@ const HEATMAP_BUCKET_MS: Record<string, number> = {
   '365d': 2 * 24 * 60 * 60 * 1000, // 2 days
   'all':  2 * 24 * 60 * 60 * 1000, // 2 days
 };
+
+type TimestampedRow = Record<string, unknown> & { timestamp: string };
+
+const ROLLUP_RANGES = new Set(['90d', '365d', 'all']);
+const RAW_BUCKETED_RANGES = new Set(['30d']);
+const ROLLUP_TAIL_OVERLAP_MS = 60 * 60 * 1000;
+
+function rowTime(row: TimestampedRow): number {
+  const time = new Date(row.timestamp).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function latestRowTime(rows: TimestampedRow[]): number | null {
+  let latest: number | null = null;
+  for (const row of rows) {
+    const time = rowTime(row);
+    if (time && (latest == null || time > latest)) latest = time;
+  }
+  return latest;
+}
+
+function rawTailSince(rows: TimestampedRow[], fallbackSince: string): string {
+  const fallback = new Date(fallbackSince).getTime();
+  const latest = latestRowTime(rows);
+  if (latest == null) return fallbackSince;
+  return new Date(Math.max(fallback, latest - ROLLUP_TAIL_OVERLAP_MS)).toISOString();
+}
+
+function mergeByTimestamp<T extends TimestampedRow>(baseRows: T[], tailRows: T[]): T[] {
+  const rows = new Map<string, T>();
+  for (const row of baseRows) rows.set(row.timestamp, row);
+  for (const row of tailRows) rows.set(row.timestamp, row);
+  return Array.from(rows.values()).sort((a, b) => rowTime(a) - rowTime(b));
+}
+
+function appendRawTail<T extends TimestampedRow>(
+  baseRows: T[],
+  since: string,
+  getTail: (tailSince: string) => T[],
+): T[] {
+  return mergeByTimestamp(baseRows, getTail(rawTailSince(baseRows, since)));
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function downsample<T extends Record<string, any>>(
@@ -120,12 +163,35 @@ export function GET(request: NextRequest) {
     const bucketMs = BUCKET_MS[range] || 0;
     const heatmapBucketMs = HEATMAP_BUCKET_MS[range] || bucketMs;
     const optionsCoverage = getOptionsCoverage(since);
-    const useRollups = range === '90d' || range === '365d' || range === 'all';
+    const useRollups = ROLLUP_RANGES.has(range);
+    const useBucketedRaw = RAW_BUCKETED_RANGES.has(range);
 
     const limits = CHART_ROW_LIMITS[range] || CHART_ROW_LIMITS['14d'];
-    const prices = useRollups ? getSpotPricesHourly_rollup(since) : getSpotPrices(since, limits.prices);
-    const options = useRollups ? getBestOptionsHourly_rollup(since) : getBestOptionsOverTime(since);
-    const liquidity = useRollups ? getLiquidityHourly_rollup(since) : getLiquidityOverTime(since);
+    const prices = useBucketedRaw
+      ? getSpotPricesBucketed(since, bucketMs)
+      : useRollups
+        ? appendRawTail(
+            getSpotPricesHourly_rollup(since) as TimestampedRow[],
+            since,
+            (tailSince) => getSpotPricesBucketed(tailSince, bucketMs) as TimestampedRow[],
+          )
+        : getSpotPrices(since, limits.prices);
+    const options = useBucketedRaw
+      ? getBestOptionsBucketed(since, bucketMs)
+      : useRollups
+        ? appendRawTail(
+            getBestOptionsHourly_rollup(since) as TimestampedRow[],
+            since,
+            (tailSince) => getBestOptionsBucketed(tailSince, bucketMs) as TimestampedRow[],
+          )
+        : getBestOptionsOverTime(since);
+    const liquidity = useRollups
+      ? appendRawTail(
+          getLiquidityHourly_rollup(since) as TimestampedRow[],
+          since,
+          (tailSince) => getLiquidityOverTime(tailSince) as TimestampedRow[],
+        )
+      : getLiquidityOverTime(since);
     const optionsHeatmap = getOptionsHeatmap(since, limits.heatmap, heatmapBucketMs);
 
     // Sentiment data

@@ -61,11 +61,14 @@ function prepareAll(d: Database.Database) {
     `),
 
     getSpotPrices: d.prepare(`
-      SELECT * FROM spot_prices
-      WHERE timestamp > ?
-        AND price BETWEEN 100 AND 20000
+      SELECT * FROM (
+        SELECT * FROM spot_prices
+        WHERE timestamp > ?
+          AND price BETWEEN 100 AND 20000
+        ORDER BY timestamp DESC
+        LIMIT ?
+      )
       ORDER BY timestamp ASC
-      LIMIT ?
     `),
 
     getOptionsHeatmap: d.prepare(`
@@ -736,6 +739,100 @@ export function getOptionsCoverage(since: string) {
 
 export function getBestOptionsOverTime(since: string) {
   return getStmts().getBestOptionsOverTime.all(since);
+}
+
+export function getSpotPricesBucketed(since: string, bucketMs: number) {
+  if (!(bucketMs > 0)) return getSpotPrices(since, 40_000);
+  const bucketSeconds = Math.max(1, Math.floor(bucketMs / 1000));
+  return getDb().prepare(`
+    WITH source AS (
+      SELECT
+        timestamp,
+        price,
+        short_momentum_main,
+        short_momentum_derivative,
+        medium_momentum_main,
+        medium_momentum_derivative,
+        (CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds) * @bucket_seconds AS bucket_epoch
+      FROM spot_prices
+      WHERE timestamp > @since
+        AND price BETWEEN 100 AND 20000
+    ),
+    latest AS (
+      SELECT
+        bucket_epoch,
+        short_momentum_main,
+        short_momentum_derivative,
+        medium_momentum_main,
+        medium_momentum_derivative
+      FROM (
+        SELECT
+          *,
+          ROW_NUMBER() OVER (PARTITION BY bucket_epoch ORDER BY timestamp DESC) AS rn
+        FROM source
+      )
+      WHERE rn = 1
+    ),
+    bucketed AS (
+      SELECT bucket_epoch, AVG(price) AS price
+      FROM source
+      GROUP BY bucket_epoch
+    )
+    SELECT
+      strftime('%Y-%m-%dT%H:%M:%SZ', b.bucket_epoch, 'unixepoch') AS timestamp,
+      b.price,
+      l.short_momentum_main,
+      l.short_momentum_derivative,
+      l.medium_momentum_main,
+      l.medium_momentum_derivative
+    FROM bucketed b
+    LEFT JOIN latest l ON l.bucket_epoch = b.bucket_epoch
+    ORDER BY b.bucket_epoch ASC
+  `).all({ since, bucket_seconds: bucketSeconds }) as {
+    timestamp: string;
+    price: number;
+    short_momentum_main: string | null;
+    short_momentum_derivative: string | null;
+    medium_momentum_main: string | null;
+    medium_momentum_derivative: string | null;
+  }[];
+}
+
+export function getBestOptionsBucketed(since: string, bucketMs: number) {
+  if (!(bucketMs > 0)) return getBestOptionsOverTime(since);
+  const bucketSeconds = Math.max(1, Math.floor(bucketMs / 1000));
+  return getDb().prepare(`
+    WITH source AS (
+      SELECT
+        timestamp,
+        option_type,
+        instrument_name,
+        delta,
+        ask_delta_value,
+        bid_delta_value,
+        index_price,
+        (CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds) * @bucket_seconds AS bucket_epoch
+      FROM options_snapshots
+      WHERE timestamp > @since
+    )
+    SELECT
+      strftime('%Y-%m-%dT%H:%M:%SZ', bucket_epoch, 'unixepoch') AS timestamp,
+      MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
+        AND delta <= -0.02 AND delta >= -0.12
+        THEN ask_delta_value END) AS best_put_value,
+      MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
+        AND delta >= 0.04 AND delta <= 0.12
+        THEN bid_delta_value END) AS best_call_value,
+      AVG(CASE WHEN index_price BETWEEN 100 AND 20000 THEN index_price END) AS lyra_spot
+    FROM source
+    GROUP BY bucket_epoch
+    ORDER BY bucket_epoch ASC
+  `).all({ since, bucket_seconds: bucketSeconds }) as {
+    timestamp: string;
+    best_put_value: number | null;
+    best_call_value: number | null;
+    lyra_spot: number | null;
+  }[];
 }
 
 export function getLiquidityOverTime(since: string) {
