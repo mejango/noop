@@ -5304,8 +5304,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const minBid = criteria.min_bid ?? null;
         const minScore = criteria.min_score ?? null;
 
-        // Check market conditions if present
-        if (marketConditions) {
+        // Empty market_conditions means "no extra market gate"; only evaluate
+        // when the advisor supplied at least one condition.
+        const hasMarketConditions = Array.isArray(marketConditions)
+          ? marketConditions.length > 0
+          : Boolean(marketConditions);
+        if (hasMarketConditions) {
           const marketValues = { spot_price: spotPrice };
           if (!evaluateConditions(marketConditions, 'all', marketValues)) continue;
         }

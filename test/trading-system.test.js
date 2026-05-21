@@ -3839,8 +3839,11 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
       if (putRemaining <= 10) return null;
     }
 
-    // Market conditions
-    if (criteria.market_conditions) {
+    // Market conditions. Empty market_conditions means "no extra market gate".
+    const hasMarketConditions = Array.isArray(criteria.market_conditions)
+      ? criteria.market_conditions.length > 0
+      : Boolean(criteria.market_conditions);
+    if (hasMarketConditions) {
       const marketValues = { spot_price: spotPrice };
       if (!evaluateConditions(criteria.market_conditions, 'all', marketValues)) return null;
     }
@@ -3947,6 +3950,26 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
     assert.ok(result.score > 0.004, `Score ${result.score} should exceed min_score`);
     assert.strictEqual(result.price, 5.50);
     assert.ok(result.qty > 0, 'Quantity should be positive');
+  });
+
+  test('Step 2b: Empty market_conditions does not block entry matching', () => {
+    const rule = {
+      action: 'buy_put',
+      criteria: {
+        option_type: 'P',
+        delta_range: [-0.08, -0.02],
+        dte_range: [45, 75],
+        max_strike_pct: 0.85,
+        min_score: 0.004,
+        max_cost: 15.00,
+        market_conditions: [],
+      },
+      budget_limit: 50.00,
+    };
+
+    const result = evaluateEntryRule(rule, tickerMap, instruments, 1800);
+    assert.ok(result, 'Empty market_conditions should mean any market, not block the rule');
+    assert.strictEqual(result.instrument, putInstrument);
   });
 
   test('Step 3: Quantity is capped by remaining budget', () => {
