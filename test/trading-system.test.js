@@ -1233,7 +1233,7 @@ describe('DB operations (isolated test database)', () => {
     `),
     hasPendingActionForRule: testDb.prepare(`
       SELECT COUNT(*) as count FROM pending_actions
-      WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed')
+      WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed', 'resting')
     `),
     getLastExecutedAction: testDb.prepare(`
       SELECT executed_at FROM pending_actions
@@ -1482,7 +1482,7 @@ describe('DB operations (isolated test database)', () => {
       // An executed action's rule_id should NOT count as having a pending action
       // unless there's also a separate pending/confirmed action for the same rule
       const otherPending = testDb.prepare(
-        'SELECT COUNT(*) as count FROM pending_actions WHERE rule_id = @rule_id AND status IN (\'pending\', \'confirmed\')'
+        'SELECT COUNT(*) as count FROM pending_actions WHERE rule_id = @rule_id AND status IN (\'pending\', \'confirmed\', \'resting\')'
       ).get({ rule_id: executedAction.rule_id });
 
       if (otherPending.count === 0) {
@@ -1517,6 +1517,31 @@ describe('DB operations (isolated test database)', () => {
 
       assert.strictEqual(hasPendingActionForRule(ruleId), false);
     }
+  });
+
+  test('hasPendingActionForRule: resting action returns true', () => {
+    replaceActiveRules('adv-resting', [
+      { rule_type: 'entry', action: 'sell_call',
+        criteria: { option_type: 'C', delta_range: [0.05, 0.11], dte_range: [5, 12] },
+        priority: 'medium', reasoning: 'Resting duplicate guard' },
+    ]);
+    const rules = getActiveRulesByType('entry');
+    const ruleId = rules[0].id;
+    const result = insertPendingAction({
+      rule_id: ruleId,
+      action: 'sell_call',
+      instrument_name: 'ETH-20260529-2400-C',
+      amount: 1,
+      price: 3,
+      trigger_details: null,
+    });
+
+    updatePendingAction(result.lastInsertRowid, {
+      status: 'resting',
+      executed_at: new Date().toISOString(),
+    });
+
+    assert.strictEqual(hasPendingActionForRule(ruleId), true);
   });
 
   // ── getLastExecutedAction tests ──
@@ -2374,11 +2399,11 @@ describe('Confirmation result handling paths', () => {
     assert.strictEqual(expectedStatus, 'failed');
   });
 
-  test('resting result → action should be marked executed', () => {
+  test('resting result → action should be marked resting', () => {
     const result = { resting: true, orderId: 'ord_123', action: 'buy_put' };
     assert.ok(result.resting);
-    const expectedStatus = result.resting ? 'executed' : 'unknown';
-    assert.strictEqual(expectedStatus, 'executed');
+    const expectedStatus = result.resting ? 'resting' : 'unknown';
+    assert.strictEqual(expectedStatus, 'resting');
   });
 
   test('normal fill result → action should be marked executed', () => {
@@ -4088,7 +4113,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
     insertRule: exitDb.prepare(`INSERT INTO trading_rules (rule_type, action, instrument_name, criteria, priority, reasoning, advisory_id, is_active) VALUES (@rule_type, @action, @instrument_name, @criteria, @priority, @reasoning, @advisory_id, 1)`),
     getExitRules: exitDb.prepare(`SELECT * FROM trading_rules WHERE is_active = 1 AND rule_type = 'exit'`),
     insertPendingAction: exitDb.prepare(`INSERT INTO pending_actions (rule_id, action, instrument_name, amount, price, trigger_details) VALUES (@rule_id, @action, @instrument_name, @amount, @price, @trigger_details)`),
-    hasPendingForRule: exitDb.prepare(`SELECT COUNT(*) as count FROM pending_actions WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed')`),
+    hasPendingForRule: exitDb.prepare(`SELECT COUNT(*) as count FROM pending_actions WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed', 'resting')`),
     getPending: exitDb.prepare(`SELECT * FROM pending_actions WHERE status = 'pending'`),
   };
 

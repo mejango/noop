@@ -178,8 +178,8 @@ const STARTERS = [
 // ─── Ops Types ──────────────────────────────────────────────────────────────
 
 interface OpsStats {
-  active_rules: number; pending_count: number; confirmed_count: number;
-  executed_count: number; rejected_count: number; failed_count: number;
+  active_rules: number; pending_count: number; confirmed_count: number; resting_count: number;
+  executed_count: number; cancelled_count: number; rejected_count: number; failed_count: number;
   orders_24h: number; current_advisory_id: string | null;
   advisory_created_at: string | null;
 }
@@ -492,7 +492,9 @@ const ACTION_STYLES: Record<string, { label: string; color: string }> = {
 const STATUS_STYLES: Record<string, { color: string }> = {
   pending: { color: 'bg-yellow-500/20 text-yellow-400' },
   confirmed: { color: 'bg-blue-500/20 text-blue-400' },
+  resting: { color: 'bg-cyan-500/20 text-cyan-400' },
   executed: { color: 'bg-green-500/20 text-green-400' },
+  cancelled: { color: 'bg-zinc-500/20 text-zinc-400' },
   rejected: { color: 'bg-gray-500/20 text-gray-400' },
   failed: { color: 'bg-red-500/20 text-red-400' },
 };
@@ -1388,7 +1390,9 @@ export default function AdvisorDrawer() {
                   </div>
                   <div className="flex gap-3 mt-2 pt-2 border-t border-white/5 text-[10px]">
                     <span className="text-green-400">{opsData.stats.executed_count} executed</span>
+                    <span className="text-cyan-400">{opsData.stats.resting_count} resting</span>
                     <span className="text-blue-400">{opsData.stats.confirmed_count} confirmed</span>
+                    <span className="text-zinc-400">{opsData.stats.cancelled_count} cancelled</span>
                     <span className="text-gray-400">{opsData.stats.rejected_count} rejected</span>
                     <span className="text-red-400">{opsData.stats.failed_count} failed</span>
                   </div>
@@ -1607,13 +1611,18 @@ export default function AdvisorDrawer() {
                     <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Action Pipeline ({opsData.actions.length})</p>
                     {opsData.actions.map((a) => {
                       const actionStyle = ACTION_STYLES[a.action] || { label: a.action, color: 'bg-white/10 text-gray-400' };
-                      const statusStyle = STATUS_STYLES[a.status] || { color: 'bg-white/10 text-gray-400' };
                       let triggerDetails: Record<string, unknown> = {};
                       try { if (a.trigger_details) triggerDetails = JSON.parse(a.trigger_details); } catch { /* skip */ }
                       let confirmReasoning: Record<string, unknown> | string = '';
                       try { if (a.confirmation_reasoning) confirmReasoning = JSON.parse(a.confirmation_reasoning); } catch { confirmReasoning = a.confirmation_reasoning || ''; }
                       let execResult: Record<string, unknown> = {};
                       try { if (a.execution_result) execResult = JSON.parse(a.execution_result); } catch { /* skip */ }
+                      const isRestingPlacement = a.status === 'resting' || (a.status === 'executed' && execResult.resting === true);
+                      const displayStatus = isRestingPlacement ? 'resting' : a.status;
+                      const statusStyle = STATUS_STYLES[displayStatus] || { color: 'bg-white/10 text-gray-400' };
+                      const statusTime = displayStatus === 'pending'
+                        ? a.triggered_at
+                        : (a.executed_at || a.confirmed_at || a.triggered_at);
                       return (
                         <details key={a.id} className="border border-white/5 mb-1.5">
                           <summary className="px-3 py-2 cursor-pointer hover:bg-white/5 transition-colors">
@@ -1622,13 +1631,13 @@ export default function AdvisorDrawer() {
                                 {actionStyle.label}
                               </span>
                               <span className={`text-[10px] px-1.5 py-0.5 ${statusStyle.color}`}>
-                                {a.status}
+                                {displayStatus}
                               </span>
                               <span className="text-[10px] text-gray-500 font-mono truncate max-w-[160px]">{a.instrument_name}</span>
                               {a.price && <span className="text-[10px] text-gray-500">@ ${a.price.toFixed(2)}</span>}
                               {a.amount && <span className="text-[10px] text-gray-500">x{a.amount}</span>}
                               {a.retries > 0 && <span className="text-[10px] text-red-400">retry {a.retries}</span>}
-                              <span className="text-[10px] text-gray-600 ml-auto">{timeAgo(a.triggered_at)}</span>
+                              <span className="text-[10px] text-gray-600 ml-auto">{timeAgo(statusTime)}</span>
                             </div>
                           </summary>
                           <div className="px-3 pb-2.5 space-y-1.5 border-t border-white/5">
@@ -1636,7 +1645,7 @@ export default function AdvisorDrawer() {
                             <div className="mt-1.5 flex gap-3 flex-wrap text-[10px] text-gray-500">
                               <span>triggered {a.triggered_at}</span>
                               {a.confirmed_at && <span>confirmed {a.confirmed_at}</span>}
-                              {a.executed_at && <span>executed {a.executed_at}</span>}
+                              {a.executed_at && <span>{displayStatus === 'resting' ? 'placed' : displayStatus === 'cancelled' ? 'resolved' : 'executed'} {a.executed_at}</span>}
                             </div>
                             {/* Rule context */}
                             {a.rule_reasoning && (
@@ -1687,36 +1696,47 @@ export default function AdvisorDrawer() {
                 {opsData.orders.length > 0 && (
                   <div>
                     <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-1.5">Recent Orders ({opsData.orders.length})</p>
-                    {opsData.orders.map((o) => (
-                      <details key={o.id} className="border border-white/5 mb-1.5">
-                        <summary className="px-3 py-2 cursor-pointer hover:bg-white/5 transition-colors">
-                          <div className="inline-flex items-center gap-1.5">
-                            <span className={`text-[10px] font-bold px-1.5 py-0.5 ${o.success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
-                              {o.success ? 'FILLED' : 'FAILED'}
-                            </span>
-                            <span className={`text-[10px] font-bold px-1.5 py-0.5 ${ACTION_STYLES[o.action]?.color || 'bg-white/10 text-gray-400'}`}>
-                              {ACTION_STYLES[o.action]?.label || o.action}
-                            </span>
-                            <span className="text-[10px] text-gray-500 font-mono truncate max-w-[140px]">{o.instrument_name}</span>
-                            {o.total_value != null && <span className="text-[10px] text-white">${o.total_value.toFixed(2)}</span>}
-                            <span className="text-[10px] text-gray-600">{timeAgo(o.timestamp)}</span>
+                    {opsData.orders.map((o) => {
+                      const placedOnly = Boolean(
+                        o.success
+                        && Number(o.filled_amount ?? 0) === 0
+                        && /resting .* order placed/i.test(o.reason || '')
+                      );
+                      const orderStatusLabel = placedOnly ? 'PLACED' : (o.success ? 'FILLED' : 'FAILED');
+                      const orderStatusColor = placedOnly
+                        ? 'bg-cyan-500/20 text-cyan-400'
+                        : (o.success ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400');
+                      return (
+                        <details key={o.id} className="border border-white/5 mb-1.5">
+                          <summary className="px-3 py-2 cursor-pointer hover:bg-white/5 transition-colors">
+                            <div className="inline-flex items-center gap-1.5">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 ${orderStatusColor}`}>
+                                {orderStatusLabel}
+                              </span>
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 ${ACTION_STYLES[o.action]?.color || 'bg-white/10 text-gray-400'}`}>
+                                {ACTION_STYLES[o.action]?.label || o.action}
+                              </span>
+                              <span className="text-[10px] text-gray-500 font-mono truncate max-w-[140px]">{o.instrument_name}</span>
+                              {o.total_value != null && <span className="text-[10px] text-white">${o.total_value.toFixed(2)}</span>}
+                              <span className="text-[10px] text-gray-600">{timeAgo(o.timestamp)}</span>
+                            </div>
+                          </summary>
+                          <div className="px-3 pb-2.5 border-t border-white/5 mt-0">
+                            <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-gray-500">
+                              <span>Time: {o.timestamp}</span>
+                              {o.spot_price != null && <span>Spot: ${o.spot_price.toFixed(2)}</span>}
+                              {o.strike != null && <span>Strike: {o.strike}</span>}
+                              {o.delta != null && <span>Delta: {o.delta.toFixed(4)}</span>}
+                              {o.intended_amount != null && <span>Intended: {o.intended_amount}</span>}
+                              {o.filled_amount != null && <span>Filled: {o.filled_amount}</span>}
+                              {o.price != null && <span>Limit: ${o.price.toFixed(2)}</span>}
+                              {o.fill_price != null && <span>Fill: ${o.fill_price.toFixed(2)}</span>}
+                            </div>
+                            {o.reason && <p className="text-[10px] text-gray-500 mt-1">{o.reason}</p>}
                           </div>
-                        </summary>
-                        <div className="px-3 pb-2.5 border-t border-white/5 mt-0">
-                          <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-gray-500">
-                            <span>Time: {o.timestamp}</span>
-                            {o.spot_price != null && <span>Spot: ${o.spot_price.toFixed(2)}</span>}
-                            {o.strike != null && <span>Strike: {o.strike}</span>}
-                            {o.delta != null && <span>Delta: {o.delta.toFixed(4)}</span>}
-                            {o.intended_amount != null && <span>Intended: {o.intended_amount}</span>}
-                            {o.filled_amount != null && <span>Filled: {o.filled_amount}</span>}
-                            {o.price != null && <span>Limit: ${o.price.toFixed(2)}</span>}
-                            {o.fill_price != null && <span>Fill: ${o.fill_price.toFixed(2)}</span>}
-                          </div>
-                          {o.reason && <p className="text-[10px] text-gray-500 mt-1">{o.reason}</p>}
-                        </div>
-                      </details>
-                    ))}
+                        </details>
+                      );
+                    })}
                   </div>
                 )}
 

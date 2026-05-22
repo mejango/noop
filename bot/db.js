@@ -160,6 +160,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS resting_orders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id TEXT NOT NULL UNIQUE,
+    pending_action_id INTEGER REFERENCES pending_actions(id),
     instrument_name TEXT NOT NULL,
     action TEXT NOT NULL,
     direction TEXT NOT NULL,
@@ -171,6 +172,65 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_resting_orders_status ON resting_orders(status);
 `);
+try { db.exec('ALTER TABLE resting_orders ADD COLUMN pending_action_id INTEGER REFERENCES pending_actions(id)'); } catch {}
+try {
+  const restingActions = db.prepare(`
+    SELECT id, execution_result
+    FROM pending_actions
+    WHERE status = 'executed' AND execution_result IS NOT NULL
+  `).all();
+  const linkRestingOrder = db.prepare(`
+    UPDATE resting_orders
+    SET pending_action_id = @pending_action_id
+    WHERE order_id = @order_id AND pending_action_id IS NULL
+  `);
+  const getRestingOrder = db.prepare(`
+    SELECT status, filled_amount FROM resting_orders WHERE order_id = @order_id
+  `);
+  const updateActionStatus = db.prepare(`
+    UPDATE pending_actions
+    SET status = @status,
+      execution_result = COALESCE(@execution_result, execution_result)
+    WHERE id = @id
+  `);
+
+  for (const action of restingActions) {
+    let parsed = null;
+    try { parsed = JSON.parse(action.execution_result); } catch { parsed = null; }
+    const orderId = parsed?.orderId || parsed?.order_id;
+    if (!parsed?.resting || !orderId) continue;
+
+    linkRestingOrder.run({ pending_action_id: action.id, order_id: orderId });
+    const restingOrder = getRestingOrder.get({ order_id: orderId });
+    if (!restingOrder) continue;
+    const filledAmount = Number(restingOrder.filled_amount || 0);
+    if (restingOrder.status === 'open') {
+      updateActionStatus.run({ id: action.id, status: 'resting', execution_result: null });
+    } else if (filledAmount > 0 || restingOrder.status === 'filled') {
+      updateActionStatus.run({
+        id: action.id,
+        status: 'executed',
+        execution_result: JSON.stringify({
+          orderId,
+          orderStatus: restingOrder.status,
+          filledAmount,
+          note: 'Legacy resting order reconciled',
+        }),
+      });
+    } else if (filledAmount <= 0 && (restingOrder.status === 'cancelled' || restingOrder.status === 'expired')) {
+      updateActionStatus.run({
+        id: action.id,
+        status: 'cancelled',
+        execution_result: JSON.stringify({
+          orderId,
+          orderStatus: restingOrder.status,
+          filledAmount,
+          note: 'Legacy resting order reconciled',
+        }),
+      });
+    }
+  }
+} catch {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS bot_ticks (
@@ -1023,7 +1083,7 @@ const stmts = {
 
   hasPendingActionForRule: db.prepare(`
     SELECT COUNT(*) as count FROM pending_actions
-    WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed')
+    WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed', 'resting')
   `),
 
   getLastExecutedAction: db.prepare(`
@@ -1050,8 +1110,8 @@ const stmts = {
 
   // Resting order tracking
   insertRestingOrder: db.prepare(`
-    INSERT OR IGNORE INTO resting_orders (order_id, instrument_name, action, direction, amount, limit_price)
-    VALUES (@order_id, @instrument_name, @action, @direction, @amount, @limit_price)
+    INSERT OR IGNORE INTO resting_orders (order_id, pending_action_id, instrument_name, action, direction, amount, limit_price)
+    VALUES (@order_id, @pending_action_id, @instrument_name, @action, @direction, @amount, @limit_price)
   `),
   getOpenRestingOrders: db.prepare(`
     SELECT * FROM resting_orders WHERE status = 'open'
@@ -1619,6 +1679,7 @@ const getLastFailedAction = (action, instrumentName) => stmts.getLastFailedActio
 const insertRestingOrder = (order) => {
   stmts.insertRestingOrder.run({
     order_id: order.order_id,
+    pending_action_id: order.pending_action_id ?? null,
     instrument_name: order.instrument_name,
     action: order.action,
     direction: order.direction,

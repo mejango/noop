@@ -425,6 +425,7 @@ function prepareAll(d: Database.Database) {
       FROM orders
       WHERE timestamp > ?
         AND success = 1
+        AND COALESCE(filled_amount, 0) > 0
         AND action IN ('buy_put', 'sell_put', 'sell_call', 'buyback_call')
       ORDER BY timestamp DESC
     `),
@@ -483,10 +484,12 @@ function prepareAll(d: Database.Database) {
         (SELECT COUNT(*) FROM trading_rules WHERE is_active = 1) as active_rules,
         (SELECT COUNT(*) FROM pending_actions WHERE status = 'pending') as pending_count,
         (SELECT COUNT(*) FROM pending_actions WHERE status = 'confirmed') as confirmed_count,
+        (SELECT COUNT(*) FROM pending_actions WHERE status = 'resting') as resting_count,
         (SELECT COUNT(*) FROM pending_actions WHERE status = 'executed') as executed_count,
+        (SELECT COUNT(*) FROM pending_actions WHERE status = 'cancelled') as cancelled_count,
         (SELECT COUNT(*) FROM pending_actions WHERE status = 'rejected') as rejected_count,
         (SELECT COUNT(*) FROM pending_actions WHERE status = 'failed') as failed_count,
-        (SELECT COUNT(*) FROM orders WHERE success = 1 AND timestamp > datetime('now', '-24 hours')) as orders_24h,
+        (SELECT COUNT(*) FROM orders WHERE success = 1 AND COALESCE(filled_amount, 0) > 0 AND timestamp > datetime('now', '-24 hours')) as orders_24h,
         (SELECT advisory_id FROM trading_rules WHERE is_active = 1 LIMIT 1) as current_advisory_id,
         (SELECT created_at FROM trading_rules WHERE is_active = 1 ORDER BY id ASC LIMIT 1) as advisory_created_at
     `),
@@ -548,6 +551,7 @@ function prepareAll(d: Database.Database) {
         MAX(timestamp) as last_timestamp
       FROM orders
       WHERE success = 1
+        AND COALESCE(filled_amount, 0) > 0
         AND action IN ('sell_call', 'buyback_call', 'buy_put', 'sell_put')
         AND timestamp > datetime('now', '-21 days')
     `),
@@ -597,25 +601,25 @@ function prepareAll(d: Database.Database) {
     `),
     getOrderCashflowTotalsBefore: d.prepare(`
       SELECT
-        COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 THEN total_value ELSE 0 END), 0) as revenue,
-        COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0) as expenses,
-        COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 THEN total_value ELSE 0 END), 0)
-          - COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+        COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as revenue,
+        COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as expenses,
+        COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0)
+          - COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0)
           as profit,
-        COUNT(CASE WHEN success = 1 AND action IN ('sell_call', 'buyback_call', 'buy_put', 'sell_put') THEN 1 END) as order_count
+        COUNT(CASE WHEN success = 1 AND COALESCE(filled_amount, 0) > 0 AND action IN ('sell_call', 'buyback_call', 'buy_put', 'sell_put') THEN 1 END) as order_count
       FROM orders
       WHERE timestamp < ?
     `),
     getRealizedPnL: d.prepare(`
       SELECT
-        COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 THEN total_value ELSE 0 END), 0)
-        - COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 THEN total_value ELSE 0 END), 0)
+        COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0)
+        - COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0)
         as net_realized_pnl,
-        COALESCE(SUM(CASE WHEN action = 'buy_put' AND success = 1 THEN total_value ELSE 0 END), 0) as total_put_cost,
-        COALESCE(SUM(CASE WHEN action = 'sell_put' AND success = 1 THEN total_value ELSE 0 END), 0) as total_put_revenue,
-        COALESCE(SUM(CASE WHEN action = 'sell_call' AND success = 1 THEN total_value ELSE 0 END), 0) as total_call_revenue,
-        COALESCE(SUM(CASE WHEN action = 'buyback_call' AND success = 1 THEN total_value ELSE 0 END), 0) as total_call_cost,
-        COUNT(CASE WHEN success = 1 THEN 1 END) as successful_orders,
+        COALESCE(SUM(CASE WHEN action = 'buy_put' AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as total_put_cost,
+        COALESCE(SUM(CASE WHEN action = 'sell_put' AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as total_put_revenue,
+        COALESCE(SUM(CASE WHEN action = 'sell_call' AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as total_call_revenue,
+        COALESCE(SUM(CASE WHEN action = 'buyback_call' AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as total_call_cost,
+        COUNT(CASE WHEN success = 1 AND COALESCE(filled_amount, 0) > 0 THEN 1 END) as successful_orders,
         COUNT(*) as total_orders
       FROM orders
     `),
@@ -1294,8 +1298,8 @@ export function getRecentOrders(limit = 20) {
 export function getOpsStats() {
   try {
     return getStmts().getOpsStats.get() as {
-      active_rules: number; pending_count: number; confirmed_count: number;
-      executed_count: number; rejected_count: number; failed_count: number;
+      active_rules: number; pending_count: number; confirmed_count: number; resting_count: number;
+      executed_count: number; cancelled_count: number; rejected_count: number; failed_count: number;
       orders_24h: number; current_advisory_id: string | null;
       advisory_created_at: string | null;
     } | undefined;

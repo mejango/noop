@@ -133,7 +133,8 @@ export function GET(req: NextRequest) {
 
     const rawSnapshots = getPortfolioSnapshotsInRange(fromIso, toIso) as SnapshotRow[];
     const baseline = getPortfolioSnapshotBefore(fromIso) as SnapshotRow | undefined;
-    const orders = (getOrdersInRange(fromIso, toIso) as OrderRow[]).filter(o => o.success === 1);
+    const orders = (getOrdersInRange(fromIso, toIso) as OrderRow[])
+      .filter(o => o.success === 1 && Number(o.filled_amount ?? 0) > 0);
     const openingCashflow = getOrderCashflowTotalsBefore(fromIso) || {
       revenue: 0,
       expenses: 0,

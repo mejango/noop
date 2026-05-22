@@ -5613,7 +5613,7 @@ const manageOpenOrders = async (tickerMap) => {
 
         let filledAmt, fillPrice, status;
         if (finalStatus) {
-          filledAmt = finalStatus.filled_amount || 0;
+          filledAmt = Number(finalStatus.filled_amount || 0);
           fillPrice = finalStatus.average_price > 0 ? finalStatus.average_price : tracked.limit_price;
           status = finalStatus.order_status; // 'filled', 'cancelled', 'expired'
           console.log(`📋 Order ${tracked.order_id} status: ${status}, filled=${filledAmt}/${tracked.amount} @ $${fillPrice}`);
@@ -5635,6 +5635,20 @@ const manageOpenOrders = async (tickerMap) => {
 
         const dbStatus = status === 'cancelled' || status === 'expired' ? 'cancelled' : 'filled';
         db.updateRestingOrder(tracked.order_id, dbStatus, filledAmt);
+        if (tracked.pending_action_id) {
+          const actionStatus = filledAmt > 0 ? 'executed' : 'cancelled';
+          db.updatePendingAction(tracked.pending_action_id, {
+            status: actionStatus,
+            executed_at: new Date().toISOString(),
+            execution_result: {
+              orderId: tracked.order_id,
+              orderStatus: status,
+              filledAmount: filledAmt,
+              fillPrice: filledAmt > 0 ? fillPrice : null,
+              note: `Resting order ${status}`,
+            },
+          });
+        }
         db.insertOrder({
           action: tracked.action,
           success: filledAmt > 0,
@@ -5687,6 +5701,20 @@ const manageOpenOrders = async (tickerMap) => {
 
       // Update our tracking table
       db.updateRestingOrder(order.order_id, 'cancelled', filled);
+      const tracked = trackedResting.find((item) => item.order_id === order.order_id);
+      if (tracked?.pending_action_id) {
+        db.updatePendingAction(tracked.pending_action_id, {
+          status: filled > 0 ? 'executed' : 'cancelled',
+          executed_at: new Date().toISOString(),
+          execution_result: {
+            orderId: order.order_id,
+            orderStatus: 'cancelled',
+            filledAmount: filled,
+            cancelReason: reason,
+            cancelResult: result || null,
+          },
+        });
+      }
     }
   }
 };
@@ -5895,7 +5923,7 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
   return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
 };
 
-const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc', tickerMap = {}) => {
+const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc', tickerMap = {}, pendingActionId = null) => {
   // DRY_RUN mode: track budget discipline but skip actual order
   if (process.env.DRY_RUN === '1') {
     const totalValue = amount * price;
@@ -6141,20 +6169,12 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   if (filledAmt === 0 && (orderType === 'gtc' || orderType === 'post_only')) {
     const orderId = orderRecord?.order_id || null;
     console.log(`📋 Order resting: ${action} ${instrumentName} @ $${price} [${orderType}] orderId=${orderId}`);
-    if (db) db.insertOrder({
-      action, success: true, reason: `Resting ${orderType} order placed`,
-      instrument_name: instrumentName,
-      strike: instrument.option_details?.strike || null,
-      expiry: instrument.option_details?.expiry || null,
-      delta: null, price, intended_amount: amount,
-      filled_amount: 0, fill_price: null,
-      total_value: 0, spot_price: spotPrice,
-      raw_response: order,
-    });
-    // Track resting order for fill reconciliation
+    // Track resting order for fill reconciliation. Do not write a trade row yet:
+    // no fill happened, and P&L/recent-orders views should only count fills.
     if (db && orderId) {
       db.insertRestingOrder({
         order_id: orderId,
+        pending_action_id: pendingActionId,
         instrument_name: instrumentName,
         action,
         direction,
@@ -6200,7 +6220,8 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
 
   console.log(`🔍 ${pending.length} pending action(s) to confirm`);
 
-  let confirmed = 0;
+  let executed = 0;
+  let resting = 0;
   for (const action of pending.slice(0, 2)) { // Max 2 per tick
     // Fetch fresh margin state for each confirmation (margin changes between trades)
     let marginState = null;
@@ -6496,7 +6517,8 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           instruments,
           spotPrice,
           orderType,
-          tickerMap
+          tickerMap,
+          action.id
         );
 
         if (result && result.postOnlyRejected) {
@@ -6521,11 +6543,11 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           // GTC/post-only order is resting on the book
           const finalOrderPrice = result.price ?? executionPrice;
           db.updatePendingAction(action.id, {
-            status: 'executed',
+            status: 'resting',
             executed_at: new Date().toISOString(),
             execution_result: JSON.stringify({ ...result, price: finalOrderPrice, note: 'Resting on order book' }),
           });
-          confirmed++;
+          resting++;
           console.log(`📋 Resting order: ${action.action} ${action.instrument_name} @ $${finalOrderPrice} [${orderType}] | ${reasoning}`);
         } else if (result && result.failed) {
           db.updatePendingAction(action.id, { status: 'failed', execution_result: result.reason || 'Order placement failed' });
@@ -6536,7 +6558,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
             executed_at: new Date().toISOString(),
             execution_result: JSON.stringify(result),
           });
-          confirmed++;
+          executed++;
           console.log(`✅ Confirmed & executed: ${action.action} ${action.instrument_name} [${orderType}] | ${reasoning}`);
         } else {
           const failureReason = result?.reason || 'Order placement failed';
@@ -6562,7 +6584,8 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
     }
   }
 
-  if (confirmed > 0) console.log(`📋 Executed ${confirmed} trade(s) this tick`);
+  if (executed > 0) console.log(`📋 Executed ${executed} trade(s) this tick`);
+  if (resting > 0) console.log(`📋 Placed ${resting} resting order(s) this tick`);
 };
 
 // ─── LLM-Driven Trading Advisory ─────────────────────────────────────────────
