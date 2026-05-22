@@ -137,6 +137,7 @@ const HIDDEN_JOURNAL_ENTRY_TYPES = new Set([
   'advisory_spitznagel',
   'advisory_taleb',
   'mandelbrot_archive',
+  'advisory_context',
 ]);
 
 function timeUntil(ts: string): string {
@@ -230,6 +231,7 @@ interface AdvisoryArtifacts {
   spitznagel: AdvisoryArtifact | null;
   taleb: AdvisoryArtifact | null;
   mandelbrot: AdvisoryArtifact | null;
+  context: AdvisoryArtifact | null;
 }
 
 function parseArtifactContent(content: string) {
@@ -371,6 +373,51 @@ function renderMandelbrotArtifact(content: string) {
             <p key={`invalidation-${index}`} className="text-[11px] text-gray-400 leading-relaxed">{String(note)}</p>
           ))}
         </div>
+      )}
+    </div>
+  );
+}
+
+function renderAdvisoryContextArtifact(content: string) {
+  const parsed = parseArtifactContent(content);
+  if (!isPlainObject(parsed)) {
+    return <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{content}</pre>;
+  }
+
+  const rolling = isPlainObject(parsed.rolling_option_value_context) ? parsed.rolling_option_value_context : parsed;
+  const put = isPlainObject(rolling.put_value_context) ? rolling.put_value_context : {};
+  const budget = isPlainObject(rolling.put_budget_context) ? rolling.put_budget_context : {};
+  const action = isPlainObject(rolling.action_pressure) ? rolling.action_pressure : {};
+  const spot = isPlainObject(rolling.spot_price_action) ? rolling.spot_price_action : {};
+  const current = isPlainObject(put.current_detail) ? put.current_detail : null;
+
+  const rows = ([
+    ['PUT score', put.current_score],
+    ['Prior best', put.prior_window_best_score],
+    ['Vs prior best', put.current_vs_prior_best_pct != null ? `${put.current_vs_prior_best_pct}%` : null],
+    ['Fresh best', put.is_strict_fresh_best ? 'yes' : 'no'],
+    ['Spot action', spot.state],
+    ['Budget left', budget.remaining != null ? `$${budget.remaining}` : null],
+    ['Decision pressure', action.requires_buy_put_decision ? 'yes' : 'no'],
+    ['Execution style', action.execution_style],
+    ['Target score', action.target_score],
+    ['Suggested limit', action.suggested_limit_price != null ? `$${action.suggested_limit_price}` : null],
+  ] as Array<[string, unknown]>).filter(([, value]) => value != null);
+
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex justify-between gap-2 border-b border-white/5 pb-1">
+            <span className="text-[10px] text-gray-500">{label}</span>
+            <span className="text-[10px] text-gray-300 text-right">{String(value)}</span>
+          </div>
+        ))}
+      </div>
+      {current && (
+        <p className="text-[10px] text-gray-400 leading-relaxed">
+          {String(current.instrument || 'current put')} delta={String(current.delta ?? 'n/a')} ask=${String(current.ask_price ?? 'n/a')} DTE={String(current.dte ?? 'n/a')}
+        </p>
       )}
     </div>
   );
@@ -1461,7 +1508,7 @@ export default function AdvisorDrawer() {
                 )}
 
                 {/* Advisory Assessment */}
-                {(opsData.assessment || opsData.advisoryArtifacts?.main || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb || opsData.advisoryArtifacts?.mandelbrot) && (
+                {(opsData.assessment || opsData.advisoryArtifacts?.main || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb || opsData.advisoryArtifacts?.mandelbrot || opsData.advisoryArtifacts?.context) && (
                   <div className="space-y-2">
                     {(opsData.advisoryArtifacts?.main || opsData.assessment) && (
                       <div className="bg-white/5 border border-white/10 px-3 py-2.5">
@@ -1494,9 +1541,18 @@ export default function AdvisorDrawer() {
                             </>
                           );
                         })()}
-                        {(opsData.advisoryArtifacts?.mandelbrot || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb) && (
+                        {(opsData.advisoryArtifacts?.context || opsData.advisoryArtifacts?.mandelbrot || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb) && (
                           <div className="mt-3 pt-2 border-t border-white/5 space-y-2">
                             <p className="text-[10px] text-gray-500 uppercase tracking-wider">Council Breakdown</p>
+                            {opsData.advisoryArtifacts?.context && (
+                              <details className="border border-white/5 bg-black/10 px-2.5 py-2 group">
+                                <summary className="cursor-pointer list-none flex items-center justify-between text-[10px] uppercase tracking-wider text-emerald-300">
+                                  <span>Advisory Context</span>
+                                  <span className="text-gray-600 normal-case">{timeAgo(opsData.advisoryArtifacts.context.timestamp)}</span>
+                                </summary>
+                                <div className="mt-2">{renderAdvisoryContextArtifact(opsData.advisoryArtifacts.context.content)}</div>
+                              </details>
+                            )}
                             {opsData.advisoryArtifacts?.mandelbrot && (
                               <details className="border border-white/5 bg-black/10 px-2.5 py-2 group">
                                 <summary className="cursor-pointer list-none flex items-center justify-between text-[10px] uppercase tracking-wider text-cyan-300">

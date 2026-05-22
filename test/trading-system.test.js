@@ -359,6 +359,45 @@ const evaluateConditions = (conditions, logic, values) => {
   return logic === 'all' ? results.every(Boolean) : results.some(Boolean);
 };
 
+const floorOptionPriceCents = (value) => {
+  const numeric = Number(value);
+  if (!(numeric > 0)) return null;
+  return Math.max(0.01, Math.floor(numeric * 100) / 100);
+};
+
+const buildBuyPutFreshBestPressure = ({
+  currentScore,
+  priorScores,
+  budgetRemaining,
+  hasWorkingBuyPut,
+  spotState,
+  delta,
+}) => {
+  const priorBest = Math.max(...priorScores);
+  const freshBest = currentScore > priorBest;
+  const requiresDecision = freshBest && budgetRemaining > 1 && !hasWorkingBuyPut;
+  const scoreNudge = spotState === 'downward' ? 1.005 : 1.02;
+  const targetScore = currentScore * scoreNudge;
+  return {
+    priorBest,
+    freshBest,
+    requiresDecision,
+    shouldEmitBuyPut: requiresDecision && ['downward', 'stable'].includes(spotState),
+    executionStyle: spotState === 'downward' ? 'less_patient_limit' : spotState === 'stable' ? 'patient_limit' : 'explain_no_buy_unless_other_facts_override',
+    targetScore,
+    suggestedLimitPrice: floorOptionPriceCents(Math.abs(delta) / targetScore),
+  };
+};
+
+const filterAdvisoryBuyPutCandidates = (candidates) => candidates.filter((candidate) => (
+  candidate.option_type === 'P'
+  && candidate.delta >= -0.12
+  && candidate.delta <= -0.02
+  && candidate.dte >= 45
+  && candidate.dte <= 75
+  && candidate.ask_price > 0
+));
+
 const extractOrderRecord = (payload) => {
   if (!payload || typeof payload !== 'object') return null;
   if (payload.order && typeof payload.order === 'object') return payload.order;
@@ -802,9 +841,99 @@ describe('evaluateConditions', () => {
   });
 });
 
+// ============================================================================
+// 2b. Fresh-best buy-put advisory pressure
+// ============================================================================
+
+describe('Fresh-best buy-put advisory pressure', () => {
+  test('strict fresh best + downward spot action emits less patient target', () => {
+    const result = buildBuyPutFreshBestPressure({
+      currentScore: 0.0045,
+      priorScores: [0.0041, 0.00449],
+      budgetRemaining: 100,
+      hasWorkingBuyPut: false,
+      spotState: 'downward',
+      delta: -0.09,
+    });
+
+    assert.strictEqual(result.freshBest, true);
+    assert.strictEqual(result.requiresDecision, true);
+    assert.strictEqual(result.shouldEmitBuyPut, true);
+    assert.strictEqual(result.executionStyle, 'less_patient_limit');
+    assert.ok(Math.abs(result.targetScore - 0.0045225) < 0.0000001);
+    assert.strictEqual(result.suggestedLimitPrice, 19.9);
+  });
+
+  test('equal to prior best does not trigger fresh-best pressure', () => {
+    const result = buildBuyPutFreshBestPressure({
+      currentScore: 0.0045,
+      priorScores: [0.0042, 0.0045],
+      budgetRemaining: 100,
+      hasWorkingBuyPut: false,
+      spotState: 'downward',
+      delta: -0.09,
+    });
+
+    assert.strictEqual(result.freshBest, false);
+    assert.strictEqual(result.requiresDecision, false);
+    assert.strictEqual(result.shouldEmitBuyPut, false);
+  });
+
+  test('stable spot action uses patient target', () => {
+    const result = buildBuyPutFreshBestPressure({
+      currentScore: 0.0045,
+      priorScores: [0.0042, 0.0044],
+      budgetRemaining: 100,
+      hasWorkingBuyPut: false,
+      spotState: 'stable',
+      delta: -0.09,
+    });
+
+    assert.strictEqual(result.requiresDecision, true);
+    assert.strictEqual(result.executionStyle, 'patient_limit');
+    assert.ok(Math.abs(result.targetScore - 0.00459) < 0.0000001);
+    assert.strictEqual(result.suggestedLimitPrice, 19.6);
+  });
+
+  test('budget exhaustion or working buy_put suppresses pressure', () => {
+    const noBudget = buildBuyPutFreshBestPressure({
+      currentScore: 0.0045,
+      priorScores: [0.0044],
+      budgetRemaining: 0.5,
+      hasWorkingBuyPut: false,
+      spotState: 'downward',
+      delta: -0.09,
+    });
+    const working = buildBuyPutFreshBestPressure({
+      currentScore: 0.0045,
+      priorScores: [0.0044],
+      budgetRemaining: 100,
+      hasWorkingBuyPut: true,
+      spotState: 'downward',
+      delta: -0.09,
+    });
+
+    assert.strictEqual(noBudget.requiresDecision, false);
+    assert.strictEqual(working.requiresDecision, false);
+  });
+
+  test('advisory candidate filter enforces 45-75 DTE buy-put discipline', () => {
+    const filtered = filterAdvisoryBuyPutCandidates([
+      { option_type: 'P', delta: -0.08, dte: 60, ask_price: 20 },
+      { option_type: 'P', delta: -0.08, dte: 20, ask_price: 2 },
+      { option_type: 'P', delta: -0.08, dte: 90, ask_price: 30 },
+      { option_type: 'P', delta: -0.2, dte: 60, ask_price: 20 },
+      { option_type: 'C', delta: 0.08, dte: 60, ask_price: 20 },
+    ]);
+
+    assert.strictEqual(filtered.length, 1);
+    assert.strictEqual(filtered[0].dte, 60);
+  });
+});
+
 
 // ============================================================================
-// 2b. summarizeSentimentForLLM
+// 2c. summarizeSentimentForLLM
 // ============================================================================
 
 describe('summarizeSentimentForLLM', () => {

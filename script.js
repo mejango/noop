@@ -231,6 +231,10 @@ const PERIOD = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 // Trading parameters - PUTS
 const PUT_EXPIRATION_RANGE = [45, 78];
 const PUT_DELTA_RANGE = [-0.12, -0.02]; // Negative delta for puts
+const BUY_PUT_ADVISORY_DTE_RANGE = [45, 75];
+const ADVISORY_OPTION_VALUE_WINDOW_DAYS = 6.2;
+const BUY_PUT_URGENT_SCORE_NUDGE = 1.005;
+const BUY_PUT_PATIENT_SCORE_NUDGE = 1.02;
 
 // Trading parameters - CALLS  
 const CALL_EXPIRATION_RANGE = [5, 12];
@@ -1472,6 +1476,268 @@ const summarizeBestCandidate = (candidate, type) => {
       instrument: candidate.instrument_name || null,
     },
   };
+};
+
+const roundForAdvisory = (value, digits = 4) => (
+  Number.isFinite(value) ? Number(Number(value).toFixed(digits)) : null
+);
+
+const floorOptionPriceCents = (value) => {
+  const numeric = Number(value);
+  if (!(numeric > 0)) return null;
+  return Math.max(0.01, Math.floor(numeric * 100) / 100);
+};
+
+const parseAdvisoryOptionInstrument = (name) => {
+  const parts = String(name || '').split('-');
+  if (parts.length !== 4 || !/^\d{8}$/.test(parts[1])) return null;
+  const expiry = new Date(`${parts[1].slice(0, 4)}-${parts[1].slice(4, 6)}-${parts[1].slice(6, 8)}T08:00:00Z`);
+  const strike = Number(parts[2]);
+  return {
+    expiry,
+    strike: Number.isFinite(strike) ? strike : null,
+    optionType: parts[3],
+  };
+};
+
+const computeDteAt = (expiry, nowMs = Date.now()) => {
+  const expiryMs = expiry instanceof Date ? expiry.getTime() : Number(expiry) * 1000;
+  if (!Number.isFinite(expiryMs)) return null;
+  return Math.max(0, (expiryMs - nowMs) / 86400000);
+};
+
+const getBestCurrentBuyPutCandidate = (tickerMap = {}, nowMs = Date.now()) => {
+  let best = null;
+  for (const [name, ticker] of Object.entries(tickerMap || {})) {
+    const parsed = parseAdvisoryOptionInstrument(name);
+    if (!parsed || parsed.optionType !== 'P') continue;
+    const dte = computeDteAt(parsed.expiry, nowMs);
+    if (!(dte >= BUY_PUT_ADVISORY_DTE_RANGE[0] && dte <= BUY_PUT_ADVISORY_DTE_RANGE[1])) continue;
+
+    const delta = Number(ticker?.option_pricing?.d);
+    const askPrice = Number(ticker?.a);
+    const askAmount = Number(ticker?.A) || 0;
+    if (!(delta >= PUT_DELTA_RANGE[0] && delta <= PUT_DELTA_RANGE[1])) continue;
+    if (!(askPrice > 0)) continue;
+
+    const score = Math.abs(delta) / askPrice;
+    if (!best || score > best.score) {
+      best = {
+        instrument: name,
+        delta,
+        ask_price: askPrice,
+        ask_amount: askAmount,
+        strike: parsed.strike,
+        expiry: Math.floor(parsed.expiry.getTime() / 1000),
+        dte,
+        score,
+      };
+    }
+  }
+  return best;
+};
+
+const classifySpotPriceAction = (momentum = {}, recentSpotPrices = []) => {
+  const mainText = (value) => {
+    if (!value) return '';
+    if (typeof value === 'string') return value.toLowerCase();
+    return `${value.main || ''} ${value.derivative || ''}`.toLowerCase();
+  };
+  const mediumText = mainText(momentum.mediumTerm);
+  const shortText = mainText(momentum.shortTerm);
+  const combined = `${mediumText} ${shortText}`;
+
+  let slopePct = null;
+  const rows = Array.isArray(recentSpotPrices)
+    ? recentSpotPrices
+        .map((row) => ({ price: Number(row.price), timestamp: new Date(row.timestamp).getTime() }))
+        .filter((row) => Number.isFinite(row.price) && Number.isFinite(row.timestamp))
+        .sort((a, b) => a.timestamp - b.timestamp)
+    : [];
+  if (rows.length >= 2 && rows[0].price > 0) {
+    slopePct = ((rows[rows.length - 1].price - rows[0].price) / rows[0].price) * 100;
+  }
+
+  if (/\bdownward\b|_down\b|down\b/.test(shortText) || /\bdownward\b/.test(mediumText)) {
+    return { state: 'downward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'momentum labels point downward' };
+  }
+  if (/\bupward\b|_up\b|up\b/.test(shortText) || /\bupward\b/.test(mediumText)) {
+    return { state: 'upward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'momentum labels point upward' };
+  }
+  if (Number.isFinite(slopePct)) {
+    if (slopePct <= -0.25) return { state: 'downward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'recent spot slope is negative' };
+    if (slopePct >= 0.25) return { state: 'upward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'recent spot slope is positive' };
+  }
+  if (combined.includes('neutral') || combined.includes('flat')) {
+    return { state: 'stable', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'momentum labels are neutral or flat' };
+  }
+  return { state: 'unknown', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'spot trend is not classifiable' };
+};
+
+const computeScoreTrendPct = (samples, currentScore, hours) => {
+  if (!(currentScore > 0) || !Array.isArray(samples) || samples.length === 0) return null;
+  const cutoff = Date.now() - hours * 60 * 60 * 1000;
+  const recent = samples
+    .filter((row) => new Date(row.timestamp).getTime() >= cutoff)
+    .map((row) => Number(row.score))
+    .filter((score) => score > 0);
+  if (recent.length === 0) return null;
+  const avg = recent.reduce((sum, score) => sum + score, 0) / recent.length;
+  return avg > 0 ? roundForAdvisory(((currentScore - avg) / avg) * 100, 2) : null;
+};
+
+const buildRollingOptionValueContext = ({
+  tickerMap,
+  momentum,
+  putBudgetRemaining,
+  activeRules = [],
+  recentPendingActions = [],
+  openRestingOrders = [],
+  currentTickTimestamp = null,
+}) => {
+  const currentPut = getBestCurrentBuyPutCandidate(tickerMap);
+  const before = currentTickTimestamp || new Date().toISOString();
+  const since = new Date(Date.now() - ADVISORY_OPTION_VALUE_WINDOW_DAYS * 86400000).toISOString();
+  let priorSamples = [];
+  let priorBestDetail = null;
+  let recentSpotPrices = [];
+
+  if (db) {
+    try {
+      if (typeof db.getBuyPutScoreSamples === 'function') {
+        priorSamples = db.getBuyPutScoreSamples({
+          since,
+          before,
+          minDelta: PUT_DELTA_RANGE[0],
+          maxDelta: PUT_DELTA_RANGE[1],
+          minDte: BUY_PUT_ADVISORY_DTE_RANGE[0],
+          maxDte: BUY_PUT_ADVISORY_DTE_RANGE[1],
+        });
+      }
+      if (typeof db.getBestBuyPutScoreDetail === 'function') {
+        priorBestDetail = db.getBestBuyPutScoreDetail({
+          since,
+          before,
+          minDelta: PUT_DELTA_RANGE[0],
+          maxDelta: PUT_DELTA_RANGE[1],
+          minDte: BUY_PUT_ADVISORY_DTE_RANGE[0],
+          maxDte: BUY_PUT_ADVISORY_DTE_RANGE[1],
+        });
+      }
+      if (typeof db.getRecentSpotPrices === 'function') {
+        recentSpotPrices = db.getRecentSpotPrices(new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString());
+      }
+    } catch (e) {
+      console.log(`📋 Advisory context: rolling option value query failed: ${e.message}`);
+    }
+  }
+
+  const priorScores = priorSamples.map((row) => Number(row.score)).filter((score) => score > 0);
+  const priorBestScore = priorScores.length > 0 ? Math.max(...priorScores) : null;
+  const currentScore = Number(currentPut?.score || 0);
+  const currentVsPriorBestPct = priorBestScore > 0 ? (currentScore / priorBestScore) * 100 : null;
+  const percentile = currentScore > 0 && priorScores.length > 0
+    ? (priorScores.filter((score) => score <= currentScore).length / priorScores.length) * 100
+    : null;
+  const freshBest = currentScore > 0 && priorBestScore > 0 && currentScore > priorBestScore;
+  const activeBuyPutRules = activeRules.filter((rule) => rule?.is_active !== 0 && rule?.rule_type === 'entry' && rule?.action === 'buy_put').length;
+  const workingBuyPutActions = recentPendingActions.filter((action) =>
+    action?.action === 'buy_put' && ['pending', 'confirmed', 'resting'].includes(action?.status)
+  ).length;
+  const restingBuyPutOrders = openRestingOrders.filter((order) =>
+    order?.action === 'buy_put' && (!order?.status || order.status === 'open')
+  ).length;
+  const hasWorkingBuyPut = (activeBuyPutRules + workingBuyPutActions + restingBuyPutOrders) > 0;
+  const spotAction = classifySpotPriceAction(momentum, recentSpotPrices);
+  const budgetAvailable = Number(putBudgetRemaining) > 1;
+  const requiresDecision = Boolean(freshBest && budgetAvailable && !hasWorkingBuyPut);
+  const scoreNudge = spotAction.state === 'downward' ? BUY_PUT_URGENT_SCORE_NUDGE : BUY_PUT_PATIENT_SCORE_NUDGE;
+  const targetScore = currentScore > 0 ? currentScore * scoreNudge : null;
+  const suggestedLimitPrice = currentPut && targetScore > 0
+    ? floorOptionPriceCents(Math.abs(currentPut.delta) / targetScore)
+    : null;
+  const executionStyle = spotAction.state === 'downward'
+    ? 'less_patient_limit'
+    : spotAction.state === 'stable'
+      ? 'patient_limit'
+      : 'explain_no_buy_unless_other_facts_override';
+
+  return {
+    window_days: ADVISORY_OPTION_VALUE_WINDOW_DAYS,
+    buy_put_filters: {
+      delta_range: PUT_DELTA_RANGE,
+      dte_range: BUY_PUT_ADVISORY_DTE_RANGE,
+      score: 'abs(delta) / ask_price',
+    },
+    put_value_context: {
+      current_score: roundForAdvisory(currentScore, 6),
+      prior_window_best_score: roundForAdvisory(priorBestScore, 6),
+      current_vs_prior_best_pct: roundForAdvisory(currentVsPriorBestPct, 2),
+      percentile_vs_prior_window: roundForAdvisory(percentile, 1),
+      is_strict_fresh_best: freshBest,
+      trend_6h_pct: computeScoreTrendPct(priorSamples, currentScore, 6),
+      trend_24h_pct: computeScoreTrendPct(priorSamples, currentScore, 24),
+      current_detail: currentPut ? {
+        instrument: currentPut.instrument,
+        delta: roundForAdvisory(currentPut.delta, 4),
+        ask_price: roundForAdvisory(currentPut.ask_price, 4),
+        ask_amount: roundForAdvisory(currentPut.ask_amount, 2),
+        strike: currentPut.strike,
+        expiry: currentPut.expiry,
+        dte: roundForAdvisory(currentPut.dte, 1),
+      } : null,
+      prior_window_best_detail: priorBestDetail ? {
+        timestamp: priorBestDetail.timestamp,
+        instrument: priorBestDetail.instrument_name,
+        delta: roundForAdvisory(Number(priorBestDetail.delta), 4),
+        ask_price: roundForAdvisory(Number(priorBestDetail.ask_price), 4),
+        strike: Number(priorBestDetail.strike),
+        expiry: Number(priorBestDetail.expiry),
+        dte: roundForAdvisory(Number(priorBestDetail.dte), 1),
+      } : null,
+      samples: priorScores.length,
+    },
+    put_budget_context: {
+      remaining: roundForAdvisory(Number(putBudgetRemaining), 2),
+      budget_available: budgetAvailable,
+      active_buy_put_rules: activeBuyPutRules,
+      working_buy_put_actions: workingBuyPutActions,
+      resting_buy_put_orders: restingBuyPutOrders,
+      has_working_buy_put: hasWorkingBuyPut,
+    },
+    spot_price_action: spotAction,
+    action_pressure: {
+      requires_buy_put_decision: requiresDecision,
+      should_emit_buy_put: Boolean(requiresDecision && ['downward', 'stable'].includes(spotAction.state)),
+      execution_style: executionStyle,
+      target_score: roundForAdvisory(targetScore, 6),
+      suggested_limit_price: roundForAdvisory(suggestedLimitPrice, 4),
+      score_nudge_pct: roundForAdvisory((scoreNudge - 1) * 100, 2),
+      explanation: requiresDecision
+        ? 'Current buy-put value score is strictly better than the prior rolling-window best while budget remains and no buy_put is already working.'
+        : 'No mandatory fresh-best buy_put decision pressure.',
+    },
+  };
+};
+
+const formatRollingOptionValueContext = (context) => {
+  if (!context?.put_value_context) return 'No rolling option value context available.';
+  const put = context.put_value_context;
+  const budget = context.put_budget_context || {};
+  const action = context.action_pressure || {};
+  const spotAction = context.spot_price_action || {};
+  const detail = put.current_detail;
+  const prior = put.prior_window_best_detail;
+  return [
+    `Buy-put filters: delta ${JSON.stringify(context.buy_put_filters?.delta_range)}; DTE ${JSON.stringify(context.buy_put_filters?.dte_range)}; score=${context.buy_put_filters?.score}.`,
+    `Current PUT score: ${put.current_score ?? 'n/a'}${detail ? ` (${detail.instrument}, delta=${detail.delta}, ask=$${detail.ask_price}, DTE=${detail.dte})` : ''}.`,
+    `Prior ${context.window_days}d best PUT score: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (${prior.instrument} at ${prior.timestamp})` : ''}.`,
+    `Current vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${put.is_strict_fresh_best ? 'yes' : 'no'}; samples=${put.samples}.`,
+    `Score trend: 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
+    `Put budget: remaining=$${budget.remaining ?? 'n/a'}; active_buy_put_rules=${budget.active_buy_put_rules ?? 0}; working_buy_put_actions=${budget.working_buy_put_actions ?? 0}; resting_buy_put_orders=${budget.resting_buy_put_orders ?? 0}.`,
+    `Spot price action: ${spotAction.state || 'unknown'}${spotAction.slope_pct_6h != null ? ` (${spotAction.slope_pct_6h}% over recent 6h)` : ''}; reason=${spotAction.reason || 'n/a'}.`,
+    `Action pressure: requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; should_emit_buy_put=${action.should_emit_buy_put ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
+  ].join('\n');
 };
 
 // Load private key (prefer env var, fallback to file)
@@ -5318,6 +5584,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const maxCost = criteria.max_cost ?? null;
         const minBid = criteria.min_bid ?? null;
         const minScore = criteria.min_score ?? null;
+        const targetScore = Number(criteria.target_score ?? 0) > 0 ? Number(criteria.target_score) : null;
 
         // Empty market_conditions means "no extra market gate"; only evaluate
         // when the advisor supplied at least one condition.
@@ -5434,7 +5701,15 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const best = candidates[0];
 
         // Calculate amount: min of rule budget_limit, put cycle budget remaining, and book liquidity
-        const price = optionType === 'P' ? best.askPrice : best.bidPrice;
+        const livePrice = optionType === 'P' ? best.askPrice : best.bidPrice;
+        let price = livePrice;
+        let advisorLimitPrice = null;
+        if (rule.action === 'buy_put' && targetScore != null && Math.abs(best.delta) > 0) {
+          advisorLimitPrice = floorOptionPriceCents(Math.abs(best.delta) / targetScore);
+          if (advisorLimitPrice != null) {
+            price = Math.min(livePrice, advisorLimitPrice);
+          }
+        }
         if (price <= 0) continue;
 
         let maxByBudget = (rule.budget_limit || Infinity) / price;
@@ -5541,6 +5816,10 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             strike: best.strike,
             candidates_evaluated: candidates.length,
             projected_utilization: projectedDisplayedUtilization,
+            live_price: livePrice,
+            advisor_limit_price: advisorLimitPrice,
+            target_score: targetScore,
+            target_score_nudge_pct: targetScore != null && best.score > 0 ? +(((targetScore / best.score) - 1) * 100).toFixed(2) : null,
             preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
           },
         });
@@ -6272,6 +6551,9 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       let triggerData = {};
       try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
       const advisoryOrderPref = normalizePreferredOrderType(action.action, triggerData.preferred_order_type);
+      const advisorEntryLimitPrice = isEntryAction(action.action) && Number(triggerData.advisor_limit_price) > 0
+        ? Number(triggerData.advisor_limit_price)
+        : null;
       const buybackConfirmationContext = buildBuybackConfirmationContext(action, triggerData);
       const buybackConfirmationPrompt = formatBuybackConfirmationContext(buybackConfirmationContext, liveMarketPrice);
       const recentFailedEntry = getRecentFailedEntry(action.action, action.instrument_name);
@@ -6291,6 +6573,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
 Action: ${action.action} ${action.instrument_name}
 Amount: ${action.amount || 'TBD'}
 Best available price: $${currentPrice || action.price || 'N/A'}
+${advisorEntryLimitPrice ? `Advisor target limit price: $${advisorEntryLimitPrice} (derived from target_score=${triggerData.target_score || 'n/a'}; do not default back to the ask unless urgency justifies paying up).` : ''}
 ${detailsStr}
 Rule reasoning: ${action.rule_reasoning || 'N/A'}
 Triggered because: ${action.trigger_details || 'N/A'}
@@ -6434,6 +6717,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         || (codexVote?.confirm ? codexVote.order_type : null)
         || haikuVote?.order_type
         || codexVote?.order_type
+        || advisoryOrderPref
         || 'ioc'
       );
       const validOrderTypes = getAllowedOrderTypesForAction(action.action);
@@ -6451,9 +6735,22 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       }
 
       const orderTypeAdaptation = adaptOrderTypeFromFailureHistory(action.action, action.instrument_name, baseOrderType);
-      const orderType = orderTypeAdaptation.orderType;
-      if (orderTypeAdaptation.note) {
-        console.log(`📋 Order-type override for ${action.action} ${action.instrument_name}: ${baseOrderType} -> ${orderType} (${orderTypeAdaptation.note})`);
+      let orderType = orderTypeAdaptation.orderType;
+      let orderTypeNote = orderTypeAdaptation.note;
+      if (
+        action.action === 'buy_put'
+        && advisorEntryLimitPrice != null
+        && Number(liveMarketPrice) > 0
+        && advisorEntryLimitPrice < Number(liveMarketPrice)
+        && orderType === 'ioc'
+      ) {
+        orderType = 'gtc';
+        orderTypeNote = orderTypeNote
+          ? `${orderTypeNote}; advisor_target_limit_requires_resting_order`
+          : 'advisor_target_limit_requires_resting_order';
+      }
+      if (orderTypeNote) {
+        console.log(`📋 Order-type override for ${action.action} ${action.instrument_name}: ${baseOrderType} -> ${orderType} (${orderTypeNote})`);
       }
 
       // Resolve limit price: voter can override, otherwise use current market price
@@ -6464,19 +6761,23 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         || haikuVote?.limit_price
         || codexVote?.limit_price
       );
-      const marketPrice = currentPrice || action.price;
+      const marketPrice = advisorEntryLimitPrice || currentPrice || action.price;
+      const sanityReferencePrice = currentPrice || action.price || marketPrice;
       let executionPrice = marketPrice;
-      if (typeof voterLimitPrice === 'number' && voterLimitPrice > 0 && marketPrice > 0) {
-        const ratio = voterLimitPrice / marketPrice;
+      if (typeof voterLimitPrice === 'number' && voterLimitPrice > 0 && sanityReferencePrice > 0) {
+        const ratio = voterLimitPrice / sanityReferencePrice;
         if (ratio >= 0.5 && ratio <= 2.0) {
-          if (action.action === 'buyback_call' && voterLimitPrice > marketPrice) {
+          if (action.action === 'buy_put' && advisorEntryLimitPrice != null && voterLimitPrice > advisorEntryLimitPrice) {
+            executionPrice = advisorEntryLimitPrice;
+            console.log(`📋 Buy-put limit capped: voter $${voterLimitPrice} is worse than advisor target $${advisorEntryLimitPrice}; using advisor target`);
+          } else if (action.action === 'buyback_call' && voterLimitPrice > marketPrice) {
             executionPrice = marketPrice;
             console.log(`📋 Buyback limit capped: voter $${voterLimitPrice} is worse than live ask $${marketPrice}; using live ask instead`);
           } else {
             executionPrice = voterLimitPrice;
           }
         } else {
-          console.log(`⚠️ Voter price $${voterLimitPrice} rejected (${(ratio * 100).toFixed(0)}% of market $${marketPrice}) — using market price`);
+          console.log(`⚠️ Voter price $${voterLimitPrice} rejected (${(ratio * 100).toFixed(0)}% of live reference $${sanityReferencePrice}) — using default limit $${marketPrice}`);
         }
       }
 
@@ -6504,7 +6805,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       if (decision === 'confirmed') {
         db.updatePendingAction(action.id, {
           status: 'confirmed',
-          confirmation_reasoning: `${reasoning} | order_type=${orderType} limit=$${executionPrice}${orderTypeAdaptation.note ? ` | order_type_override=${orderTypeAdaptation.note}` : ''}`,
+          confirmation_reasoning: `${reasoning} | order_type=${orderType} limit=$${executionPrice}${orderTypeNote ? ` | order_type_override=${orderTypeNote}` : ''}`,
           confirmed_at: new Date().toISOString(),
         });
 
@@ -6590,7 +6891,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
 
 // ─── LLM-Driven Trading Advisory ─────────────────────────────────────────────
 
-const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
+const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentTickTimestamp = null) => {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('📋 Advisory: skipped — no ANTHROPIC_API_KEY');
     return null;
@@ -6757,6 +7058,20 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap) => {
   // Open orders on the book
   let openOrders = [];
   try { openOrders = await fetchOpenOrders(); } catch { /* ok */ }
+  let openRestingOrders = [];
+  if (db) {
+    try { openRestingOrders = db.getOpenRestingOrders(); } catch { /* ok */ }
+  }
+
+  const rollingOptionValueContext = buildRollingOptionValueContext({
+    tickerMap,
+    momentum,
+    putBudgetRemaining,
+    activeRules,
+    recentPendingActions,
+    openRestingOrders,
+    currentTickTimestamp,
+  });
 
   // ── Score and rank top 5 puts and calls from tickerMap ──────────────────────
 
@@ -6918,6 +7233,7 @@ Given market data, produce a JSON trading agenda with:
         "dte_range": [min_dte, max_dte],
         "max_strike_pct": 0.80,
         "min_score": 0.004,
+        "target_score": 0.0042,
         "max_cost": 15.00,
         "min_bid": 2.00,
         "market_conditions": [{"field": "spot_price", "op": "lt"|"gt"|"gte"|"lte", "value": 2000}]
@@ -6943,13 +7259,14 @@ Given market data, produce a JSON trading agenda with:
   ]
 }
 
-CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, max_cost, min_bid, market_conditions. Exit criteria uses: conditions (array of field/op/value objects) and condition_logic ("any" or "all").
+CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, max_cost, min_bid, market_conditions. Exit criteria uses: conditions (array of field/op/value objects) and condition_logic ("any" or "all").
 
 Rules:
-- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, max_cost (for buys), min_bid (for sells), market_conditions.
+- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), max_cost (for buys), min_bid (for sells), market_conditions.
 - Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: sell_put should use "ioc". buyback_call may use preferred_order_type ${formatOrderTypeList(getAllowedOrderTypesForAction('buyback_call'))}; patient resting buyback pricing is valid when urgency is low and the market is wide.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
+- Fresh-best buy-put rule: If ROLLING OPTION VALUE CONTEXT says requires_buy_put_decision=yes, budget remains, and no buy_put is already working, the final agenda must either emit a buy_put rule or explicitly explain no buy_put in the assessment. If spot price action is downward, emit buy_put unless a concrete ruin/liquidity veto exists; use less_patient_limit pricing by setting criteria.target_score to the supplied target_score and preferred_order_type "gtc" or "post_only". If spot price action is stable, use patient_limit pricing by setting criteria.target_score to the supplied target_score and preferred_order_type "post_only" or "gtc". target_score means the executor will bid abs(delta) / target_score, usually below the live ask, to improve on the observed score.
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
 - For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
@@ -6977,6 +7294,9 @@ Spot Price: $${spotPrice.toFixed(2)}
 
 === OPTIONS MARKET STRUCTURE (PRIMARY ADVISORY EVIDENCE) ===
 ${summarizeSentimentForAdvisor(sentiment?.windows || {})}
+
+=== ROLLING OPTION VALUE CONTEXT (PRIMARY BUY-PUT TIMING EVIDENCE) ===
+${formatRollingOptionValueContext(rollingOptionValueContext)}
 
 === MOMENTUM (SECONDARY PATH CONTEXT; NOT A STANDALONE TRADE SIGNAL) ===
 Medium-term ${momentum.mediumTerm.main} (${momentum.mediumTerm.derivative || 'n/a'}), Short-term ${momentum.shortTerm.main} (${momentum.shortTerm.derivative || 'n/a'})
@@ -7113,6 +7433,12 @@ Interpret "Taleb" operationally, not stylistically:
 - Roll (sell_put exit) at ~25 DTE to avoid terminal theta decay while preserving convexity.
 - Sell calls at 5-12 DTE. Short-dated calls maximize theta harvesting. Veto any sell_call rule with dte above 14.
 
+## Fresh-Best Put Value Discipline
+- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior rolling window using buy-put DTE discipline. A strict fresh best means the market is offering the best delta-per-dollar protection seen in the window.
+- If requires_buy_put_decision=yes and spot price action is downward, a buy_put rule should survive review unless there is a concrete ruin, liquidity, or overpaying-for-IV reason to veto it. The rule should use less_patient_limit pricing, not a chase.
+- If requires_buy_put_decision=yes and spot price action is stable, a buy_put rule may rest patiently at the supplied target_score / suggested_limit_price. Do not force IOC for stable price action.
+- If no buy_put rule survives despite requires_buy_put_decision=yes, your critique must state the exact option-market fact that outweighs the fresh-best value signal.
+
 ## Call Buyback Anti-Fragility (Taleb)
 Panic buybacks are the opposite of antifragility. The crowd buys back calls when price rises because it FEELS dangerous. That's paying a fear premium — the exact behavior we profit from.
 - The asymmetry of short calls is known and bounded. You sold time decay. The question is always: is the position genuinely threatened, or does it just feel that way?
@@ -7187,6 +7513,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 - Momentum is secondary path context. Remove or revise any agenda item whose main rationale is short-term or medium-term momentum unless option pricing, liquidity, skew, OI, funding, or position-specific risk confirms it.
+- If ROLLING OPTION VALUE CONTEXT says requires_buy_put_decision=yes, the final agenda must either include a buy_put entry rule with criteria.target_score from that context or explicitly explain why no buy_put is being emitted. Downward spot action should use less_patient_limit pricing; stable spot action should use patient_limit pricing.
 - Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
@@ -7210,6 +7537,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 - Momentum is secondary path context. Remove or revise any agenda item whose main rationale is short-term or medium-term momentum unless option pricing, liquidity, skew, OI, funding, or position-specific risk confirms it.
+- If ROLLING OPTION VALUE CONTEXT says requires_buy_put_decision=yes, the final agenda must either include a buy_put entry rule with criteria.target_score from that context or explicitly explain why no buy_put is being emitted. Downward spot action should use less_patient_limit pricing; stable spot action should use patient_limit pricing.
 - Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
@@ -7389,6 +7717,10 @@ Synthesize the final agenda now.`;
       if (mandelbrotContext) {
         db.insertJournalEntry('mandelbrot_archive', JSON.stringify(mandelbrotContext, null, 2));
       }
+      db.insertJournalEntry('advisory_context', JSON.stringify({
+        advisory_id: advisoryId,
+        rolling_option_value_context: rollingOptionValueContext,
+      }, null, 2));
     } catch (e) {
       console.log('📋 Advisory: failed to journal assessment:', e.message);
     }
@@ -7920,7 +8252,7 @@ const runBot = async () => {
         if (priceMoveRatio >= ADVISORY_PRICE_MOVE_THRESHOLD && (Date.now() - botData.lastAdvisoryTimestamp) > minAdvisoryGap) {
           const moveDirection = spotPrice > botData.lastAdvisorySpotPrice ? 'up' : 'down';
           console.log(`📋 Price moved ${(priceMoveRatio * 100).toFixed(1)}% ${moveDirection} since last advisory ($${botData.lastAdvisorySpotPrice.toFixed(0)} → $${spotPrice.toFixed(0)}) — forcing re-advisory`);
-          generateTradingAdvisory(positions, spotPrice, tickerMap).catch(e => {
+          generateTradingAdvisory(positions, spotPrice, tickerMap, tickTimestamp).catch(e => {
             console.log(`📋 Price-triggered advisory failed (non-fatal): ${e.message}`);
           });
         }
@@ -7934,7 +8266,7 @@ const runBot = async () => {
       ) {
         const retryCount = botData.advisoryRetryCount || 0;
         console.log(`📋 Advisory retry due now (${retryCount} prior failure${retryCount === 1 ? '' : 's'}) — reattempting`);
-        generateTradingAdvisory(positions, spotPrice, tickerMap).catch(e => {
+        generateTradingAdvisory(positions, spotPrice, tickerMap, tickTimestamp).catch(e => {
           console.log(`📋 Scheduled advisory retry failed (non-fatal): ${e.message}`);
         });
       }
@@ -7952,7 +8284,7 @@ const runBot = async () => {
             console.log('📚 Wiki ingest failed (non-fatal):', e.message);
           }
           // Generate trading advisory alongside journal
-          try { await generateTradingAdvisory(positions, spotPrice, tickerMap); }
+          try { await generateTradingAdvisory(positions, spotPrice, tickerMap, tickTimestamp); }
           catch (e) { console.log('📋 Advisory failed (non-fatal):', e.message); }
           // Review hypotheses and extract lessons on the journal cadence
           await reviewExpiredHypotheses();

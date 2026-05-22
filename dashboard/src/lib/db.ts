@@ -512,7 +512,7 @@ function prepareAll(d: Database.Database) {
     getLatestAdvisoryArtifacts: d.prepare(`
       SELECT entry_type, content, timestamp
       FROM ai_journal
-      WHERE entry_type IN ('advisory', 'advisory_main', 'advisory_spitznagel', 'advisory_taleb', 'mandelbrot_archive')
+      WHERE entry_type IN ('advisory', 'advisory_main', 'advisory_spitznagel', 'advisory_taleb', 'mandelbrot_archive', 'advisory_context')
       ORDER BY timestamp DESC
       LIMIT 20
     `),
@@ -1330,9 +1330,10 @@ export function getLatestAdvisoryArtifacts() {
       spitznagel: latestByType.get('advisory_spitznagel') ?? null,
       taleb: latestByType.get('advisory_taleb') ?? null,
       mandelbrot: latestByType.get('mandelbrot_archive') ?? null,
+      context: latestByType.get('advisory_context') ?? null,
     };
   } catch {
-    return { main: null, spitznagel: null, taleb: null, mandelbrot: null };
+    return { main: null, spitznagel: null, taleb: null, mandelbrot: null, context: null };
   }
 }
 
