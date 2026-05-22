@@ -1708,14 +1708,14 @@ const buildRollingOptionValueContext = ({
     spot_price_action: spotAction,
     action_pressure: {
       requires_buy_put_decision: requiresDecision,
-      should_emit_buy_put: Boolean(requiresDecision && ['downward', 'stable'].includes(spotAction.state)),
+      supports_buy_put_review: Boolean(requiresDecision && ['downward', 'stable'].includes(spotAction.state)),
       execution_style: executionStyle,
       target_score: roundForAdvisory(targetScore, 6),
       suggested_limit_price: roundForAdvisory(suggestedLimitPrice, 4),
       score_nudge_pct: roundForAdvisory((scoreNudge - 1) * 100, 2),
       explanation: requiresDecision
-        ? 'Current buy-put value score is strictly better than the prior rolling-window best while budget remains and no buy_put is already working.'
-        : 'No mandatory fresh-best buy_put decision pressure.',
+        ? 'Current buy-put value score is strictly better than the prior rolling-window best while budget remains and no buy_put is already working. This requires explicit review, not automatic execution.'
+        : 'No fresh-best buy_put review required.',
     },
   };
 };
@@ -1736,7 +1736,7 @@ const formatRollingOptionValueContext = (context) => {
     `Score trend: 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
     `Put budget: remaining=$${budget.remaining ?? 'n/a'}; active_buy_put_rules=${budget.active_buy_put_rules ?? 0}; working_buy_put_actions=${budget.working_buy_put_actions ?? 0}; resting_buy_put_orders=${budget.resting_buy_put_orders ?? 0}.`,
     `Spot price action: ${spotAction.state || 'unknown'}${spotAction.slope_pct_6h != null ? ` (${spotAction.slope_pct_6h}% over recent 6h)` : ''}; reason=${spotAction.reason || 'n/a'}.`,
-    `Action pressure: requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; should_emit_buy_put=${action.should_emit_buy_put ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
+    `Fresh-best review: requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; supports_buy_put_review=${action.supports_buy_put_review ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
   ].join('\n');
 };
 
@@ -6163,6 +6163,31 @@ const getSharedActionPolicyPrompt = () => [
   `ENTRY ORDER-TYPE RULE: ${ENTRY_ACTIONS.join(' and ')} are entry actions, not reduce_only exits. Resting order types like gtc and post_only are valid for entries when patience and pricing matter.`,
 ].join('\n');
 
+const getMomentumEvidenceDisciplinePrompt = () => [
+  'EVIDENCE PRIORITY: This is an options bang-for-buck strategy, not a price-direction strategy.',
+  '- Primary evidence: executable bid/ask, spread/depth, IV/skew, DTE, delta, moneyness, OI, funding, candidate score, position PnL, hedge role, and account margin impact.',
+  '- Secondary evidence: short-term and medium-term momentum. Use momentum as timing and path-risk context only after option economics justify attention.',
+  '- Do not create, preserve, or justify a rule mainly because momentum is upward or downward. Momentum must be confirmed by option pricing, liquidity, skew, OI, funding, or position-specific risk.',
+  '- If momentum conflicts with option-market structure, trust executable option economics first and state the mismatch plainly.',
+].join('\n');
+
+const getFreshBestBuyPutDisciplinePrompt = () => [
+  'FRESH-BEST BUY-PUT DISCIPLINE:',
+  `- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d window using buy-put DTE discipline (${BUY_PUT_ADVISORY_DTE_RANGE[0]}-${BUY_PUT_ADVISORY_DTE_RANGE[1]} DTE). A strict fresh best means the market is offering the best delta-per-dollar protection seen in that window.`,
+  '- If requires_buy_put_decision=yes, explicitly evaluate whether to emit a buy_put rule or explain why patience/no-buy is still the better stance. This is a value signal, not an instruction to override patience or pay up.',
+  '- If you choose buy_put and spot price action is downward, use less_patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "gtc" or "post_only".',
+  '- If you choose buy_put and spot price action is stable, use patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "post_only" or "gtc".',
+  '- target_score means the executor will bid abs(delta) / target_score, usually below the live ask, to improve on the observed score. Do not default back to the ask.',
+].join('\n');
+
+const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normally target ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% execution band when the size still matters. Do not reject solely because projected utilization reaches or slightly exceeds the ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% target while it remains within the ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% buffered limit. When spot is breaking upward and short calls are already on, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% with a buffered limit of ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% only if margin context explicitly shows breakout_override=active. These are discipline limits for new entries, not margin-emergency thresholds. Reject call sells that exceed the buffered limit, lack buying power, or are too small to matter.`;
+
+const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, do not panic buy back. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. For newly-created harvest rules, ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is the minimum acceptable capture, not a target to give back to. If live executable buyback price already implies strictly better capture, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
+
+const getPutExitDisciplinePrompt = () => 'PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.';
+
+const getConfirmationJsonOnlyPrompt = () => 'Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.';
+
 const normalizePreferredOrderType = (action, preferredOrderType) => {
   if (typeof preferredOrderType !== 'string') return null;
   const normalized = preferredOrderType.trim().toLowerCase();
@@ -6573,7 +6598,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
 Action: ${action.action} ${action.instrument_name}
 Amount: ${action.amount || 'TBD'}
 Best available price: $${currentPrice || action.price || 'N/A'}
-${advisorEntryLimitPrice ? `Advisor target limit price: $${advisorEntryLimitPrice} (derived from target_score=${triggerData.target_score || 'n/a'}; do not default back to the ask unless urgency justifies paying up).` : ''}
+${advisorEntryLimitPrice ? `Advisor target limit price: $${advisorEntryLimitPrice} (derived from target_score=${triggerData.target_score || 'n/a'}; do not bid worse than this target because urgency is already encoded in target_score).` : ''}
 ${detailsStr}
 Rule reasoning: ${action.rule_reasoning || 'N/A'}
 Triggered because: ${action.trigger_details || 'N/A'}
@@ -6592,8 +6617,8 @@ ${getActionOrderTypeHardRule(action.action)}
 - "gtc" (good-til-cancelled): rest on the order book at your limit_price until filled. MAKER fee = 0.01% of notional (~$0.16/contract). 6x cheaper than IOC. Use when you want a specific price and can wait.
 - "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee 0.01%). 6x cheaper than IOC. Best for patient limit orders.
 
-Return EXACTLY one single-line JSON object.
-No markdown fences. No prose before or after. No explanation outside the JSON.
+${getConfirmationJsonOnlyPrompt()}
+No explanation outside the JSON.
 JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, "limit_price": <number or null for market>, "reasoning": "..." }`;
 
       // Vote 1: Claude Haiku (Spitznagel temperament)
@@ -6606,11 +6631,11 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
 ${getSharedActionPolicyPrompt()}
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
-CALL DISCIPLINE: Short calls normally target ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% execution band when the size still matters. Do not reject solely because projected utilization reaches or slightly exceeds the ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% target while it remains within the ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% buffered limit. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% with a buffered limit of ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the buffered limit, lack buying power, or are too small to matter.
-CALL BUYBACK DISCIPLINE: For buyback_call — don't panic buyback. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove the tail risk of further upside continuation. Confirm buybacks when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by actual breakout evidence. Reject buybacks driven by price action alone when theta is still working, the call remains OTM, and the position is not under real threat. There is one explicit house-rule exception: deterministic theta harvesting. If the trigger details show an active advisor-rule buyback context, treat that rule as the approved strategic intent and validate execution safety against the rule's own executable unrealized_pnl_pct threshold; do not substitute a different threshold during confirmation. For newly-created harvest rules, ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is the minimum acceptable capture, not a target to give back to. If the live executable buyback price already implies strictly better capture, do not bid back up to the threshold; either hold/let expire, or use a lower patient bid only if the advisor is genuinely happy with that price. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger. If there is no urgency and the book is wide, patient limit-style buyback pricing is acceptable.
-PUT EXIT DISCIPLINE: For sell_put — evaluate it as monetizing or rolling an existing long put. Do not analyze it as short put selling or naked downside exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin. The question is whether closing this owned hedge now is prudent, not whether opening short put risk is acceptable.
+${getCallMarginDisciplinePrompt()}
+${getCallBuybackDisciplinePrompt()}
+${getPutExitDisciplinePrompt()}
 REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.
-Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.`,
+${getConfirmationJsonOnlyPrompt()}`,
           messages: [{ role: 'user', content: confirmPrompt }],
         }, {
           headers: {
@@ -6653,11 +6678,11 @@ Return EXACTLY one single-line JSON object. No markdown fences. No prose before 
 ${getSharedActionPolicyPrompt()}
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
-CALL DISCIPLINE: Short calls normally target ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% execution band when the size still matters. Do not reject solely because projected utilization reaches or slightly exceeds the ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% target while it remains within the ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% buffered limit. There is one narrow exception: when spot is breaking upward and short calls are already on, selling more calls into euphoric premium may be superior to buying back into emotional bullish pricing, and the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% with a buffered limit of ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% if the margin context explicitly shows breakout_override=active. These are discipline limits for NEW entries, not margin-emergency thresholds. Do not describe ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% utilization as a forced unwind or emergency by itself; true emergency language is reserved for near-liquidation / ~100% utilization. Reject call sells that exceed the buffered limit, lack buying power, or are too small to matter.
-CALL BUYBACK DISCIPLINE: Panic buybacks are fragile. The crowd buys back calls when price rises because it feels dangerous, but the premium was already collected and temporary mark pain is not the same as final loss. A buyback below strike is an explicit purchase of upside insurance. Confirm buybacks only when the position is genuinely threatened, assignment risk is credible, or the insurance cost is justified by real continuation evidence. Reject buybacks driven by price noise when theta is still working. One explicit house-rule exception is deterministic theta harvesting: when trigger details show an active advisor-rule buyback context, the confirmation job is to validate execution safety against that rule's own executable unrealized_pnl_pct threshold, not to re-litigate the strategy with a different threshold. For newly-created harvest rules, ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is the minimum acceptable capture, not a target to give back to. If the live executable buyback price already implies strictly better capture, do not bid back up to the threshold; either hold/let expire, or use a lower patient bid only if the advisor is genuinely happy with that price. Never confirm a threshold-style buyback when live market price is unavailable. Extra DTE or margin-release metrics are context, not gating requirements for that case. Margin utilization by itself is not a buyback trigger. If urgency is low and the book is wide, patient limit-style buyback pricing is acceptable.
-PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
+${getCallMarginDisciplinePrompt()}
+${getCallBuybackDisciplinePrompt()}
+${getPutExitDisciplinePrompt()}
 REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV overpays alongside the crowd. Use actual Greeks, DTE, and momentum to judge.
-Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.
+${getConfirmationJsonOnlyPrompt()}
 Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, "limit_price": <number or null>, "reasoning": "..." }`,
           confirmPrompt,
           { maxTokens: 256, timeout: 15000, model: 'gpt-4o-mini' }
@@ -7168,12 +7193,7 @@ Interpret "Spitznagel" operationally, not stylistically:
 You advise a bot that accumulates OTM ETH puts (long insurance) and sells OTM ETH calls (premium harvesting).
 
 ## Evidence Priority
-This is an options bang-for-buck strategy, not a price-direction strategy. Lead with executable option value and market structure.
-- Primary evidence: bid/ask, spread/depth, IV/skew regime, DTE, delta, moneyness, open interest, funding, candidate score, position PnL, hedge role, and account margin impact.
-- Secondary evidence: short-term and medium-term momentum. Use momentum only as timing and path-risk context after option economics already justify attention.
-- ETH moving up or down is second-order evidence. It matters when it changes protection cost, call premium, liquidity, margin geometry, or realized payoff asymmetry; it is not the objective by itself.
-- Do not create, preserve, or justify a rule mainly because momentum is upward or downward. Momentum must be confirmed by option pricing, liquidity, skew, OI, funding, or position-specific risk.
-- If momentum conflicts with option-market structure, trust executable option economics first and state the mismatch plainly.
+${getMomentumEvidenceDisciplinePrompt()}
 
 ## Account Model
 The account is ETH-collateralized. Puts are bought on leverage against ETH. Derive's margin engine recognizes that long puts offset ETH exposure, so buying puts can improve margin health. USDC from call premiums pays down margin debt first; excess gets converted to ETH manually.
@@ -7182,7 +7202,7 @@ There are TWO constraints on put buying:
 1. **Margin**: initial_margin must stay positive. maintenance_margin at zero = liquidation.
 2. **Budget discipline**: We commit to spending 3.33% of insured base per year on puts, allocated in 15-day budget windows. The insured base is Derive USDC plus total insured ETH marked at spot, where off-platform insured ETH is fixed at ${PUT_INSURED_EXTERNAL_ETH.toFixed(4)}. Spend predictably across the cycle. Don't front-load. Don't impulse buy. If nothing is well-priced, let the budget roll over.
 
-For calls: **base target cap at ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%**. Treat ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% as a caution threshold for new trades, not an automatic rejection line. The bot may size trades down within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% execution band when the size still matters. There is one narrow exception: when spot is breaking upward and the bot already has short calls on, call premium may be richest exactly when buyback temptation is highest. In that case the bot may sell additional calls into euphoric premium up to a ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% target / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit instead of reflexively paying up to derisk. Size against margin headroom, not ETH balance.
+${getCallMarginDisciplinePrompt()}
 
 ## Call Buyback Philosophy (Spitznagel)
 We sell short-dated calls. The arithmetic of buybacks is simple: don't pay fear premiums to exit positions that are working.
@@ -7204,7 +7224,7 @@ Things to consider in your assessment:
 - In recovery, fear lingers and IV stays elevated even as price stabilizes. Panickers overpay for protection they no longer need as urgently. This can be an opportunity.
 - The full cycle: cash → cheap puts → crash → puts print → sell at the right time → buy cheap ETH → sell calls → premium → repeat.
 
-Use your judgment. Look at the actual Greeks, DTE, IV/skew, spread/depth, OI, executable bid/ask, position characteristics, and only then momentum as secondary path context. There are no absolute rules — only the principle that well-priced insurance is bought in calm and sold in fear, and that ETH selloffs tend to be deeper and faster than anyone expects.
+Use your judgment. Look at the actual Greeks, DTE, IV/skew, spread/depth, OI, executable bid/ask, position characteristics, and only then momentum as secondary path context. There are no absolute directional rules; hard execution, sizing, DTE, and risk constraints still apply.
 
 ## Assessment Writing Constraints
 - Every assessment must do two jobs: state the clearest current market observation or thesis from the supplied data, and state the operational stance it implies for the bot.
@@ -7266,7 +7286,7 @@ Rules:
 - Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: sell_put should use "ioc". buyback_call may use preferred_order_type ${formatOrderTypeList(getAllowedOrderTypesForAction('buyback_call'))}; patient resting buyback pricing is valid when urgency is low and the market is wide.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
-- Fresh-best buy-put rule: If ROLLING OPTION VALUE CONTEXT says requires_buy_put_decision=yes, budget remains, and no buy_put is already working, the final agenda must either emit a buy_put rule or explicitly explain no buy_put in the assessment. If spot price action is downward, emit buy_put unless a concrete ruin/liquidity veto exists; use less_patient_limit pricing by setting criteria.target_score to the supplied target_score and preferred_order_type "gtc" or "post_only". If spot price action is stable, use patient_limit pricing by setting criteria.target_score to the supplied target_score and preferred_order_type "post_only" or "gtc". target_score means the executor will bid abs(delta) / target_score, usually below the live ask, to improve on the observed score.
+${getFreshBestBuyPutDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
 - For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
@@ -7321,7 +7341,7 @@ ${JSON.stringify(accountHealth, null, 2)}
 3. Momentum labels are secondary path context and must not outrank executable option economics, spread/depth, IV/skew, OI, funding, or position-specific risk.
 4. The knowledge wiki is compiled long-term memory. Use it for pattern recognition and discipline, but if live state conflicts with wiki memory, trust the live state and note the mismatch.
 
-=== TOP PUT CANDIDATES (by delta/ask ratio, wide scan) ===
+=== TOP PUT CANDIDATES (execution scan; rolling context is authoritative for buy-put timing) ===
 ${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte} | score=${p.score.toFixed(4)}`).join('\n') : 'No qualifying puts found'}
 
 === TOP CALL CANDIDATES (by bid/delta ratio, wide scan) ===
@@ -7426,7 +7446,9 @@ Interpret "Taleb" operationally, not stylistically:
 - Treat convexity as real only if downside is small, explicit, and survivable while upside from disorder is meaningfully larger.
 - Be especially hostile to paying fear premiums, roll-for-relief logic, and exits that feel safe but worsen long-run asymmetry.
 - Evidence that matters most: bounded downside, tail sensitivity, concentration risk, hidden path dependence, and whether the portfolio becomes more fragile if the market gets wilder.
-- Treat momentum-only reasoning as fragile. If a rule is mainly justified by short-term or medium-term momentum, amend or veto it unless executable option pricing, liquidity, skew, OI, funding, or position-specific risk confirms the action.
+
+## Shared Evidence Discipline
+${getMomentumEvidenceDisciplinePrompt()}
 
 ## DTE Discipline (Non-Negotiable)
 - Buy puts at 45-75 DTE. Never below 35 DTE. Short-dated puts bleed theta — you're paying for time decay, not convexity. Veto any buy_put rule outside [45, 75].
@@ -7434,10 +7456,7 @@ Interpret "Taleb" operationally, not stylistically:
 - Sell calls at 5-12 DTE. Short-dated calls maximize theta harvesting. Veto any sell_call rule with dte above 14.
 
 ## Fresh-Best Put Value Discipline
-- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior rolling window using buy-put DTE discipline. A strict fresh best means the market is offering the best delta-per-dollar protection seen in the window.
-- If requires_buy_put_decision=yes and spot price action is downward, a buy_put rule should survive review unless there is a concrete ruin, liquidity, or overpaying-for-IV reason to veto it. The rule should use less_patient_limit pricing, not a chase.
-- If requires_buy_put_decision=yes and spot price action is stable, a buy_put rule may rest patiently at the supplied target_score / suggested_limit_price. Do not force IOC for stable price action.
-- If no buy_put rule survives despite requires_buy_put_decision=yes, your critique must state the exact option-market fact that outweighs the fresh-best value signal.
+${getFreshBestBuyPutDisciplinePrompt()}
 
 ## Call Buyback Anti-Fragility (Taleb)
 Panic buybacks are the opposite of antifragility. The crowd buys back calls when price rises because it FEELS dangerous. That's paying a fear premium — the exact behavior we profit from.
@@ -7512,8 +7531,8 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
-- Momentum is secondary path context. Remove or revise any agenda item whose main rationale is short-term or medium-term momentum unless option pricing, liquidity, skew, OI, funding, or position-specific risk confirms it.
-- If ROLLING OPTION VALUE CONTEXT says requires_buy_put_decision=yes, the final agenda must either include a buy_put entry rule with criteria.target_score from that context or explicitly explain why no buy_put is being emitted. Downward spot action should use less_patient_limit pricing; stable spot action should use patient_limit pricing.
+${getMomentumEvidenceDisciplinePrompt()}
+${getFreshBestBuyPutDisciplinePrompt()}
 - Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
@@ -7536,8 +7555,8 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
-- Momentum is secondary path context. Remove or revise any agenda item whose main rationale is short-term or medium-term momentum unless option pricing, liquidity, skew, OI, funding, or position-specific risk confirms it.
-- If ROLLING OPTION VALUE CONTEXT says requires_buy_put_decision=yes, the final agenda must either include a buy_put entry rule with criteria.target_score from that context or explicitly explain why no buy_put is being emitted. Downward spot action should use less_patient_limit pricing; stable spot action should use patient_limit pricing.
+${getMomentumEvidenceDisciplinePrompt()}
+${getFreshBestBuyPutDisciplinePrompt()}
 - Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
@@ -7557,6 +7576,9 @@ ${JSON.stringify(primaryAgenda, null, 2)}
 
 ## Taleb Advisor's Review
 ${JSON.stringify(secondOpinion, null, 2)}
+
+## Rolling Option Value Context
+${formatRollingOptionValueContext(rollingOptionValueContext)}
 
 ## Mandelbrot Market-Structure Archive
 ${buildMandelbrotContextBlock(mandelbrotContext)}
@@ -7583,6 +7605,9 @@ ${JSON.stringify(primaryAgenda, null, 2)}
 
 === SECOND OPINION ===
 Not available (OpenAI key not set or call failed). Validate and pass through the primary agenda.
+
+=== ROLLING OPTION VALUE CONTEXT ===
+${formatRollingOptionValueContext(rollingOptionValueContext)}
 
 === MANDELBROT MARKET STRUCTURE ARCHIVE ===
 ${buildMandelbrotContextBlock(mandelbrotContext)}

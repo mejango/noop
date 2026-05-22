@@ -382,7 +382,7 @@ const buildBuyPutFreshBestPressure = ({
     priorBest,
     freshBest,
     requiresDecision,
-    shouldEmitBuyPut: requiresDecision && ['downward', 'stable'].includes(spotState),
+    supportsBuyPutReview: requiresDecision && ['downward', 'stable'].includes(spotState),
     executionStyle: spotState === 'downward' ? 'less_patient_limit' : spotState === 'stable' ? 'patient_limit' : 'explain_no_buy_unless_other_facts_override',
     targetScore,
     suggestedLimitPrice: floorOptionPriceCents(Math.abs(delta) / targetScore),
@@ -842,11 +842,11 @@ describe('evaluateConditions', () => {
 });
 
 // ============================================================================
-// 2b. Fresh-best buy-put advisory pressure
+// 2b. Fresh-best buy-put advisory review
 // ============================================================================
 
-describe('Fresh-best buy-put advisory pressure', () => {
-  test('strict fresh best + downward spot action emits less patient target', () => {
+describe('Fresh-best buy-put advisory review', () => {
+  test('strict fresh best + downward spot action provides less patient target', () => {
     const result = buildBuyPutFreshBestPressure({
       currentScore: 0.0045,
       priorScores: [0.0041, 0.00449],
@@ -858,7 +858,7 @@ describe('Fresh-best buy-put advisory pressure', () => {
 
     assert.strictEqual(result.freshBest, true);
     assert.strictEqual(result.requiresDecision, true);
-    assert.strictEqual(result.shouldEmitBuyPut, true);
+    assert.strictEqual(result.supportsBuyPutReview, true);
     assert.strictEqual(result.executionStyle, 'less_patient_limit');
     assert.ok(Math.abs(result.targetScore - 0.0045225) < 0.0000001);
     assert.strictEqual(result.suggestedLimitPrice, 19.9);
@@ -876,7 +876,7 @@ describe('Fresh-best buy-put advisory pressure', () => {
 
     assert.strictEqual(result.freshBest, false);
     assert.strictEqual(result.requiresDecision, false);
-    assert.strictEqual(result.shouldEmitBuyPut, false);
+    assert.strictEqual(result.supportsBuyPutReview, false);
   });
 
   test('stable spot action uses patient target', () => {
