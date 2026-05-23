@@ -398,6 +398,38 @@ const filterAdvisoryBuyPutCandidates = (candidates) => candidates.filter((candid
   && candidate.ask_price > 0
 ));
 
+const buildRulebookRequirements = ({ putBudgetRemaining = 0, accountHealth = {}, positionSnapshots = [] } = {}) => {
+  const requirements = [];
+  if (Number(putBudgetRemaining) > 1) requirements.push({ type: 'entry', action: 'buy_put' });
+
+  const margin = accountHealth.margin || {};
+  const call = accountHealth.callMarginDiscipline || {};
+  const utilizationPct = Number(call.utilizationPct ?? margin.margin_usage_pct);
+  const limitPct = Number(call.bufferedLimitPct) * 100;
+  if (accountHealth.margin && !margin.is_under_liquidation && utilizationPct < limitPct) {
+    requirements.push({ type: 'entry', action: 'sell_call' });
+  }
+
+  for (const snapshot of positionSnapshots) {
+    if (snapshot.direction === 'long' && snapshot.option_type === 'P') {
+      requirements.push({ type: 'exit', action: 'sell_put', instrument_name: snapshot.instrument });
+    }
+    if (snapshot.direction === 'short' && snapshot.option_type === 'C') {
+      requirements.push({ type: 'exit', action: 'buyback_call', instrument_name: snapshot.instrument });
+    }
+  }
+  return requirements;
+};
+
+const findMissingRulebookRequirements = (agenda, requirements) => {
+  const entryRules = Array.isArray(agenda?.entry_rules) ? agenda.entry_rules : [];
+  const exitRules = Array.isArray(agenda?.exit_rules) ? agenda.exit_rules : [];
+  return requirements.filter((req) => {
+    if (req.type === 'entry') return !entryRules.some((rule) => rule.action === req.action);
+    return !exitRules.some((rule) => rule.action === req.action && rule.instrument_name === req.instrument_name);
+  });
+};
+
 const extractOrderRecord = (payload) => {
   if (!payload || typeof payload !== 'object') return null;
   if (payload.order && typeof payload.order === 'object') return payload.order;
@@ -929,11 +961,56 @@ describe('Fresh-best buy-put advisory review', () => {
     assert.strictEqual(filtered.length, 1);
     assert.strictEqual(filtered[0].dte, 60);
   });
+
 });
 
 
 // ============================================================================
-// 2c. summarizeSentimentForLLM
+// 2c. Standing rulebook coverage requirements
+// ============================================================================
+
+describe('Standing rulebook coverage requirements', () => {
+  test('requires all four watcher types when budget, margin, long puts, and short calls exist', () => {
+    const requirements = buildRulebookRequirements({
+      putBudgetRemaining: 123,
+      accountHealth: {
+        margin: { is_under_liquidation: false, margin_usage_pct: 35 },
+        callMarginDiscipline: { utilizationPct: 35, bufferedLimitPct: 0.5 },
+      },
+      positionSnapshots: [
+        { instrument: 'ETH-20260529-1000-P', direction: 'long', option_type: 'P' },
+        { instrument: 'ETH-20260529-2400-C', direction: 'short', option_type: 'C' },
+      ],
+    });
+
+    assert.ok(requirements.some((req) => req.type === 'entry' && req.action === 'buy_put'));
+    assert.ok(requirements.some((req) => req.type === 'entry' && req.action === 'sell_call'));
+    assert.ok(requirements.some((req) => req.type === 'exit' && req.action === 'sell_put' && req.instrument_name === 'ETH-20260529-1000-P'));
+    assert.ok(requirements.some((req) => req.type === 'exit' && req.action === 'buyback_call' && req.instrument_name === 'ETH-20260529-2400-C'));
+  });
+
+  test('detects missing required watcher rules in an agenda', () => {
+    const requirements = [
+      { type: 'entry', action: 'buy_put' },
+      { type: 'entry', action: 'sell_call' },
+      { type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260529-1000-P' },
+    ];
+    const agenda = {
+      entry_rules: [{ action: 'buy_put' }],
+      exit_rules: [],
+    };
+
+    const missing = findMissingRulebookRequirements(agenda, requirements);
+    assert.deepStrictEqual(missing, [
+      { type: 'entry', action: 'sell_call' },
+      { type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260529-1000-P' },
+    ]);
+  });
+});
+
+
+// ============================================================================
+// 2d. summarizeSentimentForLLM
 // ============================================================================
 
 describe('summarizeSentimentForLLM', () => {

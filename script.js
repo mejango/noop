@@ -1647,7 +1647,7 @@ const buildRollingOptionValueContext = ({
   const restingBuyPutOrders = openRestingOrders.filter((order) =>
     order?.action === 'buy_put' && (!order?.status || order.status === 'open')
   ).length;
-  const hasWorkingBuyPut = (activeBuyPutRules + workingBuyPutActions + restingBuyPutOrders) > 0;
+  const hasWorkingBuyPut = (workingBuyPutActions + restingBuyPutOrders) > 0;
   const spotAction = classifySpotPriceAction(momentum, recentSpotPrices);
   const budgetAvailable = Number(putBudgetRemaining) > 1;
   const requiresDecision = Boolean(freshBest && budgetAvailable && !hasWorkingBuyPut);
@@ -4661,6 +4661,88 @@ const buildPositionAdviceSnapshots = (positions = [], tickerMap = {}, spotPrice 
   });
 };
 
+const buildRulebookRequirements = ({
+  putBudgetRemaining = 0,
+  accountHealth = {},
+  positionSnapshots = [],
+} = {}) => {
+  const requirements = [];
+  const putBudget = Number(putBudgetRemaining);
+  if (putBudget > 1) {
+    requirements.push({
+      action: 'buy_put',
+      type: 'entry',
+      applies: 'put budget remains',
+      instruction: 'Create a patient standing buy_put watcher with favorable score/price criteria, not necessarily an immediately marketable buy.',
+    });
+  }
+
+  const margin = accountHealth?.margin || {};
+  const callDiscipline = accountHealth?.callMarginDiscipline || {};
+  const utilizationPct = Number(callDiscipline.utilizationPct ?? margin.margin_usage_pct);
+  const limitPct = Number(callDiscipline.bufferedLimitPct) * 100;
+  const hasMarginState = Boolean(accountHealth?.margin);
+  const marginAvailable = hasMarginState
+    && !margin.is_under_liquidation
+    && Number.isFinite(utilizationPct)
+    && Number.isFinite(limitPct)
+    && utilizationPct < limitPct;
+  if (marginAvailable) {
+    requirements.push({
+      action: 'sell_call',
+      type: 'entry',
+      applies: 'call margin headroom remains',
+      instruction: 'Create a standing sell_call watcher with favorable premium, DTE, delta, and margin criteria.',
+    });
+  }
+
+  for (const snapshot of positionSnapshots || []) {
+    if (snapshot?.direction === 'long' && snapshot?.option_type === 'P') {
+      requirements.push({
+        action: 'sell_put',
+        type: 'exit',
+        instrument_name: snapshot.instrument,
+        applies: 'open long put',
+        instruction: 'Create a reduce-only sell_put watcher for favorable monetization, roll, or expiry-management conditions.',
+      });
+    }
+    if (snapshot?.direction === 'short' && snapshot?.option_type === 'C') {
+      requirements.push({
+        action: 'buyback_call',
+        type: 'exit',
+        instrument_name: snapshot.instrument,
+        applies: 'open short call',
+        instruction: 'Create a reduce-only buyback_call watcher for favorable profit capture, assignment-risk, or threat-management conditions.',
+      });
+    }
+  }
+
+  return requirements;
+};
+
+const formatRulebookRequirements = (requirements = []) => {
+  if (!Array.isArray(requirements) || requirements.length === 0) {
+    return 'No mandatory standing watchers: no put budget, no call margin headroom, and no open option positions requiring exit watchers.';
+  }
+  return requirements.map((req, index) => {
+    const instrument = req.instrument_name ? ` ${req.instrument_name}` : '';
+    return `${index + 1}. ${req.type}/${req.action}${instrument} — applies because ${req.applies}. ${req.instruction}`;
+  }).join('\n');
+};
+
+const findMissingRulebookRequirements = (agenda = {}, requirements = []) => {
+  const entryRules = Array.isArray(agenda?.entry_rules) ? agenda.entry_rules : [];
+  const exitRules = Array.isArray(agenda?.exit_rules) ? agenda.exit_rules : [];
+  return (requirements || []).filter((req) => {
+    if (req.type === 'entry') {
+      return !entryRules.some((rule) => rule?.action === req.action);
+    }
+    return !exitRules.some((rule) =>
+      rule?.action === req.action && rule?.instrument_name === req.instrument_name
+    );
+  });
+};
+
 const parseCriteriaForSummary = (criteria) => {
   if (!criteria) return null;
   if (typeof criteria === 'object') return criteria;
@@ -5515,6 +5597,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
   try {
     const entryRules = db.getActiveRulesByType('entry');
     let openRestingEntryOrders = getOpenRestingEntryOrders();
+    let workingEntryActions = [];
+    try {
+      workingEntryActions = db.getRecentPendingActions(50)
+        .filter((action) => ['buy_put', 'sell_call'].includes(action?.action)
+          && ['pending', 'confirmed', 'resting'].includes(action?.status));
+    } catch { /* ok */ }
     let liveMarginState = null;
     try { liveMarginState = await fetchSubaccount(); } catch { /* ok */ }
     let provisionalCallOrderMargin = 0;
@@ -5570,6 +5658,14 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
         // Dedup: skip if already pending or confirmed
         if (db.hasPendingActionForRule(rule.id)) continue;
+
+        if (
+          workingEntryActions.some((action) => action.action === rule.action)
+          || openRestingEntryOrders.some((order) => order.action === rule.action)
+        ) {
+          console.log(`📋 Entry skip: ${rule.action} already has a pending or resting entry order`);
+          continue;
+        }
 
         // Dedup: skip if we already have a resting order for this action type
         // (prevents GTC duplicate stacking — entry rules match multiple instruments,
@@ -6180,6 +6276,17 @@ const getFreshBestBuyPutDisciplinePrompt = () => [
   '- target_score means the executor will bid abs(delta) / target_score, usually below the live ask, to improve on the observed score. Do not default back to the ask.',
 ].join('\n');
 
+const getStandingRulebookDisciplinePrompt = () => [
+  'STANDING RULEBOOK DISCIPLINE:',
+  '- The advisory output is a standing rulebook for tick-by-tick execution, not only a list of trades that should execute at the current tick.',
+  '- Every REQUIRED STANDING RULEBOOK COVERAGE item must have a corresponding rule in the final agenda. If the favorable condition is not true now, encode the condition that would make it favorable later.',
+  '- buy_put rules define a price/score where insurance is worth buying while put budget remains.',
+  '- sell_call rules define premium, delta, DTE, and margin conditions where call selling is worth doing while margin headroom remains.',
+  '- sell_put rules define when an owned long put should be monetized, rolled, or cleaned up.',
+  '- buyback_call rules define when an existing short call should be bought back for profit capture or genuine threat management.',
+  '- Do not omit a required watcher just because it is not currently triggered. Tighten criteria instead.',
+].join('\n');
+
 const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normally target ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% execution band when the size still matters. Do not reject solely because projected utilization reaches or slightly exceeds the ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% target while it remains within the ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% buffered limit. When spot is breaking upward and short calls are already on, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% with a buffered limit of ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% only if margin context explicitly shows breakout_override=active. These are discipline limits for new entries, not margin-emergency thresholds. Reject call sells that exceed the buffered limit, lack buying power, or are too small to matter.`;
 
 const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, do not panic buy back. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. For newly-created harvest rules, ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is the minimum acceptable capture, not a target to give back to. If live executable buyback price already implies strictly better capture, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
@@ -6786,7 +6893,10 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         || haikuVote?.limit_price
         || codexVote?.limit_price
       );
-      const marketPrice = advisorEntryLimitPrice || currentPrice || action.price;
+      const defaultActionPrice = currentPrice || action.price;
+      const marketPrice = action.action === 'buy_put' && advisorEntryLimitPrice != null
+        ? (Number(defaultActionPrice) > 0 ? Math.min(advisorEntryLimitPrice, Number(defaultActionPrice)) : advisorEntryLimitPrice)
+        : (advisorEntryLimitPrice || defaultActionPrice);
       const sanityReferencePrice = currentPrice || action.price || marketPrice;
       let executionPrice = marketPrice;
       if (typeof voterLimitPrice === 'number' && voterLimitPrice > 0 && sanityReferencePrice > 0) {
@@ -7149,6 +7259,11 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
   const top5Puts = scoredPuts.slice(0, 8);
   const top5Calls = scoredCalls.slice(0, 8);
   const positionAdviceSnapshots = buildPositionAdviceSnapshots(positions, tickerMap, spotPrice);
+  const rulebookRequirements = buildRulebookRequirements({
+    putBudgetRemaining,
+    accountHealth,
+    positionSnapshots: positionAdviceSnapshots,
+  });
 
   // ── Step 0: Regime Examiner (OpenAI, Mandelbrot temperament) ──────────────
 
@@ -7191,6 +7306,9 @@ Interpret "Spitznagel" operationally, not stylistically:
 - Evidence that matters most: option pricing quality, IV/skew regime, tail-risk geometry, margin resilience, and whether the position improves or worsens fragility.
 
 You advise a bot that accumulates OTM ETH puts (long insurance) and sells OTM ETH calls (premium harvesting).
+
+## Output Shape
+Your output is a standing rulebook. A rule does not need to fire immediately; it should define the favorable future condition that would make the action worth taking before the next advisory run. Each advisory run replaces the prior rulebook, so required watcher conditions must be reassessed and restated every time.
 
 ## Evidence Priority
 ${getMomentumEvidenceDisciplinePrompt()}
@@ -7235,7 +7353,7 @@ Use your judgment. Look at the actual Greeks, DTE, IV/skew, spread/depth, OI, ex
   - <exact open instrument name>: <hold / buyback_call / sell_put / roll / let expire / monitor>. Why: <specific DTE, moneyness, bid/ask, executable PnL, margin, or hedge role facts>.
 - The Thesis breakdown must include one bullet for every instrument in OPEN POSITIONS REQUIRING ADVICE, even when the right action is no trade. If no exit rule is warranted for a position, say that plainly and explain why.
 - If you emit an exit rule for a position, the matching Thesis breakdown bullet must name that rule and the reason. If you do not emit an exit rule for a position, the bullet must say the stance is hold/monitor/let expire/no buyback/no roll as appropriate.
-- If the correct stance is to wait, say so explicitly in plain language such as "sit on hands", "stand aside", or "wait for cleaner asymmetry", and explain why.
+- If the current stance is patience, say so explicitly, but still include the required standing watcher rules with stricter favorable conditions.
 - In "assessment", use only facts and metric names explicitly present in this prompt or policy constants stated here.
 - Never invent metric labels such as "put efficiency", "call efficiency", "deployment efficiency", "antifragility score", or any unnamed ratio.
 - Never invent thresholds. If you mention a percentage threshold, it must be one of the explicit policy constants stated here and you must name it precisely. Otherwise omit threshold language.
@@ -7287,18 +7405,19 @@ Rules:
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: sell_put should use "ioc". buyback_call may use preferred_order_type ${formatOrderTypeList(getAllowedOrderTypesForAction('buyback_call'))}; patient resting buyback pricing is valid when urgency is low and the market is wide.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 ${getFreshBestBuyPutDisciplinePrompt()}
+${getStandingRulebookDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
-- For sell_put exits: use conditions on dte (e.g. dte lte 25) and/or unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do NOT generate sell_put rules for positions with mark price below $0.10 — selling worthless puts recovers nothing (we already paid for them). Let them expire. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.
+- For sell_put exits: use conditions on dte (e.g. dte lte 25), mark_price, executable PnL, and/or unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. If a put is currently worthless, make the watcher require recoverable value such as mark_price gte 0.10 instead of omitting the rule. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you avoid triggering a sell_put, do it because removing protection is strategically unwise or value is unrecoverable, not because the exit itself uses more margin.
 - For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. The ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line is a minimum acceptable capture, not a target. Use patient gtc/post_only buyback rules when the current executable buyback price is worse than that line and the advisor wants to name a better price; if the live price is already strictly better, do not give back edge by bidding at the threshold. Near expiry, hold/let expire is often superior unless a penny-on-the-dollar bid is available. Never create a threshold-style buyback rule without a live buyback market price. Do not use margin utilization by itself as the buyback trigger. Margin release is a benefit of a good profit-harvest close, not a reason to panic-close. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending.
 - For calls: the normal target cap is ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold; the code may size down within that zone. In the specific case of an upside breakout with short calls already open, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit so the bot can sell into richer bullish premium rather than paying up for fear-driven buybacks. This override is for breakout add-ons only, not generic leverage creep.
-- Entry rules should target the highest-scoring candidates when possible
+- Entry rules should target the highest-scoring candidates when possible.
 - Exit rules MUST reference specific instrument_name from current positions
-- If the market is unclear, it is ALWAYS correct to produce fewer rules or none
-- Maximum 5 entry rules and 5 exit rules
+- If the market is unclear, tighten the watcher criteria and lower priority. Do not omit required standing watchers solely because they are not currently triggered.
+- Maximum 5 entry rules; exit rules should cover each required open-position watcher from REQUIRED STANDING RULEBOOK COVERAGE.
 
 Order type guidance (fee matters — maker is 6x cheaper than taker):
 - "ioc" (immediate-or-cancel): fill instantly or cancel. TAKER fee = $0.50 base + 0.03% of notional (~$1/contract for ETH options). Only use when the opportunity is exceptional and might vanish.
@@ -7329,6 +7448,9 @@ Positions: ${JSON.stringify(positions.map(p => ({
 
 === OPEN POSITIONS REQUIRING ADVICE ===
 ${positionAdviceSnapshots.length > 0 ? JSON.stringify(positionAdviceSnapshots, null, 2) : 'No open positions'}
+
+=== REQUIRED STANDING RULEBOOK COVERAGE ===
+${formatRulebookRequirements(rulebookRequirements)}
 
 Balances: ${JSON.stringify(balances, null, 1)}
 
@@ -7457,6 +7579,7 @@ ${getMomentumEvidenceDisciplinePrompt()}
 
 ## Fresh-Best Put Value Discipline
 ${getFreshBestBuyPutDisciplinePrompt()}
+${getStandingRulebookDisciplinePrompt()}
 
 ## Call Buyback Anti-Fragility (Taleb)
 Panic buybacks are the opposite of antifragility. The crowd buys back calls when price rises because it FEELS dangerous. That's paying a fear premium — the exact behavior we profit from.
@@ -7533,6 +7656,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 ${getMomentumEvidenceDisciplinePrompt()}
 ${getFreshBestBuyPutDisciplinePrompt()}
+${getStandingRulebookDisciplinePrompt()}
 - Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
@@ -7557,6 +7681,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
 ${getMomentumEvidenceDisciplinePrompt()}
 ${getFreshBestBuyPutDisciplinePrompt()}
+${getStandingRulebookDisciplinePrompt()}
 - Preserve advisor-led low-urgency buyback_call rules that use gtc/post_only to improve an exit toward at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% call premium capture, unless the economics or risk rationale are internally inconsistent. If live executable capture is already better than the rule target, prefer hold/let expire or a lower bid rather than bidding back up. Do not turn margin utilization alone into a buyback trigger.
 
 Return the FINAL trading agenda as JSON:
@@ -7579,6 +7704,9 @@ ${JSON.stringify(secondOpinion, null, 2)}
 
 ## Rolling Option Value Context
 ${formatRollingOptionValueContext(rollingOptionValueContext)}
+
+## Required Standing Rulebook Coverage
+${formatRulebookRequirements(rulebookRequirements)}
 
 ## Mandelbrot Market-Structure Archive
 ${buildMandelbrotContextBlock(mandelbrotContext)}
@@ -7608,6 +7736,9 @@ Not available (OpenAI key not set or call failed). Validate and pass through the
 
 === ROLLING OPTION VALUE CONTEXT ===
 ${formatRollingOptionValueContext(rollingOptionValueContext)}
+
+=== REQUIRED STANDING RULEBOOK COVERAGE ===
+${formatRulebookRequirements(rulebookRequirements)}
 
 === MANDELBROT MARKET STRUCTURE ARCHIVE ===
 ${buildMandelbrotContextBlock(mandelbrotContext)}
@@ -7673,6 +7804,75 @@ Synthesize the final agenda now.`;
     positionSnapshots: positionAdviceSnapshots,
     exitRules: finalAgenda.exit_rules || [],
   });
+
+  let missingRulebookCoverage = findMissingRulebookRequirements(finalAgenda, rulebookRequirements);
+  if (missingRulebookCoverage.length > 0) {
+    try {
+      console.log(`📋 Advisory ${advisoryId}: requesting rulebook coverage repair for ${missingRulebookCoverage.length} missing watcher(s)`);
+      const repairResponse = await callAnthropicWithMinuteBoundaryRetry({
+        label: 'Advisory Step 3b',
+        model: synthesisAnthropicModel,
+        maxTokens: 3072,
+        system: `You repair an options bot standing rulebook. Add or amend only the missing watcher rules needed to satisfy REQUIRED STANDING RULEBOOK COVERAGE. The favorable conditions must come from the supplied market, account, and position facts. Preserve valid existing rules unless they contradict risk discipline.
+${getMomentumEvidenceDisciplinePrompt()}
+${getFreshBestBuyPutDisciplinePrompt()}
+${getStandingRulebookDisciplinePrompt()}
+Return ONLY valid JSON with assessment, entry_rules, and exit_rules. No markdown fences.`,
+        messages: [{
+          role: 'user',
+          content: `Repair this final agenda so it covers all required standing watchers.
+
+=== MISSING REQUIRED WATCHERS ===
+${formatRulebookRequirements(missingRulebookCoverage)}
+
+=== CURRENT FINAL AGENDA ===
+${JSON.stringify(finalAgenda, null, 2)}
+
+=== ROLLING OPTION VALUE CONTEXT ===
+${formatRollingOptionValueContext(rollingOptionValueContext)}
+
+=== ACCOUNT HEALTH ===
+${JSON.stringify(accountHealth, null, 2)}
+
+=== OPEN POSITIONS REQUIRING WATCHERS ===
+${positionAdviceSnapshots.length > 0 ? JSON.stringify(positionAdviceSnapshots, null, 2) : 'No open positions'}
+
+=== TOP PUT CANDIDATES ===
+${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte} | score=${p.score.toFixed(4)}`).join('\n') : 'No qualifying puts found'}
+
+=== TOP CALL CANDIDATES ===
+${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${c.delta.toFixed(4)} | bid=$${c.bidPrice.toFixed(2)} | DTE=${c.dte} | score=${c.score.toFixed(4)}`).join('\n') : 'No qualifying calls found'}
+
+Return the full repaired agenda JSON.`,
+        }],
+        timeout: 60000,
+      });
+      const repairedText = repairResponse.data?.content?.[0]?.text || '';
+      const repairedAgenda = extractJSON(repairedText);
+      if (repairedAgenda) {
+        finalAgenda = repairedAgenda;
+        finalAgenda.assessment = ensureAssessmentHasPositionPlan({
+          assessment: finalAgenda.assessment || 'No assessment produced',
+          positionSnapshots: positionAdviceSnapshots,
+          exitRules: finalAgenda.exit_rules || [],
+        });
+        missingRulebookCoverage = findMissingRulebookRequirements(finalAgenda, rulebookRequirements);
+        console.log(`📋 Advisory Step 3b: repaired agenda, missing watchers remaining=${missingRulebookCoverage.length}`);
+      } else {
+        console.log('📋 Advisory Step 3b: no JSON in repair response');
+      }
+    } catch (e) {
+      console.log('📋 Advisory Step 3b FAILED:', getAnthropicErrorMessage(e));
+    }
+  }
+
+  if (missingRulebookCoverage.length > 0) {
+    const missingText = missingRulebookCoverage
+      .map((req) => `${req.type}/${req.action}${req.instrument_name ? ` ${req.instrument_name}` : ''}`)
+      .join(', ');
+    console.log(`📋 Advisory ${advisoryId}: missing required standing watcher(s): ${missingText}`);
+    finalAgenda.assessment = `${finalAgenda.assessment}\n\nRulebook coverage warning: missing ${missingText}.`;
+  }
 
   // ── Persist rules to database ───────────────────────────────────────────────
 
