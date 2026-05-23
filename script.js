@@ -5220,9 +5220,23 @@ const parseExpiryFromInstrument = (name) => {
   return new Date(`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}T08:00:00Z`);
 };
 
+const computeDteFromInstrumentName = (instrumentName, nowMs = Date.now()) => {
+  const expiry = parseExpiryFromInstrument(instrumentName);
+  if (!expiry) return null;
+  return Math.max(0, (expiry.getTime() - nowMs) / 86400000);
+};
+
+const isSellCallCandidateInStrategyRange = (dte, delta) => (
+  Number.isFinite(dte)
+  && dte >= CALL_EXPIRATION_RANGE[0]
+  && dte <= CALL_EXPIRATION_RANGE[1]
+  && Number.isFinite(delta)
+  && delta >= CALL_DELTA_RANGE[0]
+  && delta <= CALL_DELTA_RANGE[1]
+);
+
 const computeCurrentValues = (position, ticker, spotPrice) => {
-  const expiry = parseExpiryFromInstrument(position.instrument_name);
-  const dte = expiry ? Math.max(0, (expiry.getTime() - Date.now()) / (86400000)) : null;
+  const dte = computeDteFromInstrumentName(position.instrument_name);
   const markPrice = Number(ticker?.M) || position.mark_price || 0;
   const entryPrice = position.avg_entry_price || 0;
   const unrealizedPnlPct = entryPrice > 0 ? ((markPrice - entryPrice) / entryPrice) * 100 : 0;
@@ -5850,15 +5864,19 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             if (optionType && instrument.option_details?.option_type !== optionType) { filterStats.wrongType++; continue; }
 
             // Compute DTE from instrument name
-            const expiry = parseExpiryFromInstrument(instrName);
-            if (!expiry) { filterStats.noExpiry++; continue; }
-            const dte = Math.max(0, (expiry.getTime() - Date.now()) / 86400000);
+            const dte = computeDteFromInstrumentName(instrName);
+            if (dte == null) { filterStats.noExpiry++; continue; }
 
             // Filter by DTE range
             if (dteRange && (dte < dteRange[0] || dte > dteRange[1])) { filterStats.dteOut++; continue; }
 
             // Filter by delta range
             const delta = Number(ticker?.option_pricing?.d) || 0;
+            if (rule.action === 'sell_call' && !isSellCallCandidateInStrategyRange(dte, delta)) {
+              if (dte < CALL_EXPIRATION_RANGE[0] || dte > CALL_EXPIRATION_RANGE[1]) filterStats.dteOut++;
+              else filterStats.deltaOut++;
+              continue;
+            }
             if (deltaRange && (delta < deltaRange[0] || delta > deltaRange[1])) { filterStats.deltaOut++; continue; }
 
             // Filter by max_strike_pct
@@ -5917,10 +5935,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               const instrument = instruments.find(i => i.instrument_name === instrName);
               if (!instrument) continue;
               if (optionType && instrument.option_details?.option_type !== optionType) continue;
-              const expiry = parseExpiryFromInstrument(instrName);
-              if (!expiry) continue;
+              const dte = computeDteFromInstrumentName(instrName);
+              if (dte == null) continue;
               const expiryKey = instrName.split('-')[1];
-              const dte = Math.max(0, (expiry.getTime() - Date.now()) / 86400000);
               const bucket = expirySummary.get(expiryKey) || { count: 0, minDte: dte, maxDte: dte };
               bucket.count++;
               bucket.minDte = Math.min(bucket.minDte, dte);
@@ -6482,6 +6499,7 @@ const getStandingRulebookDisciplinePrompt = () => [
   '- Every REQUIRED STANDING RULEBOOK COVERAGE item must have a corresponding rule in the final agenda. If the favorable condition is not true now, encode the condition that would make it favorable later.',
   '- buy_put rules define a price/score where insurance is worth buying while put budget remains.',
   '- sell_call rules define premium, delta, DTE, and margin conditions where call selling is worth doing while margin headroom remains.',
+  `- sell_call rules must stay inside the normal call sale universe: ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE and ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]} delta.`,
   '- sell_put rules define when an owned long put should be monetized, rolled, or cleaned up.',
   '- buyback_call rules define when an existing short call should be bought back for profit capture or genuine threat management.',
   '- Do not omit a required watcher just because it is not currently triggered. Tighten criteria instead.',
@@ -7426,8 +7444,8 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
     };
   };
 
-  // Score candidates with wide ranges — the advisory sees more of the market
-  // and can recommend tighter ranges in its rules if it wants
+  // Score candidates. Puts stay broad for hedge discovery; sell-call candidates
+  // use the same strategy universe the executor is allowed to trade.
   const scoredPuts = [];
   const scoredCalls = [];
 
@@ -7446,8 +7464,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
         scoredPuts.push({ name, delta, askPrice, bidPrice, dte: Math.round(parsed.dte), strike: parsed.strike, score });
       }
     } else if (parsed.optionType === 'C') {
-      // Wide filter: delta 0.01 to 0.15, DTE 3-45 (advisory decides what's interesting)
-      if (delta >= 0.01 && delta <= 0.15 && parsed.dte >= 3 && parsed.dte <= 45 && bidPrice > 0) {
+      if (isSellCallCandidateInStrategyRange(parsed.dte, delta) && bidPrice > 0) {
         const score = bidPrice / Math.abs(delta);
         scoredCalls.push({ name, delta, askPrice, bidPrice, dte: Math.round(parsed.dte), strike: parsed.strike, score });
       }

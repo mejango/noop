@@ -31,6 +31,9 @@ const describe = (name, fn) => {
 // Pure functions (copied from script.js to keep tests self-contained)
 // ============================================================================
 
+const CALL_EXPIRATION_RANGE = [5, 12];
+const CALL_DELTA_RANGE = [0.04, 0.12];
+
 const parseExpiryFromInstrument = (name) => {
   if (!name) return null;
   const parts = name.split('-');
@@ -38,6 +41,15 @@ const parseExpiryFromInstrument = (name) => {
   const d = parts[1]; // "20260501"
   return new Date(`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}T08:00:00Z`);
 };
+
+const isSellCallCandidateInStrategyRange = (dte, delta) => (
+  Number.isFinite(dte)
+  && dte >= CALL_EXPIRATION_RANGE[0]
+  && dte <= CALL_EXPIRATION_RANGE[1]
+  && Number.isFinite(delta)
+  && delta >= CALL_DELTA_RANGE[0]
+  && delta <= CALL_DELTA_RANGE[1]
+);
 
 const computeCurrentValues = (position, ticker, spotPrice) => {
   const expiry = parseExpiryFromInstrument(position.instrument_name);
@@ -1085,7 +1097,20 @@ describe('Standing rulebook coverage requirements', () => {
 
 
 // ============================================================================
-// 2d. summarizeSentimentForLLM
+// 2d. Sell-call candidate universe
+// ============================================================================
+
+describe('Sell-call candidate universe', () => {
+  test('keeps advisory and executor sell_call candidates inside normal DTE/delta range', () => {
+    assert.strictEqual(isSellCallCandidateInStrategyRange(33.76, 0.08), false);
+    assert.strictEqual(isSellCallCandidateInStrategyRange(8.5, 0.14904), false);
+    assert.strictEqual(isSellCallCandidateInStrategyRange(8.5, 0.08), true);
+  });
+});
+
+
+// ============================================================================
+// 2e. summarizeSentimentForLLM
 // ============================================================================
 
 describe('summarizeSentimentForLLM', () => {
@@ -4140,7 +4165,7 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
     }
   };
 
-  // Helper: simulate evaluateTradingRules entry logic for buy_put
+  // Helper: simulate evaluateTradingRules entry candidate filtering
   const evaluateEntryRule = (rule, tickerMap, instruments, spotPrice) => {
     let criteria;
     try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { return null; }
@@ -4175,6 +4200,7 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
 
       const delta = Number(ticker?.option_pricing?.d) || 0;
       if (criteria.delta_range && (delta < criteria.delta_range[0] || delta > criteria.delta_range[1])) continue;
+      if (rule.action === 'sell_call' && !isSellCallCandidateInStrategyRange(dte, delta)) continue;
 
       const strike = Number(instrument.option_details?.strike) || 0;
       if (criteria.max_strike_pct && strike >= criteria.max_strike_pct * spotPrice) continue;
@@ -4283,6 +4309,30 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
     const result = evaluateEntryRule(rule, tickerMap, instruments, 1800);
     assert.ok(result, 'Empty market_conditions should mean any market, not block the rule');
     assert.strictEqual(result.instrument, putInstrument);
+  });
+
+  test('Step 2c: sell_call candidate scan rejects far-dated calls even when rule criteria is broad', () => {
+    const farDate = new Date(Date.now() + 34 * 86400000);
+    const farExpiry = farDate.toISOString().slice(0, 10).replace(/-/g, '');
+    const farCall = `ETH-${farExpiry}-2400-C`;
+    const rule = {
+      action: 'sell_call',
+      criteria: {
+        option_type: 'C',
+        delta_range: [0.04, 0.12],
+        dte_range: [20, 45],
+      },
+      budget_limit: 50.00,
+    };
+
+    const result = evaluateEntryRule(
+      rule,
+      { [farCall]: { a: '24.00', A: '10', b: '19.00', B: '10', option_pricing: { d: '0.08' } } },
+      [{ instrument_name: farCall, option_details: { option_type: 'C', strike: 2400 }, options: { amount_step: 0.01 } }],
+      2036
+    );
+
+    assert.strictEqual(result, null);
   });
 
   test('Step 3: Quantity is capped by remaining budget', () => {
