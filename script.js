@@ -235,6 +235,12 @@ const BUY_PUT_ADVISORY_DTE_RANGE = [45, 75];
 const ADVISORY_OPTION_VALUE_WINDOW_DAYS = 6.2;
 const BUY_PUT_URGENT_SCORE_NUDGE = 1.005;
 const BUY_PUT_PATIENT_SCORE_NUDGE = 1.02;
+const BUY_PUT_REPRICING_LAG_SCORE_NUDGE = 0.999;
+const BUY_PUT_REPRICING_LAG_LOOKBACK_MINUTES = 20;
+const BUY_PUT_REPRICING_LAG_SCORE_LOOKBACK_HOURS = 1;
+const BUY_PUT_REPRICING_LAG_MIN_SCORE_TREND_PCT = 6;
+const BUY_PUT_REPRICING_LAG_MIN_SPOT_DROP_PCT = -0.35;
+const BUY_PUT_REPRICING_LAG_NEAR_BEST_PCT = 90;
 
 // Trading parameters - CALLS  
 const CALL_EXPIRATION_RANGE = [5, 12];
@@ -298,8 +304,6 @@ let botData = createBotData();
 let _advisoryInFlight = false;
 let _wikiLintInFlight = false;
 
-// Price move threshold to force a re-advisory (8% move since last advisory)
-const ADVISORY_PRICE_MOVE_THRESHOLD = 0.08;
 const ADVISORY_RETRY_BACKOFF_MS = [
   5 * 60 * 1000,
   15 * 60 * 1000,
@@ -1586,6 +1590,85 @@ const computeScoreTrendPct = (samples, currentScore, hours) => {
   return avg > 0 ? roundForAdvisory(((currentScore - avg) / avg) * 100, 2) : null;
 };
 
+const computeSpotMovePct = (recentSpotPrices = [], lookbackMinutes = 20) => {
+  const rows = Array.isArray(recentSpotPrices)
+    ? recentSpotPrices
+        .map((row) => ({ price: Number(row.price), timestamp: new Date(row.timestamp).getTime() }))
+        .filter((row) => Number.isFinite(row.price) && row.price > 0 && Number.isFinite(row.timestamp))
+        .sort((a, b) => a.timestamp - b.timestamp)
+    : [];
+  if (rows.length < 2) return null;
+
+  const latest = rows[rows.length - 1];
+  const cutoff = latest.timestamp - lookbackMinutes * 60 * 1000;
+  let base = rows[0];
+  for (const row of rows) {
+    if (row.timestamp <= cutoff) {
+      base = row;
+    } else {
+      break;
+    }
+  }
+  if (!(base.price > 0) || base.timestamp === latest.timestamp) return null;
+  return roundForAdvisory(((latest.price - base.price) / base.price) * 100, 2);
+};
+
+const buildPutRepricingLagContext = ({
+  currentScore,
+  priorBestScore,
+  scoreTrendPct,
+  spotMovePct,
+  spotAction,
+}) => {
+  const currentVsPriorBestPct = priorBestScore > 0 ? (currentScore / priorBestScore) * 100 : null;
+  const scoreJump = Number(scoreTrendPct) >= BUY_PUT_REPRICING_LAG_MIN_SCORE_TREND_PCT;
+  const nearRollingBest = Number(currentVsPriorBestPct) >= BUY_PUT_REPRICING_LAG_NEAR_BEST_PCT;
+  const spotDropped = Number(spotMovePct) <= BUY_PUT_REPRICING_LAG_MIN_SPOT_DROP_PCT;
+  const downwardSpot = spotAction?.state === 'downward';
+  const detected = Boolean(currentScore > 0 && (
+    (scoreJump && (spotDropped || downwardSpot))
+    || (nearRollingBest && spotDropped)
+  ));
+
+  return {
+    is_detected: detected,
+    score_trend_1h_pct: roundForAdvisory(scoreTrendPct, 2),
+    spot_move_20m_pct: roundForAdvisory(spotMovePct, 2),
+    current_vs_prior_best_pct: roundForAdvisory(currentVsPriorBestPct, 2),
+    thresholds: {
+      min_score_trend_1h_pct: BUY_PUT_REPRICING_LAG_MIN_SCORE_TREND_PCT,
+      min_spot_move_20m_pct: BUY_PUT_REPRICING_LAG_MIN_SPOT_DROP_PCT,
+      near_best_pct: BUY_PUT_REPRICING_LAG_NEAR_BEST_PCT,
+    },
+    reason: detected
+      ? 'Put score jumped or is near the rolling best while spot is dropping, consistent with option ask lagging the new spot.'
+      : 'No short-term spot/put repricing lag detected.',
+  };
+};
+
+const isActionableBuyPutSignal = (signal) => (
+  signal === 'strict_fresh_best'
+  || signal === 'spot_drop_option_repricing_lag'
+);
+
+const normalizeBuyPutValueSignal = (signal) => {
+  const normalized = String(signal || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'fresh_best') return 'strict_fresh_best';
+  if (normalized === 'repricing_lag' || normalized === 'spot_lag') return 'spot_drop_option_repricing_lag';
+  if (['strict_fresh_best', 'spot_drop_option_repricing_lag', 'any_actionable_buy_put'].includes(normalized)) {
+    return normalized;
+  }
+  return null;
+};
+
+const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
+  const required = normalizeBuyPutValueSignal(requiredSignal);
+  if (!required) return true;
+  if (required === 'any_actionable_buy_put') return isActionableBuyPutSignal(currentSignal);
+  return currentSignal === required;
+};
+
 const buildRollingOptionValueContext = ({
   tickerMap,
   momentum,
@@ -1644,19 +1727,43 @@ const buildRollingOptionValueContext = ({
   const workingBuyPutActions = recentPendingActions.filter((action) =>
     action?.action === 'buy_put' && ['pending', 'confirmed', 'resting'].includes(action?.status)
   ).length;
+  const blockingBuyPutActions = recentPendingActions.filter((action) =>
+    action?.action === 'buy_put' && ['pending', 'confirmed'].includes(action?.status)
+  ).length;
   const restingBuyPutOrders = openRestingOrders.filter((order) =>
     order?.action === 'buy_put' && (!order?.status || order.status === 'open')
   ).length;
   const hasWorkingBuyPut = (workingBuyPutActions + restingBuyPutOrders) > 0;
   const spotAction = classifySpotPriceAction(momentum, recentSpotPrices);
   const budgetAvailable = Number(putBudgetRemaining) > 1;
-  const requiresDecision = Boolean(freshBest && budgetAvailable && !hasWorkingBuyPut);
-  const scoreNudge = spotAction.state === 'downward' ? BUY_PUT_URGENT_SCORE_NUDGE : BUY_PUT_PATIENT_SCORE_NUDGE;
+  const scoreTrend1hPct = computeScoreTrendPct(priorSamples, currentScore, BUY_PUT_REPRICING_LAG_SCORE_LOOKBACK_HOURS);
+  const spotMove20mPct = computeSpotMovePct(recentSpotPrices, BUY_PUT_REPRICING_LAG_LOOKBACK_MINUTES);
+  const repricingLag = buildPutRepricingLagContext({
+    currentScore,
+    priorBestScore,
+    scoreTrendPct: scoreTrend1hPct,
+    spotMovePct: spotMove20mPct,
+    spotAction,
+  });
+  const repricingLagSignal = Boolean(!freshBest && repricingLag.is_detected);
+  const actionSignal = freshBest
+    ? 'strict_fresh_best'
+    : repricingLagSignal
+      ? 'spot_drop_option_repricing_lag'
+      : null;
+  const requiresDecision = Boolean(actionSignal && budgetAvailable && blockingBuyPutActions === 0);
+  const scoreNudge = repricingLagSignal
+    ? BUY_PUT_REPRICING_LAG_SCORE_NUDGE
+    : spotAction.state === 'downward'
+      ? BUY_PUT_URGENT_SCORE_NUDGE
+      : BUY_PUT_PATIENT_SCORE_NUDGE;
   const targetScore = currentScore > 0 ? currentScore * scoreNudge : null;
   const suggestedLimitPrice = currentPut && targetScore > 0
     ? floorOptionPriceCents(Math.abs(currentPut.delta) / targetScore)
     : null;
-  const executionStyle = spotAction.state === 'downward'
+  const executionStyle = repricingLagSignal
+    ? 'spot_lag_near_live_limit'
+    : spotAction.state === 'downward'
     ? 'less_patient_limit'
     : spotAction.state === 'stable'
       ? 'patient_limit'
@@ -1675,6 +1782,7 @@ const buildRollingOptionValueContext = ({
       current_vs_prior_best_pct: roundForAdvisory(currentVsPriorBestPct, 2),
       percentile_vs_prior_window: roundForAdvisory(percentile, 1),
       is_strict_fresh_best: freshBest,
+      trend_1h_pct: scoreTrend1hPct,
       trend_6h_pct: computeScoreTrendPct(priorSamples, currentScore, 6),
       trend_24h_pct: computeScoreTrendPct(priorSamples, currentScore, 24),
       current_detail: currentPut ? {
@@ -1697,25 +1805,30 @@ const buildRollingOptionValueContext = ({
       } : null,
       samples: priorScores.length,
     },
+    spot_repricing_lag_context: repricingLag,
     put_budget_context: {
       remaining: roundForAdvisory(Number(putBudgetRemaining), 2),
       budget_available: budgetAvailable,
       active_buy_put_rules: activeBuyPutRules,
       working_buy_put_actions: workingBuyPutActions,
+      blocking_buy_put_actions: blockingBuyPutActions,
       resting_buy_put_orders: restingBuyPutOrders,
       has_working_buy_put: hasWorkingBuyPut,
     },
     spot_price_action: spotAction,
     action_pressure: {
+      signal: actionSignal,
       requires_buy_put_decision: requiresDecision,
-      supports_buy_put_review: Boolean(requiresDecision && ['downward', 'stable'].includes(spotAction.state)),
+      supports_buy_put_review: Boolean(requiresDecision && (repricingLagSignal || ['downward', 'stable'].includes(spotAction.state))),
       execution_style: executionStyle,
       target_score: roundForAdvisory(targetScore, 6),
       suggested_limit_price: roundForAdvisory(suggestedLimitPrice, 4),
       score_nudge_pct: roundForAdvisory((scoreNudge - 1) * 100, 2),
       explanation: requiresDecision
-        ? 'Current buy-put value score is strictly better than the prior rolling-window best while budget remains and no buy_put is already working. This requires explicit review, not automatic execution.'
-        : 'No fresh-best buy_put review required.',
+        ? actionSignal === 'spot_drop_option_repricing_lag'
+          ? 'Current buy-put value score is locally spiking while spot is dropping, indicating a possible option-repricing lag before asks reset. This requires explicit review, not automatic execution.'
+          : 'Current buy-put value score is strictly better than the prior rolling-window best while budget remains and no buy_put is pending or confirmed. This requires explicit review, not automatic execution.'
+        : 'No fresh-best or spot-lag buy_put review required.',
     },
   };
 };
@@ -1726,6 +1839,7 @@ const formatRollingOptionValueContext = (context) => {
   const budget = context.put_budget_context || {};
   const action = context.action_pressure || {};
   const spotAction = context.spot_price_action || {};
+  const lag = context.spot_repricing_lag_context || {};
   const detail = put.current_detail;
   const prior = put.prior_window_best_detail;
   return [
@@ -1733,10 +1847,11 @@ const formatRollingOptionValueContext = (context) => {
     `Current PUT score: ${put.current_score ?? 'n/a'}${detail ? ` (${detail.instrument}, delta=${detail.delta}, ask=$${detail.ask_price}, DTE=${detail.dte})` : ''}.`,
     `Prior ${context.window_days}d best PUT score: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (${prior.instrument} at ${prior.timestamp})` : ''}.`,
     `Current vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${put.is_strict_fresh_best ? 'yes' : 'no'}; samples=${put.samples}.`,
-    `Score trend: 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
-    `Put budget: remaining=$${budget.remaining ?? 'n/a'}; active_buy_put_rules=${budget.active_buy_put_rules ?? 0}; working_buy_put_actions=${budget.working_buy_put_actions ?? 0}; resting_buy_put_orders=${budget.resting_buy_put_orders ?? 0}.`,
+    `Score trend: 1h=${put.trend_1h_pct ?? 'n/a'}%, 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
+    `Spot-lag repricing check: detected=${lag.is_detected ? 'yes' : 'no'}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%; spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%; near_best=${lag.current_vs_prior_best_pct ?? 'n/a'}%; reason=${lag.reason || 'n/a'}.`,
+    `Put budget: remaining=$${budget.remaining ?? 'n/a'}; active_buy_put_rules=${budget.active_buy_put_rules ?? 0}; blocking_buy_put_actions=${budget.blocking_buy_put_actions ?? 0}; working_buy_put_actions=${budget.working_buy_put_actions ?? 0}; resting_buy_put_orders=${budget.resting_buy_put_orders ?? 0}.`,
     `Spot price action: ${spotAction.state || 'unknown'}${spotAction.slope_pct_6h != null ? ` (${spotAction.slope_pct_6h}% over recent 6h)` : ''}; reason=${spotAction.reason || 'n/a'}.`,
-    `Fresh-best review: requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; supports_buy_put_review=${action.supports_buy_put_review ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
+    `Buy-put review: signal=${action.signal || 'none'}; requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; supports_buy_put_review=${action.supports_buy_put_review ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
   ].join('\n');
 };
 
@@ -5606,6 +5721,23 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
     let liveMarginState = null;
     try { liveMarginState = await fetchSubaccount(); } catch { /* ok */ }
     let provisionalCallOrderMargin = 0;
+    let buyPutOpportunityContext = null;
+    const getBuyPutOpportunityContext = () => {
+      if (buyPutOpportunityContext) return buyPutOpportunityContext;
+      const putBudgetRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
+      buyPutOpportunityContext = buildRollingOptionValueContext({
+        tickerMap,
+        momentum: {
+          mediumTerm: botData.mediumTermMomentum,
+          shortTerm: botData.shortTermMomentum,
+        },
+        putBudgetRemaining,
+        activeRules: entryRules,
+        recentPendingActions: workingEntryActions,
+        openRestingOrders: openRestingEntryOrders,
+      });
+      return buyPutOpportunityContext;
+    };
     for (const rule of entryRules) {
       try {
         let criteria;
@@ -5630,7 +5762,15 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           if (elapsed < 3600000) continue; // 1 hour cooldown
         }
 
-        const reservedCapacity = summarizeReservedEntryCapacity(openRestingEntryOrders);
+        const buyPutContext = rule.action === 'buy_put' ? getBuyPutOpportunityContext() : null;
+        const canReplaceRestingBuyPut = Boolean(
+          rule.action === 'buy_put'
+          && isActionableBuyPutSignal(buyPutContext?.action_pressure?.signal)
+        );
+        const capacityOrders = canReplaceRestingBuyPut
+          ? openRestingEntryOrders.filter((order) => order.action !== 'buy_put')
+          : openRestingEntryOrders;
+        const reservedCapacity = summarizeReservedEntryCapacity(capacityOrders);
 
         // Put budget discipline: skip if cycle budget exhausted
         if (rule.action === 'buy_put' && botData.putBudgetForCycle > 0) {
@@ -5659,17 +5799,10 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         // Dedup: skip if already pending or confirmed
         if (db.hasPendingActionForRule(rule.id)) continue;
 
-        if (
-          workingEntryActions.some((action) => action.action === rule.action)
-          || openRestingEntryOrders.some((order) => order.action === rule.action)
-        ) {
-          console.log(`📋 Entry skip: ${rule.action} already has a pending or resting entry order`);
+        if (workingEntryActions.some((action) => action.action === rule.action && action.status !== 'resting')) {
+          console.log(`📋 Entry skip: ${rule.action} already has a pending or confirmed entry order`);
           continue;
         }
-
-        // Dedup: skip if we already have a resting order for this action type
-        // (prevents GTC duplicate stacking — entry rules match multiple instruments,
-        //  but we don't want to queue a new one while an order is on the book)
 
         // Scan tickerMap for candidates matching criteria
         const optionType = criteria.option_type; // 'P' or 'C'
@@ -5680,7 +5813,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const maxCost = criteria.max_cost ?? null;
         const minBid = criteria.min_bid ?? null;
         const minScore = criteria.min_score ?? null;
-        const targetScore = Number(criteria.target_score ?? 0) > 0 ? Number(criteria.target_score) : null;
+        const valueSignal = normalizeBuyPutValueSignal(criteria.value_signal ?? criteria.buy_put_signal);
+        let targetScore = Number(criteria.target_score ?? 0) > 0 ? Number(criteria.target_score) : null;
 
         // Empty market_conditions means "no extra market gate"; only evaluate
         // when the advisor supplied at least one condition.
@@ -5690,6 +5824,16 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         if (hasMarketConditions) {
           const marketValues = { spot_price: spotPrice };
           if (!evaluateConditions(marketConditions, 'all', marketValues)) continue;
+        }
+        if (rule.action === 'buy_put' && valueSignal) {
+          const currentSignal = buyPutContext?.action_pressure?.signal || null;
+          if (!buyPutValueSignalMatches(valueSignal, currentSignal)) continue;
+        }
+        if (canReplaceRestingBuyPut) {
+          const signalTargetScore = Number(buyPutContext?.action_pressure?.target_score || 0);
+          if (signalTargetScore > 0 && (targetScore == null || targetScore > signalTargetScore)) {
+            targetScore = signalTargetScore;
+          }
         }
 
         let candidates = [];
@@ -5882,8 +6026,58 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             continue;
           }
           db.updateRestingOrder(existingResting.order_id, 'cancelled', existingResting.filled_amount || 0);
+          if (existingResting.pending_action_id) {
+            db.updatePendingAction(existingResting.pending_action_id, {
+              status: 'cancelled',
+              executed_at: new Date().toISOString(),
+              execution_result: {
+                orderId: existingResting.order_id,
+                orderStatus: 'cancelled',
+                filledAmount: existingResting.filled_amount || 0,
+                cancelReason: 'resting entry order adjusted to refreshed rule target',
+              },
+            });
+          }
           openRestingEntryOrders = openRestingEntryOrders.filter(order => order.order_id !== existingResting.order_id);
-        } else if (db.hasRestingOrderForInstrument(best.name)) {
+        } else {
+          const sameActionResting = openRestingEntryOrders.find(order => order.action === rule.action);
+          if (sameActionResting) {
+            const canReplaceDifferentResting = Boolean(
+              rule.action === 'buy_put'
+              && isActionableBuyPutSignal(buyPutContext?.action_pressure?.signal)
+              && best.score > 0
+            );
+            if (!canReplaceDifferentResting) {
+              console.log(`📋 Entry skip: ${rule.action} already has a resting entry order (${sameActionResting.instrument_name})`);
+              continue;
+            }
+
+            const lag = buyPutContext.spot_repricing_lag_context || {};
+            const signal = buyPutContext.action_pressure?.signal || 'unknown';
+            console.log(`📋 Replace resting ${rule.action}: cancel ${sameActionResting.order_id} ${sameActionResting.instrument_name} @ $${Number(sameActionResting.limit_price).toFixed(4)} -> ${best.name} @ $${price.toFixed(4)} (${signal}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%, spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%)`);
+            const cancelled = await cancelOrder(sameActionResting.order_id, sameActionResting.instrument_name);
+            if (!cancelled) {
+              console.log(`📋 Keep resting ${rule.action} ${sameActionResting.instrument_name}: cancel failed, re-evaluate next tick`);
+              continue;
+            }
+            db.updateRestingOrder(sameActionResting.order_id, 'cancelled', sameActionResting.filled_amount || 0);
+            if (sameActionResting.pending_action_id) {
+              db.updatePendingAction(sameActionResting.pending_action_id, {
+                status: 'cancelled',
+                executed_at: new Date().toISOString(),
+                execution_result: {
+                  orderId: sameActionResting.order_id,
+                  orderStatus: 'cancelled',
+                  filledAmount: sameActionResting.filled_amount || 0,
+                  cancelReason: `replaced by ${signal} buy-put opportunity`,
+                },
+              });
+            }
+            openRestingEntryOrders = openRestingEntryOrders.filter(order => order.order_id !== sameActionResting.order_id);
+          }
+        }
+
+        if (db.hasRestingOrderForInstrument(best.name)) {
           console.log(`📋 Skip ${rule.action} ${best.name}: another resting order already on book`);
           continue;
         }
@@ -5916,7 +6110,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             advisor_limit_price: advisorLimitPrice,
             target_score: targetScore,
             target_score_nudge_pct: targetScore != null && best.score > 0 ? +(((targetScore / best.score) - 1) * 100).toFixed(2) : null,
-            preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
+            buy_put_signal: rule.action === 'buy_put' ? buyPutContext?.action_pressure?.signal || null : null,
+            spot_repricing_lag: rule.action === 'buy_put' ? buyPutContext?.spot_repricing_lag_context || null : null,
+            preferred_order_type: buyPutContext?.action_pressure?.signal === 'spot_drop_option_repricing_lag' ? 'ioc' : normalizePreferredOrderType(rule.action, rule.preferred_order_type),
           },
         });
         triggeredCount++;
@@ -6270,10 +6466,14 @@ const getMomentumEvidenceDisciplinePrompt = () => [
 const getFreshBestBuyPutDisciplinePrompt = () => [
   'FRESH-BEST BUY-PUT DISCIPLINE:',
   `- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d window using buy-put DTE discipline (${BUY_PUT_ADVISORY_DTE_RANGE[0]}-${BUY_PUT_ADVISORY_DTE_RANGE[1]} DTE). A strict fresh best means the market is offering the best delta-per-dollar protection seen in that window.`,
-  '- If requires_buy_put_decision=yes, explicitly evaluate whether to emit a buy_put rule or explain why patience/no-buy is still the better stance. This is a value signal, not an instruction to override patience or pay up.',
+  '- The spot-lag repricing check catches a different cheap-convexity window: spot has dropped and the put score has locally jumped or moved near the rolling best before asks fully recalibrate.',
+  '- If requires_buy_put_decision=yes, explicitly evaluate whether to emit a buy_put rule or explain why patience/no-buy is still the better stance. This is a value signal, not an instruction to override discipline.',
+  '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch either strict_fresh_best or spot_drop_option_repricing_lag on a later tick without waiting for a new advisory.',
+  '- If value_signal is present, still include option_type, delta_range, dte_range, budget_limit, and sane max_cost/min_score bounds so the watcher cannot buy low-quality protection.',
+  '- If signal=spot_drop_option_repricing_lag, the edge may vanish quickly; prefer ioc or gtc with the supplied near-live target_score instead of a deeply patient post_only bid.',
   '- If you choose buy_put and spot price action is downward, use less_patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "gtc" or "post_only".',
   '- If you choose buy_put and spot price action is stable, use patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "post_only" or "gtc".',
-  '- target_score means the executor will bid abs(delta) / target_score, usually below the live ask, to improve on the observed score. Do not default back to the ask.',
+  '- target_score means the executor will bid abs(delta) / target_score. It is usually below the live ask to improve the observed score; for spot-lag repricing it may be near the live ask because speed matters.',
 ].join('\n');
 
 const getStandingRulebookDisciplinePrompt = () => [
@@ -7372,6 +7572,7 @@ Given market data, produce a JSON trading agenda with:
         "max_strike_pct": 0.80,
         "min_score": 0.004,
         "target_score": 0.0042,
+        "value_signal": "strict_fresh_best" | "spot_drop_option_repricing_lag" | "any_actionable_buy_put",
         "max_cost": 15.00,
         "min_bid": 2.00,
         "market_conditions": [{"field": "spot_price", "op": "lt"|"gt"|"gte"|"lte", "value": 2000}]
@@ -7397,10 +7598,10 @@ Given market data, produce a JSON trading agenda with:
   ]
 }
 
-CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, max_cost, min_bid, market_conditions. Exit criteria uses: conditions (array of field/op/value objects) and condition_logic ("any" or "all").
+CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, max_cost, min_bid, market_conditions. Exit criteria uses: conditions (array of field/op/value objects) and condition_logic ("any" or "all").
 
 Rules:
-- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), max_cost (for buys), min_bid (for sells), market_conditions.
+- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), max_cost (for buys), min_bid (for sells), market_conditions.
 - Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: sell_put should use "ioc". buyback_call may use preferred_order_type ${formatOrderTypeList(getAllowedOrderTypesForAction('buyback_call'))}; patient resting buyback pricing is valid when urgency is low and the market is wide.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
@@ -7955,7 +8156,7 @@ Return the full repaired agenda JSON.`,
   const exitCount = finalAgenda.exit_rules?.length || 0;
   console.log(`📋 Advisory ${advisoryId}: complete — ${entryCount} entry rules, ${exitCount} exit rules`);
 
-  // Track advisory state for price-triggered re-advisory (persisted to survive restarts)
+  // Track advisory state for dashboards and retry cadence (persisted to survive restarts)
   botData.lastAdvisorySpotPrice = spotPrice;
   botData.lastAdvisoryTimestamp = Date.now();
   botData.lastAdvisorySuccess = Date.now();
@@ -8468,19 +8669,6 @@ const runBot = async () => {
         db.insertTick(tickTimestamp, JSON.stringify(tickSummary));
       } catch (e) {
         console.log('DB: tick write failed:', e.message);
-      }
-
-      // Price-triggered re-advisory: if price moved >8% since last advisory, recalibrate
-      if (process.env.ANTHROPIC_API_KEY && spotPrice && botData.lastAdvisorySpotPrice) {
-        const priceMoveRatio = Math.abs(spotPrice - botData.lastAdvisorySpotPrice) / botData.lastAdvisorySpotPrice;
-        const minAdvisoryGap = 10 * 60 * 1000; // 10 min minimum between advisories
-        if (priceMoveRatio >= ADVISORY_PRICE_MOVE_THRESHOLD && (Date.now() - botData.lastAdvisoryTimestamp) > minAdvisoryGap) {
-          const moveDirection = spotPrice > botData.lastAdvisorySpotPrice ? 'up' : 'down';
-          console.log(`📋 Price moved ${(priceMoveRatio * 100).toFixed(1)}% ${moveDirection} since last advisory ($${botData.lastAdvisorySpotPrice.toFixed(0)} → $${spotPrice.toFixed(0)}) — forcing re-advisory`);
-          generateTradingAdvisory(positions, spotPrice, tickerMap, tickTimestamp).catch(e => {
-            console.log(`📋 Price-triggered advisory failed (non-fatal): ${e.message}`);
-          });
-        }
       }
 
       if (

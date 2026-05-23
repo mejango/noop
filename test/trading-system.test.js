@@ -372,18 +372,42 @@ const buildBuyPutFreshBestPressure = ({
   hasWorkingBuyPut,
   spotState,
   delta,
+  scoreTrend1hPct = null,
+  spotMove20mPct = null,
 }) => {
+  const REPRICING_LAG_MIN_SCORE_TREND_PCT = 6;
+  const REPRICING_LAG_MIN_SPOT_DROP_PCT = -0.35;
+  const REPRICING_LAG_NEAR_BEST_PCT = 90;
   const priorBest = Math.max(...priorScores);
+  const currentVsPriorBestPct = priorBest > 0 ? (currentScore / priorBest) * 100 : null;
   const freshBest = currentScore > priorBest;
-  const requiresDecision = freshBest && budgetRemaining > 1 && !hasWorkingBuyPut;
-  const scoreNudge = spotState === 'downward' ? 1.005 : 1.02;
+  const repricingLagDetected = Boolean(
+    !freshBest
+    && currentScore > 0
+    && (
+      (
+        Number(scoreTrend1hPct) >= REPRICING_LAG_MIN_SCORE_TREND_PCT
+        && (Number(spotMove20mPct) <= REPRICING_LAG_MIN_SPOT_DROP_PCT || spotState === 'downward')
+      )
+      || (
+        Number(currentVsPriorBestPct) >= REPRICING_LAG_NEAR_BEST_PCT
+        && Number(spotMove20mPct) <= REPRICING_LAG_MIN_SPOT_DROP_PCT
+      )
+    )
+  );
+  const actionSignal = freshBest ? 'strict_fresh_best' : repricingLagDetected ? 'spot_drop_option_repricing_lag' : null;
+  const requiresDecision = Boolean(actionSignal && budgetRemaining > 1 && !hasWorkingBuyPut);
+  const scoreNudge = repricingLagDetected ? 0.999 : spotState === 'downward' ? 1.005 : 1.02;
   const targetScore = currentScore * scoreNudge;
   return {
     priorBest,
     freshBest,
+    repricingLagDetected,
+    actionSignal,
+    currentVsPriorBestPct,
     requiresDecision,
-    supportsBuyPutReview: requiresDecision && ['downward', 'stable'].includes(spotState),
-    executionStyle: spotState === 'downward' ? 'less_patient_limit' : spotState === 'stable' ? 'patient_limit' : 'explain_no_buy_unless_other_facts_override',
+    supportsBuyPutReview: requiresDecision && (repricingLagDetected || ['downward', 'stable'].includes(spotState)),
+    executionStyle: repricingLagDetected ? 'spot_lag_near_live_limit' : spotState === 'downward' ? 'less_patient_limit' : spotState === 'stable' ? 'patient_limit' : 'explain_no_buy_unless_other_facts_override',
     targetScore,
     suggestedLimitPrice: floorOptionPriceCents(Math.abs(delta) / targetScore),
   };
@@ -397,6 +421,29 @@ const filterAdvisoryBuyPutCandidates = (candidates) => candidates.filter((candid
   && candidate.dte <= 75
   && candidate.ask_price > 0
 ));
+
+const normalizeBuyPutValueSignal = (signal) => {
+  const normalized = String(signal || '').trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'fresh_best') return 'strict_fresh_best';
+  if (normalized === 'repricing_lag' || normalized === 'spot_lag') return 'spot_drop_option_repricing_lag';
+  if (['strict_fresh_best', 'spot_drop_option_repricing_lag', 'any_actionable_buy_put'].includes(normalized)) {
+    return normalized;
+  }
+  return null;
+};
+
+const isActionableBuyPutSignal = (signal) => (
+  signal === 'strict_fresh_best'
+  || signal === 'spot_drop_option_repricing_lag'
+);
+
+const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
+  const required = normalizeBuyPutValueSignal(requiredSignal);
+  if (!required) return true;
+  if (required === 'any_actionable_buy_put') return isActionableBuyPutSignal(currentSignal);
+  return currentSignal === required;
+};
 
 const buildRulebookRequirements = ({ putBudgetRemaining = 0, accountHealth = {}, positionSnapshots = [] } = {}) => {
   const requirements = [];
@@ -925,6 +972,34 @@ describe('Fresh-best buy-put advisory review', () => {
     assert.strictEqual(result.executionStyle, 'patient_limit');
     assert.ok(Math.abs(result.targetScore - 0.00459) < 0.0000001);
     assert.strictEqual(result.suggestedLimitPrice, 19.6);
+  });
+
+  test('spot-drop repricing lag can trigger below the rolling best', () => {
+    const result = buildBuyPutFreshBestPressure({
+      currentScore: 0.004708,
+      priorScores: [0.0042, 0.004965],
+      budgetRemaining: 100,
+      hasWorkingBuyPut: false,
+      spotState: 'downward',
+      delta: -0.095,
+      scoreTrend1hPct: 12,
+      spotMove20mPct: -0.8,
+    });
+
+    assert.strictEqual(result.freshBest, false);
+    assert.strictEqual(result.repricingLagDetected, true);
+    assert.strictEqual(result.actionSignal, 'spot_drop_option_repricing_lag');
+    assert.strictEqual(result.requiresDecision, true);
+    assert.strictEqual(result.executionStyle, 'spot_lag_near_live_limit');
+    assert.ok(Math.abs(result.targetScore - 0.004703292) < 0.0000001);
+  });
+
+  test('standing value_signal watcher matches actionable buy-put signals', () => {
+    assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'strict_fresh_best'), true);
+    assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'spot_drop_option_repricing_lag'), true);
+    assert.strictEqual(buyPutValueSignalMatches('strict_fresh_best', 'spot_drop_option_repricing_lag'), false);
+    assert.strictEqual(buyPutValueSignalMatches('fresh_best', 'strict_fresh_best'), true);
+    assert.strictEqual(buyPutValueSignalMatches(null, null), true);
   });
 
   test('budget exhaustion or working buy_put suppresses pressure', () => {
