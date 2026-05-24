@@ -390,9 +390,15 @@ const buildBuyPutFreshBestPressure = ({
   const REPRICING_LAG_MIN_SCORE_TREND_PCT = 6;
   const REPRICING_LAG_MIN_SPOT_DROP_PCT = -0.35;
   const REPRICING_LAG_NEAR_BEST_PCT = 90;
+  const RECENT_VALUE_MIN_TREND_PCT = 8;
+  const RECENT_VALUE_MIN_PERCENTILE = 80;
+  const RECENT_VALUE_MIN_ROLLING_BEST_PCT = 70;
   const priorBest = Math.max(...priorScores);
   const currentVsPriorBestPct = priorBest > 0 ? (currentScore / priorBest) * 100 : null;
   const freshBest = currentScore > priorBest;
+  const priorAvg = priorScores.reduce((sum, score) => sum + score, 0) / priorScores.length;
+  const recentPercentile = priorScores.filter((score) => score <= currentScore).length / priorScores.length * 100;
+  const recentTrendPct = priorAvg > 0 ? ((currentScore - priorAvg) / priorAvg) * 100 : null;
   const repricingLagDetected = Boolean(
     !freshBest
     && currentScore > 0
@@ -407,7 +413,23 @@ const buildBuyPutFreshBestPressure = ({
       )
     )
   );
-  const actionSignal = freshBest ? 'strict_fresh_best' : repricingLagDetected ? 'spot_drop_option_repricing_lag' : null;
+  const recentRelativeValueDetected = Boolean(
+    !freshBest
+    && !repricingLagDetected
+    && currentScore > 0
+    && ['downward', 'stable'].includes(spotState)
+    && priorScores.length >= 4
+    && Number(recentTrendPct) >= RECENT_VALUE_MIN_TREND_PCT
+    && Number(recentPercentile) >= RECENT_VALUE_MIN_PERCENTILE
+    && Number(currentVsPriorBestPct) >= RECENT_VALUE_MIN_ROLLING_BEST_PCT
+  );
+  const actionSignal = freshBest
+    ? 'strict_fresh_best'
+    : repricingLagDetected
+      ? 'spot_drop_option_repricing_lag'
+      : recentRelativeValueDetected
+        ? 'recent_relative_value'
+        : null;
   const requiresDecision = Boolean(actionSignal && budgetRemaining > 1 && !hasWorkingBuyPut);
   const scoreNudge = repricingLagDetected ? 0.999 : spotState === 'downward' ? 1.005 : 1.02;
   const targetScore = currentScore * scoreNudge;
@@ -415,8 +437,11 @@ const buildBuyPutFreshBestPressure = ({
     priorBest,
     freshBest,
     repricingLagDetected,
+    recentRelativeValueDetected,
     actionSignal,
     currentVsPriorBestPct,
+    recentPercentile,
+    recentTrendPct,
     requiresDecision,
     supportsBuyPutReview: requiresDecision && (repricingLagDetected || ['downward', 'stable'].includes(spotState)),
     executionStyle: repricingLagDetected ? 'spot_lag_near_live_limit' : spotState === 'downward' ? 'less_patient_limit' : spotState === 'stable' ? 'patient_limit' : 'explain_no_buy_unless_other_facts_override',
@@ -439,7 +464,8 @@ const normalizeBuyPutValueSignal = (signal) => {
   if (!normalized) return null;
   if (normalized === 'fresh_best') return 'strict_fresh_best';
   if (normalized === 'repricing_lag' || normalized === 'spot_lag') return 'spot_drop_option_repricing_lag';
-  if (['strict_fresh_best', 'spot_drop_option_repricing_lag', 'any_actionable_buy_put'].includes(normalized)) {
+  if (normalized === 'relative_value' || normalized === 'recent_value') return 'recent_relative_value';
+  if (['strict_fresh_best', 'spot_drop_option_repricing_lag', 'recent_relative_value', 'any_actionable_buy_put'].includes(normalized)) {
     return normalized;
   }
   return null;
@@ -448,6 +474,7 @@ const normalizeBuyPutValueSignal = (signal) => {
 const isActionableBuyPutSignal = (signal) => (
   signal === 'strict_fresh_best'
   || signal === 'spot_drop_option_repricing_lag'
+  || signal === 'recent_relative_value'
 );
 
 const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
@@ -1006,9 +1033,29 @@ describe('Fresh-best buy-put advisory review', () => {
     assert.ok(Math.abs(result.targetScore - 0.004703292) < 0.0000001);
   });
 
+  test('recent-relative value can trigger below the 6.2d rolling best', () => {
+    const result = buildBuyPutFreshBestPressure({
+      currentScore: 0.0043,
+      priorScores: [0.0034, 0.0035, 0.0036, 0.0038, 0.0052],
+      budgetRemaining: 100,
+      hasWorkingBuyPut: false,
+      spotState: 'stable',
+      delta: -0.095,
+    });
+
+    assert.strictEqual(result.freshBest, false);
+    assert.strictEqual(result.repricingLagDetected, false);
+    assert.strictEqual(result.recentRelativeValueDetected, true);
+    assert.strictEqual(result.actionSignal, 'recent_relative_value');
+    assert.strictEqual(result.requiresDecision, true);
+    assert.strictEqual(result.executionStyle, 'patient_limit');
+  });
+
   test('standing value_signal watcher matches actionable buy-put signals', () => {
     assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'strict_fresh_best'), true);
     assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'spot_drop_option_repricing_lag'), true);
+    assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'recent_relative_value'), true);
+    assert.strictEqual(buyPutValueSignalMatches('recent_value', 'recent_relative_value'), true);
     assert.strictEqual(buyPutValueSignalMatches('strict_fresh_best', 'spot_drop_option_repricing_lag'), false);
     assert.strictEqual(buyPutValueSignalMatches('fresh_best', 'strict_fresh_best'), true);
     assert.strictEqual(buyPutValueSignalMatches(null, null), true);

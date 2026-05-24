@@ -241,6 +241,11 @@ const BUY_PUT_REPRICING_LAG_SCORE_LOOKBACK_HOURS = 1;
 const BUY_PUT_REPRICING_LAG_MIN_SCORE_TREND_PCT = 6;
 const BUY_PUT_REPRICING_LAG_MIN_SPOT_DROP_PCT = -0.35;
 const BUY_PUT_REPRICING_LAG_NEAR_BEST_PCT = 90;
+const BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS = 6;
+const BUY_PUT_RECENT_VALUE_MIN_SAMPLES = 4;
+const BUY_PUT_RECENT_VALUE_MIN_TREND_PCT = 8;
+const BUY_PUT_RECENT_VALUE_MIN_PERCENTILE = 80;
+const BUY_PUT_RECENT_VALUE_MIN_ROLLING_BEST_PCT = 70;
 
 // Trading parameters - CALLS  
 const CALL_EXPIRATION_RANGE = [5, 12];
@@ -1590,6 +1595,33 @@ const computeScoreTrendPct = (samples, currentScore, hours) => {
   return avg > 0 ? roundForAdvisory(((currentScore - avg) / avg) * 100, 2) : null;
 };
 
+const summarizeRecentScoreWindow = (samples, currentScore, hours) => {
+  if (!(currentScore > 0) || !Array.isArray(samples) || samples.length === 0) {
+    return { hours, samples: 0 };
+  }
+  const cutoff = Date.now() - hours * 60 * 60 * 1000;
+  const scores = samples
+    .filter((row) => new Date(row.timestamp).getTime() >= cutoff)
+    .map((row) => Number(row.score))
+    .filter((score) => score > 0)
+    .sort((a, b) => a - b);
+  if (scores.length === 0) return { hours, samples: 0 };
+
+  const avg = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+  const best = scores[scores.length - 1];
+  const percentile = (scores.filter((score) => score <= currentScore).length / scores.length) * 100;
+
+  return {
+    hours,
+    samples: scores.length,
+    avg_score: roundForAdvisory(avg, 6),
+    best_score: roundForAdvisory(best, 6),
+    percentile: roundForAdvisory(percentile, 1),
+    current_vs_avg_pct: avg > 0 ? roundForAdvisory(((currentScore - avg) / avg) * 100, 2) : null,
+    current_vs_recent_best_pct: best > 0 ? roundForAdvisory((currentScore / best) * 100, 2) : null,
+  };
+};
+
 const computeSpotMovePct = (recentSpotPrices = [], lookbackMinutes = 20) => {
   const rows = Array.isArray(recentSpotPrices)
     ? recentSpotPrices
@@ -1646,9 +1678,57 @@ const buildPutRepricingLagContext = ({
   };
 };
 
+const buildRecentRelativePutValueContext = ({
+  currentScore,
+  priorSamples,
+  priorBestScore,
+  spotAction,
+}) => {
+  const recentWindow = summarizeRecentScoreWindow(
+    priorSamples,
+    currentScore,
+    BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS
+  );
+  const currentVsRollingBestPct = priorBestScore > 0 ? (currentScore / priorBestScore) * 100 : null;
+  const enoughSamples = Number(recentWindow.samples) >= BUY_PUT_RECENT_VALUE_MIN_SAMPLES;
+  const strongRecentPercentile = Number(recentWindow.percentile) >= BUY_PUT_RECENT_VALUE_MIN_PERCENTILE;
+  const strongRecentTrend = Number(recentWindow.current_vs_avg_pct) >= BUY_PUT_RECENT_VALUE_MIN_TREND_PCT;
+  const notGloballyCheapOnly = currentVsRollingBestPct == null
+    || currentVsRollingBestPct >= BUY_PUT_RECENT_VALUE_MIN_ROLLING_BEST_PCT;
+  const compatibleSpot = ['downward', 'stable'].includes(spotAction?.state);
+  const detected = Boolean(
+    currentScore > 0
+    && enoughSamples
+    && strongRecentPercentile
+    && strongRecentTrend
+    && notGloballyCheapOnly
+    && compatibleSpot
+  );
+
+  return {
+    is_detected: detected,
+    lookback_hours: BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS,
+    samples: recentWindow.samples || 0,
+    percentile: recentWindow.percentile ?? null,
+    current_vs_recent_avg_pct: recentWindow.current_vs_avg_pct ?? null,
+    current_vs_recent_best_pct: recentWindow.current_vs_recent_best_pct ?? null,
+    current_vs_rolling_best_pct: roundForAdvisory(currentVsRollingBestPct, 2),
+    thresholds: {
+      min_samples: BUY_PUT_RECENT_VALUE_MIN_SAMPLES,
+      min_trend_pct: BUY_PUT_RECENT_VALUE_MIN_TREND_PCT,
+      min_percentile: BUY_PUT_RECENT_VALUE_MIN_PERCENTILE,
+      min_rolling_best_pct: BUY_PUT_RECENT_VALUE_MIN_ROLLING_BEST_PCT,
+    },
+    reason: detected
+      ? 'Current buy-put score is materially better than the recent local window while still respectable versus the rolling-window best.'
+      : 'No recent-relative buy-put value signal detected.',
+  };
+};
+
 const isActionableBuyPutSignal = (signal) => (
   signal === 'strict_fresh_best'
   || signal === 'spot_drop_option_repricing_lag'
+  || signal === 'recent_relative_value'
 );
 
 const normalizeBuyPutValueSignal = (signal) => {
@@ -1656,7 +1736,8 @@ const normalizeBuyPutValueSignal = (signal) => {
   if (!normalized) return null;
   if (normalized === 'fresh_best') return 'strict_fresh_best';
   if (normalized === 'repricing_lag' || normalized === 'spot_lag') return 'spot_drop_option_repricing_lag';
-  if (['strict_fresh_best', 'spot_drop_option_repricing_lag', 'any_actionable_buy_put'].includes(normalized)) {
+  if (normalized === 'relative_value' || normalized === 'recent_value') return 'recent_relative_value';
+  if (['strict_fresh_best', 'spot_drop_option_repricing_lag', 'recent_relative_value', 'any_actionable_buy_put'].includes(normalized)) {
     return normalized;
   }
   return null;
@@ -1745,12 +1826,21 @@ const buildRollingOptionValueContext = ({
     spotMovePct: spotMove20mPct,
     spotAction,
   });
+  const recentRelativeValue = buildRecentRelativePutValueContext({
+    currentScore,
+    priorSamples,
+    priorBestScore,
+    spotAction,
+  });
   const repricingLagSignal = Boolean(!freshBest && repricingLag.is_detected);
+  const recentRelativeValueSignal = Boolean(!freshBest && !repricingLagSignal && recentRelativeValue.is_detected);
   const actionSignal = freshBest
     ? 'strict_fresh_best'
     : repricingLagSignal
       ? 'spot_drop_option_repricing_lag'
-      : null;
+      : recentRelativeValueSignal
+        ? 'recent_relative_value'
+        : null;
   const requiresDecision = Boolean(actionSignal && budgetAvailable && blockingBuyPutActions === 0);
   const scoreNudge = repricingLagSignal
     ? BUY_PUT_REPRICING_LAG_SCORE_NUDGE
@@ -1806,6 +1896,7 @@ const buildRollingOptionValueContext = ({
       samples: priorScores.length,
     },
     spot_repricing_lag_context: repricingLag,
+    recent_relative_value_context: recentRelativeValue,
     put_budget_context: {
       remaining: roundForAdvisory(Number(putBudgetRemaining), 2),
       budget_available: budgetAvailable,
@@ -1827,8 +1918,10 @@ const buildRollingOptionValueContext = ({
       explanation: requiresDecision
         ? actionSignal === 'spot_drop_option_repricing_lag'
           ? 'Current buy-put value score is locally spiking while spot is dropping, indicating a possible option-repricing lag before asks reset. This requires explicit review, not automatic execution.'
-          : 'Current buy-put value score is strictly better than the prior rolling-window best while budget remains and no buy_put is pending or confirmed. This requires explicit review, not automatic execution.'
-        : 'No fresh-best or spot-lag buy_put review required.',
+          : actionSignal === 'recent_relative_value'
+            ? 'Current buy-put value score is materially good versus the recent local window, even though it is not a strict rolling-window best. This requires explicit review, not automatic execution.'
+            : 'Current buy-put value score is strictly better than the prior rolling-window best while budget remains and no buy_put is pending or confirmed. This requires explicit review, not automatic execution.'
+        : 'No fresh-best, spot-lag, or recent-relative buy_put review required.',
     },
   };
 };
@@ -1840,6 +1933,7 @@ const formatRollingOptionValueContext = (context) => {
   const action = context.action_pressure || {};
   const spotAction = context.spot_price_action || {};
   const lag = context.spot_repricing_lag_context || {};
+  const recent = context.recent_relative_value_context || {};
   const detail = put.current_detail;
   const prior = put.prior_window_best_detail;
   return [
@@ -1849,6 +1943,7 @@ const formatRollingOptionValueContext = (context) => {
     `Current vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${put.is_strict_fresh_best ? 'yes' : 'no'}; samples=${put.samples}.`,
     `Score trend: 1h=${put.trend_1h_pct ?? 'n/a'}%, 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
     `Spot-lag repricing check: detected=${lag.is_detected ? 'yes' : 'no'}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%; spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%; near_best=${lag.current_vs_prior_best_pct ?? 'n/a'}%; reason=${lag.reason || 'n/a'}.`,
+    `Recent-relative value check: detected=${recent.is_detected ? 'yes' : 'no'}; lookback=${recent.lookback_hours ?? 'n/a'}h; samples=${recent.samples ?? 0}; percentile=${recent.percentile ?? 'n/a'}; vs_recent_avg=${recent.current_vs_recent_avg_pct ?? 'n/a'}%; vs_rolling_best=${recent.current_vs_rolling_best_pct ?? 'n/a'}%; reason=${recent.reason || 'n/a'}.`,
     `Put budget: remaining=$${budget.remaining ?? 'n/a'}; active_buy_put_rules=${budget.active_buy_put_rules ?? 0}; blocking_buy_put_actions=${budget.blocking_buy_put_actions ?? 0}; working_buy_put_actions=${budget.working_buy_put_actions ?? 0}; resting_buy_put_orders=${budget.resting_buy_put_orders ?? 0}.`,
     `Spot price action: ${spotAction.state || 'unknown'}${spotAction.slope_pct_6h != null ? ` (${spotAction.slope_pct_6h}% over recent 6h)` : ''}; reason=${spotAction.reason || 'n/a'}.`,
     `Buy-put review: signal=${action.signal || 'none'}; requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; supports_buy_put_review=${action.supports_buy_put_review ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
@@ -6484,10 +6579,12 @@ const getFreshBestBuyPutDisciplinePrompt = () => [
   'FRESH-BEST BUY-PUT DISCIPLINE:',
   `- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d window using buy-put DTE discipline (${BUY_PUT_ADVISORY_DTE_RANGE[0]}-${BUY_PUT_ADVISORY_DTE_RANGE[1]} DTE). A strict fresh best means the market is offering the best delta-per-dollar protection seen in that window.`,
   '- The spot-lag repricing check catches a different cheap-convexity window: spot has dropped and the put score has locally jumped or moved near the rolling best before asks fully recalibrate.',
+  `- The recent-relative value check catches a local value window: the live score is strong versus the last ${BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS}h even if it is not the best score in ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d. Treat signal=recent_relative_value as actionable only with budget and normal buy-put discipline.`,
   '- If requires_buy_put_decision=yes, explicitly evaluate whether to emit a buy_put rule or explain why patience/no-buy is still the better stance. This is a value signal, not an instruction to override discipline.',
-  '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch either strict_fresh_best or spot_drop_option_repricing_lag on a later tick without waiting for a new advisory.',
+  '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch strict_fresh_best, spot_drop_option_repricing_lag, or recent_relative_value on a later tick without waiting for a new advisory.',
   '- If value_signal is present, still include option_type, delta_range, dte_range, budget_limit, and sane max_cost/min_score bounds so the watcher cannot buy low-quality protection.',
   '- If signal=spot_drop_option_repricing_lag, the edge may vanish quickly; prefer ioc or gtc with the supplied near-live target_score instead of a deeply patient post_only bid.',
+  '- If signal=recent_relative_value, prefer post_only or gtc with the supplied target_score unless other facts show urgency.',
   '- If you choose buy_put and spot price action is downward, use less_patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "gtc" or "post_only".',
   '- If you choose buy_put and spot price action is stable, use patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "post_only" or "gtc".',
   '- target_score means the executor will bid abs(delta) / target_score. It is usually below the live ask to improve the observed score; for spot-lag repricing it may be near the live ask because speed matters.',
@@ -7589,7 +7686,7 @@ Given market data, produce a JSON trading agenda with:
         "max_strike_pct": 0.80,
         "min_score": 0.004,
         "target_score": 0.0042,
-        "value_signal": "strict_fresh_best" | "spot_drop_option_repricing_lag" | "any_actionable_buy_put",
+        "value_signal": "strict_fresh_best" | "spot_drop_option_repricing_lag" | "recent_relative_value" | "any_actionable_buy_put",
         "max_cost": 15.00,
         "min_bid": 2.00,
         "market_conditions": [{"field": "spot_price", "op": "lt"|"gt"|"gte"|"lte", "value": 2000}]
