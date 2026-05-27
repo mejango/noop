@@ -842,6 +842,11 @@ export function getBestOptionsBucketed(since: string, bucketMs: number) {
 export function getLiquidityOverTime(since: string) {
   const rows = getStmts().getLiquidityRawData.all(since) as { timestamp: string; raw_data: string }[];
 
+  const isTemporaryV4AggregateSample = (name: string, dex: Record<string, unknown>) => {
+    const poolCount = Number(dex?.pools);
+    return name === 'uniswap_v4' && Number.isFinite(poolCount) && poolCount > 1;
+  };
+
   return rows.map(row => {
     const entry: Record<string, number | string> = { timestamp: row.timestamp };
     try {
@@ -850,6 +855,7 @@ export function getLiquidityOverTime(since: string) {
       if (dexes) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         for (const [name, dex] of Object.entries(dexes) as [string, any][]) {
+          if (isTemporaryV4AggregateSample(name, dex)) continue;
           if (!dex.error && dex.totalLiquidity && !isNaN(dex.totalLiquidity)) {
             entry[name] = dex.totalLiquidity;
           }

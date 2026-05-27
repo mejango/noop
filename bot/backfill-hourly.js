@@ -108,6 +108,8 @@ const insertOnchainBatch = db.transaction((rows) => {
       const dexes = data?.dexLiquidity?.dexes;
       if (!dexes) continue;
       for (const [name, dex] of Object.entries(dexes)) {
+        const poolCount = Number(dex?.pools);
+        if (name === 'uniswap_v4' && Number.isFinite(poolCount) && poolCount > 1) continue;
         if (dex.error) continue;
         const tvl = Number(dex.totalLiquidity) || 0;
         const volume = Number(dex.totalVolume) || 0;

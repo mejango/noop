@@ -744,13 +744,19 @@ const calculateLiquidityFlow = (currentData, historicalData) => {
     };
   }
   
+  const isTemporaryV4AggregateSample = (dexName, dex) => {
+    const poolCount = Number(dex?.pools);
+    return dexName === 'uniswap_v4' && Number.isFinite(poolCount) && poolCount > 1;
+  };
+
   // Calculate total liquidity for each time period
   const calculateTotalLiquidity = (data) => {
     let total = 0;
     let hasValidData = false;
     let hasFailedDexes = false;
     if (data.dexes) {
-      Object.values(data.dexes).forEach(dex => {
+      Object.entries(data.dexes).forEach(([dexName, dex]) => {
+        if (isTemporaryV4AggregateSample(dexName, dex)) return;
         // Skip DEXes that failed to load (have error property)
         if (dex.error) {
           hasFailedDexes = true;
