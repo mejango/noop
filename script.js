@@ -5516,8 +5516,10 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     'Buy-put value confirmation context:',
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(Number(triggerData?.dte), 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
     `- Planned execution limit: ${fmtPrice(limitPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit.`,
-    `- Rule thresholds: min_score=${fmt(minScore)}, target_score=${fmt(targetScore)}; value_signal=${triggerData?.buy_put_signal || 'n/a'}.`,
-    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. Do not invent a different target score or reject by recomputing from stale/partial context when the trigger/planned score satisfies the supplied rule thresholds.`,
+    `- Trigger threshold: min_score=${fmt(minScore)}. Execution target: target_score=${fmt(targetScore)} is a limit-price target, not a minimum trigger threshold; trigger_score below target_score is expected when resting below the live ask.`,
+    `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus trigger_score >= min_score is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
+    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there; do not reject as "not achievable" merely because it is not immediately marketable.`,
+    '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit.',
   ].join('\n');
 };
 
@@ -7037,21 +7039,24 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         action.amount,
         currentPrice || action.price
       );
+      const ruleReasoningLine = action.action === 'buy_put'
+        ? `Standing rule reasoning at advisory creation (historical; may contain stale score/target language, current buy-put trigger context is authoritative): ${action.rule_reasoning || 'N/A'}`
+        : `Rule reasoning: ${action.rule_reasoning || 'N/A'}`;
 
       const confirmPrompt = `Trade confirmation:
 Action: ${action.action} ${action.instrument_name}
 Amount: ${action.amount || 'TBD'}
 Best available price: $${currentPrice || action.price || 'N/A'}
-${advisorEntryLimitPrice ? `Advisor target limit price: $${advisorEntryLimitPrice} (derived from target_score=${triggerData.target_score || 'n/a'}; do not bid worse than this target because urgency is already encoded in target_score).` : ''}
+${advisorEntryLimitPrice ? `Advisor target limit price: $${advisorEntryLimitPrice} (derived from target_score=${triggerData.target_score || 'n/a'}; target_score is a limit-price target, not a minimum trigger threshold; do not bid worse than this target).` : ''}
 ${detailsStr}
-Rule reasoning: ${action.rule_reasoning || 'N/A'}
-Triggered because: ${action.trigger_details || 'N/A'}
 Action semantics: ${describeActionSemantics(action.action)}
 Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
 ${callMarginContext}
 ${buybackConfirmationPrompt}
 ${buyPutConfirmationPrompt}
+${ruleReasoningLine}
+Triggered because: ${action.trigger_details || 'N/A'}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
 ${recentFailedEntry?.reason ? `Recent execution friction on this exact instrument/action: ${recentFailedEntry.reason}` : ''}
 ${recentTradeReviews.length > 0 ? `Recent trade reviews:\n${recentTradeReviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}` : ''}

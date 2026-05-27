@@ -726,8 +726,10 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     'Buy-put value confirmation context:',
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}.`,
     `- Planned execution limit: ${fmtPrice(limitPrice)}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit.`,
-    `- Rule thresholds: target_score=${fmt(targetScore)}; value_signal=${triggerData?.buy_put_signal || 'n/a'}.`,
-    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. Do not invent a different target score or reject by recomputing from stale/partial context when the trigger/planned score satisfies the supplied rule thresholds.`,
+    `- Trigger threshold: min_score=n/a. Execution target: target_score=${fmt(targetScore)} is a limit-price target, not a minimum trigger threshold; trigger_score below target_score is expected when resting below the live ask.`,
+    `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus trigger_score >= min_score is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
+    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there; do not reject as "not achievable" merely because it is not immediately marketable.`,
+    '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit.',
   ].join('\n');
 };
 
@@ -5201,6 +5203,8 @@ describe('confirmation prompt margin context', () => {
 
     assert.ok(context.includes('Trigger score: 0.004014'));
     assert.ok(context.includes('planned_score=0.004014'));
+    assert.ok(context.includes('target_score=0.004010 is a limit-price target, not a minimum trigger threshold'));
+    assert.ok(context.includes('post_only/gtc can rest there'));
     assert.ok(context.includes('live_delta=-0.0737'));
     assert.ok(context.includes('Do not invent a different target score'));
   });
