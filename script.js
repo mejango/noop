@@ -5482,8 +5482,10 @@ const normalizeBuybackCaptureFloor = (rule) => {
 
   let changed = false;
   let previousFloor = null;
+  let hasProfitCaptureCondition = false;
   const conditions = criteria.conditions.map(condition => {
     if (!isBuybackProfitCaptureCondition(condition)) return condition;
+    hasProfitCaptureCondition = true;
     const threshold = Number(condition.value ?? condition.threshold);
     if (threshold >= CALL_BUYBACK_PROFIT_THRESHOLD) return condition;
     previousFloor = previousFloor == null ? threshold : Math.min(previousFloor, threshold);
@@ -5491,18 +5493,64 @@ const normalizeBuybackCaptureFloor = (rule) => {
     return { ...condition, value: CALL_BUYBACK_PROFIT_THRESHOLD };
   });
 
+  if (!hasProfitCaptureCondition) {
+    conditions.push({ field: 'unrealized_pnl_pct', op: 'gte', value: CALL_BUYBACK_PROFIT_THRESHOLD });
+    changed = true;
+  }
+
+  const previousLogic = criteria.condition_logic || 'all';
+  const conditionLogic = 'all';
+  if (previousLogic !== conditionLogic) changed = true;
+
   if (!changed) return { rule, changed: false };
 
-  const suffix = `normalized buyback capture floor: ${previousFloor}% -> ${CALL_BUYBACK_PROFIT_THRESHOLD}%`;
+  const suffixParts = [];
+  if (previousFloor != null) {
+    suffixParts.push(`capture floor: ${previousFloor}% -> ${CALL_BUYBACK_PROFIT_THRESHOLD}%`);
+  } else if (!hasProfitCaptureCondition) {
+    suffixParts.push(`added capture floor: ${CALL_BUYBACK_PROFIT_THRESHOLD}%`);
+  }
+  if (previousLogic !== conditionLogic) {
+    suffixParts.push(`condition_logic: ${previousLogic} -> ${conditionLogic}`);
+  }
+  const suffix = `normalized buyback ${suffixParts.join(', ')}`;
   return {
     rule: {
       ...rule,
-      criteria: { ...criteria, conditions },
+      criteria: { ...criteria, conditions, condition_logic: conditionLogic },
       reasoning: rule.reasoning ? `${rule.reasoning} [${suffix}]` : suffix,
     },
     changed: true,
     reason: suffix,
   };
+};
+
+const getBuybackCaptureGate = (rule, criteria, values) => {
+  if (!rule || rule.rule_type !== 'exit' || rule.action !== 'buyback_call') {
+    return { allowed: true };
+  }
+  if (criteria?.allow_below_profit_floor === true) {
+    return { allowed: true };
+  }
+
+  const condition = getBuybackProfitCaptureCondition(criteria);
+  if (!condition) {
+    return {
+      allowed: false,
+      reason: `missing executable unrealized_pnl_pct >= ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture floor`,
+    };
+  }
+
+  const actual = Number(values?.unrealized_pnl_pct);
+  if (!conditionPasses(actual, condition.op, condition.threshold)) {
+    const opText = condition.op === 'gt' ? '>' : condition.op === 'gte' ? '>=' : condition.op;
+    return {
+      allowed: false,
+      reason: `executable capture ${Number.isFinite(actual) ? actual.toFixed(2) : 'N/A'}% does not satisfy ${opText} ${condition.threshold}%`,
+    };
+  }
+
+  return { allowed: true };
 };
 
 const buildBuybackConfirmationContext = (action, triggerData) => {
@@ -5857,6 +5905,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
         const triggered = evaluateConditions(criteria.conditions, criteria.condition_logic, values);
         if (!triggered) continue;
+
+        const buybackGate = getBuybackCaptureGate(rule, criteria, values);
+        if (!buybackGate.allowed) {
+          console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} — ${buybackGate.reason}`);
+          continue;
+        }
 
         // Dedup: skip if there's already a pending/confirmed action for this rule
         if (db.hasPendingActionForRule(rule.id)) continue;
@@ -7077,6 +7131,22 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
 
       const buybackConfirmationContext = buildBuybackConfirmationContext(action, triggerData);
       const buybackConfirmationPrompt = formatBuybackConfirmationContext(buybackConfirmationContext, liveMarketPrice);
+      const pendingBuybackGate = action.action === 'buyback_call'
+        ? getBuybackCaptureGate(
+            { rule_type: 'exit', action: action.action },
+            parseMaybeJsonObject(action.rule_criteria),
+            triggerData?.current_values || {}
+          )
+        : { allowed: true };
+      if (!pendingBuybackGate.allowed) {
+        const rejectReason = `Auto-rejected before LLM: ${pendingBuybackGate.reason}`;
+        db.updatePendingAction(action.id, {
+          status: 'rejected',
+          confirmation_reasoning: rejectReason,
+        });
+        console.log(`🚫 Rejected: ${action.action} ${action.instrument_name} — ${rejectReason}`);
+        continue;
+      }
       const buyPutConfirmationPrompt = formatBuyPutConfirmationContext({
         action,
         triggerData,
