@@ -706,6 +706,30 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
   return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(1)}pp. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the target cap. Do not reject solely because projected utilization reaches the target cap while it remains at or below ${limitPct.toFixed(1)}%.`;
 };
+const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice }) => {
+  if (action?.action !== 'buy_put') return '';
+  const triggerScore = Number(triggerData?.score);
+  const triggerDelta = Number(triggerData?.delta);
+  const liveDelta = Number(ticker?.option_pricing?.d);
+  const bestAsk = Number(currentPrice || action.price);
+  const targetScore = Number(triggerData?.target_score);
+  const limitPrice = Number(advisorLimitPrice) > 0 && bestAsk > 0
+    ? Math.min(Number(advisorLimitPrice), bestAsk)
+    : Number(advisorLimitPrice) > 0
+      ? Number(advisorLimitPrice)
+      : bestAsk;
+  const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
+  const plannedScore = Math.abs(scoreDelta) > 0 && limitPrice > 0 ? Math.abs(scoreDelta) / limitPrice : null;
+  const fmt = (value, digits = 6) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
+  const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
+  return [
+    'Buy-put value confirmation context:',
+    `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}.`,
+    `- Planned execution limit: ${fmtPrice(limitPrice)}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit.`,
+    `- Rule thresholds: target_score=${fmt(targetScore)}; value_signal=${triggerData?.buy_put_signal || 'n/a'}.`,
+    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. Do not invent a different target score or reject by recomputing from stale/partial context when the trigger/planned score satisfies the supplied rule thresholds.`,
+  ].join('\n');
+};
 
 const clampSellCallQtyToEntryCap = ({
   desiredQty,
@@ -5181,6 +5205,26 @@ describe('confirmation prompt margin context', () => {
   test('non-call action says margin context not applicable', () => {
     const context = getCallMarginContext('buy_put', {}, [], [], [], 2240, 'ETH-20260417-1400-P', 1, 1);
     assert.strictEqual(context, 'Call margin utilization: not applicable for this action.');
+  });
+
+  test('buy_put confirmation context makes trigger score canonical when live delta differs', () => {
+    const context = formatBuyPutConfirmationContext({
+      action: { action: 'buy_put', price: 21 },
+      triggerData: {
+        score: 0.004014,
+        delta: -0.0843,
+        target_score: 0.00401,
+        buy_put_signal: 'spot_drop_option_repricing_lag',
+      },
+      ticker: { a: 21, option_pricing: { d: '-0.0737' } },
+      currentPrice: 21,
+      advisorLimitPrice: 21,
+    });
+
+    assert.ok(context.includes('Trigger score: 0.004014'));
+    assert.ok(context.includes('planned_score=0.004014'));
+    assert.ok(context.includes('live_delta=-0.0737'));
+    assert.ok(context.includes('Do not invent a different target score'));
   });
 
   test('call discipline wording distinguishes entry caps from true emergencies', () => {

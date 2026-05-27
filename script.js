@@ -5492,6 +5492,36 @@ const formatBuybackConfirmationContext = (context, liveMarketPrice) => {
   ].join('\n');
 };
 
+const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice }) => {
+  if (action?.action !== 'buy_put') return '';
+  const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
+  const triggerScore = Number(triggerData?.score);
+  const triggerDelta = Number(triggerData?.delta);
+  const liveDelta = Number(ticker?.option_pricing?.d);
+  const bestAsk = Number(currentPrice || action.price);
+  const targetScore = Number(triggerData?.target_score);
+  const minScore = Number(criteria.min_score ?? triggerData?.min_score);
+  const limitPrice = Number(advisorLimitPrice) > 0 && bestAsk > 0
+    ? Math.min(Number(advisorLimitPrice), bestAsk)
+    : Number(advisorLimitPrice) > 0
+      ? Number(advisorLimitPrice)
+      : bestAsk;
+  const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
+  const plannedScore = Math.abs(scoreDelta) > 0 && limitPrice > 0
+    ? Math.abs(scoreDelta) / limitPrice
+    : null;
+
+  const fmt = (value, digits = 6) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
+  const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
+  return [
+    'Buy-put value confirmation context:',
+    `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(Number(triggerData?.dte), 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
+    `- Planned execution limit: ${fmtPrice(limitPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit.`,
+    `- Rule thresholds: min_score=${fmt(minScore)}, target_score=${fmt(targetScore)}; value_signal=${triggerData?.buy_put_signal || 'n/a'}.`,
+    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. Do not invent a different target score or reject by recomputing from stale/partial context when the trigger/planned score satisfies the supplied rule thresholds.`,
+  ].join('\n');
+};
+
 const getOpenRestingEntryOrders = () => {
   if (!db) return [];
   return db.getOpenRestingOrders().filter(order => order.action === 'buy_put' || order.action === 'sell_call');
@@ -6224,6 +6254,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             target_score_nudge_pct: targetScore != null && best.score > 0 ? +(((targetScore / best.score) - 1) * 100).toFixed(2) : null,
             buy_put_signal: rule.action === 'buy_put' ? buyPutContext?.action_pressure?.signal || null : null,
             spot_repricing_lag: rule.action === 'buy_put' ? buyPutContext?.spot_repricing_lag_context || null : null,
+            recent_relative_value: rule.action === 'buy_put' ? buyPutContext?.recent_relative_value_context || null : null,
             preferred_order_type: buyPutContext?.action_pressure?.signal === 'spot_drop_option_repricing_lag' ? 'ioc' : normalizePreferredOrderType(rule.action, rule.preferred_order_type),
           },
         });
@@ -6983,6 +7014,14 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       const currentPrice = liveMarketPrice || action.price;
       const momentum = botData.mediumTermMomentum;
 
+      // Parse trigger details for advisory's preferred order type and value context.
+      let triggerData = {};
+      try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
+      const advisoryOrderPref = normalizePreferredOrderType(action.action, triggerData.preferred_order_type);
+      const advisorEntryLimitPrice = isEntryAction(action.action) && Number(triggerData.advisor_limit_price) > 0
+        ? Number(triggerData.advisor_limit_price)
+        : null;
+
       // Determine what details to show
       let detailsStr;
       if (isReduceOnlyExitAction(action.action)) {
@@ -6990,19 +7029,21 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         detailsStr = `Position exit. ${describeActionSemantics(action.action)} Trigger: ${action.trigger_details || 'N/A'}`;
       } else {
         // Entry: show option info
-        const delta = ticker ? Number(ticker.option_pricing?.d) : null;
-        detailsStr = `${describeActionSemantics(action.action)} Delta: ${delta?.toFixed(4) || 'N/A'}, Price: $${currentPrice?.toFixed(4) || 'N/A'}`;
+        const triggerDelta = Number(triggerData.delta);
+        const liveDelta = Number(ticker?.option_pricing?.d);
+        const delta = Number.isFinite(triggerDelta) ? triggerDelta : Number.isFinite(liveDelta) ? liveDelta : null;
+        detailsStr = `${describeActionSemantics(action.action)} Delta: ${delta != null ? delta.toFixed(4) : 'N/A'}, Price: $${currentPrice?.toFixed(4) || 'N/A'}`;
       }
 
-      // Parse trigger details for advisory's preferred order type
-      let triggerData = {};
-      try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
-      const advisoryOrderPref = normalizePreferredOrderType(action.action, triggerData.preferred_order_type);
-      const advisorEntryLimitPrice = isEntryAction(action.action) && Number(triggerData.advisor_limit_price) > 0
-        ? Number(triggerData.advisor_limit_price)
-        : null;
       const buybackConfirmationContext = buildBuybackConfirmationContext(action, triggerData);
       const buybackConfirmationPrompt = formatBuybackConfirmationContext(buybackConfirmationContext, liveMarketPrice);
+      const buyPutConfirmationPrompt = formatBuyPutConfirmationContext({
+        action,
+        triggerData,
+        ticker,
+        currentPrice,
+        advisorLimitPrice: advisorEntryLimitPrice,
+      });
       const recentFailedEntry = getRecentFailedEntry(action.action, action.instrument_name);
       const callMarginContext = getCallMarginContext(
         action.action,
@@ -7029,6 +7070,7 @@ Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
 ${callMarginContext}
 ${buybackConfirmationPrompt}
+${buyPutConfirmationPrompt}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
 ${recentFailedEntry?.reason ? `Recent execution friction on this exact instrument/action: ${recentFailedEntry.reason}` : ''}
 ${recentTradeReviews.length > 0 ? `Recent trade reviews:\n${recentTradeReviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}` : ''}
