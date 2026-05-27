@@ -171,7 +171,6 @@ const CALL_BREAKOUT_OVERRIDE_LIMIT_PCT = getCallExposureLimitPct(CALL_BREAKOUT_O
 const CALL_ENTRY_BUFFER_PCT = BOT_CONFIG.CALL_ENTRY_BUFFER_PCT || 0.05;
 const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
 const CALL_BREAKOUT_DERIVATIVES = new Set(['moving', 'slanted', 'steep']);
-const REJECTED_ACTION_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const SUBACCOUNT_ID = 25923;
 
 // ─── Telegram Notifications ──────────────────────────────────────────────────
@@ -5820,11 +5819,6 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
-        if (wasRecentlyRejected(rule.action, rule.instrument_name)) {
-          console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} — rejected recently, cooling down`);
-          continue;
-        }
-
         db.insertPendingAction({
           rule_id: rule.id,
           action: rule.action,
@@ -6224,11 +6218,6 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
-        if (wasRecentlyRejected(rule.action, best.name)) {
-          console.log(`📋 Skip ${rule.action} ${best.name}: rejected recently, cooling down`);
-          continue;
-        }
-
         const recentFailedEntry = getRecentFailedEntry(rule.action, best.name);
         if (recentFailedEntry) {
           console.log(`📋 Skip ${rule.action} ${best.name}: failed recently, cooling down (${recentFailedEntry.reason || 'recent execution failure'})`);
@@ -6431,14 +6420,6 @@ const manageOpenOrders = async (tickerMap) => {
       }
     }
   }
-};
-
-const wasRecentlyRejected = (action, instrumentName, cooldownMs = REJECTED_ACTION_COOLDOWN_MS) => {
-  if (!db || !action || !instrumentName) return false;
-  const lastRejectedAt = db.getLastRejectedAction(action, instrumentName);
-  if (!lastRejectedAt) return false;
-  const elapsed = Date.now() - new Date(lastRejectedAt).getTime();
-  return elapsed >= 0 && elapsed < cooldownMs;
 };
 
 const FAILED_ENTRY_ACTION_COOLDOWN_MS = 30 * 60 * 1000;
@@ -7359,17 +7340,12 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           console.log(`❌ Confirmed but execution failed: ${action.action} ${action.instrument_name} — ${failureReason}`);
         }
       } else {
-        const shouldAlert = !wasRecentlyRejected(action.action, action.instrument_name);
         db.updatePendingAction(action.id, {
           status: 'rejected',
           confirmation_reasoning: reasoning,
         });
         console.log(`🚫 Rejected: ${action.action} ${action.instrument_name} | ${reasoning}`);
-        if (shouldAlert) {
-          sendTelegram(`❌ *REJECTED*: ${action.action} ${action.instrument_name}\n${reasoning}`);
-        } else {
-          console.log(`📋 Rejection alert suppressed: ${action.action} ${action.instrument_name} was already rejected recently`);
-        }
+        sendTelegram(`❌ *REJECTED*: ${action.action} ${action.instrument_name}\n${reasoning}`);
       }
     } catch (e) {
       console.error(`❌ Confirmation error for ${action.instrument_name}:`, e.message);
