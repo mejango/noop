@@ -840,12 +840,18 @@ export function getBestOptionsBucketed(since: string, bucketMs: number) {
 }
 
 export function getLiquidityOverTime(since: string) {
-  const rows = getStmts().getLiquidityRawData.all(since) as { timestamp: string; raw_data: string }[];
+  const sinceMs = Date.parse(since);
+  const seedSince = Number.isFinite(sinceMs)
+    ? new Date(sinceMs - 24 * 60 * 60 * 1000).toISOString()
+    : since;
+  const rows = getStmts().getLiquidityRawData.all(seedSince) as { timestamp: string; raw_data: string }[];
 
   const isTemporaryV4AggregateSample = (name: string, dex: Record<string, unknown>) => {
     const poolCount = Number(dex?.pools);
     return name === 'uniswap_v4' && Number.isFinite(poolCount) && poolCount > 1;
   };
+
+  let lastTrackedV4: Record<string, number> | null = null;
 
   return rows.map(row => {
     const entry: Record<string, number | string> = { timestamp: row.timestamp };
@@ -875,10 +881,24 @@ export function getLiquidityOverTime(since: string) {
             if (firstPool?.feeTier) entry[`${name}_fee`] = firstPool.feeTier;
           }
         }
+        if (typeof entry.uniswap_v4 === 'number') {
+          lastTrackedV4 = {};
+          for (const suffix of ['', '_vol', '_txCount', '_active', '_fee']) {
+            const key = `uniswap_v4${suffix}`;
+            if (typeof entry[key] === 'number') lastTrackedV4[key] = entry[key];
+          }
+        } else if (lastTrackedV4) {
+          for (const [key, value] of Object.entries(lastTrackedV4)) {
+            entry[key] = value;
+          }
+        }
       }
     } catch { /* skip malformed rows */ }
     return entry;
-  }).filter(r => Object.keys(r).length > 1);
+  }).filter(r =>
+    Object.keys(r).length > 1 &&
+    (!Number.isFinite(sinceMs) || Date.parse(r.timestamp as string) >= sinceMs)
+  );
 }
 
 export function getBestScores() {

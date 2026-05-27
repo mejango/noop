@@ -148,6 +148,9 @@ const assertGraphQLSuccess = (response) => {
     .filter(Boolean)
     .join('; ')
     .slice(0, 240);
+  if (message.includes('bad indexers')) {
+    throw new Error('GraphQL bad indexers (subgraph unavailable)');
+  }
   throw new Error(`GraphQL error: ${message || 'unknown error'}`);
 };
 
@@ -739,6 +742,27 @@ const loadHistoricalLiquidity = () => {
   }
 };
 
+const isTemporaryV4AggregateSample = (dexName, dex) => {
+  const poolCount = Number(dex?.pools);
+  return dexName === 'uniswap_v4' && Number.isFinite(poolCount) && poolCount > 1;
+};
+
+const findLastValidDexSample = (historicalData, dexName) => {
+  for (const entry of historicalData || []) {
+    const dex = entry?.dexes?.[dexName];
+    if (!dex || dex.error || isTemporaryV4AggregateSample(dexName, dex)) continue;
+    const totalLiquidity = Number(dex.totalLiquidity);
+    if (Number.isFinite(totalLiquidity) && totalLiquidity > 0) {
+      return {
+        ...dex,
+        stale: true,
+        staleReason: 'subgraph_unavailable',
+      };
+    }
+  }
+  return null;
+};
+
 // Calculate liquidity flow direction
 const calculateLiquidityFlow = (currentData, historicalData) => {
   if (!historicalData || historicalData.length < 2) {
@@ -754,11 +778,6 @@ const calculateLiquidityFlow = (currentData, historicalData) => {
     };
   }
   
-  const isTemporaryV4AggregateSample = (dexName, dex) => {
-    const poolCount = Number(dex?.pools);
-    return dexName === 'uniswap_v4' && Number.isFinite(poolCount) && poolCount > 1;
-  };
-
   const isComparableDex = (dexName, dex) => {
     if (isTemporaryV4AggregateSample(dexName, dex)) return false;
     if (dex?.error) return false;
@@ -906,6 +925,7 @@ const analyzeDEXLiquidity = async (spotPrice) => {
       spotPrice: spotPrice,
       dexes: {}
     };
+    const historicalData = loadHistoricalLiquidity();
 
     // Uniswap V3 analysis - specific pools only
     try {
@@ -1064,15 +1084,20 @@ const analyzeDEXLiquidity = async (spotPrice) => {
         };
       }
     } catch (error) {
-      console.log('⚠️ Uniswap V4 liquidity analysis failed:', error.message);
-      if (error.response) {
-        console.log('⚠️ V4 API Response:', error.response.status, error.response.data);
+      const fallback = findLastValidDexSample(historicalData, 'uniswap_v4');
+      if (fallback) {
+        console.log('⚠️ Uniswap V4 subgraph unavailable; using last valid tracked-pool sample');
+        liquidityData.dexes.uniswap_v4 = fallback;
+      } else {
+        console.log('⚠️ Uniswap V4 liquidity analysis failed:', error.message);
+        if (error.response) {
+          console.log('⚠️ V4 API Response:', error.response.status, error.response.data);
+        }
+        liquidityData.dexes.uniswap_v4 = { error: error.message };
       }
-      liquidityData.dexes.uniswap_v4 = { error: error.message };
     }
 
     // Calculate liquidity flow direction
-    const historicalData = loadHistoricalLiquidity();
     const flowAnalysis = calculateLiquidityFlow(liquidityData, historicalData);
     liquidityData.flowAnalysis = flowAnalysis;
 
