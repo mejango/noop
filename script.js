@@ -8633,6 +8633,15 @@ const runBot = async () => {
       console.log('⛓ Onchain Analysis Summary:');
       try {
         if (onchainAnalysis.dexLiquidity && onchainAnalysis.dexLiquidity.dexes) {
+          const formatTvlUSD = (value) => {
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric) || numeric <= 0) return 'N/A';
+            if (numeric >= 1e9) return `$${(numeric / 1e9).toFixed(2)}B`;
+            if (numeric >= 1e6) return `$${(numeric / 1e6).toFixed(1)}M`;
+            if (numeric >= 1e3) return `$${(numeric / 1e3).toFixed(1)}K`;
+            return `$${numeric.toFixed(0)}`;
+          };
+
           // Show detailed DEX breakdown
           Object.entries(onchainAnalysis.dexLiquidity.dexes).forEach(([dexName, dexData]) => {
             if (dexData.error) {
@@ -8645,19 +8654,20 @@ const runBot = async () => {
                   .sort((a, b) => (b.liquidity || 0) - (a.liquidity || 0))
                   .slice(0, 3);
                 topUniswapV3Pools.forEach(pool => {
-                  const poolLiquidityUSD = pool.liquidityUSD ? `$${(pool.liquidityUSD/1000000).toFixed(1)}M` : 'N/A';
+                  const poolLiquidityUSD = formatTvlUSD(pool.liquidityUSD);
                   console.log(`• ${pool.token0?.symbol || 'Unknown'}/${pool.token1?.symbol || 'Unknown'}: ${poolLiquidityUSD} TVL`);
                 });
               }
 
               // Show top 3 Uniswap V4 pools
               if (dexName === 'uniswap_v4' && dexData.poolDetails && dexData.poolDetails.length > 0) {
-                console.log(`🦄 Uniswap V4 Pools:`);
+                const staleSuffix = dexData.stale ? ' (last valid sample)' : '';
+                console.log(`🦄 Uniswap V4 Pools${staleSuffix}:`);
                 const topUniswapV4Pools = dexData.poolDetails
                   .sort((a, b) => (b.liquidity || 0) - (a.liquidity || 0))
                   .slice(0, 3);
                 topUniswapV4Pools.forEach(pool => {
-                  const poolLiquidityUSD = pool.liquidityUSD ? `$${(pool.liquidityUSD/1000000).toFixed(1)}M` : 'N/A';
+                  const poolLiquidityUSD = formatTvlUSD(pool.liquidityUSD);
                   console.log(`• ${pool.token0?.symbol || 'Unknown'}/${pool.token1?.symbol || 'Unknown'}: ${poolLiquidityUSD} TVL`);
                 });
               }
@@ -8684,7 +8694,7 @@ const runBot = async () => {
                                    flow.direction === 'outflow' ? '📉' : '➡️';
               const magnitudePercent = (flow.magnitude * 100).toFixed(1);
               const confidencePercent = (flow.confidence * 100).toFixed(0);
-              const currentTotal = flow.currentTotal ? `${flow.currentTotal.toFixed(2)} ETH` : 'N/A';
+              const currentTotal = formatTvlUSD(flow.currentTotal);
               console.log(`Liquidity Flow: ${directionEmoji} ${flow.direction.toUpperCase()} (${magnitudePercent}%, confidence: ${confidencePercent}%) - Total: ${currentTotal}`);
 
               // Show multi-timeframe breakdown
@@ -8696,7 +8706,7 @@ const runBot = async () => {
                     const changePercent = (tf.change * 100).toFixed(2);
                     const flowDescription = tf.direction === 'inflow' ? 'liquidity entering' :
                                           tf.direction === 'outflow' ? 'liquidity leaving' : 'stable';
-                    const tfTotal = tf.total ? `$${(tf.total/1000000).toFixed(1)}M` : 'N/A';
+                    const tfTotal = formatTvlUSD(tf.total);
                     console.log(`${timeframe}: ${tfEmoji} ${flowDescription} (${changePercent}%) - ${tfTotal}`);
                   }
                 });
