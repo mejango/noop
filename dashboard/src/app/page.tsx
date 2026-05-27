@@ -2073,7 +2073,7 @@ export default function OverviewPage() {
                   }}
                 />
                 {dexNames.map((name, i) => (
-                  <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />
+                  <Line key={name} yAxisId="tvl" type="stepAfter" dataKey={`${name}_pct`} stroke={getColor(name, i)} strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} />
                 ))}
                 {hasVolume && volDexes.map((name, i) => (
                   <Bar key={`${name}_vol`} yAxisId="vol" dataKey={`${name}_volNorm`} fill={getColor(name, i)} fillOpacity={0.5} stroke="none" isAnimationActive={false} />

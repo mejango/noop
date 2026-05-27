@@ -140,6 +140,16 @@ const DEX_APIS = {
   UNISWAP_V4: `https://gateway.thegraph.com/api/${_THEGRAPH_KEY}/subgraphs/id/DiYPVdygkfjDWhbxGSqAQxwBKmfKnkWQojqeM2rkLb3G`
 };
 
+const assertGraphQLSuccess = (response) => {
+  const errors = response.data?.errors;
+  if (!Array.isArray(errors) || errors.length === 0) return;
+  const message = errors
+    .map(error => error?.message)
+    .filter(Boolean)
+    .join('; ')
+    .slice(0, 240);
+  throw new Error(`GraphQL error: ${message || 'unknown error'}`);
+};
 
 // Common configuration
 const DERIVE_ACCOUNT_ADDRESS = '0xD87890df93bf74173b51077e5c6cD12121d87903';
@@ -749,13 +759,27 @@ const calculateLiquidityFlow = (currentData, historicalData) => {
     return dexName === 'uniswap_v4' && Number.isFinite(poolCount) && poolCount > 1;
   };
 
-  // Calculate total liquidity for each time period
+  const isComparableDex = (dexName, dex) => {
+    if (isTemporaryV4AggregateSample(dexName, dex)) return false;
+    if (dex?.error) return false;
+    const totalLiquidity = Number(dex?.totalLiquidity);
+    return Number.isFinite(totalLiquidity) && totalLiquidity > 0;
+  };
+
+  const currentDexNames = new Set(
+    Object.entries(currentData.dexes || {})
+      .filter(([dexName, dex]) => isComparableDex(dexName, dex))
+      .map(([dexName]) => dexName)
+  );
+
+  // Calculate total liquidity for each time period using the current valid DEX set.
   const calculateTotalLiquidity = (data) => {
     let total = 0;
     let hasValidData = false;
     let hasFailedDexes = false;
     if (data.dexes) {
       Object.entries(data.dexes).forEach(([dexName, dex]) => {
+        if (!currentDexNames.has(dexName)) return;
         if (isTemporaryV4AggregateSample(dexName, dex)) return;
         // Skip DEXes that failed to load (have error property)
         if (dex.error) {
@@ -914,6 +938,7 @@ const analyzeDEXLiquidity = async (spotPrice) => {
       };
       
       const response = await axios.post(DEX_APIS.UNISWAP_V3, uniswapQuery, { timeout: 15000 });
+      assertGraphQLSuccess(response);
       if (response.data?.data?.pools && Array.isArray(response.data.data.pools)) {
         // For Uniswap V3, calculate both TVL and in-range liquidity
         const poolCount = response.data.data.pools.length;
@@ -997,6 +1022,7 @@ const analyzeDEXLiquidity = async (spotPrice) => {
       };
       
       const response = await axios.post(DEX_APIS.UNISWAP_V4, uniswapV4Query, { timeout: 10000 });
+      assertGraphQLSuccess(response);
       if (response.data?.data?.pools && Array.isArray(response.data.data.pools)) {
         // For Uniswap V4, use USD TVL directly (consistent with V3)
         const totalTVLUSD = response.data.data.pools.reduce((sum, pool) => {
