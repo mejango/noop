@@ -961,14 +961,34 @@ const analyzeDEXLiquidity = async (spotPrice) => {
       liquidityData.dexes.uniswap_v3 = { error: error.message };
     }
 
-    // Uniswap V4 analysis - specific pools only
+    // Uniswap V4 analysis - ETH/stable pools across fee tiers/hooks
     try {
       const uniswapV4Query = {
         query: `
                   query {
-                    pools(where: {id_in: [
-                      "0x72331fcb696b0151904c03584b66dc8365bc63f8a144d89a773384e3a579ca73"
-                    ]}) {
+                    pools(
+                      first: 25,
+                      orderBy: totalValueLockedUSD,
+                      orderDirection: desc,
+                      where: {
+                        or: [
+                          {
+                            token0: "0x0000000000000000000000000000000000000000",
+                            token1_in: [
+                              "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                              "0xdac17f958d2ee523a2206206994597c13d831ec7"
+                            ]
+                          },
+                          {
+                            token1: "0x0000000000000000000000000000000000000000",
+                            token0_in: [
+                              "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+                              "0xdac17f958d2ee523a2206206994597c13d831ec7"
+                            ]
+                          }
+                        ]
+                      }
+                    ) {
                       id
                       totalValueLockedUSD
                       volumeUSD
