@@ -6056,7 +6056,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const dteRange = criteria.dte_range; // [min, max]
         const maxStrikePct = criteria.max_strike_pct || null;
         const marketConditions = criteria.market_conditions || null;
-        const maxCost = criteria.max_cost ?? null;
+        // buy_put cost discipline is handled by total budget_limit/put budget
+        // plus score/value filters; per-contract max_cost is deprecated.
+        const maxCost = rule.action === 'buy_put' ? null : criteria.max_cost ?? null;
         const minBid = criteria.min_bid ?? null;
         const minScore = criteria.min_score ?? null;
         const valueSignal = normalizeBuyPutValueSignal(criteria.value_signal ?? criteria.buy_put_signal);
@@ -6120,7 +6122,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             const bidPrice = Number(ticker?.b) || 0;
             const bidAmount = Number(ticker?.B) || 0;
 
-            // Filter by max_cost (for buys)
+            // Filter by max_cost where still supported.
             if (maxCost != null && askPrice > maxCost) { filterStats.costOut++; continue; }
 
             // Filter by min_bid (for sells)
@@ -6707,7 +6709,7 @@ const getFreshBestBuyPutDisciplinePrompt = () => [
   `- The recent-relative value check catches a local value window: the live score is strong versus the last ${BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS}h even if it is not the best score in ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d. Treat signal=recent_relative_value as actionable only with budget and normal buy-put discipline.`,
   '- If requires_buy_put_decision=yes, explicitly evaluate whether to emit a buy_put rule or explain why patience/no-buy is still the better stance. This is a value signal, not an instruction to override discipline.',
   '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch strict_fresh_best, spot_drop_option_repricing_lag, or recent_relative_value on a later tick without waiting for a new advisory.',
-  '- If value_signal is present, still include option_type, delta_range, dte_range, budget_limit, and sane max_cost/min_score bounds so the watcher cannot buy low-quality protection.',
+  '- If value_signal is present, still include option_type, delta_range, dte_range, budget_limit, and sane min_score/target_score bounds so the watcher cannot buy low-quality protection.',
   '- If signal=spot_drop_option_repricing_lag, the edge may vanish quickly; prefer ioc or gtc with the supplied near-live target_score instead of a deeply patient post_only bid.',
   '- If signal=recent_relative_value, prefer post_only or gtc with the supplied target_score unless other facts show urgency.',
   '- If you choose buy_put and spot price action is downward, use less_patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "gtc" or "post_only".',
@@ -7837,7 +7839,6 @@ Given market data, produce a JSON trading agenda with:
         "min_score": 0.004,
         "target_score": 0.0042,
         "value_signal": "strict_fresh_best" | "spot_drop_option_repricing_lag" | "recent_relative_value" | "any_actionable_buy_put",
-        "max_cost": 15.00,
         "min_bid": 2.00,
         "market_conditions": [{"field": "spot_price", "op": "lt"|"gt"|"gte"|"lte", "value": 2000}]
       },
@@ -7862,13 +7863,13 @@ Given market data, produce a JSON trading agenda with:
   ]
 }
 
-CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, max_cost, min_bid, market_conditions. Exit criteria uses: conditions (array of field/op/value objects) and condition_logic ("any" or "all").
+CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, min_bid, market_conditions. Exit criteria uses: conditions (array of field/op/value objects) and condition_logic ("any" or "all").
 
 Rules:
-- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), max_cost (for buys), min_bid (for sells), market_conditions.
+- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_bid (for sells), market_conditions.
 - Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: sell_put should use "ioc". buyback_call may use preferred_order_type ${formatOrderTypeList(getAllowedOrderTypesForAction('buyback_call'))}; patient resting buyback pricing is valid when urgency is low and the market is wide.
-- For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]), max_cost for the max ask price. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
+- For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.

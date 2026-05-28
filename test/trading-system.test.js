@@ -4257,7 +4257,7 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
       if (criteria.max_strike_pct && strike >= criteria.max_strike_pct * spotPrice) continue;
 
       const askPrice = Number(ticker?.a) || 0;
-      if (criteria.max_cost != null && askPrice > criteria.max_cost) continue;
+      if (rule.action !== 'buy_put' && criteria.max_cost != null && askPrice > criteria.max_cost) continue;
 
       const absDelta = Math.abs(delta);
       const score = askPrice > 0 ? absDelta / askPrice : 0;
@@ -4328,7 +4328,6 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
         dte_range: [45, 75],
         max_strike_pct: 0.85,
         min_score: 0.004,
-        max_cost: 15.00,
       },
       budget_limit: 50.00,
     };
@@ -4351,7 +4350,6 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
         dte_range: [45, 75],
         max_strike_pct: 0.85,
         min_score: 0.004,
-        max_cost: 15.00,
         market_conditions: [],
       },
       budget_limit: 50.00,
@@ -4362,7 +4360,27 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
     assert.strictEqual(result.instrument, putInstrument);
   });
 
-  test('Step 2c: sell_call candidate scan rejects far-dated calls even when rule criteria is broad', () => {
+  test('Step 2c: buy_put ignores deprecated per-contract max_cost', () => {
+    const rule = {
+      action: 'buy_put',
+      criteria: {
+        option_type: 'P',
+        delta_range: [-0.08, -0.02],
+        dte_range: [45, 75],
+        max_strike_pct: 0.85,
+        min_score: 0.004,
+        max_cost: 1.00,
+      },
+      budget_limit: 50.00,
+    };
+
+    const result = evaluateEntryRule(rule, tickerMap, instruments, 1800);
+    assert.ok(result, 'buy_put should use total budget and score discipline, not max_cost');
+    assert.strictEqual(result.price, 5.50);
+    assert.ok(result.totalValue <= botData.putBudgetForCycle + botData.putUnspentBuyLimit + 0.01);
+  });
+
+  test('Step 2d: sell_call candidate scan rejects far-dated calls even when rule criteria is broad', () => {
     const farDate = new Date(Date.now() + 34 * 86400000);
     const farExpiry = farDate.toISOString().slice(0, 10).replace(/-/g, '');
     const farCall = `ETH-${farExpiry}-2400-C`;
@@ -4391,7 +4409,7 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
     // Max by budget = 12.32 / 5.50 ≈ 2.24 → quantized to 2.2 (step 0.1)
     const rule = {
       action: 'buy_put',
-      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004, max_cost: 15.00 },
+      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004 },
       budget_limit: 50.00,
     };
 
@@ -4404,7 +4422,7 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
   test('Step 4: Execution decrements putNetBought', () => {
     const rule = {
       action: 'buy_put',
-      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004, max_cost: 15.00 },
+      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004 },
       budget_limit: 50.00,
     };
     const result = evaluateEntryRule(rule, tickerMap, instruments, 1800);
@@ -4422,7 +4440,7 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
 
     const rule = {
       action: 'buy_put',
-      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004, max_cost: 15.00 },
+      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004 },
       budget_limit: 50.00,
     };
     const result = evaluateEntryRule(rule, tickerMap, instruments, 1800);
@@ -4453,7 +4471,7 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
 
     const rule = {
       action: 'buy_put',
-      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004, max_cost: 15.00 },
+      criteria: { option_type: 'P', delta_range: [-0.08, -0.02], dte_range: [45, 75], max_strike_pct: 0.85, min_score: 0.004 },
       budget_limit: 50.00,
     };
     const result = evaluateEntryRule(rule, tickerMap, instruments, 2000);
@@ -4768,10 +4786,12 @@ describe('Entry candidate filtering: all criteria enforced', () => {
     assert.ok(strike < maxStrike, `Strike $${strike} should be < max $${maxStrike}`);
   });
 
-  test('ask price above max_cost → rejected', () => {
+  test('buy_put ask price above max_cost is not rejected by per-contract cost', () => {
     const askPrice = 18.00;
     const maxCost = 15.00;
-    assert.ok(askPrice > maxCost, `Ask $${askPrice} should exceed max_cost $${maxCost}`);
+    const isBuyPut = true;
+    const rejectedByMaxCost = !isBuyPut && askPrice > maxCost;
+    assert.strictEqual(rejectedByMaxCost, false, 'buy_put should rely on score and total spend instead');
   });
 
   test('score below min_score → rejected', () => {
