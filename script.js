@@ -258,6 +258,8 @@ const BUY_PUT_RECENT_VALUE_MIN_SAMPLES = 4;
 const BUY_PUT_RECENT_VALUE_MIN_TREND_PCT = 8;
 const BUY_PUT_RECENT_VALUE_MIN_PERCENTILE = 80;
 const BUY_PUT_RECENT_VALUE_MIN_ROLLING_BEST_PCT = 70;
+const PUT_ROLL_DTE_THRESHOLD = 25;
+const PUT_MONETIZATION_PROFIT_THRESHOLD = 100;
 
 // Trading parameters - CALLS  
 const CALL_EXPIRATION_RANGE = [5, 12];
@@ -4969,7 +4971,7 @@ const buildRulebookRequirements = ({
         type: 'exit',
         instrument_name: snapshot.instrument,
         applies: 'open long put',
-        instruction: 'Create a reduce-only sell_put watcher for favorable monetization, roll, or expiry-management conditions.',
+        instruction: `Create a reduce-only sell_put watcher only for roll/expiry management at <=${PUT_ROLL_DTE_THRESHOLD} DTE or asymmetric monetization after executable PnL reaches >=${PUT_MONETIZATION_PROFIT_THRESHOLD}%.`,
       });
     }
     if (snapshot?.direction === 'short' && snapshot?.option_type === 'C') {
@@ -5407,6 +5409,18 @@ const computeCurrentValues = (position, ticker, spotPrice) => {
 
 const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => {
   const values = computeCurrentValues(position, ticker, spotPrice);
+  if (action === 'sell_put' && position?.direction === 'long') {
+    const executablePrice = Number(ticker?.b) || values.mark_price || 0;
+    const entryPrice = Number(position?.avg_entry_price) || 0;
+    const adjustedPnlPct = entryPrice > 0 ? ((executablePrice - entryPrice) / entryPrice) * 100 : 0;
+
+    return {
+      ...values,
+      unrealized_pnl_pct: adjustedPnlPct,
+      execution_price: executablePrice,
+    };
+  }
+
   if (action !== 'buyback_call' || position?.direction !== 'short') return values;
 
   const executablePrice = Number(ticker?.a) || values.mark_price || 0;
@@ -5551,6 +5565,29 @@ const getBuybackCaptureGate = (rule, criteria, values) => {
   }
 
   return { allowed: true };
+};
+
+const getSellPutProtectionGate = (rule, values) => {
+  if (!rule || rule.action !== 'sell_put') {
+    return { allowed: true };
+  }
+
+  const dte = Number(values?.dte);
+  if (Number.isFinite(dte) && dte <= PUT_ROLL_DTE_THRESHOLD) {
+    return { allowed: true };
+  }
+
+  const pnlPct = Number(values?.unrealized_pnl_pct);
+  if (Number.isFinite(pnlPct) && pnlPct >= PUT_MONETIZATION_PROFIT_THRESHOLD) {
+    return { allowed: true };
+  }
+
+  const dteText = Number.isFinite(dte) ? dte.toFixed(2) : 'n/a';
+  const pnlText = Number.isFinite(pnlPct) ? `${pnlPct.toFixed(2)}%` : 'n/a';
+  return {
+    allowed: false,
+    reason: `protective long put exit requires dte <= ${PUT_ROLL_DTE_THRESHOLD} or executable pnl >= ${PUT_MONETIZATION_PROFIT_THRESHOLD}%; actual dte=${dteText}, executable_pnl=${pnlText}`,
+  };
 };
 
 const buildBuybackConfirmationContext = (action, triggerData) => {
@@ -5909,6 +5946,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const buybackGate = getBuybackCaptureGate(rule, criteria, values);
         if (!buybackGate.allowed) {
           console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} — ${buybackGate.reason}`);
+          continue;
+        }
+        const putExitGate = getSellPutProtectionGate(rule, values);
+        if (!putExitGate.allowed) {
+          console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} — ${putExitGate.reason}`);
           continue;
         }
 
@@ -6724,7 +6766,7 @@ const getStandingRulebookDisciplinePrompt = () => [
   '- buy_put rules define a price/score where insurance is worth buying while put budget remains.',
   '- sell_call rules define premium, delta, DTE, and margin conditions where call selling is worth doing while margin headroom remains.',
   `- sell_call rules must stay inside the normal call sale universe: ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE and ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]} delta.`,
-  '- sell_put rules define when an owned long put should be monetized, rolled, or cleaned up.',
+  `- sell_put rules define when an owned long put should be rolled near expiry or monetized after true asymmetric upside. They must not sell long-dated protection merely because it has recoverable bid value; before ${PUT_ROLL_DTE_THRESHOLD} DTE, require executable unrealized_pnl_pct >= ${PUT_MONETIZATION_PROFIT_THRESHOLD}%.`,
   '- buyback_call rules define when an existing short call should be bought back for profit capture or genuine threat management.',
   '- Do not omit a required watcher just because it is not currently triggered. Tighten criteria instead.',
 ].join('\n');
@@ -6733,7 +6775,7 @@ const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normal
 
 const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, do not panic buy back. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. For newly-created harvest rules, ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is the minimum acceptable capture, not a target to give back to. If live executable buyback price already implies strictly better capture, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
 
-const getPutExitDisciplinePrompt = () => 'PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.';
+const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether monetizing or rolling an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. Do not sell long-dated protection merely because it has recoverable bid value. Before ${PUT_ROLL_DTE_THRESHOLD} DTE, only monetize after executable unrealized_pnl_pct reaches at least ${PUT_MONETIZATION_PROFIT_THRESHOLD}% so the hedge has actually delivered asymmetric upside. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.`;
 
 const getConfirmationJsonOnlyPrompt = () => 'Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.';
 
@@ -7142,6 +7184,21 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         : { allowed: true };
       if (!pendingBuybackGate.allowed) {
         const rejectReason = `Auto-rejected before LLM: ${pendingBuybackGate.reason}`;
+        db.updatePendingAction(action.id, {
+          status: 'rejected',
+          confirmation_reasoning: rejectReason,
+        });
+        console.log(`🚫 Rejected: ${action.action} ${action.instrument_name} — ${rejectReason}`);
+        continue;
+      }
+      const pendingSellPutGate = action.action === 'sell_put'
+        ? getSellPutProtectionGate(
+            { action: action.action },
+            triggerData?.current_values || {}
+          )
+        : { allowed: true };
+      if (!pendingSellPutGate.allowed) {
+        const rejectReason = `Auto-rejected before LLM: ${pendingSellPutGate.reason}`;
         db.updatePendingAction(action.id, {
           status: 'rejected',
           confirmation_reasoning: rejectReason,
@@ -7872,9 +7929,9 @@ Rules:
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
-- For sell_put exits (rolling): roll long puts when DTE reaches ~25. Use exit condition dte lte 25 to trigger the roll. This preserves convexity while avoiding terminal theta decay.
+- For sell_put exits (rolling): roll long puts when DTE reaches ~${PUT_ROLL_DTE_THRESHOLD}. Use exit condition dte lte ${PUT_ROLL_DTE_THRESHOLD} to trigger the roll. This preserves convexity while avoiding terminal theta decay.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.02, 0.10]), min_bid for the minimum bid price. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
-- For sell_put exits: use conditions on dte (e.g. dte lte 25), mark_price, executable PnL, and/or unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. If a put is currently worthless, make the watcher require recoverable value such as mark_price gte 0.10 instead of omitting the rule. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you avoid triggering a sell_put, do it because removing protection is strategically unwise or value is unrecoverable, not because the exit itself uses more margin.
+- For sell_put exits: use conditions on dte (e.g. dte lte ${PUT_ROLL_DTE_THRESHOLD}) or executable unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do not sell a long-dated protective put merely because it has recoverable bid/mark value. Before ${PUT_ROLL_DTE_THRESHOLD} DTE, a monetization watcher must require executable unrealized_pnl_pct gte ${PUT_MONETIZATION_PROFIT_THRESHOLD}. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you avoid triggering a sell_put, do it because removing protection is strategically unwise or value has not delivered asymmetric upside, not because the exit itself uses more margin.
 - For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. The ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line is a minimum acceptable capture, not a target. Use patient gtc/post_only buyback rules when the current executable buyback price is worse than that line and the advisor wants to name a better price; if the live price is already strictly better, do not give back edge by bidding at the threshold. Near expiry, hold/let expire is often superior unless a penny-on-the-dollar bid is available. Never create a threshold-style buyback rule without a live buyback market price. Do not use margin utilization by itself as the buyback trigger. Margin release is a benefit of a good profit-harvest close, not a reason to panic-close. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
@@ -8040,7 +8097,7 @@ ${getMomentumEvidenceDisciplinePrompt()}
 
 ## DTE Discipline (Non-Negotiable)
 - Buy puts at 45-75 DTE. Never below 35 DTE. Short-dated puts bleed theta — you're paying for time decay, not convexity. Veto any buy_put rule outside [45, 75].
-- Roll (sell_put exit) at ~25 DTE to avoid terminal theta decay while preserving convexity.
+- Roll (sell_put exit) at ~${PUT_ROLL_DTE_THRESHOLD} DTE to avoid terminal theta decay while preserving convexity. Before that, only monetize protective puts after executable unrealized_pnl_pct reaches at least ${PUT_MONETIZATION_PROFIT_THRESHOLD}%.
 - Sell calls at 5-12 DTE. Short-dated calls maximize theta harvesting. Veto any sell_call rule with dte above 14.
 
 ## Fresh-Best Put Value Discipline

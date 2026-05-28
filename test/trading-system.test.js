@@ -33,6 +33,8 @@ const describe = (name, fn) => {
 
 const CALL_EXPIRATION_RANGE = [5, 12];
 const CALL_DELTA_RANGE = [0.04, 0.12];
+const PUT_ROLL_DTE_THRESHOLD = 25;
+const PUT_MONETIZATION_PROFIT_THRESHOLD = 100;
 
 const parseExpiryFromInstrument = (name) => {
   if (!name) return null;
@@ -73,6 +75,18 @@ const computeCurrentValues = (position, ticker, spotPrice) => {
 
 const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => {
   const values = computeCurrentValues(position, ticker, spotPrice);
+  if (action === 'sell_put' && position?.direction === 'long') {
+    const executablePrice = Number(ticker?.b) || values.mark_price || 0;
+    const entryPrice = Number(position?.avg_entry_price) || 0;
+    const adjustedPnlPct = entryPrice > 0 ? ((executablePrice - entryPrice) / entryPrice) * 100 : 0;
+
+    return {
+      ...values,
+      unrealized_pnl_pct: adjustedPnlPct,
+      execution_price: executablePrice,
+    };
+  }
+
   if (action !== 'buyback_call' || position?.direction !== 'short') return values;
 
   const executablePrice = Number(ticker?.a) || values.mark_price || 0;
@@ -85,6 +99,24 @@ const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => 
     unrealized_pnl_pct: adjustedPnlPct,
     execution_price: executablePrice,
   };
+};
+
+const getSellPutProtectionGate = (rule, values) => {
+  if (!rule || rule.action !== 'sell_put') {
+    return { allowed: true };
+  }
+
+  const dte = Number(values?.dte);
+  if (Number.isFinite(dte) && dte <= PUT_ROLL_DTE_THRESHOLD) {
+    return { allowed: true };
+  }
+
+  const pnlPct = Number(values?.unrealized_pnl_pct);
+  if (Number.isFinite(pnlPct) && pnlPct >= PUT_MONETIZATION_PROFIT_THRESHOLD) {
+    return { allowed: true };
+  }
+
+  return { allowed: false };
 };
 
 const getTradeCashflow = (order) => {
@@ -1291,6 +1323,30 @@ describe('computeCurrentValues', () => {
     assert.ok(Math.abs(executable.unrealized_pnl_pct - 76.6666666667) < 0.0001, `Expected ask-based pnl ~76.67, got ${executable.unrealized_pnl_pct}`);
     assert.strictEqual(executable.execution_price, 1.4);
     assert.strictEqual(executable.mark_price, 1.0);
+  });
+
+  test('sell_put rule evaluation uses executable bid price for long-put pnl', () => {
+    const position = {
+      instrument_name: 'ETH-20261231-1500-P',
+      direction: 'long',
+      avg_entry_price: 20.0,
+      mark_price: 0,
+      delta: 0,
+      theta: 0,
+    };
+    const ticker = {
+      M: '30.00',
+      b: '27.10',
+      option_pricing: { d: '-0.1', i: '0.65', t: '-0.02' },
+    };
+
+    const base = computeCurrentValues(position, ticker, 1800);
+    const executable = getRuleEvaluationValues(position, ticker, 1800, 'sell_put');
+
+    assert.strictEqual(base.unrealized_pnl_pct, 50);
+    assert.ok(Math.abs(executable.unrealized_pnl_pct - 35.5) < 0.0001, `Expected bid-based pnl 35.5, got ${executable.unrealized_pnl_pct}`);
+    assert.strictEqual(executable.execution_price, 27.1);
+    assert.strictEqual(executable.mark_price, 30);
   });
 
   test('DTE calculation from instrument name', () => {
@@ -4547,6 +4603,25 @@ describe('Full schema: exit monitoring for put rolling', () => {
     assert.strictEqual(triggered, false, 'DTE 40 should NOT trigger roll window (lte 25)');
   });
 
+  test('long-dated protective put is blocked below asymmetric monetization threshold', () => {
+    const rule = { action: 'sell_put' };
+    const values = {
+      dte: 63.7,
+      mark_price: 30.50,
+      execution_price: 27.10,
+      unrealized_pnl_pct: 35.5,
+    };
+    const looseConditionTriggered = evaluateConditions(
+      [{ field: 'mark_price', op: 'gte', value: 0.10 }],
+      'all',
+      values
+    );
+    const gate = getSellPutProtectionGate(rule, values);
+
+    assert.strictEqual(looseConditionTriggered, true, 'Loose recoverable-value condition would trigger');
+    assert.strictEqual(gate.allowed, false, 'Protection gate should block long-dated non-explosive put exits');
+  });
+
   test('position enters roll window → triggers pending action', () => {
     const position = { instrument_name: 'ETH-20260501-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
     const ticker = { M: '4.00', b: '3.50', option_pricing: { d: '-0.03', i: '0.55', t: '-0.04' } };
@@ -4554,6 +4629,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
 
     const values = computeCurrentValues(position, ticker, spotPrice);
     values.dte = 22; // Inside roll window
+    assert.strictEqual(getSellPutProtectionGate({ action: 'sell_put' }, values).allowed, true);
 
     const rules = exitStmts.getExitRules.all();
     for (const rule of rules) {
@@ -4576,6 +4652,15 @@ describe('Full schema: exit monitoring for put rolling', () => {
     assert.strictEqual(pending[0].action, 'sell_put');
     assert.strictEqual(pending[0].instrument_name, 'ETH-20260501-1500-P');
     assert.strictEqual(pending[0].amount, 1.0);
+  });
+
+  test('long-dated put can be monetized after asymmetric upside', () => {
+    const gate = getSellPutProtectionGate(
+      { action: 'sell_put' },
+      { dte: 63.7, unrealized_pnl_pct: 120, execution_price: 44 }
+    );
+
+    assert.strictEqual(gate.allowed, true);
   });
 
   test('dedup: same rule does not trigger twice', () => {
