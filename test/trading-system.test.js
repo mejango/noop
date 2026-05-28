@@ -2361,17 +2361,15 @@ describe('Budget tracking per action type', () => {
     const totalValue = 25.50;
     const action = 'buy_put';
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
     assert.strictEqual(putNetBought, 125.50);
   });
 
-  test('sell_put decreases putNetBought', () => {
+  test('sell_put does NOT change putNetBought', () => {
     let putNetBought = 100;
     const totalValue = 30.00;
     const action = 'sell_put';
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
-    assert.strictEqual(putNetBought, 70.00);
+    assert.strictEqual(putNetBought, 100);
   });
 
   test('sell_call does NOT change putNetBought', () => {
@@ -2379,7 +2377,6 @@ describe('Budget tracking per action type', () => {
     const totalValue = 50.00;
     const action = 'sell_call';
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
     assert.strictEqual(putNetBought, 100);
   });
 
@@ -2388,7 +2385,6 @@ describe('Budget tracking per action type', () => {
     const totalValue = 40.00;
     const action = 'buyback_call';
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
     assert.strictEqual(putNetBought, 100);
   });
 });
@@ -2509,7 +2505,7 @@ const computeCancelBudgetAdjustment = (order) => {
   const isBuy = order.direction === 'buy';
 
   if (isPut && isBuy) return { adjustment: fillValue, action: 'put_bought' };
-  if (isPut && !isBuy) return { adjustment: -fillValue, action: 'put_sold' };
+  if (isPut && !isBuy) return { adjustment: 0, action: 'put_sold' };
   return { adjustment: 0, action: 'call_or_other' };
 };
 
@@ -2525,14 +2521,14 @@ describe('Partial fill budget accounting on cancel', () => {
     assert.strictEqual(r.action, 'put_bought');
   });
 
-  test('cancelled sell put with partial fill → negative budget adjustment', () => {
+  test('cancelled sell put with partial fill → no budget adjustment', () => {
     const r = computeCancelBudgetAdjustment({
       instrument_name: 'ETH-20260501-1500-P',
       direction: 'sell',
       filled_amount: '0.5',
       average_price: '8.00',
     });
-    assert.strictEqual(r.adjustment, -4.00);
+    assert.strictEqual(r.adjustment, 0);
     assert.strictEqual(r.action, 'put_sold');
   });
 
@@ -2774,18 +2770,16 @@ describe('DRY_RUN budget simulation', () => {
     const amount = 1.0, price = 8.00;
     const totalValue = amount * price;
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
     assert.strictEqual(putNetBought, 58.00);
   });
 
-  test('sell_put returns to put budget in dry run', () => {
+  test('sell_put does not replenish put budget in dry run', () => {
     let putNetBought = 50;
     const action = 'sell_put';
     const amount = 0.5, price = 12.00;
     const totalValue = amount * price;
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
-    assert.strictEqual(putNetBought, 44.00);
+    assert.strictEqual(putNetBought, 50);
   });
 
   test('sell_call does not affect put budget in dry run', () => {
@@ -2794,7 +2788,6 @@ describe('DRY_RUN budget simulation', () => {
     const amount = 2.0, price = 15.00;
     const totalValue = amount * price;
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
     assert.strictEqual(putNetBought, 50);
   });
 });
@@ -3066,8 +3059,16 @@ describe('Fill reconciliation', () => {
     const isPut = order.instrument_name.endsWith('-P');
     let budgetDelta = 0;
     if (isPut && order.direction === 'buy') budgetDelta = fillValue;
-    else if (isPut && order.direction === 'sell') budgetDelta = -fillValue;
     assert.strictEqual(budgetDelta, 5.00);
+  });
+
+  test('filled put sell → zero budget adjustment', () => {
+    const order = { instrument_name: 'ETH-20260501-1500-P', direction: 'sell', amount: 1.0, limit_price: 12.00 };
+    const fillValue = order.amount * order.limit_price;
+    const isPut = order.instrument_name.endsWith('-P');
+    let budgetDelta = 0;
+    if (isPut && order.direction === 'buy') budgetDelta = fillValue;
+    assert.strictEqual(budgetDelta, 0);
   });
 
   test('filled call sell → zero budget adjustment (calls are collateral-sized)', () => {
@@ -3076,7 +3077,6 @@ describe('Fill reconciliation', () => {
     const isPut = order.instrument_name.endsWith('-P');
     let budgetDelta = 0;
     if (isPut && order.direction === 'buy') budgetDelta = fillValue;
-    else if (isPut && order.direction === 'sell') budgetDelta = -fillValue;
     assert.strictEqual(budgetDelta, 0);
   });
 });
@@ -3149,7 +3149,6 @@ describe('Fill reconciliation with order status', () => {
     let budgetDelta = 0;
     if (filledAmt > 0) {
       if (isPut && tracked.direction === 'buy') budgetDelta = fillValue;
-      else if (isPut && tracked.direction === 'sell') budgetDelta = -fillValue;
     }
     return { filledAmt, fillPrice, fillValue, status, budgetDelta };
   };
@@ -3214,6 +3213,15 @@ describe('Fill reconciliation with order status', () => {
     );
     assert.strictEqual(r.filledAmt, 2.0);
     assert.strictEqual(r.budgetDelta, 0); // calls don't affect put budget
+  });
+
+  test('filled put sell → zero budget impact', () => {
+    const r = reconcileOrder(
+      { instrument_name: 'ETH-20260501-1500-P', direction: 'sell', amount: 1.0, limit_price: 12.00 },
+      { order_status: 'filled', filled_amount: 1.0, average_price: 12.25 }
+    );
+    assert.strictEqual(r.filledAmt, 1.0);
+    assert.strictEqual(r.budgetDelta, 0);
   });
 
   test('average_price 0 falls back to limit_price', () => {
@@ -3933,17 +3941,15 @@ describe('Dynamic put budget: execution tracking', () => {
     const action = 'buy_put';
     const totalValue = 3.50;
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
     assert.strictEqual(putNetBought, 8.50);
   });
 
-  test('sell_put fill decreases putNetBought (returns budget)', () => {
+  test('sell_put fill does not replenish put budget', () => {
     let putNetBought = 10;
     const action = 'sell_put';
     const totalValue = 4.00;
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
-    assert.strictEqual(putNetBought, 6.00);
+    assert.strictEqual(putNetBought, 10);
   });
 
   test('sell_call does not affect putNetBought', () => {
@@ -3951,7 +3957,6 @@ describe('Dynamic put budget: execution tracking', () => {
     const action = 'sell_call';
     const totalValue = 8.00;
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
     assert.strictEqual(putNetBought, 10);
   });
 
@@ -3960,7 +3965,6 @@ describe('Dynamic put budget: execution tracking', () => {
     const action = 'buyback_call';
     const totalValue = 8.00;
     if (action === 'buy_put') putNetBought += totalValue;
-    else if (action === 'sell_put') putNetBought -= totalValue;
     assert.strictEqual(putNetBought, 10);
   });
 
@@ -3973,9 +3977,21 @@ describe('Dynamic put budget: execution tracking', () => {
     const isPut = tracked.instrument_name.endsWith('-P');
     if (filledAmt > 0) {
       if (isPut && tracked.direction === 'buy') putNetBought += fillValue;
-      else if (isPut && tracked.direction === 'sell') putNetBought -= fillValue;
     }
     assert.strictEqual(putNetBought, 8.00);
+  });
+
+  test('resting put sell fill does not replenish put budget on reconciliation', () => {
+    let putNetBought = 8;
+    const tracked = { instrument_name: 'ETH-20260501-1500-P', direction: 'sell' };
+    const filledAmt = 1.0;
+    const fillPrice = 12.00;
+    const fillValue = filledAmt * fillPrice;
+    const isPut = tracked.instrument_name.endsWith('-P');
+    if (filledAmt > 0) {
+      if (isPut && tracked.direction === 'buy') putNetBought += fillValue;
+    }
+    assert.strictEqual(putNetBought, 8);
   });
 
   test('resting call sell fill does not track budget', () => {
@@ -3987,7 +4003,6 @@ describe('Dynamic put budget: execution tracking', () => {
     const isPut = tracked.instrument_name.endsWith('-P');
     if (filledAmt > 0) {
       if (isPut && tracked.direction === 'buy') putNetBought += fillValue;
-      else if (isPut && tracked.direction === 'sell') putNetBought -= fillValue;
     }
     assert.strictEqual(putNetBought, 5); // unchanged
   });
@@ -4001,7 +4016,6 @@ describe('Dynamic put budget: execution tracking', () => {
     const isPut = tracked.instrument_name.endsWith('-P');
     if (filledAmt > 0) {
       if (isPut && tracked.direction === 'buy') putNetBought += fillValue;
-      else if (isPut && tracked.direction === 'sell') putNetBought -= fillValue;
     }
     assert.strictEqual(putNetBought, 5); // unchanged
   });
@@ -4796,12 +4810,11 @@ describe('DRY_RUN mode budget tracking', () => {
 
     // Simulate DRY_RUN executeOrder logic
     if (action === 'buy_put') botState.putNetBought += totalValue;
-    else if (action === 'sell_put') botState.putNetBought -= totalValue;
 
     assert.strictEqual(botState.putNetBought, 11.00, 'DRY_RUN should still track put spending');
   });
 
-  test('sell_put in DRY_RUN returns budget', () => {
+  test('sell_put in DRY_RUN does not replenish put budget', () => {
     const botState = { putNetBought: 11.00 };
     const action = 'sell_put';
     const amount = 1.0;
@@ -4809,9 +4822,8 @@ describe('DRY_RUN mode budget tracking', () => {
     const totalValue = amount * price;
 
     if (action === 'buy_put') botState.putNetBought += totalValue;
-    else if (action === 'sell_put') botState.putNetBought -= totalValue;
 
-    assert.strictEqual(botState.putNetBought, 7.00, 'Selling a put should return budget');
+    assert.strictEqual(botState.putNetBought, 11.00, 'Selling a put should not return budget');
   });
 
   test('sell_call in DRY_RUN does not affect put budget', () => {
@@ -4820,7 +4832,6 @@ describe('DRY_RUN mode budget tracking', () => {
     const totalValue = 3.00;
 
     if (action === 'buy_put') botState.putNetBought += totalValue;
-    else if (action === 'sell_put') botState.putNetBought -= totalValue;
 
     assert.strictEqual(botState.putNetBought, 5.00, 'Call sells should not affect put budget');
   });

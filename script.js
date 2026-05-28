@@ -6489,7 +6489,6 @@ const manageOpenOrders = async (tickerMap) => {
         if (filledAmt > 0) {
           const isPut = tracked.instrument_name?.endsWith('-P');
           if (isPut && tracked.direction === 'buy') botData.putNetBought += fillValue;
-          else if (isPut && tracked.direction === 'sell') botData.putNetBought -= fillValue;
           persistCycleState();
         }
 
@@ -6823,7 +6822,6 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   if (process.env.DRY_RUN === '1') {
     const totalValue = amount * price;
     if (action === 'buy_put') botData.putNetBought += totalValue;
-    else if (action === 'sell_put') botData.putNetBought -= totalValue;
     persistCycleState();
     if (db) db.insertOrder({
       action, success: true, reason: `DRY RUN: simulated ${action} (${orderType})`,
@@ -7083,8 +7081,6 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   // Track put budget discipline (arithmetic cost commitment)
   if (action === 'buy_put') {
     botData.putNetBought += totalValue;
-  } else if (action === 'sell_put') {
-    botData.putNetBought -= totalValue;
   }
   persistCycleState();
 
@@ -7690,7 +7686,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
       cycleDays: BOT_CONFIG.PERIOD_DAYS,
       insuredPortfolioBaseUsd: +insuredPortfolioBaseUsd.toFixed(2),
       insuredExternalEth: PUT_INSURED_EXTERNAL_ETH,
-      note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of insured base per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Budget base = Derive USDC plus total insured ETH marked at spot, where external insured ETH is fixed at ${PUT_INSURED_EXTERNAL_ETH.toFixed(4)}. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once.`,
+      note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of insured base per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Budget base = Derive USDC plus total insured ETH marked at spot, where external insured ETH is fixed at ${PUT_INSURED_EXTERNAL_ETH.toFixed(4)}. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once. Selling puts realizes cash but does not replenish this cycle's put-buying budget.`,
     },
     note: 'Account is ETH-collateralized on Derive. buying_power = available initial margin for new trades. margin_usage_pct mirrors the Derive display metric. Projected trade sizing still uses the bot internal margin estimate. Sizing must respect buying power, put budget discipline, and the active call margin-utilization cap, which can widen during an upside breakout when the bot already has short calls on.',
   };
@@ -7935,7 +7931,7 @@ ${getStandingRulebookDisciplinePrompt()}
 - For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. The ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line is a minimum acceptable capture, not a target. Use patient gtc/post_only buyback rules when the current executable buyback price is worse than that line and the advisor wants to name a better price; if the live price is already strictly better, do not give back edge by bidding at the threshold. Near expiry, hold/let expire is often superior unless a penny-on-the-dollar bid is available. Never create a threshold-style buyback rule without a live buyback market price. Do not use margin utilization by itself as the buyback trigger. Margin release is a benefit of a good profit-harvest close, not a reason to panic-close. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
-- Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending.
+- Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending. Selling owned puts realizes cash but does not replenish the current cycle's put-buying budget.
 - For calls: the normal target cap is ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold; the code may size down within that zone. In the specific case of an upside breakout with short calls already open, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit so the bot can sell into richer bullish premium rather than paying up for fear-driven buybacks. This override is for breakout add-ons only, not generic leverage creep.
 - Entry rules should target the highest-scoring candidates when possible.
 - Exit rules MUST reference specific instrument_name from current positions
