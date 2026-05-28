@@ -34,7 +34,7 @@ const describe = (name, fn) => {
 const CALL_EXPIRATION_RANGE = [5, 12];
 const CALL_DELTA_RANGE = [0.04, 0.12];
 const PUT_ROLL_DTE_THRESHOLD = 25;
-const PUT_MONETIZATION_PROFIT_THRESHOLD = 100;
+const PUT_MONETIZATION_PROFIT_THRESHOLD = 500;
 
 const parseExpiryFromInstrument = (name) => {
   if (!name) return null;
@@ -112,7 +112,7 @@ const getSellPutProtectionGate = (rule, values) => {
   }
 
   const pnlPct = Number(values?.unrealized_pnl_pct);
-  if (Number.isFinite(pnlPct) && pnlPct >= PUT_MONETIZATION_PROFIT_THRESHOLD) {
+  if (Number.isFinite(pnlPct) && pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD) {
     return { allowed: true };
   }
 
@@ -4654,13 +4654,22 @@ describe('Full schema: exit monitoring for put rolling', () => {
     assert.strictEqual(pending[0].amount, 1.0);
   });
 
-  test('long-dated put can be monetized after asymmetric upside', () => {
+  test('long-dated put can be considered after extreme asymmetric upside', () => {
     const gate = getSellPutProtectionGate(
       { action: 'sell_put' },
-      { dte: 63.7, unrealized_pnl_pct: 120, execution_price: 44 }
+      { dte: 63.7, unrealized_pnl_pct: 520, execution_price: 120 }
     );
 
     assert.strictEqual(gate.allowed, true);
+  });
+
+  test('long-dated put at monetization boundary is still blocked', () => {
+    const gate = getSellPutProtectionGate(
+      { action: 'sell_put' },
+      { dte: 63.7, unrealized_pnl_pct: PUT_MONETIZATION_PROFIT_THRESHOLD, execution_price: 100 }
+    );
+
+    assert.strictEqual(gate.allowed, false);
   });
 
   test('dedup: same rule does not trigger twice', () => {
