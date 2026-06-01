@@ -1675,6 +1675,13 @@ describe('DB operations (isolated test database)', () => {
       WHERE action = @action AND status = 'executed'
       ORDER BY executed_at DESC LIMIT 1
     `),
+    getLastRejectedAction: testDb.prepare(`
+      SELECT triggered_at, confirmation_reasoning, execution_result FROM pending_actions
+      WHERE action = @action
+        AND instrument_name = @instrument_name
+        AND status = 'rejected'
+      ORDER BY triggered_at DESC LIMIT 1
+    `),
   };
 
   // Helper functions mirroring bot/db.js
@@ -1729,6 +1736,7 @@ describe('DB operations (isolated test database)', () => {
   const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ status });
   const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
   const getLastExecutedAction = (action) => stmts.getLastExecutedAction.get({ action })?.executed_at || null;
+  const getLastRejectedAction = (action, instrumentName) => stmts.getLastRejectedAction.get({ action, instrument_name: instrumentName }) || null;
 
   // ── replaceActiveRules tests ──
 
@@ -1969,6 +1977,34 @@ describe('DB operations (isolated test database)', () => {
     });
 
     assert.strictEqual(hasPendingActionForRule(ruleId), true);
+  });
+
+  test('rejected action is retrievable for one-hour backoff checks', () => {
+    replaceActiveRules('adv-rejected-backoff', [
+      { rule_type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260501-1500-P',
+        criteria: { conditions: [{ field: 'dte', op: 'lte', value: 25 }], condition_logic: 'all' },
+        priority: 'medium', reasoning: 'Roll watcher' },
+    ]);
+    const rules = getActiveRulesByType('exit');
+    const ruleId = rules[0].id;
+    const result = insertPendingAction({
+      rule_id: ruleId,
+      action: 'sell_put',
+      instrument_name: 'ETH-20260501-1500-P',
+      amount: 1,
+      price: 5.4,
+      trigger_details: null,
+    });
+
+    updatePendingAction(result.lastInsertRowid, {
+      status: 'rejected',
+      confirmation_reasoning: 'Advisor rejected roll this tick',
+    });
+
+    assert.strictEqual(hasPendingActionForRule(ruleId), false, 'Rejected action should not count as active pending');
+    const rejected = getLastRejectedAction('sell_put', 'ETH-20260501-1500-P');
+    assert.ok(rejected, 'Rejected action should be available to cooldown logic');
+    assert.strictEqual(rejected.confirmation_reasoning, 'Advisor rejected roll this tick');
   });
 
   // ── getLastExecutedAction tests ──
