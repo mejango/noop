@@ -525,7 +525,11 @@ const buildRulebookRequirements = ({ putBudgetRemaining = 0, accountHealth = {},
   const utilizationPct = Number(call.utilizationPct ?? margin.margin_usage_pct);
   const limitPct = Number(call.bufferedLimitPct) * 100;
   if (accountHealth.margin && !margin.is_under_liquidation && utilizationPct < limitPct) {
-    requirements.push({ type: 'entry', action: 'sell_call' });
+    requirements.push({
+      type: 'entry',
+      action: 'sell_call',
+      instruction: 'Create a standing sell_call watcher only for favorable call premium. Encode value with min_score (call score = bid / abs(delta)) plus min_bid, DTE, delta, and margin criteria; do not use a broad spot_price floor as a substitute for better premium or post-drop recovery.',
+    });
   }
 
   for (const snapshot of positionSnapshots) {
@@ -1179,6 +1183,22 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(requirements.some((req) => req.type === 'entry' && req.action === 'sell_call'));
     assert.ok(requirements.some((req) => req.type === 'exit' && req.action === 'sell_put' && req.instrument_name === 'ETH-20260529-1000-P'));
     assert.ok(requirements.some((req) => req.type === 'exit' && req.action === 'buyback_call' && req.instrument_name === 'ETH-20260529-2400-C'));
+  });
+
+  test('sell_call watcher requirement demands score-based premium value', () => {
+    const requirements = buildRulebookRequirements({
+      accountHealth: {
+        margin: { is_under_liquidation: false, margin_usage_pct: 49.8 },
+        callMarginDiscipline: { utilizationPct: 49.8, bufferedLimitPct: 0.5 },
+      },
+    });
+    const requirement = requirements.find((req) => req.type === 'entry' && req.action === 'sell_call');
+
+    assert.ok(requirement);
+    assert.ok(requirement.instruction.includes('min_score'));
+    assert.ok(requirement.instruction.includes('bid / abs(delta)'));
+    assert.ok(requirement.instruction.includes('min_bid'));
+    assert.ok(requirement.instruction.includes('do not use a broad spot_price floor'));
   });
 
   test('detects missing required watcher rules in an agenda', () => {
