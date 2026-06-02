@@ -5468,6 +5468,13 @@ const isBuybackProfitCaptureCondition = (condition) => {
   return Number.isFinite(Number(condition.value ?? condition.threshold));
 };
 
+const REDUNDANT_BUYBACK_CAPTURE_FIELDS = new Set(['dte', 'mark_price']);
+
+const isThreatManagementBuybackCriteria = (criteria) => (
+  criteria?.allow_below_profit_floor === true
+  || criteria?.buyback_intent === 'threat_management'
+);
+
 const getBuybackProfitCaptureCondition = (criteria) => {
   const parsed = parseMaybeJsonObject(criteria);
   if (!parsed || !Array.isArray(parsed.conditions)) return null;
@@ -5493,20 +5500,33 @@ const normalizeBuybackCaptureFloor = (rule) => {
 
   const criteria = parseMaybeJsonObject(rule.criteria);
   if (!criteria || !Array.isArray(criteria.conditions)) return { rule, changed: false };
-  if (criteria.allow_below_profit_floor === true) return { rule, changed: false };
+  if (isThreatManagementBuybackCriteria(criteria)) return { rule, changed: false };
 
   let changed = false;
   let previousFloor = null;
   let hasProfitCaptureCondition = false;
-  const conditions = criteria.conditions.map(condition => {
-    if (!isBuybackProfitCaptureCondition(condition)) return condition;
+  const removedCaptureBlockers = new Set();
+  const conditions = [];
+  for (const condition of criteria.conditions) {
+    if (REDUNDANT_BUYBACK_CAPTURE_FIELDS.has(condition?.field)) {
+      removedCaptureBlockers.add(condition.field);
+      changed = true;
+      continue;
+    }
+    if (!isBuybackProfitCaptureCondition(condition)) {
+      conditions.push(condition);
+      continue;
+    }
     hasProfitCaptureCondition = true;
     const threshold = Number(condition.value ?? condition.threshold);
-    if (threshold >= CALL_BUYBACK_PROFIT_THRESHOLD) return condition;
+    if (threshold >= CALL_BUYBACK_PROFIT_THRESHOLD) {
+      conditions.push(condition);
+      continue;
+    }
     previousFloor = previousFloor == null ? threshold : Math.min(previousFloor, threshold);
     changed = true;
-    return { ...condition, value: CALL_BUYBACK_PROFIT_THRESHOLD };
-  });
+    conditions.push({ ...condition, value: CALL_BUYBACK_PROFIT_THRESHOLD });
+  }
 
   if (!hasProfitCaptureCondition) {
     conditions.push({ field: 'unrealized_pnl_pct', op: 'gte', value: CALL_BUYBACK_PROFIT_THRESHOLD });
@@ -5528,6 +5548,9 @@ const normalizeBuybackCaptureFloor = (rule) => {
   if (previousLogic !== conditionLogic) {
     suffixParts.push(`condition_logic: ${previousLogic} -> ${conditionLogic}`);
   }
+  if (removedCaptureBlockers.size > 0) {
+    suffixParts.push(`removed redundant ${Array.from(removedCaptureBlockers).join('/')} capture blocker(s)`);
+  }
   const suffix = `normalized buyback ${suffixParts.join(', ')}`;
   return {
     rule: {
@@ -5544,7 +5567,7 @@ const getBuybackCaptureGate = (rule, criteria, values) => {
   if (!rule || rule.rule_type !== 'exit' || rule.action !== 'buyback_call') {
     return { allowed: true };
   }
-  if (criteria?.allow_below_profit_floor === true) {
+  if (isThreatManagementBuybackCriteria(criteria)) {
     return { allowed: true };
   }
 
@@ -6816,7 +6839,7 @@ const getStandingRulebookDisciplinePrompt = () => [
 
 const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normally target ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% execution band when the size still matters. Do not reject solely because projected utilization reaches or slightly exceeds the ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% target while it remains within the ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% buffered limit. When spot is breaking upward and short calls are already on, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% with a buffered limit of ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% only if margin context explicitly shows breakout_override=active. These are discipline limits for new entries, not margin-emergency thresholds. Reject call sells that exceed the buffered limit, lack buying power, or are too small to matter.`;
 
-const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, do not panic buy back. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. For newly-created harvest rules, ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture is the minimum acceptable capture, not a target to give back to. If live executable buyback price already implies strictly better capture, do not bid back up to the threshold. For low-urgency penny/capture cleanup, use mark_price and executable unrealized_pnl_pct as the trigger; do not add a DTE condition that prevents posting a cheap resting bid before the final day. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
+const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, keep two intents separate. Intent 1 is profit/capacity reset while the short call is winning: use buyback_intent="profit_capture" and executable unrealized_pnl_pct >= ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic trigger. Do not add DTE or mark_price blockers for this intent; executable capture already uses the live buyback ask. Intent 2 is threat management when price is moving against the short call and time is running out for recovery: use buyback_intent="threat_management" with allow_below_profit_floor=true, and conditions on real threat facts such as delta, spot vs strike, and remaining DTE. Do not panic buy back. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
 
 const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. DTE <= ${PUT_ROLL_DTE_THRESHOLD} is a valid roll trigger and does not need the ${PUT_MONETIZATION_PROFIT_THRESHOLD}% monetization threshold. When DTE is above ${PUT_ROLL_DTE_THRESHOLD}, only consider monetizing after executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}%. Even when the hard trigger is satisfied, confirm only if the full market context says selling is wise rather than prematurely cutting convexity. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.`;
 
@@ -7951,7 +7974,9 @@ Given market data, produce a JSON trading agenda with:
       "instrument_name": "<specific instrument name from positions>",
       "criteria": {
         "conditions": [{"field": "dte"|"delta"|"mark_price"|"unrealized_pnl_pct"|"iv"|"theta"|"spot_price", "op": "lt"|"gt"|"gte"|"lte", "value": <number>}],
-        "condition_logic": "any" | "all"
+        "condition_logic": "any" | "all",
+        "buyback_intent": "profit_capture" | "threat_management",
+        "allow_below_profit_floor": false
       },
       "priority": "high" | "medium" | "low",
       "preferred_order_type": ${EXIT_ALLOWED_ORDER_TYPES.map((orderType) => `"${orderType}"`).join(' | ')},
@@ -7960,11 +7985,11 @@ Given market data, produce a JSON trading agenda with:
   ]
 }
 
-CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, min_bid, market_conditions. Exit criteria uses: conditions (array of field/op/value objects) and condition_logic ("any" or "all").
+CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, min_bid, market_conditions. Exit criteria uses: conditions (array of field/op/value objects) and condition_logic ("any" or "all"). buyback_call criteria may also include buyback_intent and allow_below_profit_floor.
 
 Rules:
 - Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_bid (for sells), market_conditions. For sell_call, include min_score as the primary value gate.
-- Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte.
+- Exit criteria MUST include: conditions (array of {field, op, value}), condition_logic ("any" or "all"). Fields: dte, delta, mark_price, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte. For buyback_call, include buyback_intent; set allow_below_profit_floor true only for threat_management.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: sell_put should use "ioc". buyback_call may use preferred_order_type ${formatOrderTypeList(getAllowedOrderTypesForAction('buyback_call'))}; patient resting buyback pricing is valid when urgency is low and the market is wide.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 ${getFreshBestBuyPutDisciplinePrompt()}
@@ -7972,7 +7997,7 @@ ${getStandingRulebookDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~${PUT_ROLL_DTE_THRESHOLD}. Use exit condition dte lte ${PUT_ROLL_DTE_THRESHOLD} to trigger the roll. This preserves convexity while avoiding terminal theta decay. This roll trigger is independent of the ${PUT_MONETIZATION_PROFIT_THRESHOLD}% monetization threshold.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.04, 0.12]), min_bid for the minimum bid price, and min_score for favorable premium. Sell-call score is bid / abs(delta); use it to require genuinely rich premium, especially when margin utilization is near the caution/buffer zone or price action is weak/downward. Do not rely on spot_price >= some floor as a recovery or value condition. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
 - For sell_put exits: use conditions on dte (e.g. dte lte ${PUT_ROLL_DTE_THRESHOLD}) or executable unrealized_pnl_pct. IMPORTANT: sell_put means selling an already-owned long put to close or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do not sell a long-dated protective put merely because it has recoverable bid/mark value. When DTE is above ${PUT_ROLL_DTE_THRESHOLD}, a monetization watcher must require executable unrealized_pnl_pct gt ${PUT_MONETIZATION_PROFIT_THRESHOLD}. At or below ${PUT_ROLL_DTE_THRESHOLD} DTE, a roll watcher may trigger without the monetization threshold, but confirmation should still decide whether the roll is wise. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you avoid triggering a sell_put, do it because removing protection is strategically unwise or value has not delivered extreme asymmetric upside, not because the exit itself uses more margin.
-- For buyback_call exits: use conditions on unrealized_pnl_pct, dte, and/or delta. Think about what actually threatens the position vs. what's just noise. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. The ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line is a minimum acceptable capture, not a target. Use patient gtc/post_only buyback rules when the current executable buyback price is worse than that line and the advisor wants to name a better price; if the live price is already strictly better, do not give back edge by bidding at the threshold. Near expiry, hold/let expire is often superior unless a penny-on-the-dollar bid is available. For penny/capture cleanup, use mark_price and executable unrealized_pnl_pct as the actionable trigger and let the bot post a cheap resting bid when that price emerges; do not add dte lte 1 as a blocker that prevents posting the bid earlier. Never create a threshold-style buyback rule without a live buyback market price. Do not use margin utilization by itself as the buyback trigger. Margin release is a benefit of a good profit-harvest close, not a reason to panic-close. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
+- For buyback_call exits, choose one intent. Intent 1: profit_capture / capacity reset while the short call is working. Use buyback_intent "profit_capture" and executable unrealized_pnl_pct gte ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the primary condition. Do not add dte or mark_price trigger blockers; executable capture already includes the live ask and is the relevant economic threshold. Intent 2: threat_management when price is moving against the short call and time is running out for recovery inside the threatened range. Use buyback_intent "threat_management", set allow_below_profit_floor true, and use real threat conditions such as delta, spot_price vs strike, and remaining DTE. Do not mix these two intents in one rule. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. The ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line is a minimum acceptable capture, not a target. Use patient gtc/post_only buyback rules when the current executable buyback price is worse than that line and the advisor wants to name a better price; if the live price is already strictly better, do not give back edge by bidding at the threshold. Never create a threshold-style buyback rule without a live buyback market price. Do not use margin utilization by itself as the buyback trigger. Margin release is a benefit of a good profit-harvest close, not a reason to panic-close. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending. Selling owned puts realizes cash but does not replenish the current cycle's put-buying budget.

@@ -5233,25 +5233,41 @@ describe('buyback_call limit discipline', () => {
 
 describe('advisor-led buyback confirmation discipline', () => {
   const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
+  const REDUNDANT_BUYBACK_CAPTURE_FIELDS = new Set(['dte', 'mark_price']);
 
   const isProfitCaptureCondition = (condition) =>
     condition?.field === 'unrealized_pnl_pct'
     && ['gte', 'gt'].includes(condition.op)
     && Number.isFinite(Number(condition.value ?? condition.threshold));
 
+  const isThreatManagementCriteria = (criteria) =>
+    criteria?.allow_below_profit_floor === true
+    || criteria?.buyback_intent === 'threat_management';
+
   const normalizeCaptureFloor = (rule) => {
     if (rule.rule_type !== 'exit' || rule.action !== 'buyback_call') return { rule, changed: false };
-    if (rule.criteria?.allow_below_profit_floor === true) return { rule, changed: false };
+    if (isThreatManagementCriteria(rule.criteria)) return { rule, changed: false };
 
     let changed = false;
     let hasProfitCaptureCondition = false;
-    const conditions = rule.criteria.conditions.map(condition => {
-      if (!isProfitCaptureCondition(condition)) return condition;
+    const conditions = [];
+    for (const condition of rule.criteria.conditions) {
+      if (REDUNDANT_BUYBACK_CAPTURE_FIELDS.has(condition?.field)) {
+        changed = true;
+        continue;
+      }
+      if (!isProfitCaptureCondition(condition)) {
+        conditions.push(condition);
+        continue;
+      }
       hasProfitCaptureCondition = true;
-      if (Number(condition.value ?? condition.threshold) >= CALL_BUYBACK_PROFIT_THRESHOLD) return condition;
+      if (Number(condition.value ?? condition.threshold) >= CALL_BUYBACK_PROFIT_THRESHOLD) {
+        conditions.push(condition);
+        continue;
+      }
       changed = true;
-      return { ...condition, value: CALL_BUYBACK_PROFIT_THRESHOLD };
-    });
+      conditions.push({ ...condition, value: CALL_BUYBACK_PROFIT_THRESHOLD });
+    }
     if (!hasProfitCaptureCondition) {
       conditions.push({ field: 'unrealized_pnl_pct', op: 'gte', value: CALL_BUYBACK_PROFIT_THRESHOLD });
       changed = true;
@@ -5275,7 +5291,7 @@ describe('advisor-led buyback confirmation discipline', () => {
 
   const captureGateAllows = ({ rule, values }) => {
     if (rule.rule_type !== 'exit' || rule.action !== 'buyback_call') return true;
-    if (rule.criteria?.allow_below_profit_floor === true) return true;
+    if (isThreatManagementCriteria(rule.criteria)) return true;
     const condition = rule.criteria.conditions.find(isProfitCaptureCondition);
     if (!condition) return false;
     return conditionPasses(
@@ -5325,7 +5341,7 @@ describe('advisor-led buyback confirmation discipline', () => {
 
     assert.strictEqual(normalized.changed, true);
     assert.strictEqual(normalized.rule.criteria.conditions[0].value, 80);
-    assert.strictEqual(normalized.rule.criteria.conditions[1].value, 7);
+    assert.strictEqual(normalized.rule.criteria.conditions.some((condition) => condition.field === 'dte'), false);
   });
 
   test('normalizes OR buyback rules so theta cannot bypass capture floor', () => {
@@ -5347,7 +5363,7 @@ describe('advisor-led buyback confirmation discipline', () => {
     assert.strictEqual(captureGateAllows({ rule: normalized.rule, values: { theta: -0.9, unrealized_pnl_pct: 82 } }), true);
   });
 
-  test('adds capture floor to dte-only buyback rules', () => {
+  test('adds capture floor to dte-only buyback rules without keeping dte as a blocker', () => {
     const normalized = normalizeCaptureFloor({
       rule_type: 'exit',
       action: 'buyback_call',
@@ -5361,7 +5377,50 @@ describe('advisor-led buyback confirmation discipline', () => {
     assert.strictEqual(normalized.changed, true);
     assert.ok(captureCondition);
     assert.strictEqual(captureCondition.value, 80);
-    assert.strictEqual(captureGateAllows({ rule: normalized.rule, values: { dte: 7, unrealized_pnl_pct: 65 } }), false);
+    assert.strictEqual(normalized.rule.criteria.conditions.some((condition) => condition.field === 'dte'), false);
+    assert.strictEqual(captureGateAllows({ rule: normalized.rule, values: { dte: 30, unrealized_pnl_pct: 65 } }), false);
+    assert.strictEqual(captureGateAllows({ rule: normalized.rule, values: { dte: 30, unrealized_pnl_pct: 82 } }), true);
+  });
+
+  test('removes mark_price from normalized buyback capture rules', () => {
+    const normalized = normalizeCaptureFloor({
+      rule_type: 'exit',
+      action: 'buyback_call',
+      criteria: {
+        conditions: [
+          { field: 'mark_price', op: 'lte', value: 0.5 },
+          { field: 'unrealized_pnl_pct', op: 'gte', value: 80 },
+        ],
+        condition_logic: 'all',
+      },
+    });
+
+    assert.strictEqual(normalized.changed, true);
+    assert.deepStrictEqual(normalized.rule.criteria.conditions, [
+      { field: 'unrealized_pnl_pct', op: 'gte', value: 80 },
+    ]);
+  });
+
+  test('preserves threat-management buyback rules below the profit floor', () => {
+    const rule = {
+      rule_type: 'exit',
+      action: 'buyback_call',
+      criteria: {
+        buyback_intent: 'threat_management',
+        allow_below_profit_floor: true,
+        conditions: [
+          { field: 'dte', op: 'lte', value: 3 },
+          { field: 'delta', op: 'gte', value: 0.45 },
+          { field: 'spot_price', op: 'gte', value: 2380 },
+        ],
+        condition_logic: 'all',
+      },
+    };
+
+    const normalized = normalizeCaptureFloor(rule);
+    assert.strictEqual(normalized.changed, false);
+    assert.deepStrictEqual(normalized.rule.criteria.conditions, rule.criteria.conditions);
+    assert.strictEqual(captureGateAllows({ rule: normalized.rule, values: { unrealized_pnl_pct: 12 } }), true);
   });
 
   test('explicit below-floor allowance is left untouched', () => {
