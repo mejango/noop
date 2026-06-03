@@ -5487,6 +5487,28 @@ describe('advisor-led buyback confirmation discipline', () => {
     return false;
   };
 
+  const buildBuybackContext = ({ actual, patientCapturePct, threshold = CALL_BUYBACK_PROFIT_THRESHOLD, op = 'gte' }) => {
+    const actualSatisfied = conditionPasses(actual, op, threshold);
+    const patientSatisfied = conditionPasses(patientCapturePct, op, threshold);
+    return {
+      threshold,
+      op,
+      actual,
+      patientCapturePct,
+      satisfied: actualSatisfied || patientSatisfied,
+      actualSatisfied,
+      patientSatisfied,
+    };
+  };
+
+  const isPatientBuybackThresholdMisclassification = (reason) => {
+    const text = String(reason || '').toLowerCase();
+    return text.includes('advisor limit')
+      && text.includes('would capture')
+      && text.includes('live executable ask')
+      && (text.includes('below the 80') || text.includes('conditions_met=false'));
+  };
+
   const captureGateAllows = ({ rule, values }) => {
     if (rule.rule_type !== 'exit' || rule.action !== 'buyback_call') return true;
     if (isThreatManagementCriteria(rule.criteria)) return true;
@@ -5645,6 +5667,24 @@ describe('advisor-led buyback confirmation discipline', () => {
     });
 
     assert.strictEqual(decision, 'confirmed');
+  });
+
+  test('patient buyback bid can satisfy profit-capture rule before live ask does', () => {
+    const context = buildBuybackContext({
+      actual: 77.49,
+      patientCapturePct: 80,
+    });
+
+    assert.strictEqual(context.actualSatisfied, false);
+    assert.strictEqual(context.patientSatisfied, true);
+    assert.strictEqual(context.satisfied, true);
+  });
+
+  test('recognizes stale rejection caused by patient buyback threshold misclassification', () => {
+    const reason = 'Rule NOT satisfied: unrealized_pnl_pct 77.49% is below the 80% threshold. Advisor limit_price=$3.82 would capture 80%, but live executable ask=$4.30 does not achieve the 80% capture rule threshold. conditions_met=false';
+
+    assert.strictEqual(isPatientBuybackThresholdMisclassification(reason), true);
+    assert.strictEqual(isPatientBuybackThresholdMisclassification('Reject: genuine threat-management concern'), false);
   });
 
   test('split review still rejects when the buyback rule is not satisfied or price is missing', () => {

@@ -5931,6 +5931,8 @@ const buildBuybackConfirmationContext = (action, triggerData) => {
   const patientCapturePct = Number(triggerData?.patient_buyback_capture_pct ?? triggerData?.current_values?.patient_buyback_capture_pct);
 
   if (!Number.isFinite(threshold)) return null;
+  const actualSatisfied = conditionPasses(actual, op, threshold);
+  const patientSatisfied = conditionPasses(patientCapturePct, op, threshold);
 
   return {
     threshold,
@@ -5939,7 +5941,9 @@ const buildBuybackConfirmationContext = (action, triggerData) => {
     executionPrice: Number.isFinite(executionPrice) && executionPrice > 0 ? executionPrice : null,
     patientLimitPrice: Number.isFinite(patientLimitPrice) && patientLimitPrice > 0 ? patientLimitPrice : null,
     patientCapturePct: Number.isFinite(patientCapturePct) ? patientCapturePct : null,
-    satisfied: conditionPasses(actual, op, threshold),
+    satisfied: actualSatisfied || patientSatisfied,
+    actualSatisfied,
+    patientSatisfied,
   };
 };
 
@@ -5955,11 +5959,19 @@ const formatBuybackConfirmationContext = (context, liveMarketPrice) => {
   return [
     'Advisor-rule buyback context:',
     `- Active buyback_call rule threshold: executable unrealized_pnl_pct ${opText} ${context.threshold}%`,
-    `- Current executable capture from trigger details: ${actualText}; rule_satisfied=${context.satisfied ? 'yes' : 'no'}`,
+    `- Current executable capture from trigger details: ${actualText}; live_rule_satisfied=${context.actualSatisfied ? 'yes' : 'no'}; patient_bid_satisfies_rule=${context.patientSatisfied ? 'yes' : 'no'}; rule_satisfied=${context.satisfied ? 'yes' : 'no'}`,
     `- Live buyback ask: ${liveText}; trigger execution_price=${executionText}${patientText}`,
     `- If the rule names max_buyback_price, treat that cap as patient bid guidance: use gtc/post_only at or below the named price rather than crossing a higher ask.`,
     `- Confirmation should validate live price, reduce-only semantics, and rule consistency. Do not reject solely because the call is OTM, delta is low, theta remains, or the rule is a profit-harvest/capacity-reset rather than a threat signal. The advisor rule is the source of strategic intent for this pending exit.`,
   ].join('\n');
+};
+
+const isPatientBuybackThresholdMisclassification = (reason) => {
+  const text = String(reason || '').toLowerCase();
+  return text.includes('advisor limit')
+    && text.includes('would capture')
+    && text.includes('live executable ask')
+    && (text.includes('below the 80') || text.includes('conditions_met=false'));
 };
 
 const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice }) => {
@@ -6311,8 +6323,15 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
         const recentRejection = getRecentRejectedAction(rule.action, rule.instrument_name);
         if (recentRejection) {
-          console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} rejected recently; backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
-          continue;
+          const ignorePatientBuybackRejection = rule.action === 'buyback_call'
+            && patientBuybackPlan
+            && isPatientBuybackThresholdMisclassification(recentRejection.reason);
+          if (ignorePatientBuybackRejection) {
+            console.log(`📋 Exit retry: ${rule.action} ${rule.instrument_name} ignoring stale patient-buyback threshold rejection; advisor limit $${patientBuybackPlan.limitPrice.toFixed(4)} captures ${patientBuybackPlan.capturePct.toFixed(2)}%`);
+          } else {
+            console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} rejected recently; backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
+            continue;
+          }
         }
 
         const existingRestingExit = findRestingExitOrderForRule(openRestingExitOrders, rule);
