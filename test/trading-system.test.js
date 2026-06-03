@@ -190,7 +190,7 @@ const getPatientSellPutPlan = (rule, criteria, position) => {
   if (!(limitPrice > 0) || !(entryPrice > 0)) return null;
   const pnlPct = ((limitPrice - entryPrice) / entryPrice) * 100;
   if (!(pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
-  return { limitPrice, pnlPct, preferredOrderType: rule.preferred_order_type || 'gtc' };
+  return { limitPrice, pnlPct, preferredOrderType: 'ioc' };
 };
 
 const getTradeCashflow = (order) => {
@@ -654,7 +654,7 @@ const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
     instrument_name: requirement.instrument_name,
     criteria,
     priority: 'low',
-    preferred_order_type: maxBuybackPrice != null ? 'post_only' : 'ioc',
+    preferred_order_type: 'ioc',
   };
 };
 
@@ -918,7 +918,7 @@ const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, 
     `- Intent=${triggerData?.put_exit_intent || criteria.put_exit_intent || 'n/a'}. sell_put closes an owned long put; it is reduce_only and capital-releasing, not a naked short-put entry.`,
     `- Current executable exit: live_bid=${fmtPrice(currentValues.execution_price ?? currentPrice ?? action.price)}, live_unrealized_pnl_pct=${fmt(livePnlPct)}%, patient_floor_pnl_pct=${fmt(patientPnlPct)}%.`,
     `- Protection discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
-    `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use patient gtc/post_only at or above the floor rather than dumping into the bid.`,
+    `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use an IOC limit at or above the floor; zero fill is better than dumping into a thin bid.`,
   ].join('\n');
 };
 
@@ -1394,7 +1394,7 @@ describe('Standing rulebook coverage requirements', () => {
       { field: 'unrealized_pnl_pct', op: 'gte', value: 80 },
     ]);
     assert.strictEqual(fallback.criteria.max_buyback_price, 3.82);
-    assert.strictEqual(fallback.preferred_order_type, 'post_only');
+    assert.strictEqual(fallback.preferred_order_type, 'ioc');
   });
 });
 
@@ -2880,8 +2880,8 @@ describe('execution order type normalization', () => {
   const ACTION_POLICY = {
     buy_put: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
     sell_call: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
-    sell_put: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
-    buyback_call: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
+    sell_put: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc'] },
+    buyback_call: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc'] },
   };
   const getActionPolicy = (action) => ACTION_POLICY[action] || null;
   const isReduceOnlyExitAction = (action) => Boolean(getActionPolicy(action)?.reduceOnly);
@@ -2895,17 +2895,16 @@ describe('execution order type normalization', () => {
   const isInvalidReduceOnlyOrderType = (action, orderType) => {
     return !getAllowedOrderTypesForAction(action).includes(orderType);
   };
-  const clampSellPutOrderTypeForIntent = (orderType, intent) => (
-    intent === 'roll_protection' && orderType !== 'ioc' ? 'ioc' : orderType
-  );
+  const clampSellPutOrderTypeForIntent = (orderType) => (orderType !== 'ioc' ? 'ioc' : orderType);
 
-  test('sell_put allows resting order types for protected tail-win exits', () => {
-    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'gtc'), false);
-    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'post_only'), false);
+  test('sell_put rejects resting order types because reduce_only exits must be non-resting', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'gtc'), true);
+    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'post_only'), true);
   });
 
-  test('buyback_call allows post_only for patient reduce_only buybacks', () => {
-    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'post_only'), false);
+  test('buyback_call rejects resting order types because reduce_only exits must be non-resting', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'post_only'), true);
+    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'gtc'), true);
   });
 
   test('sell_put accepts ioc for reduce_only exit', () => {
@@ -2916,26 +2915,27 @@ describe('execution order type normalization', () => {
     assert.strictEqual(isInvalidReduceOnlyOrderType('sell_call', 'post_only'), false);
   });
 
-  test('sell_put keeps patient resting preference for monetization rules', () => {
-    assert.strictEqual(normalizePreferredOrderType('sell_put', 'post_only'), 'post_only');
+  test('sell_put ignores patient resting preference for monetization rules', () => {
+    assert.strictEqual(normalizePreferredOrderType('sell_put', 'post_only'), null);
   });
 
-  test('roll_protection sell_put still clamps execution to ioc', () => {
-    assert.strictEqual(clampSellPutOrderTypeForIntent('gtc', 'roll_protection'), 'ioc');
-    assert.strictEqual(clampSellPutOrderTypeForIntent('post_only', 'roll_protection'), 'ioc');
-    assert.strictEqual(clampSellPutOrderTypeForIntent('post_only', 'monetize_tail_win'), 'post_only');
+  test('sell_put always clamps execution to ioc', () => {
+    assert.strictEqual(clampSellPutOrderTypeForIntent('gtc'), 'ioc');
+    assert.strictEqual(clampSellPutOrderTypeForIntent('post_only'), 'ioc');
+    assert.strictEqual(clampSellPutOrderTypeForIntent('ioc'), 'ioc');
   });
 
   test('sell_call keeps valid resting preference', () => {
     assert.strictEqual(normalizePreferredOrderType('sell_call', 'post_only'), 'post_only');
   });
 
-  test('buyback_call keeps valid resting preference', () => {
-    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'post_only'), 'post_only');
+  test('buyback_call ignores resting preference', () => {
+    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'post_only'), null);
   });
 
-  test('exit preference is normalized case-insensitively', () => {
-    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'GTC'), 'gtc');
+  test('exit preference accepts ioc case-insensitively', () => {
+    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'IOC'), 'ioc');
+    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'GTC'), null);
   });
 });
 
@@ -4956,7 +4956,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
     };
     const liveValues = { dte: 63.7, unrealized_pnl_pct: 300, execution_price: 20 };
     const plan = getPatientSellPutPlan(
-      { action: 'sell_put', preferred_order_type: 'post_only' },
+      { action: 'sell_put', preferred_order_type: 'ioc' },
       criteria,
       position
     );
@@ -6013,7 +6013,7 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('tranche_fraction=0.2500'));
     assert.ok(context.includes('retain_downside_protection=yes'));
     assert.ok(context.includes('Advisor exit floor: $120.0000'));
-    assert.ok(context.includes('rather than dumping into the bid'));
+    assert.ok(context.includes('zero fill is better than dumping into a thin bid'));
   });
 
   test('confirmation scope is last-mile execution, not a second advisory', () => {
