@@ -1554,7 +1554,7 @@ const roundForAdvisory = (value, digits = 4) => (
 const floorOptionPriceCents = (value) => {
   const numeric = Number(value);
   if (!(numeric > 0)) return null;
-  return Math.max(0.01, Math.floor(numeric * 100) / 100);
+  return Math.max(0.01, Math.floor((numeric + 1e-9) * 100) / 100);
 };
 
 const parseAdvisoryOptionInstrument = (name) => {
@@ -5021,6 +5021,48 @@ const findMissingRulebookRequirements = (agenda = {}, requirements = []) => {
       rule?.action === req.action && rule?.instrument_name === req.instrument_name
     );
   });
+};
+
+const buildAgendaFromValidatedRules = (rules = []) => ({
+  entry_rules: (rules || []).filter((rule) => rule?.rule_type === 'entry'),
+  exit_rules: (rules || []).filter((rule) => rule?.rule_type === 'exit'),
+});
+
+const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
+  if (requirement?.type !== 'exit' || requirement?.action !== 'buyback_call' || !requirement.instrument_name) {
+    return null;
+  }
+
+  const snapshot = (context.positionSnapshots || []).find((item) => item?.instrument === requirement.instrument_name);
+  const entryPrice = Number(snapshot?.avg_entry_price);
+  const maxBuybackPrice = entryPrice > 0
+    ? floorOptionPriceCents(entryPrice * (1 - CALL_BUYBACK_PROFIT_THRESHOLD / 100))
+    : null;
+  const criteria = {
+    buyback_intent: 'profit_capture',
+    conditions: [
+      { field: 'unrealized_pnl_pct', op: 'gte', value: CALL_BUYBACK_PROFIT_THRESHOLD },
+    ],
+    condition_logic: 'all',
+    target_capture_pct: CALL_BUYBACK_PROFIT_THRESHOLD,
+  };
+  if (maxBuybackPrice != null) {
+    criteria.max_buyback_price = maxBuybackPrice;
+  }
+
+  return {
+    rule_type: 'exit',
+    action: 'buyback_call',
+    instrument_name: requirement.instrument_name,
+    criteria,
+    budget_limit: null,
+    priority: 'low',
+    reasoning: maxBuybackPrice != null
+      ? `Required short-call coverage fallback: patient reduce-only buyback watcher at ${CALL_BUYBACK_PROFIT_THRESHOLD}%+ capture; max bid $${maxBuybackPrice.toFixed(2)} from entry $${entryPrice.toFixed(2)}.`
+      : `Required short-call coverage fallback: reduce-only buyback watcher only when executable capture reaches ${CALL_BUYBACK_PROFIT_THRESHOLD}%+.`,
+    advisory_id: context.advisoryId || null,
+    preferred_order_type: maxBuybackPrice != null ? 'post_only' : 'ioc',
+  };
 };
 
 const parseCriteriaForSummary = (criteria) => {
@@ -8806,6 +8848,40 @@ Return the full repaired agenda JSON.`,
         console.log(`📋 Advisory ${advisoryId}: ${normalized.reason} for ${rawRule.instrument_name}`);
       }
       allRules.push(normalized.rule);
+    }
+  }
+
+  const postValidationMissingCoverage = findMissingRulebookRequirements(
+    buildAgendaFromValidatedRules(allRules),
+    rulebookRequirements
+  );
+  let fallbackRulesAdded = 0;
+  for (const requirement of postValidationMissingCoverage) {
+    const fallbackRule = buildCanonicalRequiredWatcherRule(requirement, {
+      advisoryId,
+      positionSnapshots: positionAdviceSnapshots,
+    });
+    if (!fallbackRule) continue;
+
+    const validation = validateAdvisorRuleContract(fallbackRule, { positionSnapshots: positionAdviceSnapshots });
+    if (!validation.valid) {
+      console.log(`📋 Advisory ${advisoryId}: canonical fallback rejected for ${requirement.action} ${requirement.instrument_name || ''} — ${validation.reason}`);
+      continue;
+    }
+    allRules.push(fallbackRule);
+    fallbackRulesAdded++;
+    console.log(`📋 Advisory ${advisoryId}: added canonical ${fallbackRule.action} watcher for ${fallbackRule.instrument_name} after validation coverage check`);
+  }
+  if (fallbackRulesAdded > 0) {
+    const remainingMissing = findMissingRulebookRequirements(
+      buildAgendaFromValidatedRules(allRules),
+      rulebookRequirements
+    );
+    if (remainingMissing.length > 0) {
+      const remainingText = remainingMissing
+        .map((req) => `${req.type}/${req.action}${req.instrument_name ? ` ${req.instrument_name}` : ''}`)
+        .join(', ');
+      console.log(`📋 Advisory ${advisoryId}: required watcher coverage still missing after fallback: ${remainingText}`);
     }
   }
 

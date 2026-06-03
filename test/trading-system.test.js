@@ -36,6 +36,7 @@ const CALL_DELTA_RANGE = [0.04, 0.12];
 const PUT_ROLL_DTE_THRESHOLD = 25;
 const PUT_MONETIZATION_PROFIT_THRESHOLD = 500;
 const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
+const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
 
 const parseExpiryFromInstrument = (name) => {
   if (!name) return null;
@@ -458,7 +459,7 @@ const evaluateConditions = (conditions, logic, values) => {
 const floorOptionPriceCents = (value) => {
   const numeric = Number(value);
   if (!(numeric > 0)) return null;
-  return Math.max(0.01, Math.floor(numeric * 100) / 100);
+  return Math.max(0.01, Math.floor((numeric + 1e-9) * 100) / 100);
 };
 
 const buildBuyPutFreshBestPressure = ({
@@ -604,6 +605,36 @@ const findMissingRulebookRequirements = (agenda, requirements) => {
     if (req.type === 'entry') return !entryRules.some((rule) => rule.action === req.action);
     return !exitRules.some((rule) => rule.action === req.action && rule.instrument_name === req.instrument_name);
   });
+};
+
+const buildAgendaFromValidatedRules = (rules = []) => ({
+  entry_rules: rules.filter((rule) => rule.rule_type === 'entry'),
+  exit_rules: rules.filter((rule) => rule.rule_type === 'exit'),
+});
+
+const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
+  if (requirement.type !== 'exit' || requirement.action !== 'buyback_call') return null;
+  const snapshot = (context.positionSnapshots || []).find((item) => item.instrument === requirement.instrument_name);
+  const entryPrice = Number(snapshot?.avg_entry_price);
+  const maxBuybackPrice = entryPrice > 0
+    ? floorOptionPriceCents(entryPrice * (1 - CALL_BUYBACK_PROFIT_THRESHOLD / 100))
+    : null;
+  const criteria = {
+    buyback_intent: 'profit_capture',
+    conditions: [{ field: 'unrealized_pnl_pct', op: 'gte', value: CALL_BUYBACK_PROFIT_THRESHOLD }],
+    condition_logic: 'all',
+    target_capture_pct: CALL_BUYBACK_PROFIT_THRESHOLD,
+  };
+  if (maxBuybackPrice != null) criteria.max_buyback_price = maxBuybackPrice;
+
+  return {
+    rule_type: 'exit',
+    action: 'buyback_call',
+    instrument_name: requirement.instrument_name,
+    criteria,
+    priority: 'low',
+    preferred_order_type: maxBuybackPrice != null ? 'post_only' : 'ioc',
+  };
 };
 
 const extractOrderRecord = (payload) => {
@@ -1272,6 +1303,28 @@ describe('Standing rulebook coverage requirements', () => {
       { type: 'entry', action: 'sell_call' },
       { type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260529-1000-P' },
     ]);
+  });
+
+  test('adds canonical short-call buyback coverage after validation drops advisor rule', () => {
+    const requirements = [
+      { type: 'exit', action: 'buyback_call', instrument_name: 'ETH-20260626-2400-C' },
+    ];
+    const validatedRules = [];
+    const missing = findMissingRulebookRequirements(buildAgendaFromValidatedRules(validatedRules), requirements);
+    const fallback = buildCanonicalRequiredWatcherRule(missing[0], {
+      positionSnapshots: [
+        { instrument: 'ETH-20260626-2400-C', direction: 'short', option_type: 'C', avg_entry_price: 19.10 },
+      ],
+    });
+
+    assert.strictEqual(fallback.action, 'buyback_call');
+    assert.strictEqual(fallback.instrument_name, 'ETH-20260626-2400-C');
+    assert.strictEqual(fallback.criteria.buyback_intent, 'profit_capture');
+    assert.deepStrictEqual(fallback.criteria.conditions, [
+      { field: 'unrealized_pnl_pct', op: 'gte', value: 80 },
+    ]);
+    assert.strictEqual(fallback.criteria.max_buyback_price, 3.82);
+    assert.strictEqual(fallback.preferred_order_type, 'post_only');
   });
 });
 
