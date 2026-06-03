@@ -5689,10 +5689,69 @@ const getPatientBuybackPlan = (rule, criteria, position) => {
 
   return {
     limitPrice,
+    ceilingPrice: limitPrice,
     capturePct,
+    entryPrice,
     targetCapturePct,
     preferredOrderType,
+    priceReason: 'capture_floor_ceiling',
   };
+};
+
+const getBuybackCapturePctAtPrice = (entryPrice, buybackPrice) => {
+  const entry = Number(entryPrice);
+  const price = Number(buybackPrice);
+  if (!(entry > 0) || !(price > 0)) return null;
+  return ((entry - price) / entry) * 100;
+};
+
+const refinePatientBuybackPlanPrice = (plan, ticker, instrument) => {
+  if (!plan) return null;
+
+  const entryPrice = Number(plan.entryPrice);
+  const targetCapturePct = Number(plan.targetCapturePct);
+  const rawCeiling = Number(plan.ceilingPrice ?? plan.limitPrice);
+  if (!(entryPrice > 0) || !(targetCapturePct > 0) || !(rawCeiling > 0)) return null;
+
+  const step = getInstrumentPriceStep(instrument, rawCeiling);
+  const ceilingPrice = normalizePriceToStep(rawCeiling, step, 'down');
+  if (!(ceilingPrice > 0)) return null;
+
+  const build = (price, reason, mode = 'down') => {
+    const normalized = normalizePriceToStep(Math.min(Number(price), ceilingPrice), step, mode);
+    if (!(normalized > 0) || normalized > ceilingPrice + 1e-9) return null;
+    const capturePct = getBuybackCapturePctAtPrice(entryPrice, normalized);
+    if (!Number.isFinite(capturePct) || capturePct + 1e-9 < targetCapturePct) return null;
+    return {
+      ...plan,
+      limitPrice: normalized,
+      ceilingPrice,
+      capturePct,
+      priceReason: reason,
+      priceStep: step,
+    };
+  };
+
+  const askPrice = Number(ticker?.a) || 0;
+  if (askPrice > 0 && askPrice <= ceilingPrice + 1e-9) {
+    const executable = normalizePriceToStep(askPrice, step, 'up');
+    return build(executable <= ceilingPrice + 1e-9 ? executable : ceilingPrice, 'live_ask_below_capture_ceiling', 'down')
+      || build(ceilingPrice, 'capture_floor_ceiling');
+  }
+
+  const bidPrice = Number(ticker?.b) || 0;
+  if (bidPrice > 0 && bidPrice < ceilingPrice) {
+    return build(Math.min(bidPrice + step, ceilingPrice), 'one_tick_above_best_bid')
+      || build(ceilingPrice, 'capture_floor_ceiling');
+  }
+
+  const markPrice = Number(ticker?.M) || 0;
+  if (markPrice > 0 && markPrice < ceilingPrice) {
+    return build(markPrice, 'mark_anchor_below_capture_ceiling')
+      || build(ceilingPrice, 'capture_floor_ceiling');
+  }
+
+  return build(ceilingPrice, 'capture_floor_ceiling');
 };
 
 const validateAdvisorRuleContract = (rule, context = {}) => {
@@ -5928,6 +5987,7 @@ const buildBuybackConfirmationContext = (action, triggerData) => {
   );
   const executionPrice = Number(triggerData?.current_values?.execution_price);
   const patientLimitPrice = Number(triggerData?.advisor_limit_price ?? triggerData?.current_values?.patient_buyback_limit_price);
+  const patientCeilingPrice = Number(triggerData?.patient_buyback_ceiling_price ?? triggerData?.current_values?.patient_buyback_ceiling_price);
   const patientCapturePct = Number(triggerData?.patient_buyback_capture_pct ?? triggerData?.current_values?.patient_buyback_capture_pct);
 
   if (!Number.isFinite(threshold)) return null;
@@ -5940,6 +6000,7 @@ const buildBuybackConfirmationContext = (action, triggerData) => {
     actual: Number.isFinite(actual) ? actual : null,
     executionPrice: Number.isFinite(executionPrice) && executionPrice > 0 ? executionPrice : null,
     patientLimitPrice: Number.isFinite(patientLimitPrice) && patientLimitPrice > 0 ? patientLimitPrice : null,
+    patientCeilingPrice: Number.isFinite(patientCeilingPrice) && patientCeilingPrice > 0 ? patientCeilingPrice : null,
     patientCapturePct: Number.isFinite(patientCapturePct) ? patientCapturePct : null,
     satisfied: actualSatisfied || patientSatisfied,
     actualSatisfied,
@@ -5956,22 +6017,37 @@ const formatBuybackConfirmationContext = (context, liveMarketPrice) => {
   const patientText = context.patientLimitPrice
     ? `; patient bid $${context.patientLimitPrice.toFixed(4)} would capture ${Number.isFinite(context.patientCapturePct) ? `${context.patientCapturePct.toFixed(2)}%` : 'N/A'}`
     : '';
+  const ceilingText = context.patientCeilingPrice && context.patientCeilingPrice !== context.patientLimitPrice
+    ? `; max buyback ceiling $${context.patientCeilingPrice.toFixed(4)}`
+    : '';
   return [
     'Advisor-rule buyback context:',
     `- Active buyback_call rule threshold: executable unrealized_pnl_pct ${opText} ${context.threshold}%`,
     `- Current executable capture from trigger details: ${actualText}; live_rule_satisfied=${context.actualSatisfied ? 'yes' : 'no'}; patient_bid_satisfies_rule=${context.patientSatisfied ? 'yes' : 'no'}; rule_satisfied=${context.satisfied ? 'yes' : 'no'}`,
-    `- Live buyback ask: ${liveText}; trigger execution_price=${executionText}${patientText}`,
-    `- If the rule names max_buyback_price, treat that cap as patient bid guidance: use gtc/post_only at or below the named price rather than crossing a higher ask.`,
+    `- Live buyback ask: ${liveText}; trigger execution_price=${executionText}${patientText}${ceilingText}`,
+    `- If the rule names max_buyback_price, treat that cap as a ceiling, not a target: use gtc/post_only at or below the named price, and keep any extra edge available from lower live asks, lower visible bids, or sparse-book market-making.`,
     `- Confirmation should validate live price, reduce-only semantics, and rule consistency. Do not reject solely because the call is OTM, delta is low, theta remains, or the rule is a profit-harvest/capacity-reset rather than a threat signal. The advisor rule is the source of strategic intent for this pending exit.`,
   ].join('\n');
 };
 
 const isPatientBuybackThresholdMisclassification = (reason) => {
   const text = String(reason || '').toLowerCase();
-  return text.includes('advisor limit')
+  const oldAdvisorLimitWording = text.includes('advisor limit')
     && text.includes('would capture')
     && text.includes('live executable ask')
     && (text.includes('below the 80') || text.includes('conditions_met=false'));
+  const patientBidWording = text.includes('patient_bid_satisfies_rule=yes')
+    || (
+      text.includes('patient bid')
+      && (text.includes('would capture') || text.includes('capture 80'))
+      && (
+        text.includes('live executable')
+        || text.includes('live ask')
+        || text.includes('current market')
+        || text.includes('rule itself')
+      )
+    );
+  return oldAdvisorLimitWording || patientBidWording;
 };
 
 const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice }) => {
@@ -6345,13 +6421,19 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           console.log(`📋 Exit rule ${rule.id}: skipping — criteria missing structured conditions`);
           continue;
         }
-        const patientBuybackPlan = getPatientBuybackPlan(rule, criteria, position);
+        const instrument = instruments.find(item => item.instrument_name === rule.instrument_name);
+        const patientBuybackPlan = refinePatientBuybackPlanPrice(
+          getPatientBuybackPlan(rule, criteria, position),
+          ticker,
+          instrument
+        );
         const patientSellPutPlan = getPatientSellPutPlan(rule, criteria, position);
         const plannedValues = {
           ...values,
           ...(patientBuybackPlan ? {
             patient_buyback_capture_pct: patientBuybackPlan.capturePct,
             patient_buyback_limit_price: patientBuybackPlan.limitPrice,
+            patient_buyback_ceiling_price: patientBuybackPlan.ceilingPrice,
           } : {}),
           ...(patientSellPutPlan ? {
             patient_sell_put_pnl_pct: patientSellPutPlan.pnlPct,
@@ -6391,7 +6473,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             && patientBuybackPlan
             && isPatientBuybackThresholdMisclassification(recentRejection.reason);
           if (ignorePatientBuybackRejection) {
-            console.log(`📋 Exit retry: ${rule.action} ${rule.instrument_name} ignoring stale patient-buyback threshold rejection; advisor limit $${patientBuybackPlan.limitPrice.toFixed(4)} captures ${patientBuybackPlan.capturePct.toFixed(2)}%`);
+            console.log(`📋 Exit retry: ${rule.action} ${rule.instrument_name} ignoring stale patient-buyback threshold rejection; patient bid $${patientBuybackPlan.limitPrice.toFixed(4)} captures ${patientBuybackPlan.capturePct.toFixed(2)}%`);
           } else {
             console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} rejected recently; backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
             continue;
@@ -6428,6 +6510,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               current_values: plannedValues,
               advisor_limit_price: patientBuybackPlan?.limitPrice ?? patientSellPutPlan?.limitPrice ?? null,
               patient_buyback_capture_pct: patientBuybackPlan?.capturePct ?? null,
+              patient_buyback_ceiling_price: patientBuybackPlan?.ceilingPrice ?? null,
+              patient_buyback_price_reason: patientBuybackPlan?.priceReason ?? null,
               patient_sell_put_pnl_pct: patientSellPutPlan?.pnlPct ?? null,
               patient_sell_put_limit_price: patientSellPutPlan?.limitPrice ?? null,
               put_exit_intent: rule.action === 'sell_put' ? getPutExitIntent(criteria) : null,
@@ -7857,8 +7941,20 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         console.log(`⚠️ OpenAI confirmation failed: ${e.message}`);
       }
 
+      const advisorBuybackRuleSatisfied = action.action === 'buyback_call'
+        && buybackConfirmationContext?.satisfied === true
+        && Number(liveMarketPrice) > 0;
+      const deterministicPatientBuyback = action.action === 'buyback_call'
+        && buybackConfirmationContext?.patientSatisfied === true
+        && Number(buybackConfirmationContext?.patientLimitPrice) > 0
+        && Number(liveMarketPrice) > 0;
+      const patientBuybackOverrideReason = deterministicPatientBuyback
+        ? `advisor_patient_buyback_override: patient bid $${buybackConfirmationContext.patientLimitPrice.toFixed(4)} captures ${buybackConfirmationContext.patientCapturePct.toFixed(2)}%, satisfying ${buybackConfirmationContext.op} ${buybackConfirmationContext.threshold}% without crossing live ask`
+        : null;
+
       // Voting logic
       let decision;
+      let decisionOverrideReason = null;
       if (haikuVote && codexVote) {
         // Both voted
         decision = (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
@@ -7868,23 +7964,20 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       } else if (codexVote) {
         decision = codexVote.confirm ? 'confirmed' : 'rejected';
       } else {
-        // Both failed — increment retries
-        db.updatePendingAction(action.id, { retries: (action.retries || 0) + 1 });
-        console.log(`⚠️ Confirmation failed for ${action.instrument_name} (retry ${(action.retries || 0) + 1})`);
-        continue;
+        if (deterministicPatientBuyback) {
+          decision = 'confirmed';
+          decisionOverrideReason = patientBuybackOverrideReason;
+        } else {
+          // Both failed — increment retries
+          db.updatePendingAction(action.id, { retries: (action.retries || 0) + 1 });
+          console.log(`⚠️ Confirmation failed for ${action.instrument_name} (retry ${(action.retries || 0) + 1})`);
+          continue;
+        }
       }
 
-      let decisionOverrideReason = null;
-      const advisorBuybackRuleSatisfied = action.action === 'buyback_call'
-        && buybackConfirmationContext?.satisfied === true
-        && Number(liveMarketPrice) > 0;
-      const deterministicPatientBuyback = action.action === 'buyback_call'
-        && buybackConfirmationContext?.patientSatisfied === true
-        && Number(buybackConfirmationContext?.patientLimitPrice) > 0
-        && Number(liveMarketPrice) > 0;
       if (decision === 'rejected' && deterministicPatientBuyback) {
         decision = 'confirmed';
-        decisionOverrideReason = `advisor_patient_buyback_override: patient bid $${buybackConfirmationContext.patientLimitPrice.toFixed(4)} captures ${buybackConfirmationContext.patientCapturePct.toFixed(2)}%, satisfying ${buybackConfirmationContext.op} ${buybackConfirmationContext.threshold}% without crossing live ask`;
+        decisionOverrideReason = patientBuybackOverrideReason;
       }
       if (
         decision === 'rejected'

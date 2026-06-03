@@ -5478,6 +5478,83 @@ describe('buyback_call limit discipline', () => {
   });
 });
 
+describe('patient buyback market-making price selection', () => {
+  const capturePctAt = (entryPrice, buybackPrice) => ((entryPrice - buybackPrice) / entryPrice) * 100;
+
+  const refinePlan = (plan, ticker, instrument = { price_step: 0.1 }) => {
+    const step = getInstrumentPriceStep(instrument, plan.ceilingPrice ?? plan.limitPrice);
+    const ceilingPrice = normalizePriceToStep(plan.ceilingPrice ?? plan.limitPrice, step, 'down');
+    const build = (price, reason, mode = 'down') => {
+      const normalized = normalizePriceToStep(Math.min(Number(price), ceilingPrice), step, mode);
+      const capturePct = capturePctAt(plan.entryPrice, normalized);
+      if (!(normalized > 0) || normalized > ceilingPrice || capturePct + 1e-9 < plan.targetCapturePct) return null;
+      return { ...plan, limitPrice: normalized, ceilingPrice, capturePct, priceReason: reason };
+    };
+
+    const askPrice = Number(ticker?.a) || 0;
+    if (askPrice > 0 && askPrice <= ceilingPrice + 1e-9) {
+      const executable = normalizePriceToStep(askPrice, step, 'up');
+      return build(executable <= ceilingPrice + 1e-9 ? executable : ceilingPrice, 'live_ask_below_capture_ceiling', 'down')
+        || build(ceilingPrice, 'capture_floor_ceiling');
+    }
+
+    const bidPrice = Number(ticker?.b) || 0;
+    if (bidPrice > 0 && bidPrice < ceilingPrice) {
+      return build(Math.min(bidPrice + step, ceilingPrice), 'one_tick_above_best_bid')
+        || build(ceilingPrice, 'capture_floor_ceiling');
+    }
+
+    const markPrice = Number(ticker?.M) || 0;
+    if (markPrice > 0 && markPrice < ceilingPrice) {
+      return build(markPrice, 'mark_anchor_below_capture_ceiling')
+        || build(ceilingPrice, 'capture_floor_ceiling');
+    }
+
+    return build(ceilingPrice, 'capture_floor_ceiling');
+  };
+
+  const basePlan = () => ({
+    entryPrice: 20,
+    limitPrice: 4,
+    ceilingPrice: 4,
+    targetCapturePct: 80,
+    capturePct: 80,
+    preferredOrderType: 'gtc',
+  });
+
+  test('uses a lower live ask instead of bidding back up to the capture floor', () => {
+    const plan = refinePlan(basePlan(), { a: 3.4, b: 3.1, M: 3.25 });
+
+    assert.strictEqual(plan.limitPrice, 3.4);
+    assert.strictEqual(plan.priceReason, 'live_ask_below_capture_ceiling');
+    assert.ok(plan.capturePct > 80);
+  });
+
+  test('tops the visible bid by one tick when ask is above the capture ceiling', () => {
+    const plan = refinePlan(basePlan(), { a: 5.2, b: 3.2, M: 3.6 });
+
+    assert.strictEqual(plan.limitPrice, 3.3);
+    assert.strictEqual(plan.priceReason, 'one_tick_above_best_bid');
+    assert.ok(plan.capturePct > 80);
+  });
+
+  test('uses mark as a sparse-book anchor when no usable bid exists', () => {
+    const plan = refinePlan(basePlan(), { a: 5.2, b: 0, M: 2.7 });
+
+    assert.strictEqual(plan.limitPrice, 2.7);
+    assert.strictEqual(plan.priceReason, 'mark_anchor_below_capture_ceiling');
+    assert.ok(plan.capturePct > 80);
+  });
+
+  test('falls back to the capture ceiling without exceeding it', () => {
+    const plan = refinePlan(basePlan(), { a: 5.2, b: 4.4, M: 4.3 });
+
+    assert.strictEqual(plan.limitPrice, 4);
+    assert.strictEqual(plan.priceReason, 'capture_floor_ceiling');
+    assert.strictEqual(plan.capturePct, 80);
+  });
+});
+
 describe('advisor-led buyback confirmation discipline', () => {
   const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
   const REDUNDANT_BUYBACK_CAPTURE_FIELDS = new Set(['dte', 'mark_price']);
@@ -5552,10 +5629,22 @@ describe('advisor-led buyback confirmation discipline', () => {
 
   const isPatientBuybackThresholdMisclassification = (reason) => {
     const text = String(reason || '').toLowerCase();
-    return text.includes('advisor limit')
+    const oldAdvisorLimitWording = text.includes('advisor limit')
       && text.includes('would capture')
       && text.includes('live executable ask')
       && (text.includes('below the 80') || text.includes('conditions_met=false'));
+    const patientBidWording = text.includes('patient_bid_satisfies_rule=yes')
+      || (
+        text.includes('patient bid')
+        && (text.includes('would capture') || text.includes('capture 80'))
+        && (
+          text.includes('live executable')
+          || text.includes('live ask')
+          || text.includes('current market')
+          || text.includes('rule itself')
+        )
+      );
+    return oldAdvisorLimitWording || patientBidWording;
   };
 
   const captureGateAllows = ({ rule, values }) => {
@@ -5571,6 +5660,9 @@ describe('advisor-led buyback confirmation discipline', () => {
   };
 
   const resolveVote = ({ haikuVote, codexVote, buybackContext, liveMarketPrice }) => {
+    const deterministicPatientBuyback = buybackContext?.patientSatisfied === true
+      && Number(buybackContext?.patientLimitPrice) > 0
+      && Number(liveMarketPrice) > 0;
     let decision;
     if (haikuVote && codexVote) {
       decision = (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
@@ -5579,12 +5671,9 @@ describe('advisor-led buyback confirmation discipline', () => {
     } else if (codexVote) {
       decision = codexVote.confirm ? 'confirmed' : 'rejected';
     } else {
-      decision = 'retry';
+      decision = deterministicPatientBuyback ? 'confirmed' : 'retry';
     }
     const advisorBuybackRuleSatisfied = buybackContext?.satisfied === true && Number(liveMarketPrice) > 0;
-    const deterministicPatientBuyback = buybackContext?.patientSatisfied === true
-      && Number(buybackContext?.patientLimitPrice) > 0
-      && Number(liveMarketPrice) > 0;
     if (decision === 'rejected' && deterministicPatientBuyback) {
       decision = 'confirmed';
     }
@@ -5748,6 +5837,20 @@ describe('advisor-led buyback confirmation discipline', () => {
     assert.strictEqual(decision, 'confirmed');
   });
 
+  test('deterministic patient buyback does not retry when both reviewers fail to return JSON', () => {
+    const decision = resolveVote({
+      haikuVote: null,
+      codexVote: null,
+      buybackContext: {
+        ...buildBuybackContext({ actual: 52.88, patientCapturePct: 80 }),
+        patientLimitPrice: 3.82,
+      },
+      liveMarketPrice: 9,
+    });
+
+    assert.strictEqual(decision, 'confirmed');
+  });
+
   test('patient buyback override still requires live market price and explicit patient limit', () => {
     assert.strictEqual(resolveVote({
       haikuVote: { confirm: false },
@@ -5769,8 +5872,10 @@ describe('advisor-led buyback confirmation discipline', () => {
 
   test('recognizes stale rejection caused by patient buyback threshold misclassification', () => {
     const reason = 'Rule NOT satisfied: unrealized_pnl_pct 77.49% is below the 80% threshold. Advisor limit_price=$3.82 would capture 80%, but live executable ask=$4.30 does not achieve the 80% capture rule threshold. conditions_met=false';
+    const newerReason = "REJECT: Rule trigger condition NOT MET. Active buyback_intent='profit_capture' requires executable unrealized_pnl_pct >= 80%. The trigger data shows patient_bid_satisfies_rule=yes (meaning a $3.82 bid would capture 80% IF filled at that level), but the rule itself is NOT triggered at current market.";
 
     assert.strictEqual(isPatientBuybackThresholdMisclassification(reason), true);
+    assert.strictEqual(isPatientBuybackThresholdMisclassification(newerReason), true);
     assert.strictEqual(isPatientBuybackThresholdMisclassification('Reject: genuine threat-management concern'), false);
   });
 
