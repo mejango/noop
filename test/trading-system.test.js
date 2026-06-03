@@ -35,6 +35,7 @@ const CALL_EXPIRATION_RANGE = [5, 12];
 const CALL_DELTA_RANGE = [0.04, 0.12];
 const PUT_ROLL_DTE_THRESHOLD = 25;
 const PUT_MONETIZATION_PROFIT_THRESHOLD = 500;
+const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
 
 const parseExpiryFromInstrument = (name) => {
   if (!name) return null;
@@ -101,22 +102,73 @@ const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => 
   };
 };
 
-const getSellPutProtectionGate = (rule, values) => {
+const computeDteFromInstrumentName = (instrumentName, nowMs = Date.now()) => {
+  const expiry = parseExpiryFromInstrument(instrumentName);
+  if (!expiry) return null;
+  return Math.max(0, (expiry.getTime() - nowMs) / 86400000);
+};
+
+const hasLongerDatedPutProtection = (position, positions = []) => {
+  const currentDte = computeDteFromInstrumentName(position?.instrument_name);
+  if (!Number.isFinite(currentDte)) return false;
+  return positions.some((candidate) => {
+    if (!candidate || candidate === position) return false;
+    if (candidate.direction !== 'long') return false;
+    if (!candidate.instrument_name?.endsWith('-P')) return false;
+    if (!(Number(candidate.amount) > 0)) return false;
+    const candidateDte = computeDteFromInstrumentName(candidate.instrument_name);
+    return Number.isFinite(candidateDte) && candidateDte > currentDte;
+  });
+};
+
+const getTotalLongPutAmount = (positions = []) => positions
+  .filter((position) => position?.direction === 'long' && position?.instrument_name?.endsWith('-P'))
+  .reduce((total, position) => total + Math.max(0, Number(position.amount) || 0), 0);
+
+const leavesDownsideProtectionAfterSale = (position, positions = [], sellAmount = 0) => {
+  const totalLongPutAmount = getTotalLongPutAmount(positions);
+  const amount = Math.max(0, Number(sellAmount) || 0);
+  return totalLongPutAmount - amount > 1e-9 && Number(position?.amount) - amount > 1e-9;
+};
+
+const getSellPutProtectionGate = (rule, values, context = {}) => {
   if (!rule || rule.action !== 'sell_put') {
     return { allowed: true };
   }
 
   const dte = Number(values?.dte);
-  if (Number.isFinite(dte) && dte <= PUT_ROLL_DTE_THRESHOLD) {
+  if (Number.isFinite(dte) && dte <= PUT_ROLL_DTE_THRESHOLD && context.criteria?.put_exit_intent !== 'monetize_tail_win') {
+    if (!hasLongerDatedPutProtection(context.position, context.positions || [])) {
+      return { allowed: false };
+    }
     return { allowed: true };
   }
 
   const pnlPct = Number(values?.unrealized_pnl_pct);
   if (Number.isFinite(pnlPct) && pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD) {
+    const plannedSellAmount = Number(context.plannedSellAmount ?? context.position?.amount ?? 0);
+    if (!leavesDownsideProtectionAfterSale(context.position, context.positions || [], plannedSellAmount)) {
+      return { allowed: false };
+    }
     return { allowed: true };
   }
 
   return { allowed: false };
+};
+
+const getSellPutExitAmount = (position, values, criteria = {}) => {
+  const fullAmount = Math.max(0, Number(position?.amount) || 0);
+  const dte = Number(values?.dte);
+  const pnlPct = Number(values?.unrealized_pnl_pct);
+  const isTailWin = criteria.put_exit_intent === 'monetize_tail_win'
+    || (Number.isFinite(dte) && dte > PUT_ROLL_DTE_THRESHOLD
+      && Number.isFinite(pnlPct) && pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD);
+  if (!isTailWin) return fullAmount;
+  const requestedFraction = Number(criteria.tranche_fraction ?? criteria.max_tranche_fraction);
+  const fraction = Number.isFinite(requestedFraction) && requestedFraction > 0
+    ? Math.min(requestedFraction, PUT_MONETIZATION_MAX_TRANCHE_FRACTION)
+    : PUT_MONETIZATION_MAX_TRANCHE_FRACTION;
+  return Math.max(0, Math.min(fullAmount * fraction, fullAmount - 1e-9));
 };
 
 const getTradeCashflow = (order) => {
@@ -503,6 +555,8 @@ const normalizeBuyPutValueSignal = (signal) => {
   return null;
 };
 
+const hasExplicitBuyPutValueSignal = (signal) => String(signal ?? '').trim().length > 0;
+
 const isActionableBuyPutSignal = (signal) => (
   signal === 'strict_fresh_best'
   || signal === 'spot_drop_option_repricing_lag'
@@ -511,6 +565,7 @@ const isActionableBuyPutSignal = (signal) => (
 
 const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
   const required = normalizeBuyPutValueSignal(requiredSignal);
+  if (hasExplicitBuyPutValueSignal(requiredSignal) && !required) return false;
   if (!required) return true;
   if (required === 'any_actionable_buy_put') return isActionableBuyPutSignal(currentSignal);
   return currentSignal === required;
@@ -1120,6 +1175,7 @@ describe('Fresh-best buy-put advisory review', () => {
     assert.strictEqual(buyPutValueSignalMatches('recent_value', 'recent_relative_value'), true);
     assert.strictEqual(buyPutValueSignalMatches('strict_fresh_best', 'spot_drop_option_repricing_lag'), false);
     assert.strictEqual(buyPutValueSignalMatches('fresh_best', 'strict_fresh_best'), true);
+    assert.strictEqual(buyPutValueSignalMatches('typo_signal', 'strict_fresh_best'), false);
     assert.strictEqual(buyPutValueSignalMatches(null, null), true);
   });
 
@@ -4645,14 +4701,19 @@ describe('Full schema: exit monitoring for put rolling', () => {
 
   // Insert an exit rule: sell put when DTE <= 25 (roll window)
   exitStmts.insertRule.run({
-    rule_type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260501-1500-P',
-    criteria: JSON.stringify({ conditions: [{ field: 'dte', op: 'lte', value: 25 }], condition_logic: 'all' }),
+    rule_type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260626-1500-P',
+    criteria: JSON.stringify({
+      put_exit_intent: 'roll_protection',
+      requires_longer_dated_protection: true,
+      conditions: [{ field: 'dte', op: 'lte', value: 25 }],
+      condition_logic: 'all',
+    }),
     priority: 'high', reasoning: 'Roll window: sell before gamma decay', advisory_id: 'adv-test',
   });
 
   test('position outside roll window → no trigger', () => {
     // DTE = 40 days — not in the roll window yet
-    const position = { instrument_name: 'ETH-20260501-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
+    const position = { instrument_name: 'ETH-20260626-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
     const ticker = { M: '6.00', b: '5.50', option_pricing: { d: '-0.04', i: '0.60', t: '-0.02' } };
     const spotPrice = 1800;
 
@@ -4693,13 +4754,18 @@ describe('Full schema: exit monitoring for put rolling', () => {
   });
 
   test('position enters roll window → triggers pending action', () => {
-    const position = { instrument_name: 'ETH-20260501-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
+    const position = { instrument_name: 'ETH-20260626-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
+    const longerPut = { instrument_name: 'ETH-20260731-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 7.00 };
     const ticker = { M: '4.00', b: '3.50', option_pricing: { d: '-0.03', i: '0.55', t: '-0.04' } };
     const spotPrice = 1800;
 
     const values = computeCurrentValues(position, ticker, spotPrice);
     values.dte = 22; // Inside roll window
-    assert.strictEqual(getSellPutProtectionGate({ action: 'sell_put' }, values).allowed, true);
+    assert.strictEqual(getSellPutProtectionGate(
+      { action: 'sell_put' },
+      values,
+      { position, positions: [position, longerPut] }
+    ).allowed, true);
 
     const rules = exitStmts.getExitRules.all();
     for (const rule of rules) {
@@ -4720,23 +4786,41 @@ describe('Full schema: exit monitoring for put rolling', () => {
     const pending = exitStmts.getPending.all();
     assert.strictEqual(pending.length, 1, 'Should have 1 pending action');
     assert.strictEqual(pending[0].action, 'sell_put');
-    assert.strictEqual(pending[0].instrument_name, 'ETH-20260501-1500-P');
+    assert.strictEqual(pending[0].instrument_name, 'ETH-20260626-1500-P');
     assert.strictEqual(pending[0].amount, 1.0);
   });
 
-  test('long-dated put can be considered after extreme asymmetric upside', () => {
+  test('roll window is blocked without longer-dated protection in the book', () => {
+    const position = { instrument_name: 'ETH-20260626-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
     const gate = getSellPutProtectionGate(
       { action: 'sell_put' },
-      { dte: 63.7, unrealized_pnl_pct: 520, execution_price: 120 }
+      { dte: 22, unrealized_pnl_pct: -20 },
+      { position, positions: [position] }
+    );
+
+    assert.strictEqual(gate.allowed, false);
+  });
+
+  test('long-dated put can be considered after extreme asymmetric upside', () => {
+    const position = { instrument_name: 'ETH-20260731-1500-P', amount: 4.0, direction: 'long', avg_entry_price: 5.00 };
+    const values = { dte: 63.7, unrealized_pnl_pct: 520, execution_price: 120 };
+    const amount = getSellPutExitAmount(position, values, { put_exit_intent: 'monetize_tail_win', tranche_fraction: 0.25 });
+    const gate = getSellPutProtectionGate(
+      { action: 'sell_put' },
+      values,
+      { position, positions: [position], plannedSellAmount: amount }
     );
 
     assert.strictEqual(gate.allowed, true);
+    assert.strictEqual(amount, 1.0);
   });
 
   test('long-dated put at monetization boundary is still blocked', () => {
+    const position = { instrument_name: 'ETH-20260731-1500-P', amount: 4.0, direction: 'long', avg_entry_price: 5.00 };
     const gate = getSellPutProtectionGate(
       { action: 'sell_put' },
-      { dte: 63.7, unrealized_pnl_pct: PUT_MONETIZATION_PROFIT_THRESHOLD, execution_price: 100 }
+      { dte: 63.7, unrealized_pnl_pct: PUT_MONETIZATION_PROFIT_THRESHOLD, execution_price: 100 },
+      { position, positions: [position], plannedSellAmount: 1.0 }
     );
 
     assert.strictEqual(gate.allowed, false);
