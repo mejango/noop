@@ -217,6 +217,16 @@ interface EnrichedTrade extends LyraTrade {
   currentUnrealizedPnl: number | null;
 }
 
+type TradeMarkerDirection = 'up' | 'down';
+type TradeMarkerKind = 'buy_put' | 'sell_put' | 'sell_call' | 'buyback_call' | 'trade';
+
+interface TradeMarkerStyle {
+  label: string;
+  color: string;
+  direction: TradeMarkerDirection;
+  filled: boolean;
+}
+
 interface TickData {
   price: number;
   medium_momentum: { main: string; derivative: string | null } | string;
@@ -618,8 +628,72 @@ function formatExpiryLabel(expiryDate: Date | null, fallback: string | null) {
   return expiryDate.toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
-function getPositionColor(optionType: 'put' | 'call' | null) {
-  return optionType === 'put' ? chartColors.red : optionType === 'call' ? chartColors.secondary : '#a1a1aa';
+const tradeMarkerOrder: TradeMarkerKind[] = ['buy_put', 'sell_put', 'sell_call', 'buyback_call', 'trade'];
+
+const tradeMarkerStyles: Record<TradeMarkerKind, TradeMarkerStyle> = {
+  buy_put: {
+    label: 'Buy put',
+    color: chartColors.red,
+    direction: 'up',
+    filled: true,
+  },
+  sell_put: {
+    label: 'Sell put',
+    color: chartColors.red,
+    direction: 'down',
+    filled: false,
+  },
+  sell_call: {
+    label: 'Sell call',
+    color: chartColors.secondary,
+    direction: 'down',
+    filled: true,
+  },
+  buyback_call: {
+    label: 'Buyback call',
+    color: chartColors.secondary,
+    direction: 'up',
+    filled: false,
+  },
+  trade: {
+    label: 'Trade',
+    color: chartColors.trade,
+    direction: 'up',
+    filled: true,
+  },
+};
+
+function getTradeMarkerKind(trade: Pick<EnrichedTrade, 'direction' | 'optionType'>): TradeMarkerKind {
+  const direction = trade.direction?.toLowerCase();
+  if (trade.optionType === 'put' && direction === 'buy') return 'buy_put';
+  if (trade.optionType === 'put' && direction === 'sell') return 'sell_put';
+  if (trade.optionType === 'call' && direction === 'sell') return 'sell_call';
+  if (trade.optionType === 'call' && direction === 'buy') return 'buyback_call';
+  return 'trade';
+}
+
+function getTradeMarkerStyle(trade: Pick<EnrichedTrade, 'direction' | 'optionType'>): TradeMarkerStyle {
+  return tradeMarkerStyles[getTradeMarkerKind(trade)];
+}
+
+function getTradeMarkerPoints(cx: number, cy: number, size: number, direction: TradeMarkerDirection) {
+  return direction === 'up'
+    ? `${cx},${cy - size} ${cx - size},${cy + size * 0.65} ${cx + size},${cy + size * 0.65}`
+    : `${cx},${cy + size} ${cx - size},${cy - size * 0.65} ${cx + size},${cy - size * 0.65}`;
+}
+
+function TradeMarkerIcon({ markerStyle }: { markerStyle: TradeMarkerStyle }) {
+  const size = 5;
+  return (
+    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" className="shrink-0">
+      <polygon
+        points={getTradeMarkerPoints(6, 6, size, markerStyle.direction)}
+        fill={markerStyle.filled ? markerStyle.color : '#111111'}
+        stroke={markerStyle.color}
+        strokeWidth={1.5}
+      />
+    </svg>
+  );
 }
 
 function buildInstrumentSeries<T extends { instrument: string; ts: number }>(data: T[]): T[][] {
@@ -1453,6 +1527,11 @@ export default function OverviewPage() {
     };
   }), [positionsByInstrument, visibleTrades]);
 
+  const visibleTradeMarkerKinds = useMemo(() => {
+    const kinds = new Set(visibleTradesEnriched.map(getTradeMarkerKind));
+    return tradeMarkerOrder.filter((kind) => kinds.has(kind));
+  }, [visibleTradesEnriched]);
+
   return (
     <div className="space-y-6">
       {/* Left: Range + Best Options | Right: Momentum */}
@@ -1584,7 +1663,7 @@ export default function OverviewPage() {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-3 text-xs text-gray-500">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH CG</span>
           <span className="flex items-center gap-1">
             <span
@@ -1595,7 +1674,15 @@ export default function OverviewPage() {
           </span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
-          {account.trades.length > 0 && <span className="flex items-center gap-1"><span className="inline-block" style={{ width: 0, height: 0, borderLeft: '4px solid transparent', borderRight: '4px solid transparent', borderBottom: `6px solid ${chartColors.trade}` }} /> Trade</span>}
+          {visibleTradeMarkerKinds.map((kind) => {
+            const markerStyle = tradeMarkerStyles[kind];
+            return (
+              <span key={kind} className="flex items-center gap-1">
+                <TradeMarkerIcon markerStyle={markerStyle} />
+                {markerStyle.label}
+              </span>
+            );
+          })}
         </div>
       </div>
 
@@ -1679,11 +1766,11 @@ export default function OverviewPage() {
                         <div className="border-t border-white/10 mt-1.5 pt-1.5 space-y-1">
                           {tradePayloads.slice(0, 3).map((trade: EnrichedTrade) => {
                             const strikeGap = trade.strike != null ? trade.strike - trade.index_price : null;
-                            const optionColor = getPositionColor(trade.optionType);
+                            const markerStyle = getTradeMarkerStyle(trade);
                             return (
                               <div key={trade.trade_id}>
-                                <div className="text-xs font-medium" style={{ color: optionColor }}>
-                                  {trade.direction.toUpperCase()} {trade.instrument_name}
+                                <div className="text-xs font-medium" style={{ color: markerStyle.color }}>
+                                  {markerStyle.label} · {trade.instrument_name}
                                   {trade.is_bot ? ' · bot' : ' · manual'}
                                 </div>
                                 <div className="text-xs text-gray-500">
@@ -1740,6 +1827,7 @@ export default function OverviewPage() {
                   ?? findNearestMergedRow(trade.ts)?.lyraSpot
                   ?? null;
                 if (markerSpot == null) return null;
+                const markerStyle = getTradeMarkerStyle(trade);
                 return (
                   <ReferenceDot
                     key={trade.trade_id}
@@ -1748,21 +1836,17 @@ export default function OverviewPage() {
                     yAxisId="price"
                     ifOverflow="discard"
                     r={5}
-                    fill={trade.is_bot ? chartColors.trade : '#111111'}
-                    stroke={chartColors.trade}
+                    fill={markerStyle.filled && trade.is_bot ? markerStyle.color : '#111111'}
+                    stroke={markerStyle.color}
                     strokeWidth={1.5}
                     shape={({ cx, cy }: { cx?: number; cy?: number }) => {
                       if (!cx || !cy) return <></>;
-                      const isBuy = trade.direction === 'buy';
                       const size = trade.is_bot ? 7 : 6;
-                      const points = isBuy
-                        ? `${cx},${cy - size} ${cx - size},${cy + size * 0.65} ${cx + size},${cy + size * 0.65}`
-                        : `${cx},${cy + size} ${cx - size},${cy - size * 0.65} ${cx + size},${cy - size * 0.65}`;
                       return (
                         <polygon
-                          points={points}
-                          fill={trade.is_bot ? chartColors.trade : '#111111'}
-                          stroke={chartColors.trade}
+                          points={getTradeMarkerPoints(cx, cy, size, markerStyle.direction)}
+                          fill={markerStyle.filled && trade.is_bot ? markerStyle.color : '#111111'}
+                          stroke={markerStyle.color}
                           strokeWidth={1.5}
                         />
                       );
