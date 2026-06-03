@@ -8225,6 +8225,27 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           ? `${orderTypeNote}; advisor_target_limit_requires_resting_order`
           : 'advisor_target_limit_requires_resting_order';
       }
+      const syntheticRestingPreference = isRestingOrderType(advisoryOrderPref)
+        ? advisoryOrderPref
+        : 'post_only';
+      const patientBuybackLimitNeedsResting = action.action === 'buyback_call'
+        && orderType === 'ioc'
+        && advisorBuybackLimitPrice != null
+        && Number(liveMarketPrice) > 0
+        && advisorBuybackLimitPrice < Number(liveMarketPrice)
+        && isSyntheticRestingExitIntentAllowed(action.action, triggerData, ruleCriteria);
+      const patientSellPutLimitNeedsResting = action.action === 'sell_put'
+        && orderType === 'ioc'
+        && advisorSellPutLimitPrice != null
+        && Number(liveMarketPrice) > 0
+        && advisorSellPutLimitPrice > Number(liveMarketPrice)
+        && isSyntheticRestingExitIntentAllowed(action.action, triggerData, ruleCriteria);
+      if (patientBuybackLimitNeedsResting || patientSellPutLimitNeedsResting) {
+        orderType = syntheticRestingPreference;
+        orderTypeNote = orderTypeNote
+          ? `${orderTypeNote}; patient_synthetic_limit_requires_resting_order`
+          : 'patient_synthetic_limit_requires_resting_order';
+      }
       if (orderTypeNote) {
         console.log(`📋 Order-type override for ${action.action} ${action.instrument_name}: ${baseOrderType} -> ${orderType} (${orderTypeNote})`);
       }

@@ -2909,6 +2909,24 @@ describe('execution order type normalization', () => {
     if (['sell_put', 'buyback_call'].includes(action) && isRestingOrderType(orderType) && !isSyntheticRestingExitIntentAllowed(action, triggerData, ruleCriteria)) return 'ioc';
     return orderType;
   };
+  const adaptPatientSyntheticLimitOrderType = ({ action, orderType, advisoryOrderPref, triggerData = {}, ruleCriteria = {}, advisorBuybackLimitPrice = null, advisorSellPutLimitPrice = null, liveMarketPrice = null }) => {
+    const syntheticRestingPreference = isRestingOrderType(advisoryOrderPref) ? advisoryOrderPref : 'post_only';
+    const patientBuybackLimitNeedsResting = action === 'buyback_call'
+      && orderType === 'ioc'
+      && advisorBuybackLimitPrice != null
+      && Number(liveMarketPrice) > 0
+      && advisorBuybackLimitPrice < Number(liveMarketPrice)
+      && isSyntheticRestingExitIntentAllowed(action, triggerData, ruleCriteria);
+    const patientSellPutLimitNeedsResting = action === 'sell_put'
+      && orderType === 'ioc'
+      && advisorSellPutLimitPrice != null
+      && Number(liveMarketPrice) > 0
+      && advisorSellPutLimitPrice > Number(liveMarketPrice)
+      && isSyntheticRestingExitIntentAllowed(action, triggerData, ruleCriteria);
+    return patientBuybackLimitNeedsResting || patientSellPutLimitNeedsResting
+      ? syntheticRestingPreference
+      : orderType;
+  };
 
   test('sell_put allows resting order types at policy layer for synthetic tail monetization', () => {
     assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'gtc'), false);
@@ -2949,6 +2967,39 @@ describe('execution order type normalization', () => {
   test('exit preference accepts order types case-insensitively', () => {
     assert.strictEqual(normalizePreferredOrderType('buyback_call', 'IOC'), 'ioc');
     assert.strictEqual(normalizePreferredOrderType('buyback_call', 'GTC'), 'gtc');
+  });
+
+  test('patient profit-capture buyback below live ask rests instead of zero-fill IOC', () => {
+    const orderType = adaptPatientSyntheticLimitOrderType({
+      action: 'buyback_call',
+      orderType: 'ioc',
+      triggerData: { buyback_intent: 'profit_capture' },
+      advisorBuybackLimitPrice: 3.1,
+      liveMarketPrice: 4.2,
+    });
+    assert.strictEqual(orderType, 'post_only');
+  });
+
+  test('patient tail-win sell-put floor above live bid rests instead of zero-fill IOC', () => {
+    const orderType = adaptPatientSyntheticLimitOrderType({
+      action: 'sell_put',
+      orderType: 'ioc',
+      triggerData: { put_exit_intent: 'monetize_tail_win' },
+      advisorSellPutLimitPrice: 120,
+      liveMarketPrice: 100,
+    });
+    assert.strictEqual(orderType, 'post_only');
+  });
+
+  test('marketable patient buyback can remain IOC to capture better live ask', () => {
+    const orderType = adaptPatientSyntheticLimitOrderType({
+      action: 'buyback_call',
+      orderType: 'ioc',
+      triggerData: { buyback_intent: 'profit_capture' },
+      advisorBuybackLimitPrice: 3.1,
+      liveMarketPrice: 2.8,
+    });
+    assert.strictEqual(orderType, 'ioc');
   });
 });
 
