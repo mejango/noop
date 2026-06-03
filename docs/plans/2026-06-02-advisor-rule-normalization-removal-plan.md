@@ -40,6 +40,8 @@ Allowed `value_signal` values:
 Rules:
 
 - Unknown `value_signal` fails closed.
+- `any_actionable_buy_put` means `strict_fresh_best` or `spot_drop_option_repricing_lag`; it does not include `recent_relative_value`.
+- `recent_relative_value` is a weaker local-value signal and should only be used explicitly with stricter score/target constraints and a concrete value rationale.
 - Do not use per-contract `max_cost`.
 - Do not use broad spot floors as value gates.
 
@@ -252,4 +254,3 @@ These are mechanical safety checks and should remain:
 - Spot price sanity bounds.
 - Executable bid/ask based PnL calculations.
 - Fresh market-price sanity checks before execution.
-

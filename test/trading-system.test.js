@@ -560,7 +560,6 @@ const hasExplicitBuyPutValueSignal = (signal) => String(signal ?? '').trim().len
 const isActionableBuyPutSignal = (signal) => (
   signal === 'strict_fresh_best'
   || signal === 'spot_drop_option_repricing_lag'
-  || signal === 'recent_relative_value'
 );
 
 const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
@@ -1171,7 +1170,7 @@ describe('Fresh-best buy-put advisory review', () => {
   test('standing value_signal watcher matches actionable buy-put signals', () => {
     assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'strict_fresh_best'), true);
     assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'spot_drop_option_repricing_lag'), true);
-    assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'recent_relative_value'), true);
+    assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'recent_relative_value'), false);
     assert.strictEqual(buyPutValueSignalMatches('recent_value', 'recent_relative_value'), true);
     assert.strictEqual(buyPutValueSignalMatches('strict_fresh_best', 'spot_drop_option_repricing_lag'), false);
     assert.strictEqual(buyPutValueSignalMatches('fresh_best', 'strict_fresh_best'), true);
