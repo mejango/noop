@@ -190,7 +190,7 @@ const getPatientSellPutPlan = (rule, criteria, position) => {
   if (!(limitPrice > 0) || !(entryPrice > 0)) return null;
   const pnlPct = ((limitPrice - entryPrice) / entryPrice) * 100;
   if (!(pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
-  return { limitPrice, pnlPct, preferredOrderType: 'ioc' };
+  return { limitPrice, pnlPct, preferredOrderType: 'post_only' };
 };
 
 const getTradeCashflow = (order) => {
@@ -654,7 +654,7 @@ const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
     instrument_name: requirement.instrument_name,
     criteria,
     priority: 'low',
-    preferred_order_type: 'ioc',
+    preferred_order_type: maxBuybackPrice != null ? 'post_only' : 'ioc',
   };
 };
 
@@ -918,7 +918,7 @@ const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, 
     `- Intent=${triggerData?.put_exit_intent || criteria.put_exit_intent || 'n/a'}. sell_put closes an owned long put; it is reduce_only and capital-releasing, not a naked short-put entry.`,
     `- Current executable exit: live_bid=${fmtPrice(currentValues.execution_price ?? currentPrice ?? action.price)}, live_unrealized_pnl_pct=${fmt(livePnlPct)}%, patient_floor_pnl_pct=${fmt(patientPnlPct)}%.`,
     `- Protection discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
-    `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use an IOC limit at or above the floor; zero fill is better than dumping into a thin bid.`,
+    `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use a patient synthetic reduce-only gtc/post_only limit at or above the floor for monetize_tail_win; zero fill is better than dumping into a thin bid.`,
   ].join('\n');
 };
 
@@ -1394,7 +1394,7 @@ describe('Standing rulebook coverage requirements', () => {
       { field: 'unrealized_pnl_pct', op: 'gte', value: 80 },
     ]);
     assert.strictEqual(fallback.criteria.max_buyback_price, 3.82);
-    assert.strictEqual(fallback.preferred_order_type, 'ioc');
+    assert.strictEqual(fallback.preferred_order_type, 'post_only');
   });
 });
 
@@ -2880,11 +2880,10 @@ describe('execution order type normalization', () => {
   const ACTION_POLICY = {
     buy_put: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
     sell_call: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
-    sell_put: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc'] },
-    buyback_call: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc'] },
+    sell_put: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
+    buyback_call: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
   };
   const getActionPolicy = (action) => ACTION_POLICY[action] || null;
-  const isReduceOnlyExitAction = (action) => Boolean(getActionPolicy(action)?.reduceOnly);
   const getAllowedOrderTypesForAction = (action) => getActionPolicy(action)?.allowedOrderTypes || ['ioc', 'gtc', 'post_only'];
   const normalizePreferredOrderType = (action, preferredOrderType) => {
     if (typeof preferredOrderType !== 'string') return null;
@@ -2895,16 +2894,30 @@ describe('execution order type normalization', () => {
   const isInvalidReduceOnlyOrderType = (action, orderType) => {
     return !getAllowedOrderTypesForAction(action).includes(orderType);
   };
-  const clampSellPutOrderTypeForIntent = (orderType) => (orderType !== 'ioc' ? 'ioc' : orderType);
+  const isRestingOrderType = (orderType) => orderType === 'gtc' || orderType === 'post_only';
+  const isSyntheticRestingExitIntentAllowed = (action, triggerData = {}, ruleCriteria = {}) => {
+    const intent = action === 'buyback_call'
+      ? (triggerData.buyback_intent || ruleCriteria.buyback_intent)
+      : action === 'sell_put'
+        ? (triggerData.put_exit_intent || ruleCriteria.put_exit_intent)
+        : null;
+    return (action === 'buyback_call' && intent === 'profit_capture')
+      || (action === 'sell_put' && intent === 'monetize_tail_win');
+  };
+  const normalizeExitOrderTypeForIntent = (action, orderType, triggerData = {}, ruleCriteria = {}) => {
+    if (action === 'sell_put' && triggerData.put_exit_intent === 'roll_protection' && orderType !== 'ioc') return 'ioc';
+    if (['sell_put', 'buyback_call'].includes(action) && isRestingOrderType(orderType) && !isSyntheticRestingExitIntentAllowed(action, triggerData, ruleCriteria)) return 'ioc';
+    return orderType;
+  };
 
-  test('sell_put rejects resting order types because reduce_only exits must be non-resting', () => {
-    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'gtc'), true);
-    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'post_only'), true);
+  test('sell_put allows resting order types at policy layer for synthetic tail monetization', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'gtc'), false);
+    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'post_only'), false);
   });
 
-  test('buyback_call rejects resting order types because reduce_only exits must be non-resting', () => {
-    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'post_only'), true);
-    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'gtc'), true);
+  test('buyback_call allows resting order types at policy layer for synthetic profit capture', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'post_only'), false);
+    assert.strictEqual(isInvalidReduceOnlyOrderType('buyback_call', 'gtc'), false);
   });
 
   test('sell_put accepts ioc for reduce_only exit', () => {
@@ -2915,27 +2928,172 @@ describe('execution order type normalization', () => {
     assert.strictEqual(isInvalidReduceOnlyOrderType('sell_call', 'post_only'), false);
   });
 
-  test('sell_put ignores patient resting preference for monetization rules', () => {
-    assert.strictEqual(normalizePreferredOrderType('sell_put', 'post_only'), null);
+  test('sell_put keeps patient resting preference for monetization rules', () => {
+    assert.strictEqual(normalizePreferredOrderType('sell_put', 'post_only'), 'post_only');
   });
 
-  test('sell_put always clamps execution to ioc', () => {
-    assert.strictEqual(clampSellPutOrderTypeForIntent('gtc'), 'ioc');
-    assert.strictEqual(clampSellPutOrderTypeForIntent('post_only'), 'ioc');
-    assert.strictEqual(clampSellPutOrderTypeForIntent('ioc'), 'ioc');
+  test('roll_protection sell_put still clamps execution to ioc', () => {
+    assert.strictEqual(normalizeExitOrderTypeForIntent('sell_put', 'gtc', { put_exit_intent: 'roll_protection' }), 'ioc');
+    assert.strictEqual(normalizeExitOrderTypeForIntent('sell_put', 'post_only', { put_exit_intent: 'roll_protection' }), 'ioc');
+    assert.strictEqual(normalizeExitOrderTypeForIntent('sell_put', 'post_only', { put_exit_intent: 'monetize_tail_win' }), 'post_only');
   });
 
   test('sell_call keeps valid resting preference', () => {
     assert.strictEqual(normalizePreferredOrderType('sell_call', 'post_only'), 'post_only');
   });
 
-  test('buyback_call ignores resting preference', () => {
-    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'post_only'), null);
+  test('buyback_call keeps valid resting preference', () => {
+    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'post_only'), 'post_only');
   });
 
-  test('exit preference accepts ioc case-insensitively', () => {
+  test('exit preference accepts order types case-insensitively', () => {
     assert.strictEqual(normalizePreferredOrderType('buyback_call', 'IOC'), 'ioc');
-    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'GTC'), null);
+    assert.strictEqual(normalizePreferredOrderType('buyback_call', 'GTC'), 'gtc');
+  });
+});
+
+describe('synthetic reduce-only resting exit guard', () => {
+  const isRestingOrderType = (orderType) => orderType === 'gtc' || orderType === 'post_only';
+  const isReduceOnlyExitAction = (action) => action === 'sell_put' || action === 'buyback_call';
+  const getCloseablePositionForExit = (action, instrumentName, positions = []) => {
+    const position = positions.find(item => item.instrument_name === instrumentName);
+    if (action === 'buyback_call' && position?.direction === 'short') return position;
+    if (action === 'sell_put' && position?.direction === 'long') return position;
+    return null;
+  };
+  const isSyntheticRestingExitIntentAllowed = (action, triggerData = {}, ruleCriteria = {}) => {
+    const intent = action === 'buyback_call'
+      ? (triggerData.buyback_intent || ruleCriteria.buyback_intent)
+      : action === 'sell_put'
+        ? (triggerData.put_exit_intent || ruleCriteria.put_exit_intent)
+        : null;
+    return (action === 'buyback_call' && intent === 'profit_capture')
+      || (action === 'sell_put' && intent === 'monetize_tail_win');
+  };
+  const floorOrderAmountToVenuePrecision = (amount) => {
+    const numeric = Number(amount);
+    if (!(numeric > 0)) return 0;
+    return Math.floor((numeric + 1e-12) * 100) / 100;
+  };
+  const getSyntheticReduceOnlyPreflight = ({ action, instrumentName, amount, orderType, triggerData = {}, ruleCriteria = {}, positions = [], restingOrders = [] }) => {
+    if (!isReduceOnlyExitAction(action)) return { allowed: true, reduceOnly: false, amount, synthetic: false };
+    if (!isRestingOrderType(orderType)) return { allowed: true, reduceOnly: true, amount, synthetic: false };
+    if (!isSyntheticRestingExitIntentAllowed(action, triggerData, ruleCriteria)) return { allowed: false };
+    const closeablePosition = getCloseablePositionForExit(action, instrumentName, positions);
+    if (!closeablePosition) return { allowed: false };
+    const closeDirection = action === 'buyback_call' ? 'buy' : action === 'sell_put' ? 'sell' : null;
+    const existingResting = restingOrders.find(order =>
+      !['cancelled', 'filled', 'expired', 'rejected'].includes(String(order.status || order.order_status || '').toLowerCase())
+      && order.instrument_name === instrumentName
+      && (order.action === action || (!order.action && closeDirection && String(order.direction || '').toLowerCase() === closeDirection))
+    );
+    if (existingResting) return { allowed: false };
+    const closeableAmount = Math.max(0, Number(closeablePosition.amount) || 0);
+    const cappedAmount = floorOrderAmountToVenuePrecision(Math.min(Math.max(0, Number(amount) || 0), closeableAmount));
+    if (!(cappedAmount > 0)) return { allowed: false };
+    return { allowed: true, reduceOnly: false, amount: cappedAmount, synthetic: true };
+  };
+
+  test('profit-capture buyback_call can rest synthetically against live short size', () => {
+    const result = getSyntheticReduceOnlyPreflight({
+      action: 'buyback_call',
+      instrumentName: 'ETH-20260626-2400-C',
+      amount: 7.57,
+      orderType: 'post_only',
+      triggerData: { buyback_intent: 'profit_capture' },
+      positions: [{ instrument_name: 'ETH-20260626-2400-C', direction: 'short', amount: 7.57 }],
+    });
+    assert.strictEqual(result.allowed, true);
+    assert.strictEqual(result.reduceOnly, false);
+    assert.strictEqual(result.synthetic, true);
+    assert.strictEqual(result.amount, 7.57);
+  });
+
+  test('synthetic resting buyback caps amount to live closeable size', () => {
+    const result = getSyntheticReduceOnlyPreflight({
+      action: 'buyback_call',
+      instrumentName: 'ETH-20260626-2400-C',
+      amount: 7.57,
+      orderType: 'gtc',
+      triggerData: { buyback_intent: 'profit_capture' },
+      positions: [{ instrument_name: 'ETH-20260626-2400-C', direction: 'short', amount: 3 }],
+    });
+    assert.strictEqual(result.allowed, true);
+    assert.strictEqual(result.amount, 3);
+  });
+
+  test('synthetic resting amount floors to venue precision instead of rounding above closeable size', () => {
+    const result = getSyntheticReduceOnlyPreflight({
+      action: 'buyback_call',
+      instrumentName: 'ETH-20260626-2400-C',
+      amount: 3.009,
+      orderType: 'post_only',
+      triggerData: { buyback_intent: 'profit_capture' },
+      positions: [{ instrument_name: 'ETH-20260626-2400-C', direction: 'short', amount: 3.009 }],
+    });
+    assert.strictEqual(result.allowed, true);
+    assert.strictEqual(result.amount, 3);
+    assert.strictEqual(result.amount.toFixed(2), '3.00');
+  });
+
+  test('threat-management buyback cannot rest synthetically', () => {
+    const result = getSyntheticReduceOnlyPreflight({
+      action: 'buyback_call',
+      instrumentName: 'ETH-20260626-2400-C',
+      amount: 1,
+      orderType: 'post_only',
+      triggerData: { buyback_intent: 'threat_management' },
+      positions: [{ instrument_name: 'ETH-20260626-2400-C', direction: 'short', amount: 1 }],
+    });
+    assert.strictEqual(result.allowed, false);
+  });
+
+  test('tail-win sell_put can rest synthetically but roll_protection cannot', () => {
+    const tailWin = getSyntheticReduceOnlyPreflight({
+      action: 'sell_put',
+      instrumentName: 'ETH-20260731-1500-P',
+      amount: 1,
+      orderType: 'post_only',
+      triggerData: { put_exit_intent: 'monetize_tail_win' },
+      positions: [{ instrument_name: 'ETH-20260731-1500-P', direction: 'long', amount: 4 }],
+    });
+    const roll = getSyntheticReduceOnlyPreflight({
+      action: 'sell_put',
+      instrumentName: 'ETH-20260626-1500-P',
+      amount: 1,
+      orderType: 'post_only',
+      triggerData: { put_exit_intent: 'roll_protection' },
+      positions: [{ instrument_name: 'ETH-20260626-1500-P', direction: 'long', amount: 1 }],
+    });
+    assert.strictEqual(tailWin.allowed, true);
+    assert.strictEqual(tailWin.reduceOnly, false);
+    assert.strictEqual(roll.allowed, false);
+  });
+
+  test('existing same-instrument exit order blocks another synthetic resting exit', () => {
+    const result = getSyntheticReduceOnlyPreflight({
+      action: 'sell_put',
+      instrumentName: 'ETH-20260731-1500-P',
+      amount: 1,
+      orderType: 'gtc',
+      triggerData: { put_exit_intent: 'monetize_tail_win' },
+      positions: [{ instrument_name: 'ETH-20260731-1500-P', direction: 'long', amount: 4 }],
+      restingOrders: [{ order_id: 'abc', action: 'sell_put', instrument_name: 'ETH-20260731-1500-P' }],
+    });
+    assert.strictEqual(result.allowed, false);
+  });
+
+  test('venue same-instrument close-direction order blocks synthetic resting exit even without local action label', () => {
+    const result = getSyntheticReduceOnlyPreflight({
+      action: 'buyback_call',
+      instrumentName: 'ETH-20260626-2400-C',
+      amount: 1,
+      orderType: 'post_only',
+      triggerData: { buyback_intent: 'profit_capture' },
+      positions: [{ instrument_name: 'ETH-20260626-2400-C', direction: 'short', amount: 4 }],
+      restingOrders: [{ order_id: 'venue-1', direction: 'buy', instrument_name: 'ETH-20260626-2400-C', order_status: 'open' }],
+    });
+    assert.strictEqual(result.allowed, false);
   });
 });
 
@@ -3332,7 +3490,16 @@ describe('Fill reconciliation', () => {
 const classifyPlaceOrderResult = (order, orderType) => {
   if (!order) return 'failed';
   if (order.rejected_post_only) return 'post_only_rejected';
+  if (order.zero_fill_rejected) return 'zero_fill_rejected';
   return 'success';
+};
+
+const isIocNoLiquidityError = (err) => {
+  const code = Number(err?.code ?? err?.error?.code);
+  if (code === 11009) return true;
+  const text = typeof err === 'string' ? err.toLowerCase() : JSON.stringify(err || {}).toLowerCase();
+  return text.includes('zero liquidity for market or ioc/fok order')
+    || text.includes('no liquidity within the provided limit price');
 };
 
 const classifyExecutionResult = (result) => {
@@ -3356,6 +3523,16 @@ describe('post_only rejection handling', () => {
 
   test('placeOrder returns normal data → classified as success', () => {
     assert.strictEqual(classifyPlaceOrderResult({ result: {} }, 'post_only'), 'success');
+  });
+
+  test('Derive 11009 IOC/FOK no-liquidity error is classified as zero-fill rejection', () => {
+    const err = {
+      code: 11009,
+      message: 'Zero liquidity for market or IOC/FOK order',
+      data: 'A market or an IOC/FOK order was rejected because there was no liquidity within the provided limit price.',
+    };
+    assert.strictEqual(isIocNoLiquidityError(err), true);
+    assert.strictEqual(classifyPlaceOrderResult({ zero_fill_rejected: true, error: JSON.stringify(err) }, 'ioc'), 'zero_fill_rejected');
   });
 
   test('executeOrder result with postOnlyRejected → correct classification', () => {
@@ -4956,7 +5133,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
     };
     const liveValues = { dte: 63.7, unrealized_pnl_pct: 300, execution_price: 20 };
     const plan = getPatientSellPutPlan(
-      { action: 'sell_put', preferred_order_type: 'ioc' },
+      { action: 'sell_put', preferred_order_type: 'post_only' },
       criteria,
       position
     );
@@ -5373,22 +5550,22 @@ describe('action semantics descriptions', () => {
   const ACTION_POLICY = {
     buy_put: { semantics: 'Entry action: buying a put for tail-risk insurance. Bounded premium outlay, long convexity.' },
     sell_call: { semantics: 'Entry action: selling a call to open short call exposure against ETH-collateralized account capacity.' },
-    sell_put: { semantics: 'Exit-only action: selling an already-owned long put to close or trim it. This is reduce_only=true and cannot create a naked short put.' },
-    buyback_call: { semantics: 'Exit-only action: buying back an already-open short call to close or trim it. This is reduce_only=true and cannot create a new long call exposure beyond the short being closed.' },
+    sell_put: { semantics: 'Exit-only action: selling an already-owned long put to close or trim it. This must be reduce-only in effect and cannot create a naked short put.' },
+    buyback_call: { semantics: 'Exit-only action: buying back an already-open short call to close or trim it. This must be reduce-only in effect and cannot create a new long call exposure beyond the short being closed.' },
   };
   const describeActionSemantics = (action) => ACTION_POLICY[action]?.semantics || 'Trade semantics unavailable.';
 
   test('sell_put is explicitly described as closing an owned long put', () => {
     const text = describeActionSemantics('sell_put');
     assert.ok(text.includes('already-owned long put'));
-    assert.ok(text.includes('reduce_only=true'));
+    assert.ok(text.includes('reduce-only in effect'));
     assert.ok(text.includes('cannot create a naked short put'));
   });
 
   test('buyback_call is explicitly described as closing an open short call', () => {
     const text = describeActionSemantics('buyback_call');
     assert.ok(text.includes('already-open short call'));
-    assert.ok(text.includes('reduce_only=true'));
+    assert.ok(text.includes('reduce-only in effect'));
   });
 
   test('sell_put guidance treats the exit as capital-releasing, not margin-consuming', () => {
