@@ -167,8 +167,8 @@ const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'confi
 // Formula: insuredBaseValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
 const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
 const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
-// Call exposure discipline: target 45% displayed margin utilization, with a
-// small execution buffer so exact-boundary estimates do not block good entries.
+// Call exposure discipline: target 45% displayed margin utilization. The
+// buffer is last-mile safety for estimate drift, not planned entry headroom.
 const CALL_EXPOSURE_CAP_PCT = BOT_CONFIG.CALL_EXPOSURE_CAP_PCT || 0.45;
 const CALL_EXPOSURE_BUFFER_PCT = Math.max(0, Number(BOT_CONFIG.CALL_EXPOSURE_BUFFER_PCT ?? 0.05));
 const CALL_BREAKOUT_OVERRIDE_CAP_PCT = Math.max(
@@ -6466,7 +6466,7 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
   const bufferPct = CALL_EXPOSURE_BUFFER_PCT * 100;
 
-  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${baseCapPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${bufferPct.toFixed(1)}pp, base_target_cap=${baseCapPct.toFixed(1)}%, base_buffered_limit=${baseLimitPct.toFixed(1)}%, breakout_override=${breakoutOverrideActive ? 'active' : 'inactive'}. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the active target cap. The bot has a ${bufferPct.toFixed(1)} percentage point execution buffer, so do not reject solely because projected utilization reaches the active target cap while it remains at or below ${limitPct.toFixed(1)}%. Reject call sells that exceed the buffered limit, lack buying power, or are too small to matter. Use these exact figures; do not invent utilization numbers.`;
+  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${baseCapPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${bufferPct.toFixed(1)}pp, base_target_cap=${baseCapPct.toFixed(1)}%, base_buffered_limit=${baseLimitPct.toFixed(1)}%, breakout_override=${breakoutOverrideActive ? 'active' : 'inactive'}. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the active entry cap. The ${bufferPct.toFixed(1)} percentage point buffer is last-mile safety for estimate drift, not planned sell-call capacity. Confirm only when projected utilization stays at or below the active entry cap, with buying power and meaningful size. Reject call sells that exceed the active entry cap, exceed the buffered limit, lack buying power, or are too small to matter. Use these exact figures; do not invent utilization numbers.`;
 };
 
 const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice, instruments, spotPrice }) => {
@@ -6495,14 +6495,14 @@ const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice,
   const projectedUtilization = estimateProjectedDisplayedMarginUtilization(marginState, additionalMargin);
   const effectiveCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
   const effectiveLimitPct = getCallExposureLimitPct(effectiveCapPct);
-  const requiredBuyingPowerAtCap = marginBase > 0 ? Math.max(0, (1 - effectiveLimitPct) * marginBase) : 0;
-  const bufferedLimitHeadroom = buyingPowerHeadroom - requiredBuyingPowerAtCap;
+  const requiredBuyingPowerAtCap = marginBase > 0 ? Math.max(0, (1 - effectiveCapPct) * marginBase) : 0;
+  const targetCapHeadroom = buyingPowerHeadroom - requiredBuyingPowerAtCap;
   const allowed = additionalMargin <= buyingPowerHeadroom
     && projectedUtilization != null
-    && projectedUtilization <= effectiveLimitPct;
+    && projectedUtilization <= effectiveCapPct;
   return {
     allowed,
-    reason: `retry_margin=$${additionalMargin.toFixed(2)}, current_display_utilization=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_display_utilization=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, target_cap=${(effectiveCapPct * 100).toFixed(1)}%, buffered_limit=${(effectiveLimitPct * 100).toFixed(1)}%, buffered_limit_headroom=$${bufferedLimitHeadroom.toFixed(2)}, buying_power=$${buyingPowerHeadroom.toFixed(2)}`,
+    reason: `retry_margin=$${additionalMargin.toFixed(2)}, current_display_utilization=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_display_utilization=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, target_cap=${(effectiveCapPct * 100).toFixed(1)}%, buffered_limit=${(effectiveLimitPct * 100).toFixed(1)}%, target_cap_headroom=$${targetCapHeadroom.toFixed(2)}, buying_power=$${buyingPowerHeadroom.toFixed(2)}`,
   };
 };
 
@@ -6708,20 +6708,21 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           if (putRemaining <= 0.20) continue;
         }
 
-        // Call exposure cap: target cap plus a small execution buffer.
+        // Call exposure cap: the buffer is safety, not planned entry capacity.
         if (rule.action === 'sell_call') {
           if (!liveMarginState) {
             console.log(`📋 Skip ${rule.action}: margin state unavailable`);
             continue;
           }
-          const effectiveCapPct = getEffectiveCallExposureLimitPct(positions, spotPrice);
+          const effectiveCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
+          const effectiveLimitPct = getCallExposureLimitPct(effectiveCapPct);
           const currentUtilization = estimateProjectedDisplayedMarginUtilization(liveMarginState, provisionalCallOrderMargin);
           if (currentUtilization == null) {
             console.log(`📋 Skip ${rule.action}: unable to compute margin utilization`);
             continue;
           }
           if (currentUtilization >= effectiveCapPct) {
-            console.log(`📋 Call buffered cap reached: ${(currentUtilization * 100).toFixed(1)}% >= ${(effectiveCapPct * 100).toFixed(1)}%`);
+            console.log(`📋 Call entry cap reached: ${(currentUtilization * 100).toFixed(1)}% >= ${(effectiveCapPct * 100).toFixed(1)}% target cap; ${(effectiveLimitPct * 100).toFixed(1)}% buffer is reserved for execution drift`);
             continue;
           }
         }
@@ -6899,11 +6900,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought - reservedCapacity.putBudget;
           maxByBudget = Math.min(maxByBudget, putRemaining / price);
         }
-        // For calls: cap by remaining exposure headroom under the buffered limit.
+        // For calls: cap by remaining exposure headroom under the active target.
         if (rule.action === 'sell_call' && liveMarginState) {
           const targetCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
           const effectiveLimitPct = getCallExposureLimitPct(targetCapPct);
-          const marginHeadroom = getDisplayedMarginHeadroomAtCap(liveMarginState, effectiveLimitPct);
+          const marginHeadroom = getDisplayedMarginHeadroomAtCap(liveMarginState, targetCapPct);
           const marginPerUnit = estimateShortCallMarginPerUnit(
             liveMarginState,
             positions,
@@ -6939,7 +6940,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             console.log(
               `📋 Skip ${rule.action} ${best.name}: desired=${raw.toFixed(3)}, max_safe_qty=${sellCallMarginDebug.maxQtyAtCap.toFixed(3)}, step=${step.toFixed(3)}`
               + `, current=${sellCallMarginDebug.currentUtilization != null ? `${(sellCallMarginDebug.currentUtilization * 100).toFixed(1)}%` : 'N/A'}`
-              + `, target_cap=${(sellCallMarginDebug.targetCapPct * 100).toFixed(1)}%, buffered_limit=${(sellCallMarginDebug.effectiveLimitPct * 100).toFixed(1)}% — no tradable size under buffered limit`
+              + `, target_cap=${(sellCallMarginDebug.targetCapPct * 100).toFixed(1)}%, buffered_limit=${(sellCallMarginDebug.effectiveLimitPct * 100).toFixed(1)}% — no tradable size under target cap`
             );
           } else if (qty > 0 && raw - qty >= step / 2) {
             console.log(
@@ -7456,7 +7457,7 @@ const getStandingRulebookDisciplinePrompt = () => [
   '- Do not omit a required watcher just because it is not currently triggered. Tighten criteria instead.',
 ].join('\n');
 
-const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normally target ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries may be sized within the ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}-${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% execution band when the size still matters. Do not reject solely because projected utilization reaches or slightly exceeds the ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% target while it remains within the ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% buffered limit. When spot is breaking upward and short calls are already on, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% with a buffered limit of ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% only if margin context explicitly shows breakout_override=active. These are discipline limits for new entries, not margin-emergency thresholds. Reject call sells that exceed the buffered limit, lack buying power, or are too small to matter.`;
+const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normally target ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. The ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% is last-mile execution safety for estimate drift, not planned sell-call capacity. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries must stay at or below the active target cap after sizing; do not create dust orders merely to use the execution buffer. When spot is breaking upward and short calls are already on, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% with a buffered limit of ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% only if margin context explicitly shows breakout_override=active. These are discipline limits for new entries, not margin-emergency thresholds. Reject call sells that exceed the active target cap, exceed the buffered limit, lack buying power, or are too small to matter.`;
 
 const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, keep two intents separate. Intent 1 is profit/capacity reset while the short call is winning: use buyback_intent="profit_capture" and executable unrealized_pnl_pct >= ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic trigger, or set a patient max_buyback_price/target_capture_pct where the bid would capture at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% if filled. Do not add DTE or mark_price blockers for this intent; executable capture already uses the live buyback ask. Intent 2 is threat management when the short call is genuinely dangerous and time/range for recovery is running out: use buyback_intent="threat_management" with allow_below_profit_floor=true, and conditions on real threat facts such as delta, spot vs strike, and remaining DTE. Do not prematurely buy back just because price is rising; spot can come back down, and buying back fear premium can make us the sucker of the trade. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks only when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
 
@@ -8520,7 +8521,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
       currentShortExposure: +totalCallExposure.toFixed(2),
       utilizationPct: marginState ? +(100 * (estimateDisplayedMarginUtilization(marginState) || 0)).toFixed(1) : null,
       marginBase: marginState ? +getMarginCapacityBase(marginState).toFixed(2) : null,
-      note: `Base target cap: keep Derive-displayed margin utilization near ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}%, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold for new short-call entries. When breakoutAddWindow=true because spot is breaking upward with existing short calls already on, the bot may add into richer upside premium up to a ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% target / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit instead of reflexively buying back into emotional bullish pricing. utilizationPct mirrors the Derive display metric; projected trade sizing still uses the internal margin estimate.`,
+      note: `Base target cap: keep Derive-displayed margin utilization near ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}%; the ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% is last-mile execution safety, not planned sell-call capacity. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold for new short-call entries. When breakoutAddWindow=true because spot is breaking upward with existing short calls already on, the bot may add into richer upside premium up to a ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% target / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit instead of reflexively buying back into emotional bullish pricing. utilizationPct mirrors the Derive display metric; projected trade sizing still uses the internal margin estimate.`,
     },
     margin: marginState ? {
       buying_power: +marginState.initial_margin.toFixed(2),              // available margin for new trades
@@ -8800,7 +8801,7 @@ ${getStandingRulebookDisciplinePrompt()}
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending. Selling owned puts realizes cash but does not replenish the current cycle's put-buying budget.
-- For calls: the normal target cap is ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization, with a ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point execution buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}%. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold; the code may size down within that zone. In the specific case of an upside breakout with short calls already open, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit so the bot can sell into richer bullish premium rather than paying up for fear-driven buybacks. This override is for breakout add-ons only, not generic leverage creep.
+- For calls: the normal target cap is ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization; the ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% is last-mile execution safety, not planned sell-call capacity. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold; the code may size down within that zone but must not deliberately fill the buffer with dust orders. In the specific case of an upside breakout with short calls already open, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit so the bot can sell into richer bullish premium rather than paying up for fear-driven buybacks. This override is for breakout add-ons only, not generic leverage creep.
 - Entry rules should target the highest-scoring candidates when possible.
 - Exit rules MUST reference specific instrument_name from current positions
 - If the market is unclear, tighten the watcher criteria and lower priority. Do not omit required standing watchers solely because they are not currently triggered.

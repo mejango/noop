@@ -846,7 +846,7 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const capPct = CALL_EXPOSURE_CAP_PCT * 100;
   const limitPct = CALL_EXPOSURE_LIMIT_PCT * 100;
   const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
-  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(1)}pp. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the target cap. Do not reject solely because projected utilization reaches the target cap while it remains at or below ${limitPct.toFixed(1)}%.`;
+  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(1)}pp. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the active entry cap. The execution buffer is safety, not planned sell-call capacity.`;
 };
 const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice }) => {
   if (action?.action !== 'buy_put') return '';
@@ -950,7 +950,7 @@ const clampSellCallQtyToEntryCap = ({
     return { qty: Math.floor(desired / step) * step, projectedUtilization: null };
   }
 
-  const maxAdditionalMargin = Math.max(0, CALL_EXPOSURE_LIMIT_PCT * marginBase - currentUsedMargin);
+  const maxAdditionalMargin = Math.max(0, CALL_EXPOSURE_CAP_PCT * marginBase - currentUsedMargin);
   const maxQtyAtCap = maxAdditionalMargin / marginPerUnit;
   const clampedQty = Math.floor(Math.min(desired, maxQtyAtCap) / step) * step;
   const finalQty = clampedQty >= step ? clampedQty : 0;
@@ -6363,7 +6363,7 @@ describe('stale emergency buyback rule scrub', () => {
 });
 
 // ============================================================================
-// 46. Call exposure cap: 45% target, 50% buffered limit, 40% caution threshold
+// 46. Call exposure cap: 45% target, 50% safety buffer, 40% caution threshold
 // ============================================================================
 
 describe('Call exposure cap discipline', () => {
@@ -6400,12 +6400,12 @@ describe('Call exposure cap discipline', () => {
     assert.strictEqual(headroom, 0.75);
   });
 
-  test('at target cap → sell_call still allowed inside buffer', () => {
+  test('at target cap → sell_call blocked before using safety buffer', () => {
     const ethBalance = 5.0;
     const currentExposure = 2.25; // exactly at 45%
-    const bufferedLimit = CALL_EXPOSURE_LIMIT_PCT * ethBalance;
-    const blocked = currentExposure >= bufferedLimit;
-    assert.strictEqual(blocked, false, 'Target cap is not the hard rejection line');
+    const targetCap = CALL_EXPOSURE_CAP_PCT * ethBalance;
+    const blocked = currentExposure >= targetCap;
+    assert.strictEqual(blocked, true, 'Target cap is the planned-entry ceiling');
   });
 
   test('at buffered limit → sell_call blocked', () => {
@@ -6431,7 +6431,7 @@ describe('Call exposure cap discipline', () => {
     assert.strictEqual(blocked, false, '40% is caution, not a hard rejection line');
   });
 
-  test('oversized sell_call is clamped down to the buffered limit instead of rejected outright', () => {
+  test('oversized sell_call is clamped down to the target cap instead of using the buffer', () => {
     const marginState = {
       collaterals_maintenance_margin: 5000,
       positions_initial_margin: 0,
@@ -6443,9 +6443,9 @@ describe('Call exposure cap discipline', () => {
       marginState,
       marginPerUnit: 750,
     });
-    assert.strictEqual(clamped.qty, 3.33);
+    assert.strictEqual(clamped.qty, 3);
     assert.ok(clamped.projectedUtilization != null);
-    assert.ok(clamped.projectedUtilization <= CALL_EXPOSURE_LIMIT_PCT);
+    assert.ok(clamped.projectedUtilization <= CALL_EXPOSURE_CAP_PCT);
   });
 
   test('zero ETH balance → ethBalance guard prevents division issues', () => {
@@ -6458,11 +6458,11 @@ describe('Call exposure cap discipline', () => {
   test('amount sizing capped by remaining headroom', () => {
     const ethBalance = 5.0;
     const currentExposure = 1.5;
-    const headroom = Math.max(0, CALL_EXPOSURE_LIMIT_PCT * ethBalance - currentExposure); // 1.0
+    const headroom = Math.max(0, CALL_EXPOSURE_CAP_PCT * ethBalance - currentExposure); // 0.75
     const ruleBudgetMax = 10.0; // rule allows 10 ETH worth
     const bookLiquidity = 3.0;
     const raw = Math.min(ruleBudgetMax, headroom, bookLiquidity);
-    assert.strictEqual(raw, 1.0, 'Should be capped by buffered headroom, not rule or book');
+    assert.strictEqual(raw, 0.75, 'Should be capped by target-cap headroom, not rule, book, or safety buffer');
   });
 
   test('buy_put is NOT affected by call cap', () => {
