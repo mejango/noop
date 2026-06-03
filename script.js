@@ -4983,7 +4983,7 @@ const buildRulebookRequirements = ({
         type: 'exit',
         instrument_name: snapshot.instrument,
         applies: 'open long put',
-        instruction: `Create a reduce-only sell_put watcher with put_exit_intent="roll_protection" only if longer-dated put protection is already in the book, or put_exit_intent="monetize_tail_win" only after executable PnL reaches >${PUT_MONETIZATION_PROFIT_THRESHOLD}%. Monetization must be tranched and must retain downside protection after each sale.`,
+        instruction: `Create a reduce-only sell_put watcher with put_exit_intent="roll_protection" only if longer-dated put protection is already in the book, or put_exit_intent="monetize_tail_win" only after executable PnL reaches >${PUT_MONETIZATION_PROFIT_THRESHOLD}%. Monetization must include min_exit_price/limit_price, be tranched, and retain downside protection after each sale.`,
       });
     }
     if (snapshot?.direction === 'short' && snapshot?.option_type === 'C') {
@@ -5637,6 +5637,29 @@ const getSellPutExitAmount = (rule, criteria, position, values) => {
   return Math.max(0, Math.min(fullAmount * fraction, fullAmount - 1e-9));
 };
 
+const getAdvisorSellPutLimitPrice = (criteria) => {
+  const explicit = Number(criteria?.min_exit_price ?? criteria?.limit_price ?? criteria?.target_exit_price);
+  return Number.isFinite(explicit) && explicit > 0 ? explicit : null;
+};
+
+const getPatientSellPutPlan = (rule, criteria, position) => {
+  if (!rule || rule.action !== 'sell_put') return null;
+  if (getPutExitIntent(criteria) !== 'monetize_tail_win') return null;
+
+  const limitPrice = getAdvisorSellPutLimitPrice(criteria);
+  const entryPrice = Number(position?.avg_entry_price);
+  if (!(limitPrice > 0) || !(entryPrice > 0)) return null;
+
+  const pnlPct = ((limitPrice - entryPrice) / entryPrice) * 100;
+  if (!(pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
+
+  return {
+    limitPrice,
+    pnlPct,
+    preferredOrderType: normalizePreferredOrderType(rule.action, rule.preferred_order_type) || 'gtc',
+  };
+};
+
 const getBuybackTargetCapturePct = (criteria) => {
   const explicit = Number(criteria?.target_capture_pct ?? criteria?.capture_floor_pct);
   if (Number.isFinite(explicit) && explicit > 0) return explicit;
@@ -5706,12 +5729,14 @@ const validateAdvisorRuleContract = (rule, context = {}) => {
     if (intent === 'roll_protection') {
       if (!hasThresholdCondition(criteria, 'dte', ['lt', 'lte'], PUT_ROLL_DTE_THRESHOLD, 'at_most')) return { valid: false, reason: `roll_protection requires dte <= ${PUT_ROLL_DTE_THRESHOLD}` };
       if (criteria.requires_longer_dated_protection !== true) return { valid: false, reason: 'roll_protection must require longer-dated protection in the book' };
+      if (rule.preferred_order_type && rule.preferred_order_type !== 'ioc') return { valid: false, reason: 'roll_protection sell_put must use ioc/non-resting execution' };
       const snapshot = (context.positionSnapshots || []).find((item) => item?.instrument === rule.instrument_name);
       if (snapshot && !hasLongerDatedPutProtectionSnapshot(snapshot, context.positionSnapshots)) return { valid: false, reason: 'roll_protection rejected: no longer-dated long put currently in book' };
     }
 
     if (intent === 'monetize_tail_win') {
       if (!hasThresholdCondition(criteria, 'unrealized_pnl_pct', ['gt', 'gte'], PUT_MONETIZATION_PROFIT_THRESHOLD)) return { valid: false, reason: `monetize_tail_win requires executable unrealized_pnl_pct > ${PUT_MONETIZATION_PROFIT_THRESHOLD}` };
+      if (!(getAdvisorSellPutLimitPrice(criteria) > 0)) return { valid: false, reason: 'monetize_tail_win requires min_exit_price/limit_price so sparse markets cannot force an undersell' };
       const fraction = Number(criteria.tranche_fraction ?? criteria.max_tranche_fraction ?? PUT_MONETIZATION_MAX_TRANCHE_FRACTION);
       if (!(fraction > 0) || fraction > PUT_MONETIZATION_MAX_TRANCHE_FRACTION) return { valid: false, reason: `monetize_tail_win tranche_fraction must be >0 and <=${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}` };
       if (criteria.retain_downside_protection !== true) return { valid: false, reason: 'monetize_tail_win must require retained downside protection' };
@@ -5861,7 +5886,12 @@ const getSellPutProtectionGate = (rule, values, context = {}) => {
     return { allowed: true };
   }
 
-  const pnlPct = Number(values?.unrealized_pnl_pct);
+  const livePnlPct = Number(values?.unrealized_pnl_pct);
+  const patientPnlPct = Number(values?.patient_sell_put_pnl_pct);
+  const pnlPct = Math.max(
+    Number.isFinite(livePnlPct) ? livePnlPct : -Infinity,
+    Number.isFinite(patientPnlPct) ? patientPnlPct : -Infinity
+  );
   if (Number.isFinite(pnlPct) && pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD) {
     const plannedSellAmount = Number(context.plannedSellAmount ?? context.position?.amount ?? 0);
     if (!leavesDownsideProtectionAfterSale(context.position, context.positions || [], plannedSellAmount)) {
@@ -6240,26 +6270,32 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
         const patientBuybackPlan = getPatientBuybackPlan(rule, criteria, position);
-        const patientBuybackValues = patientBuybackPlan
-          ? {
-              ...values,
-              patient_buyback_capture_pct: patientBuybackPlan.capturePct,
-              patient_buyback_limit_price: patientBuybackPlan.limitPrice,
-            }
-          : values;
+        const patientSellPutPlan = getPatientSellPutPlan(rule, criteria, position);
+        const plannedValues = {
+          ...values,
+          ...(patientBuybackPlan ? {
+            patient_buyback_capture_pct: patientBuybackPlan.capturePct,
+            patient_buyback_limit_price: patientBuybackPlan.limitPrice,
+          } : {}),
+          ...(patientSellPutPlan ? {
+            patient_sell_put_pnl_pct: patientSellPutPlan.pnlPct,
+            patient_sell_put_limit_price: patientSellPutPlan.limitPrice,
+          } : {}),
+        };
         const triggered = evaluateConditions(criteria.conditions, criteria.condition_logic, values)
-          || Boolean(patientBuybackPlan);
+          || Boolean(patientBuybackPlan)
+          || Boolean(patientSellPutPlan);
         if (!triggered) continue;
         const plannedSellPutAmount = rule.action === 'sell_put'
-          ? getSellPutExitAmount(rule, criteria, position, values)
+          ? getSellPutExitAmount(rule, criteria, position, plannedValues)
           : null;
 
-        const buybackGate = getBuybackCaptureGate(rule, criteria, patientBuybackValues);
+        const buybackGate = getBuybackCaptureGate(rule, criteria, plannedValues);
         if (!buybackGate.allowed) {
           console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} — ${buybackGate.reason}`);
           continue;
         }
-        const putExitGate = getSellPutProtectionGate(rule, values, {
+        const putExitGate = getSellPutProtectionGate(rule, plannedValues, {
           criteria,
           position,
           positions,
@@ -6288,7 +6324,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const askPrice = Number(ticker?.a) || 0;
         const bidPrice = Number(ticker?.b) || 0;
         const markPrice = Number(ticker?.M) || values.mark_price || 0;
-        const price = patientBuybackPlan?.limitPrice || (rule.action.includes('buy') ? askPrice : bidPrice);
+        const price = patientBuybackPlan?.limitPrice
+          || patientSellPutPlan?.limitPrice
+          || (rule.action.includes('buy') ? askPrice : bidPrice);
 
         // Skip selling worthless positions — mark < $0.10 means nothing to recover
         if (rule.action === 'sell_put' && markPrice < 0.10) {
@@ -6304,9 +6342,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             price: price,
             trigger_details: {
               conditions_met: criteria.conditions.map(c => ({ field: c.field, op: c.op, threshold: c.value, actual: values[c.field] })),
-              current_values: patientBuybackValues,
-              advisor_limit_price: patientBuybackPlan?.limitPrice ?? null,
+              current_values: plannedValues,
+              advisor_limit_price: patientBuybackPlan?.limitPrice ?? patientSellPutPlan?.limitPrice ?? null,
               patient_buyback_capture_pct: patientBuybackPlan?.capturePct ?? null,
+              patient_sell_put_pnl_pct: patientSellPutPlan?.pnlPct ?? null,
+              patient_sell_put_limit_price: patientSellPutPlan?.limitPrice ?? null,
               put_exit_intent: rule.action === 'sell_put' ? getPutExitIntent(criteria) : null,
               tranche_fraction: rule.action === 'sell_put' && plannedSellPutAmount != null && Number(position.amount) > 0
                 ? plannedSellPutAmount / Number(position.amount)
@@ -7059,7 +7099,7 @@ const ACTION_POLICY = Object.freeze({
     phase: 'exit',
     direction: 'sell',
     reduceOnly: true,
-    allowedOrderTypes: Object.freeze(['ioc']),
+    allowedOrderTypes: Object.freeze(['ioc', 'gtc', 'post_only']),
     semantics: 'Exit-only action: selling an already-owned long put to close or trim it. This is reduce_only=true and cannot create a naked short put.',
   }),
   buyback_call: Object.freeze({
@@ -7089,6 +7129,9 @@ const getActionOrderTypeHardRule = (action) => {
   if (action === 'buyback_call') {
     return `- HARD RULE: buyback_call is a reduce_only exit. Choose ${formatOrderTypeList(policy.allowedOrderTypes)} based on urgency and book quality. Patient resting buyback pricing is allowed when there is no urgent threat.`;
   }
+  if (action === 'sell_put') {
+    return `- HARD RULE: sell_put is a reduce_only exit. Use "ioc" for roll_protection. For monetize_tail_win in a sparse or crash market, "gtc" or "post_only" is allowed only at or above the advisor's min_exit_price/limit_price floor; do not undersell to a thin visible bid.`;
+  }
   if (policy.phase === 'exit') {
     return `- HARD RULE: if action is ${EXIT_ACTIONS.join(' or ')}, this is a reduce_only exit. Reduce-only exits must use a non-resting order type. Choose ${formatOrderTypeList(policy.allowedOrderTypes)} only. Never choose "gtc" or "post_only" for reduce_only exits.`;
   }
@@ -7097,7 +7140,7 @@ const getActionOrderTypeHardRule = (action) => {
 
 const getSharedActionPolicyPrompt = () => [
   `EXIT SEMANTICS: ${describeActionSemantics('sell_put')} ${describeActionSemantics('buyback_call')}`,
-  `ORDER-TYPE RULE: sell_put must use IOC/non-resting execution. buyback_call may use ${getAllowedOrderTypesForAction('buyback_call').join('/').toUpperCase()} depending on urgency and book quality; patient resting buyback pricing is allowed when the market is wide and there is no urgent threat.`,
+  `ORDER-TYPE RULE: sell_put roll_protection must use IOC/non-resting execution. sell_put monetize_tail_win may use ${getAllowedOrderTypesForAction('sell_put').join('/').toUpperCase()} when a min_exit_price/limit_price protects us from sparse-book underselling. buyback_call may use ${getAllowedOrderTypesForAction('buyback_call').join('/').toUpperCase()} depending on urgency and book quality; patient resting buyback pricing is allowed when the market is wide and there is no urgent threat.`,
   `ENTRY ORDER-TYPE RULE: ${ENTRY_ACTIONS.join(' and ')} are entry actions, not reduce_only exits. Resting order types like gtc and post_only are valid for entries when patience and pricing matter.`,
 ].join('\n');
 
@@ -7134,7 +7177,7 @@ const getStandingRulebookDisciplinePrompt = () => [
   '- If the sell_call thesis is patience, weak/downward price action, near margin-cap discipline, or "wait for better premium", encode that waiting stance through stricter min_score/min_bid criteria or low priority. The written reasoning and JSON trigger must not contradict each other.',
   '- Do not use broad spot_price floors as a proxy for sell_call recovery, stability, or good premium. After a sharp drop, spot can remain above a floor while call selling is still unattractive.',
   `- sell_call rules must stay inside the normal call sale universe: ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE and ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]} delta.`,
-  `- sell_put rules must declare put_exit_intent. Use "roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long puts. Use "monetize_tail_win" only when executable unrealized_pnl_pct > ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true and tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}. Never sell all downside protection at once.`,
+  `- sell_put rules must declare put_exit_intent. Use "roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long puts. Use "monetize_tail_win" only when executable unrealized_pnl_pct > ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. Never sell all downside protection at once or dump into sparse crash bids.`,
   '- buyback_call rules must declare buyback_intent. Use "profit_capture" for 80%+ executable capture or a patient resting bid whose price would achieve that capture. Use "threat_management" only for genuine short-call danger; price rising alone is not enough.',
   '- Do not omit a required watcher just because it is not currently triggered. Tighten criteria instead.',
 ].join('\n');
@@ -7143,7 +7186,7 @@ const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normal
 
 const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, keep two intents separate. Intent 1 is profit/capacity reset while the short call is winning: use buyback_intent="profit_capture" and executable unrealized_pnl_pct >= ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic trigger, or set a patient max_buyback_price/target_capture_pct where the bid would capture at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% if filled. Do not add DTE or mark_price blockers for this intent; executable capture already uses the live buyback ask. Intent 2 is threat management when the short call is genuinely dangerous and time/range for recovery is running out: use buyback_intent="threat_management" with allow_below_profit_floor=true, and conditions on real threat facts such as delta, spot vs strike, and remaining DTE. Do not prematurely buy back just because price is rising; spot can come back down, and buying back fear premium can make us the sucker of the trade. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks only when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
 
-const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long put protection. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true and sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}. Never sell all protection at once. Even when the hard trigger is satisfied, confirm only if the full market context says selling a tranche is wise rather than prematurely cutting convexity. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.`;
+const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long put protection. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. Never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Even when the hard trigger is satisfied, confirm only if the full market context says selling a tranche is wise rather than prematurely cutting convexity. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.`;
 
 const getConfirmationJsonOnlyPrompt = () => 'Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.';
 
@@ -7527,6 +7570,9 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       const advisorBuybackLimitPrice = action.action === 'buyback_call' && Number(triggerData.advisor_limit_price) > 0
         ? Number(triggerData.advisor_limit_price)
         : null;
+      const advisorSellPutLimitPrice = action.action === 'sell_put' && Number(triggerData.advisor_limit_price) > 0
+        ? Number(triggerData.advisor_limit_price)
+        : null;
 
       // Determine what details to show
       let detailsStr;
@@ -7607,9 +7653,10 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
 Action: ${action.action} ${action.instrument_name}
 Amount: ${action.amount || 'TBD'}
 Best available price: $${currentPrice || action.price || 'N/A'}
-${advisorEntryLimitPrice ? `Advisor target limit price: $${advisorEntryLimitPrice} (derived from target_score=${triggerData.target_score || 'n/a'}; target_score is a limit-price target, not a minimum trigger threshold; do not bid worse than this target).` : ''}
-${advisorBuybackLimitPrice ? `Advisor buyback limit price: $${advisorBuybackLimitPrice} (patient profit-capture bid; do not pay more than this limit, and never pay more than the live ask).` : ''}
-${detailsStr}
+	${advisorEntryLimitPrice ? `Advisor target limit price: $${advisorEntryLimitPrice} (derived from target_score=${triggerData.target_score || 'n/a'}; target_score is a limit-price target, not a minimum trigger threshold; do not bid worse than this target).` : ''}
+	${advisorBuybackLimitPrice ? `Advisor buyback limit price: $${advisorBuybackLimitPrice} (patient profit-capture bid; do not pay more than this limit, and never pay more than the live ask).` : ''}
+	${advisorSellPutLimitPrice ? `Advisor sell-put minimum exit price: $${advisorSellPutLimitPrice} (tail-win monetization floor; do not sell below this limit merely because the visible bid is sparse).` : ''}
+	${detailsStr}
 Action semantics: ${describeActionSemantics(action.action)}
 Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
 ${marginStr}
@@ -7773,6 +7820,12 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       const orderTypeAdaptation = adaptOrderTypeFromFailureHistory(action.action, action.instrument_name, baseOrderType);
       let orderType = orderTypeAdaptation.orderType;
       let orderTypeNote = orderTypeAdaptation.note;
+      if (action.action === 'sell_put' && triggerData.put_exit_intent === 'roll_protection' && orderType !== 'ioc') {
+        orderType = 'ioc';
+        orderTypeNote = orderTypeNote
+          ? `${orderTypeNote}; roll_protection_forces_ioc`
+          : 'roll_protection_forces_ioc';
+      }
       if (
         action.action === 'buy_put'
         && advisorEntryLimitPrice != null
@@ -7797,6 +7850,18 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           ? `${orderTypeNote}; advisor_buyback_limit_requires_resting_order`
           : 'advisor_buyback_limit_requires_resting_order';
       }
+      if (
+        action.action === 'sell_put'
+        && advisorSellPutLimitPrice != null
+        && Number(liveMarketPrice) > 0
+        && advisorSellPutLimitPrice > Number(liveMarketPrice)
+        && orderType === 'ioc'
+      ) {
+        orderType = 'gtc';
+        orderTypeNote = orderTypeNote
+          ? `${orderTypeNote}; advisor_sell_put_floor_requires_resting_order`
+          : 'advisor_sell_put_floor_requires_resting_order';
+      }
       if (orderTypeNote) {
         console.log(`📋 Order-type override for ${action.action} ${action.instrument_name}: ${baseOrderType} -> ${orderType} (${orderTypeNote})`);
       }
@@ -7814,8 +7879,12 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         ? (Number(defaultActionPrice) > 0 ? Math.min(advisorEntryLimitPrice, Number(defaultActionPrice)) : advisorEntryLimitPrice)
         : action.action === 'buyback_call' && advisorBuybackLimitPrice != null
           ? (Number(defaultActionPrice) > 0 ? Math.min(advisorBuybackLimitPrice, Number(defaultActionPrice)) : advisorBuybackLimitPrice)
+          : action.action === 'sell_put' && advisorSellPutLimitPrice != null
+            ? (Number(defaultActionPrice) > 0 ? Math.max(advisorSellPutLimitPrice, Number(defaultActionPrice)) : advisorSellPutLimitPrice)
           : (advisorEntryLimitPrice || defaultActionPrice);
-      const sanityReferencePrice = currentPrice || action.price || marketPrice;
+      const sanityReferencePrice = action.action === 'sell_put' && advisorSellPutLimitPrice != null
+        ? marketPrice
+        : (currentPrice || action.price || marketPrice);
       let executionPrice = marketPrice;
       if (typeof voterLimitPrice === 'number' && voterLimitPrice > 0 && sanityReferencePrice > 0) {
         const ratio = voterLimitPrice / sanityReferencePrice;
@@ -7829,6 +7898,9 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           } else if (action.action === 'buyback_call' && voterLimitPrice > marketPrice) {
             executionPrice = marketPrice;
             console.log(`📋 Buyback limit capped: voter $${voterLimitPrice} is worse than live ask $${marketPrice}; using live ask instead`);
+          } else if (action.action === 'sell_put' && advisorSellPutLimitPrice != null && voterLimitPrice < advisorSellPutLimitPrice) {
+            executionPrice = advisorSellPutLimitPrice;
+            console.log(`📋 Sell-put limit floored: voter $${voterLimitPrice} is below advisor exit floor $${advisorSellPutLimitPrice}; using advisor floor`);
           } else {
             executionPrice = voterLimitPrice;
           }
@@ -8254,6 +8326,7 @@ ETH crashes tend to cascade — they accelerate, not slow down. Your decisions s
 Things to consider in your assessment:
 - In calm markets, insurance is cheap. That's when to accumulate it. If puts are expensive, patience is the edge.
 - In crashing markets, our puts become increasingly valuable. The temptation is to sell early. Consider whether the crash has further to go — ETH selloffs often have multiple legs.
+- In severe crashes, option books can get sparse and visible bids may stop representing fair value. If monetizing a tail-win put, do not undersell just because the best bid is thin or stale. If we are effectively making the market, name a responsible min_exit_price/limit_price from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and the position's payoff role, then use patient maker-style execution when appropriate.
 - In recovery, fear lingers and IV stays elevated even as price stabilizes. Panickers overpay for protection they no longer need as urgently. This can be an opportunity.
 - The full cycle: cash → cheap puts → crash → puts print → sell at the right time → buy cheap ETH → sell calls → premium → repeat.
 
@@ -8308,6 +8381,7 @@ Given market data, produce a JSON trading agenda with:
         "requires_longer_dated_protection": true,
         "retain_downside_protection": true,
         "tranche_fraction": 0.25,
+        "min_exit_price": <minimum acceptable sell price for monetize_tail_win>,
         "buyback_intent": "profit_capture" | "threat_management",
         "allow_below_profit_floor": false,
         "target_capture_pct": 80,
@@ -8324,14 +8398,14 @@ CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: op
 
 Rules:
 - Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_bid (for sells), market_conditions. For sell_call, include min_score as the primary value gate.
-- Exit criteria MUST include: conditions (array of {field, op, value}) and condition_logic ("any" or "all"). Fields: dte, delta, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte. Do not use mark_price as a strategy trigger. For sell_put, include put_exit_intent. For buyback_call, include buyback_intent; set allow_below_profit_floor true only for threat_management.
-- Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: sell_put should use "ioc". buyback_call may use preferred_order_type ${formatOrderTypeList(getAllowedOrderTypesForAction('buyback_call'))}; patient resting buyback pricing is valid when urgency is low and the market is wide.
+- Exit criteria MUST include: conditions (array of {field, op, value}) and condition_logic ("any" or "all"). Fields: dte, delta, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte. Do not use mark_price as a strategy trigger. For sell_put, include put_exit_intent. For monetize_tail_win, also include min_exit_price or limit_price. For buyback_call, include buyback_intent; set allow_below_profit_floor true only for threat_management.
+- Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: sell_put roll_protection should use "ioc"; sell_put monetize_tail_win may use ${formatOrderTypeList(getAllowedOrderTypesForAction('sell_put'))} only with a min_exit_price/limit_price floor. buyback_call may use preferred_order_type ${formatOrderTypeList(getAllowedOrderTypesForAction('buyback_call'))}; patient resting buyback pricing is valid when urgency is low and the market is wide.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.08, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~${PUT_ROLL_DTE_THRESHOLD} only if the book already holds longer-dated long puts. Use put_exit_intent="roll_protection", requires_longer_dated_protection=true, condition dte lte ${PUT_ROLL_DTE_THRESHOLD}. This roll trigger is independent of the ${PUT_MONETIZATION_PROFIT_THRESHOLD}% monetization threshold.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.04, 0.12]), min_bid for the minimum bid price, and min_score for favorable premium. Sell-call score is bid / abs(delta); use it to require genuinely rich premium, especially when margin utilization is near the caution/buffer zone or price action is weak/downward. Do not rely on spot_price >= some floor as a recovery or value condition. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting. dte_range must be within [5, 12].
-- For sell_put exits: IMPORTANT: sell_put means selling an already-owned long put to close, trim, or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do not sell a long-dated protective put merely because it has recoverable bid/mark value. When DTE is above ${PUT_ROLL_DTE_THRESHOLD}, use put_exit_intent="monetize_tail_win"; require executable unrealized_pnl_pct gt ${PUT_MONETIZATION_PROFIT_THRESHOLD}, retain_downside_protection=true, and tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}. Sell chunks, never all protection at once, so the book can capture more if ETH keeps dropping or bounces around. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you avoid triggering a sell_put, do it because removing protection is strategically unwise or value has not delivered extreme asymmetric upside, not because the exit itself uses more margin.
+- For sell_put exits: IMPORTANT: sell_put means selling an already-owned long put to close, trim, or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do not sell a long-dated protective put merely because it has recoverable bid/mark value. When DTE is above ${PUT_ROLL_DTE_THRESHOLD}, use put_exit_intent="monetize_tail_win"; require executable unrealized_pnl_pct gt ${PUT_MONETIZATION_PROFIT_THRESHOLD}, retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. Sell chunks, never all protection at once, so the book can capture more if ETH keeps dropping or bounces around. In severe crashes with sparse books, visible bids may badly understate fair value; if monetizing, make the market at a disciplined floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and payoff role instead of dumping into a stale bid. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you avoid triggering a sell_put, do it because removing protection is strategically unwise or value has not delivered extreme asymmetric upside, not because the exit itself uses more margin.
 - For buyback_call exits, choose one intent. Intent 1: profit_capture / capacity reset while the short call is working. Use buyback_intent "profit_capture", condition_logic "all", and executable unrealized_pnl_pct gte ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic condition. For patient resting bids before the live ask reaches the capture line, also set target_capture_pct=${CALL_BUYBACK_PROFIT_THRESHOLD}, max_buyback_price to the highest price you are willing to bid, and preferred_order_type "gtc" or "post_only"; the bid price must imply at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture if filled. Do not add dte or mark_price trigger blockers; executable capture already includes the live ask and is the relevant economic threshold. Intent 2: threat_management when price is moving against the short call and time is running out for recovery inside the threatened range. Use buyback_intent "threat_management", set allow_below_profit_floor true, and use real threat conditions such as delta, spot_price vs strike, and remaining DTE. Do not mix these two intents in one rule. Do not prematurely buy back calls just because price is rising; spot can come back down and buying back fear premium can make us the sucker of the trade. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. The ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line is a minimum acceptable capture, not a target. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not give back edge by bidding at the threshold. Never create a threshold-style buyback rule without a live buyback market price. Do not use margin utilization by itself as the buyback trigger. Margin release is a benefit of a good profit-harvest close, not a reason to panic-close. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
@@ -8573,7 +8647,7 @@ Output JSON only:
 
 CRITICAL: criteria must be a JSON OBJECT, not a string.
 - Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
-- Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all", "put_exit_intent": "roll_protection"|"monetize_tail_win", "buyback_intent": "profit_capture"|"threat_management" }
+- Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all", "put_exit_intent": "roll_protection"|"monetize_tail_win", "min_exit_price": number, "buyback_intent": "profit_capture"|"threat_management" }
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
@@ -8598,7 +8672,7 @@ Return ONLY valid JSON, no markdown fences.`
 
 CRITICAL: criteria must be a JSON OBJECT, not a string.
 - Entry criteria: { "option_type": "P"|"C", "delta_range": [min, max], "dte_range": [min, max], ... }
-- Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all", "put_exit_intent": "roll_protection"|"monetize_tail_win", "buyback_intent": "profit_capture"|"threat_management" }
+- Exit criteria: { "conditions": [{"field": "dte"|"unrealized_pnl_pct"|..., "op": "lt"|"gt"|"gte"|"lte", "value": number}], "condition_logic": "any"|"all", "put_exit_intent": "roll_protection"|"monetize_tail_win", "min_exit_price": number, "buyback_intent": "profit_capture"|"threat_management" }
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.

@@ -88,6 +88,8 @@ Required safety:
 
 - Sell in tranches, not all at once.
 - Always retain some downside protection after each sale.
+- Include `min_exit_price` or `limit_price` as the minimum acceptable sell price, especially in severe markets where visible bids may be sparse or stale.
+- Patient `gtc`/`post_only` execution is allowed for tail-win monetization when the named floor protects against underselling; ordinary roll protection remains IOC/non-resting.
 - Confirmation advisors should judge whether the crash may have more legs before selling each tranche.
 - No short-window momentum rule should force sale. Market context informs judgment, but the core trigger is extreme executable payoff plus protection retention.
 

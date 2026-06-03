@@ -145,7 +145,12 @@ const getSellPutProtectionGate = (rule, values, context = {}) => {
     return { allowed: true };
   }
 
-  const pnlPct = Number(values?.unrealized_pnl_pct);
+  const livePnlPct = Number(values?.unrealized_pnl_pct);
+  const patientPnlPct = Number(values?.patient_sell_put_pnl_pct);
+  const pnlPct = Math.max(
+    Number.isFinite(livePnlPct) ? livePnlPct : -Infinity,
+    Number.isFinite(patientPnlPct) ? patientPnlPct : -Infinity
+  );
   if (Number.isFinite(pnlPct) && pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD) {
     const plannedSellAmount = Number(context.plannedSellAmount ?? context.position?.amount ?? 0);
     if (!leavesDownsideProtectionAfterSale(context.position, context.positions || [], plannedSellAmount)) {
@@ -170,6 +175,22 @@ const getSellPutExitAmount = (position, values, criteria = {}) => {
     ? Math.min(requestedFraction, PUT_MONETIZATION_MAX_TRANCHE_FRACTION)
     : PUT_MONETIZATION_MAX_TRANCHE_FRACTION;
   return Math.max(0, Math.min(fullAmount * fraction, fullAmount - 1e-9));
+};
+
+const getAdvisorSellPutLimitPrice = (criteria) => {
+  const explicit = Number(criteria?.min_exit_price ?? criteria?.limit_price ?? criteria?.target_exit_price);
+  return Number.isFinite(explicit) && explicit > 0 ? explicit : null;
+};
+
+const getPatientSellPutPlan = (rule, criteria, position) => {
+  if (!rule || rule.action !== 'sell_put') return null;
+  if (criteria?.put_exit_intent !== 'monetize_tail_win') return null;
+  const limitPrice = getAdvisorSellPutLimitPrice(criteria);
+  const entryPrice = Number(position?.avg_entry_price);
+  if (!(limitPrice > 0) || !(entryPrice > 0)) return null;
+  const pnlPct = ((limitPrice - entryPrice) / entryPrice) * 100;
+  if (!(pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
+  return { limitPrice, pnlPct, preferredOrderType: rule.preferred_order_type || 'gtc' };
 };
 
 const getTradeCashflow = (order) => {
@@ -2810,7 +2831,7 @@ describe('execution order type normalization', () => {
   const ACTION_POLICY = {
     buy_put: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
     sell_call: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
-    sell_put: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc'] },
+    sell_put: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
     buyback_call: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
   };
   const getActionPolicy = (action) => ACTION_POLICY[action] || null;
@@ -2825,9 +2846,13 @@ describe('execution order type normalization', () => {
   const isInvalidReduceOnlyOrderType = (action, orderType) => {
     return !getAllowedOrderTypesForAction(action).includes(orderType);
   };
+  const clampSellPutOrderTypeForIntent = (orderType, intent) => (
+    intent === 'roll_protection' && orderType !== 'ioc' ? 'ioc' : orderType
+  );
 
-  test('sell_put rejects gtc for reduce_only exit', () => {
-    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'gtc'), true);
+  test('sell_put allows resting order types for protected tail-win exits', () => {
+    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'gtc'), false);
+    assert.strictEqual(isInvalidReduceOnlyOrderType('sell_put', 'post_only'), false);
   });
 
   test('buyback_call allows post_only for patient reduce_only buybacks', () => {
@@ -2842,8 +2867,14 @@ describe('execution order type normalization', () => {
     assert.strictEqual(isInvalidReduceOnlyOrderType('sell_call', 'post_only'), false);
   });
 
-  test('stale exit post_only preference is discarded', () => {
-    assert.strictEqual(normalizePreferredOrderType('sell_put', 'post_only'), null);
+  test('sell_put keeps patient resting preference for monetization rules', () => {
+    assert.strictEqual(normalizePreferredOrderType('sell_put', 'post_only'), 'post_only');
+  });
+
+  test('roll_protection sell_put still clamps execution to ioc', () => {
+    assert.strictEqual(clampSellPutOrderTypeForIntent('gtc', 'roll_protection'), 'ioc');
+    assert.strictEqual(clampSellPutOrderTypeForIntent('post_only', 'roll_protection'), 'ioc');
+    assert.strictEqual(clampSellPutOrderTypeForIntent('post_only', 'monetize_tail_win'), 'post_only');
   });
 
   test('sell_call keeps valid resting preference', () => {
@@ -4865,6 +4896,37 @@ describe('Full schema: exit monitoring for put rolling', () => {
 
     assert.strictEqual(gate.allowed, true);
     assert.strictEqual(amount, 1.0);
+  });
+
+  test('tail-win put can make a patient market above a sparse visible bid', () => {
+    const position = { instrument_name: 'ETH-20260731-1500-P', amount: 4.0, direction: 'long', avg_entry_price: 5.00 };
+    const criteria = {
+      put_exit_intent: 'monetize_tail_win',
+      min_exit_price: 35.00,
+      tranche_fraction: 0.25,
+    };
+    const liveValues = { dte: 63.7, unrealized_pnl_pct: 300, execution_price: 20 };
+    const plan = getPatientSellPutPlan(
+      { action: 'sell_put', preferred_order_type: 'post_only' },
+      criteria,
+      position
+    );
+    const plannedValues = {
+      ...liveValues,
+      patient_sell_put_pnl_pct: plan.pnlPct,
+      patient_sell_put_limit_price: plan.limitPrice,
+    };
+    const amount = getSellPutExitAmount(position, plannedValues, criteria);
+    const gate = getSellPutProtectionGate(
+      { action: 'sell_put' },
+      plannedValues,
+      { criteria, position, positions: [position], plannedSellAmount: amount }
+    );
+
+    assert.strictEqual(plan.limitPrice, 35);
+    assert.strictEqual(plan.pnlPct, 600);
+    assert.strictEqual(amount, 1.0);
+    assert.strictEqual(gate.allowed, true);
   });
 
   test('long-dated put at monetization boundary is still blocked', () => {
