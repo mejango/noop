@@ -7878,6 +7878,14 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       const advisorBuybackRuleSatisfied = action.action === 'buyback_call'
         && buybackConfirmationContext?.satisfied === true
         && Number(liveMarketPrice) > 0;
+      const deterministicPatientBuyback = action.action === 'buyback_call'
+        && buybackConfirmationContext?.patientSatisfied === true
+        && Number(buybackConfirmationContext?.patientLimitPrice) > 0
+        && Number(liveMarketPrice) > 0;
+      if (decision === 'rejected' && deterministicPatientBuyback) {
+        decision = 'confirmed';
+        decisionOverrideReason = `advisor_patient_buyback_override: patient bid $${buybackConfirmationContext.patientLimitPrice.toFixed(4)} captures ${buybackConfirmationContext.patientCapturePct.toFixed(2)}%, satisfying ${buybackConfirmationContext.op} ${buybackConfirmationContext.threshold}% without crossing live ask`;
+      }
       if (
         decision === 'rejected'
         && advisorBuybackRuleSatisfied

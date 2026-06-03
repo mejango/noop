@@ -5581,8 +5581,13 @@ describe('advisor-led buyback confirmation discipline', () => {
     } else {
       decision = 'retry';
     }
-
     const advisorBuybackRuleSatisfied = buybackContext?.satisfied === true && Number(liveMarketPrice) > 0;
+    const deterministicPatientBuyback = buybackContext?.patientSatisfied === true
+      && Number(buybackContext?.patientLimitPrice) > 0
+      && Number(liveMarketPrice) > 0;
+    if (decision === 'rejected' && deterministicPatientBuyback) {
+      decision = 'confirmed';
+    }
     if (
       decision === 'rejected'
       && advisorBuybackRuleSatisfied
@@ -5727,6 +5732,39 @@ describe('advisor-led buyback confirmation discipline', () => {
     assert.strictEqual(context.actualSatisfied, false);
     assert.strictEqual(context.patientSatisfied, true);
     assert.strictEqual(context.satisfied, true);
+  });
+
+  test('patient buyback bid override confirms even when both reviewers reject live ask economics', () => {
+    const decision = resolveVote({
+      haikuVote: { confirm: false, reasoning: 'live ask below threshold' },
+      codexVote: { confirm: false, reasoning: 'live executable capture below 80%' },
+      buybackContext: {
+        ...buildBuybackContext({ actual: 52.88, patientCapturePct: 80 }),
+        patientLimitPrice: 3.82,
+      },
+      liveMarketPrice: 9,
+    });
+
+    assert.strictEqual(decision, 'confirmed');
+  });
+
+  test('patient buyback override still requires live market price and explicit patient limit', () => {
+    assert.strictEqual(resolveVote({
+      haikuVote: { confirm: false },
+      codexVote: { confirm: false },
+      buybackContext: {
+        ...buildBuybackContext({ actual: 52.88, patientCapturePct: 80 }),
+        patientLimitPrice: 3.82,
+      },
+      liveMarketPrice: null,
+    }), 'rejected');
+
+    assert.strictEqual(resolveVote({
+      haikuVote: { confirm: false },
+      codexVote: { confirm: false },
+      buybackContext: buildBuybackContext({ actual: 52.88, patientCapturePct: 80 }),
+      liveMarketPrice: 9,
+    }), 'rejected');
   });
 
   test('recognizes stale rejection caused by patient buyback threshold misclassification', () => {
