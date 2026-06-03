@@ -875,6 +875,55 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   ].join('\n');
 };
 
+const formatSellCallConfirmationContext = ({ action, triggerData, ticker, currentPrice }) => {
+  if (action?.action !== 'sell_call') return '';
+  const criteria = typeof action.rule_criteria === 'string' ? JSON.parse(action.rule_criteria) : (action.rule_criteria || {});
+  const triggerScore = Number(triggerData?.score);
+  const triggerDelta = Number(triggerData?.delta);
+  const liveDelta = Number(ticker?.option_pricing?.d);
+  const triggerDte = Number(triggerData?.dte);
+  const triggerBid = Number(triggerData?.live_price ?? currentPrice ?? action.price);
+  const executionBid = Number(currentPrice || action.price);
+  const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
+  const plannedScore = Math.abs(scoreDelta) > 0 && executionBid > 0 ? executionBid / Math.abs(scoreDelta) : null;
+  const fmt = (value, digits = 4) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
+  const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
+  return [
+    'Sell-call value confirmation context:',
+    `- Trigger score: ${fmt(triggerScore, 2)} using call score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
+    `- Rule gates: min_score=${fmt(Number(criteria.min_score), 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}.`,
+    `- Live reference: executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}, planned_score=${fmt(plannedScore, 2)}.`,
+    '- Confirm sell_call only when the fresh bid/score/margin facts still match the advisor rule.',
+  ].join('\n');
+};
+
+const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, advisorLimitPrice, currentPrice }) => {
+  if (action?.action !== 'sell_put') return '';
+  const criteria = typeof action.rule_criteria === 'string' ? JSON.parse(action.rule_criteria) : (action.rule_criteria || {});
+  const currentValues = triggerData?.current_values || {};
+  const position = (livePositions || []).find((item) => item?.instrument_name === action.instrument_name);
+  const plannedAmount = Number(action.amount);
+  const positionAmount = Number(position?.amount);
+  const totalLongPuts = getTotalLongPutAmount(livePositions || []);
+  const remainingLongPuts = Number.isFinite(plannedAmount) ? Math.max(0, totalLongPuts - plannedAmount) : null;
+  const retainsProtection = position ? leavesDownsideProtectionAfterSale(position, livePositions || [], plannedAmount) : null;
+  const livePnlPct = Number(currentValues.unrealized_pnl_pct);
+  const patientPnlPct = Number(triggerData?.patient_sell_put_pnl_pct ?? currentValues.patient_sell_put_pnl_pct);
+  const advisorFloor = Number(advisorLimitPrice ?? triggerData?.patient_sell_put_limit_price ?? currentValues.patient_sell_put_limit_price);
+  const trancheFraction = Number(triggerData?.tranche_fraction ?? (positionAmount > 0 ? plannedAmount / positionAmount : NaN));
+  const fmt = (value, digits = 2) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
+  const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
+  return [
+    'Sell-put exit confirmation context:',
+    `- Intent=${triggerData?.put_exit_intent || criteria.put_exit_intent || 'n/a'}. sell_put closes an owned long put; it is reduce_only and capital-releasing, not a naked short-put entry.`,
+    `- Current executable exit: live_bid=${fmtPrice(currentValues.execution_price ?? currentPrice ?? action.price)}, live_unrealized_pnl_pct=${fmt(livePnlPct)}%, patient_floor_pnl_pct=${fmt(patientPnlPct)}%.`,
+    `- Protection discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
+    `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use patient gtc/post_only at or above the floor rather than dumping into the bid.`,
+  ].join('\n');
+};
+
+const getConfirmationScopePrompt = () => 'CONFIRMATION SCOPE: This is a last-mile execution check, not a second scheduled advisory.';
+
 const clampSellCallQtyToEntryCap = ({
   desiredQty,
   amountStep,
@@ -5750,6 +5799,85 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('post_only/gtc can rest there'));
     assert.ok(context.includes('live_delta=-0.0737'));
     assert.ok(context.includes('Do not invent a different target score'));
+  });
+
+  test('sell_call confirmation context carries advisor score gates', () => {
+    const context = formatSellCallConfirmationContext({
+      action: {
+        action: 'sell_call',
+        price: 8.1,
+        rule_criteria: {
+          option_type: 'C',
+          delta_range: [0.04, 0.12],
+          dte_range: [5, 12],
+          min_bid: 4,
+          min_score: 50,
+        },
+      },
+      triggerData: {
+        score: 68.55,
+        delta: 0.1182,
+        dte: 8.7,
+        strike: 2100,
+        live_price: 8.1,
+      },
+      ticker: { b: 8.1, option_pricing: { d: '0.1182' } },
+      currentPrice: 8.1,
+    });
+
+    assert.ok(context.includes('Sell-call value confirmation context'));
+    assert.ok(context.includes('Trigger score: 68.55'));
+    assert.ok(context.includes('min_score=50.00'));
+    assert.ok(context.includes('min_bid=$4.0000'));
+    assert.ok(context.includes('planned_score=68.53'));
+    assert.ok(context.includes('fresh bid/score/margin facts'));
+  });
+
+  test('sell_put confirmation context preserves tail monetization floor and tranche discipline', () => {
+    const context = formatSellPutConfirmationContext({
+      action: {
+        action: 'sell_put',
+        instrument_name: 'ETH-20260731-1500-P',
+        amount: 0.25,
+        price: 105,
+        rule_criteria: {
+          put_exit_intent: 'monetize_tail_win',
+          min_exit_price: 120,
+          tranche_fraction: 0.25,
+        },
+      },
+      triggerData: {
+        put_exit_intent: 'monetize_tail_win',
+        patient_sell_put_pnl_pct: 650,
+        patient_sell_put_limit_price: 120,
+        tranche_fraction: 0.25,
+        current_values: {
+          execution_price: 105,
+          unrealized_pnl_pct: 556.25,
+        },
+      },
+      livePositions: [
+        { instrument_name: 'ETH-20260731-1500-P', direction: 'long', amount: 1 },
+        { instrument_name: 'ETH-20260925-1200-P', direction: 'long', amount: 1 },
+      ],
+      advisorLimitPrice: 120,
+      currentPrice: 105,
+    });
+
+    assert.ok(context.includes('Intent=monetize_tail_win'));
+    assert.ok(context.includes('not a naked short-put entry'));
+    assert.ok(context.includes('patient_floor_pnl_pct=650.00%'));
+    assert.ok(context.includes('tranche_fraction=0.2500'));
+    assert.ok(context.includes('retain_downside_protection=yes'));
+    assert.ok(context.includes('Advisor exit floor: $120.0000'));
+    assert.ok(context.includes('rather than dumping into the bid'));
+  });
+
+  test('confirmation scope is last-mile execution, not a second advisory', () => {
+    const context = getConfirmationScopePrompt();
+
+    assert.ok(context.includes('last-mile execution check'));
+    assert.ok(context.includes('not a second scheduled advisory'));
   });
 
   test('call discipline wording distinguishes entry caps from true emergencies', () => {

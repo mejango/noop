@@ -6006,6 +6006,70 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   ].join('\n');
 };
 
+const formatSellCallConfirmationContext = ({ action, triggerData, ticker, currentPrice }) => {
+  if (action?.action !== 'sell_call') return '';
+  const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
+  const triggerScore = Number(triggerData?.score);
+  const triggerDelta = Number(triggerData?.delta);
+  const liveDelta = Number(ticker?.option_pricing?.d);
+  const triggerDte = Number(triggerData?.dte);
+  const triggerBid = Number(triggerData?.live_price ?? currentPrice ?? action.price);
+  const executionBid = Number(currentPrice || action.price);
+  const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
+  const plannedScore = Math.abs(scoreDelta) > 0 && executionBid > 0
+    ? executionBid / Math.abs(scoreDelta)
+    : null;
+  const marketConditions = Array.isArray(criteria.market_conditions) && criteria.market_conditions.length > 0
+    ? JSON.stringify(criteria.market_conditions)
+    : 'none';
+  const fmt = (value, digits = 4) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
+  const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
+  return [
+    'Sell-call value confirmation context:',
+    `- Trigger score: ${fmt(triggerScore, 2)} using call score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
+    `- Rule gates: min_score=${fmt(Number(criteria.min_score), 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}, market_conditions=${marketConditions}.`,
+    `- Live reference: executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}, planned_score=${fmt(plannedScore, 2)}.`,
+    '- Confirm sell_call only when the fresh bid/score/margin facts still match the advisor rule. A broad spot floor is not premium value by itself; if fresh market action materially contradicts the rule premise, reject rather than inventing a new thesis.',
+  ].join('\n');
+};
+
+const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, advisorLimitPrice, currentPrice }) => {
+  if (action?.action !== 'sell_put') return '';
+  const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
+  const intent = triggerData?.put_exit_intent || getPutExitIntent(criteria) || 'n/a';
+  const currentValues = triggerData?.current_values || {};
+  const position = (livePositions || []).find((item) => item?.instrument_name === action.instrument_name);
+  const plannedAmount = Number(action.amount);
+  const positionAmount = Number(position?.amount);
+  const totalLongPuts = getTotalLongPutAmount(livePositions || []);
+  const remainingLongPuts = Number.isFinite(plannedAmount)
+    ? Math.max(0, totalLongPuts - plannedAmount)
+    : null;
+  const retainsProtection = position
+    ? leavesDownsideProtectionAfterSale(position, livePositions || [], plannedAmount)
+    : null;
+  const livePnlPct = Number(currentValues.unrealized_pnl_pct);
+  const patientPnlPct = Number(triggerData?.patient_sell_put_pnl_pct ?? currentValues.patient_sell_put_pnl_pct);
+  const dte = Number(currentValues.dte);
+  const liveBid = Number(currentValues.execution_price ?? currentPrice ?? action.price);
+  const advisorFloor = Number(advisorLimitPrice ?? triggerData?.patient_sell_put_limit_price ?? currentValues.patient_sell_put_limit_price);
+  const trancheFraction = Number(triggerData?.tranche_fraction ?? (
+    Number.isFinite(plannedAmount) && positionAmount > 0 ? plannedAmount / positionAmount : NaN
+  ));
+  const fmt = (value, digits = 2) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
+  const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
+  return [
+    'Sell-put exit confirmation context:',
+    `- Intent=${intent}. sell_put closes an owned long put; it is reduce_only and capital-releasing, not a naked short-put entry.`,
+    `- Current executable exit: live_bid=${fmtPrice(liveBid)}, live_unrealized_pnl_pct=${fmt(livePnlPct)}%, patient_floor_pnl_pct=${fmt(patientPnlPct)}%, dte=${fmt(dte)}, delta=${fmt(Number(currentValues.delta), 4)}, theta=${fmt(Number(currentValues.theta), 4)}.`,
+    `- Protection discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
+    `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use patient gtc/post_only at or above the floor rather than dumping into the bid.`,
+    `- roll_protection requires DTE <= ${PUT_ROLL_DTE_THRESHOLD} and longer-dated protection already in the book. monetize_tail_win requires executable PnL > ${PUT_MONETIZATION_PROFIT_THRESHOLD}% and tranching while retaining protection; even then, confirm only if selling this chunk is wiser than keeping convexity.`,
+  ].join('\n');
+};
+
+const getConfirmationScopePrompt = () => 'CONFIRMATION SCOPE: This is a last-mile execution check, not a second scheduled advisory. Treat the active rule and trigger details as the strategic intent. Confirm only if fresh execution facts still satisfy the typed rule, the limit/order type can respect that intent, and hard safety checks pass. Reject for stale or moved-market facts that invalidate the rule, missing live pricing, margin/liquidation danger, reduce-only violations, or action-specific discipline failures; do not invent a new strategy thesis at confirmation time.';
+
 const getOpenRestingEntryOrders = () => {
   if (!db) return [];
   return db.getOpenRestingOrders().filter(order => order.action === 'buy_put' || order.action === 'sell_call');
@@ -7652,6 +7716,19 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         currentPrice,
         advisorLimitPrice: advisorEntryLimitPrice,
       });
+      const sellCallConfirmationPrompt = formatSellCallConfirmationContext({
+        action,
+        triggerData,
+        ticker,
+        currentPrice,
+      });
+      const sellPutConfirmationPrompt = formatSellPutConfirmationContext({
+        action,
+        triggerData,
+        livePositions,
+        advisorLimitPrice: advisorSellPutLimitPrice,
+        currentPrice,
+      });
       const recentFailedEntry = getRecentFailedEntry(action.action, action.instrument_name);
       const callMarginContext = getCallMarginContext(
         action.action,
@@ -7682,12 +7759,15 @@ ${marginStr}
 ${callMarginContext}
 ${buybackConfirmationPrompt}
 ${buyPutConfirmationPrompt}
+${sellCallConfirmationPrompt}
+${sellPutConfirmationPrompt}
 ${ruleReasoningLine}
 Triggered because: ${action.trigger_details || 'N/A'}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
 ${recentFailedEntry?.reason ? `Recent execution friction on this exact instrument/action: ${recentFailedEntry.reason}` : ''}
 ${recentTradeReviews.length > 0 ? `Recent trade reviews:\n${recentTradeReviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}` : ''}
 ${activeTradeLessons.length > 0 ? `Active trade lessons:\n${activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}` : ''}
+${getConfirmationScopePrompt()}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
 ${getActionOrderTypeHardRule(action.action)}
 - "ioc" (immediate-or-cancel): fill now at market or cancel. TAKER fee = $0.50 base + 0.03% of notional (~$1/contract for ETH options). Use only when the opportunity is exceptional and might vanish.
@@ -7706,6 +7786,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
           model: 'claude-haiku-4-5-20251001',
           max_tokens: 256,
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
+${getConfirmationScopePrompt()}
 ${getSharedActionPolicyPrompt()}
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
 ${getCallMarginDisciplinePrompt()}
@@ -7752,6 +7833,7 @@ ${getConfirmationJsonOnlyPrompt()}`,
           `You are a Taleb-style risk advisor. Your philosophy has TWO sides:
 1. BUY CONVEXITY CHEAP: Long puts are insurance — bounded cost, unbounded upside. Confirm puts that are cheap relative to the tail risk they cover. Reject puts that overpay for protection (high IV, crowd panic).
 2. SELL THE CROWD'S GREED: Selling calls is routine — exploit mispriced optimism to fund insurance. Confirm call sells when the premium is irrational relative to the actual probability, the strike gives real cushion, and exposure is sized to survive the worst case. Reject when the premium doesn't justify the risk or margin can't absorb an adverse move.
+${getConfirmationScopePrompt()}
 ${getSharedActionPolicyPrompt()}
 RUIN AVOIDANCE: The only real constraint. Reject trades that could cause ruin — margin too thin, exposure too concentrated, or sizing that doesn't survive a 2-sigma move. Everything else is about getting paid for risk the crowd misprices.
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject if initial_margin is dangerously low or account is under liquidation.
@@ -7804,7 +7886,13 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         && (haikuVote.confirm || codexVote.confirm)
       ) {
         decision = 'confirmed';
-        decisionOverrideReason = `advisor_rule_buyback_override: active rule capture ${buybackConfirmationContext.actual.toFixed(2)}% satisfies ${buybackConfirmationContext.op} ${buybackConfirmationContext.threshold}% and one reviewer confirmed`;
+        const overrideCapture = buybackConfirmationContext.patientSatisfied
+          ? buybackConfirmationContext.patientCapturePct
+          : buybackConfirmationContext.actual;
+        const overrideCaptureText = Number.isFinite(overrideCapture)
+          ? `${overrideCapture.toFixed(2)}%`
+          : 'available patient/live capture';
+        decisionOverrideReason = `advisor_rule_buyback_override: active rule capture ${overrideCaptureText} satisfies ${buybackConfirmationContext.op} ${buybackConfirmationContext.threshold}% and one reviewer confirmed`;
       }
 
       const reasoning = [
