@@ -846,7 +846,9 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const capPct = CALL_EXPOSURE_CAP_PCT * 100;
   const limitPct = CALL_EXPOSURE_LIMIT_PCT * 100;
   const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
-  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(1)}pp. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the active entry cap. The execution buffer is safety, not planned sell-call capacity.`;
+  const entryCapSatisfied = projectedUtilization != null
+    && projectedUtilization <= CALL_EXPOSURE_CAP_PCT + 1e-9;
+  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_exact=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(6)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, active_entry_cap_exact=${capPct.toFixed(6)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(1)}pp, entry_cap_satisfied=${entryCapSatisfied ? 'yes' : 'no'}. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the active entry cap. The execution buffer is safety, not planned sell-call capacity. At-or-below means <= and equality is allowed.`;
 };
 const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice }) => {
   if (action?.action !== 'buy_put') return '';
@@ -893,7 +895,7 @@ const formatSellCallConfirmationContext = ({ action, triggerData, ticker, curren
     `- Trigger score: ${fmt(triggerScore, 2)} using call score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
     `- Rule gates: min_score=${fmt(Number(criteria.min_score), 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}.`,
     `- Live reference: executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}, planned_score=${fmt(plannedScore, 2)}.`,
-    '- Confirm sell_call only when the fresh bid/score/margin facts still match the advisor rule.',
+    '- Confirm sell_call when the fresh bid/score/margin facts satisfy the advisor rule. Trigger score and planned_score are current execution facts; do not let stale advisory-creation prose override them.',
   ].join('\n');
 };
 
@@ -6196,10 +6198,31 @@ describe('confirmation prompt margin context', () => {
     );
     assert.ok(context.includes('current_derive_display=57.0%'));
     assert.ok(context.includes('projected_after_trade_display='));
+    assert.ok(context.includes('projected_after_trade_exact='));
     assert.ok(context.includes('caution_zone=40.0%-45.0%'));
     assert.ok(context.includes('target_cap=45.0%'));
+    assert.ok(context.includes('active_entry_cap_exact=45.000000%'));
     assert.ok(context.includes('buffered_limit=50.0%'));
     assert.ok(context.includes('execution_buffer=5.0pp'));
+    assert.ok(context.includes('entry_cap_satisfied='));
+    assert.ok(context.includes('equality is allowed'));
+  });
+
+  test('sell_call margin context treats exact target cap as satisfied', () => {
+    const context = getCallMarginContext(
+      'sell_call',
+      { maintenance_margin: 600, collaterals_maintenance_margin: 1000, positions_initial_margin: 100, open_orders_margin: 0 },
+      [{ instrument_name: 'ETH-20260417-2600-C', direction: 'short', amount: 1 }],
+      [],
+      [{ instrument_name: 'ETH-20260417-2600-C', option_details: { strike: 2600 } }],
+      2240,
+      'ETH-20260417-2600-C',
+      0.5,
+      2.8
+    );
+    assert.ok(context.includes('projected_after_trade_exact=45.000000%'));
+    assert.ok(context.includes('entry_cap_satisfied=yes'));
+    assert.ok(context.includes('At-or-below means <='));
   });
 
   test('non-call action says margin context not applicable', () => {
@@ -6258,7 +6281,9 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('min_score=50.00'));
     assert.ok(context.includes('min_bid=$4.0000'));
     assert.ok(context.includes('planned_score=68.53'));
-    assert.ok(context.includes('fresh bid/score/margin facts'));
+    assert.ok(context.includes('fresh bid/score/margin facts satisfy the advisor rule'));
+    assert.ok(context.includes('Trigger score and planned_score are current execution facts'));
+    assert.ok(context.includes('do not let stale advisory-creation prose override them'));
   });
 
   test('sell_put confirmation context preserves tail monetization floor and tranche discipline', () => {
