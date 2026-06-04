@@ -6174,6 +6174,27 @@ const getOpenRestingExitOrders = () => {
   return db.getOpenRestingOrders().filter(order => order.action === 'buyback_call' || order.action === 'sell_put');
 };
 
+const getBlockingRestingOrderForEntryCandidate = (action, candidate, price, restingOrders = null) => {
+  if (!db || !candidate?.name) return null;
+  const sameInstrumentOrders = (restingOrders || db.getOpenRestingOrders())
+    .filter(order => order.instrument_name === candidate.name);
+  if (sameInstrumentOrders.length === 0) return null;
+
+  if (action === 'sell_call') {
+    const sellPrice = Number(price);
+    const step = getInstrumentPriceStep(candidate.instrument, sellPrice);
+    const lowestSafeSell = (order) => normalizePriceToStep(Number(order.limit_price || 0) + step, step, 'up');
+    const blockingOrder = sameInstrumentOrders.find((order) => {
+      if (order.action !== 'buyback_call') return true;
+      const buybackPrice = Number(order.limit_price || 0);
+      return !(sellPrice > 0 && buybackPrice > 0 && sellPrice >= lowestSafeSell(order));
+    });
+    return blockingOrder || null;
+  }
+
+  return sameInstrumentOrders[0] || null;
+};
+
 const findRestingExitOrderForRule = (restingOrders, rule) => {
   if (!Array.isArray(restingOrders) || !rule) return null;
   return restingOrders.find(order =>
@@ -6879,7 +6900,23 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
         // Pick best candidate (highest score)
         candidates.sort((a, b) => b.score - a.score);
-        const best = candidates[0];
+        let blockedByRestingOrder = 0;
+        const best = candidates.find((candidate) => {
+          const sameActionEntryResting = openRestingEntryOrders.some(order =>
+            order.instrument_name === candidate.name && order.action === rule.action
+          );
+          const candidatePrice = optionType === 'P' ? candidate.askPrice : candidate.bidPrice;
+          if (sameActionEntryResting || !getBlockingRestingOrderForEntryCandidate(rule.action, candidate, candidatePrice)) return true;
+          blockedByRestingOrder++;
+          return false;
+        });
+        if (!best) {
+          console.log(`📋 Rule ${rule.id} (${rule.action}): ${candidates.length} candidate(s) blocked by same-instrument resting orders`);
+          continue;
+        }
+        if (blockedByRestingOrder > 0) {
+          console.log(`📋 Rule ${rule.id} (${rule.action}): skipped ${blockedByRestingOrder} candidate(s) with same-instrument resting orders; selected ${best.name}`);
+        }
 
         // Calculate amount: min of rule budget_limit, put cycle budget remaining, and book liquidity
         const livePrice = optionType === 'P' ? best.askPrice : best.bidPrice;
@@ -7018,8 +7055,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           }
         }
 
-        if (db.hasRestingOrderForInstrument(best.name)) {
-          console.log(`📋 Skip ${rule.action} ${best.name}: another resting order already on book`);
+        const blockingRestingOrder = getBlockingRestingOrderForEntryCandidate(rule.action, best, price);
+        if (blockingRestingOrder) {
+          console.log(`📋 Skip ${rule.action} ${best.name}: blocking resting ${blockingRestingOrder.action || 'order'} already on book @ $${Number(blockingRestingOrder.limit_price || 0).toFixed(4)}`);
           continue;
         }
 

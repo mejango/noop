@@ -3797,6 +3797,27 @@ describe('Defensive API response parsing', () => {
 // ============================================================================
 
 describe('Resting order dedup for entry rules', () => {
+  const chooseBestUnblockedCandidate = (candidates, restingOrders, action) => {
+    const openRestingEntryOrders = restingOrders.filter(order => order.action === 'buy_put' || order.action === 'sell_call');
+    const getBlockingRestingOrderForEntryCandidate = (candidate) => {
+      const sameInstrumentOrders = restingOrders.filter(order => order.instrument_name === candidate.name);
+      if (sameInstrumentOrders.length === 0) return null;
+      if (action === 'sell_call') {
+        return sameInstrumentOrders.find((order) => {
+          if (order.action !== 'buyback_call') return true;
+          return !(Number(candidate.price) > Number(order.limit_price));
+        }) || null;
+      }
+      return sameInstrumentOrders[0] || null;
+    };
+    return [...candidates].sort((a, b) => b.score - a.score).find((candidate) => {
+      const sameActionEntryResting = openRestingEntryOrders.some(order =>
+        order.instrument_name === candidate.name && order.action === action
+      );
+      return sameActionEntryResting || !getBlockingRestingOrderForEntryCandidate(candidate);
+    }) || null;
+  };
+
   // Simulates the check: if we have a resting order for an instrument, skip entry
   test('resting order exists for instrument → skip', () => {
     const restingInstruments = new Set(['ETH-20260501-1500-P', 'ETH-20260601-2000-C']);
@@ -3813,6 +3834,42 @@ describe('Resting order dedup for entry rules', () => {
   test('empty resting orders → always proceed', () => {
     const restingInstruments = new Set();
     assert.strictEqual(restingInstruments.has('anything'), false);
+  });
+
+  test('same-instrument buyback_call below sell price does not block best sell_call candidate', () => {
+    const candidates = [
+      { name: 'ETH-20260612-2000-C', score: 72, price: 8.5 },
+      { name: 'ETH-20260612-2200-C', score: 68, price: 5.5 },
+    ];
+    const restingOrders = [
+      { instrument_name: 'ETH-20260612-2000-C', action: 'buyback_call', limit_price: 1.6 },
+    ];
+    const best = chooseBestUnblockedCandidate(candidates, restingOrders, 'sell_call');
+    assert.strictEqual(best.name, 'ETH-20260612-2000-C');
+  });
+
+  test('same-instrument buyback_call at or above sell price blocks crossed sell_call candidate', () => {
+    const candidates = [
+      { name: 'ETH-20260612-2000-C', score: 72, price: 1.5 },
+      { name: 'ETH-20260612-2200-C', score: 68, price: 5.5 },
+    ];
+    const restingOrders = [
+      { instrument_name: 'ETH-20260612-2000-C', action: 'buyback_call', limit_price: 1.6 },
+    ];
+    const best = chooseBestUnblockedCandidate(candidates, restingOrders, 'sell_call');
+    assert.strictEqual(best.name, 'ETH-20260612-2200-C');
+  });
+
+  test('same-action entry resting order remains eligible for adjustment', () => {
+    const candidates = [
+      { name: 'ETH-20260612-2000-C', score: 72, price: 8.5 },
+      { name: 'ETH-20260612-2200-C', score: 68, price: 5.5 },
+    ];
+    const restingOrders = [
+      { instrument_name: 'ETH-20260612-2000-C', action: 'sell_call' },
+    ];
+    const best = chooseBestUnblockedCandidate(candidates, restingOrders, 'sell_call');
+    assert.strictEqual(best.name, 'ETH-20260612-2000-C');
   });
 });
 
