@@ -34,7 +34,7 @@ const describe = (name, fn) => {
 const CALL_EXPIRATION_RANGE = [5, 12];
 const CALL_DELTA_RANGE = [0.04, 0.12];
 const PUT_ROLL_DTE_THRESHOLD = 25;
-const PUT_MONETIZATION_PROFIT_THRESHOLD = 500;
+const PUT_MONETIZATION_PROFIT_THRESHOLD = 1000;
 const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
 
@@ -5159,7 +5159,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
       dte: 63.7,
       mark_price: 30.50,
       execution_price: 27.10,
-      unrealized_pnl_pct: 35.5,
+      unrealized_pnl_pct: 600,
     };
     const looseConditionTriggered = evaluateConditions(
       [{ field: 'mark_price', op: 'gte', value: 0.10 }],
@@ -5222,7 +5222,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
 
   test('long-dated put can be considered after extreme asymmetric upside', () => {
     const position = { instrument_name: 'ETH-20260731-1500-P', amount: 4.0, direction: 'long', avg_entry_price: 5.00 };
-    const values = { dte: 63.7, unrealized_pnl_pct: 520, execution_price: 120 };
+    const values = { dte: 63.7, unrealized_pnl_pct: 1200, execution_price: 120 };
     const amount = getSellPutExitAmount(position, values, { put_exit_intent: 'monetize_tail_win', tranche_fraction: 0.25 });
     const gate = getSellPutProtectionGate(
       { action: 'sell_put' },
@@ -5238,7 +5238,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
     const position = { instrument_name: 'ETH-20260731-1500-P', amount: 4.0, direction: 'long', avg_entry_price: 5.00 };
     const criteria = {
       put_exit_intent: 'monetize_tail_win',
-      min_exit_price: 35.00,
+      min_exit_price: 60.00,
       tranche_fraction: 0.25,
     };
     const liveValues = { dte: 63.7, unrealized_pnl_pct: 300, execution_price: 20 };
@@ -5259,8 +5259,8 @@ describe('Full schema: exit monitoring for put rolling', () => {
       { criteria, position, positions: [position], plannedSellAmount: amount }
     );
 
-    assert.strictEqual(plan.limitPrice, 35);
-    assert.strictEqual(plan.pnlPct, 600);
+    assert.strictEqual(plan.limitPrice, 60);
+    assert.strictEqual(plan.pnlPct, 1100);
     assert.strictEqual(amount, 1.0);
     assert.strictEqual(gate.allowed, true);
   });
@@ -6301,12 +6301,12 @@ describe('confirmation prompt margin context', () => {
       },
       triggerData: {
         put_exit_intent: 'monetize_tail_win',
-        patient_sell_put_pnl_pct: 650,
+        patient_sell_put_pnl_pct: 1150,
         patient_sell_put_limit_price: 120,
         tranche_fraction: 0.25,
         current_values: {
           execution_price: 105,
-          unrealized_pnl_pct: 556.25,
+          unrealized_pnl_pct: 1100.25,
         },
       },
       livePositions: [
@@ -6319,7 +6319,7 @@ describe('confirmation prompt margin context', () => {
 
     assert.ok(context.includes('Intent=monetize_tail_win'));
     assert.ok(context.includes('not a naked short-put entry'));
-    assert.ok(context.includes('patient_floor_pnl_pct=650.00%'));
+    assert.ok(context.includes('patient_floor_pnl_pct=1150.00%'));
     assert.ok(context.includes('tranche_fraction=0.2500'));
     assert.ok(context.includes('retain_downside_protection=yes'));
     assert.ok(context.includes('Advisor exit floor: $120.0000'));

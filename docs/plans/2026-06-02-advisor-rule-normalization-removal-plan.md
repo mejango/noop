@@ -82,7 +82,7 @@ Purpose: harvest explosive convex payoff while preserving further downside conve
 
 Trigger:
 
-- Executable `unrealized_pnl_pct > 500`.
+- Executable `unrealized_pnl_pct > 1000`.
 
 Required safety:
 
