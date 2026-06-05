@@ -262,6 +262,9 @@ const PUT_ROLL_DTE_THRESHOLD = 25;
 const PUT_MONETIZATION_PROFIT_THRESHOLD = 1000;
 const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
 const REJECTED_ACTION_BACKOFF_MS = 60 * 60 * 1000;
+const MANDELBROT_SPOT_PATH_LOOKBACK_DAYS = 30;
+const MANDELBROT_SPOT_PATH_INTERVAL_HOURS = 1;
+const MANDELBROT_SPOT_PATH_MAX_POINTS = (MANDELBROT_SPOT_PATH_LOOKBACK_DAYS * 24) + 1;
 
 // Trading parameters - CALLS  
 const CALL_EXPIRATION_RANGE = [5, 12];
@@ -5377,9 +5380,173 @@ const buildFactualAdvisoryAssessment = ({
   });
 };
 
+const normalizeSpotPathRow = (row) => {
+  if (!row || typeof row !== 'object') return null;
+  const timestamp = row.hour || row.timestamp || row.time;
+  const ts = Date.parse(timestamp);
+  const price = Number(row.avg_price ?? row.close ?? row.price);
+  if (!Number.isFinite(ts) || !(price > 0)) return null;
+  return { ts, price };
+};
+
+const buildHourlySpotPathSamples = (rows = []) => {
+  const intervalMs = MANDELBROT_SPOT_PATH_INTERVAL_HOURS * 60 * 60 * 1000;
+  const buckets = new Map();
+  const normalized = rows.map(normalizeSpotPathRow).filter(Boolean).sort((a, b) => a.ts - b.ts);
+  for (const point of normalized) {
+    const bucketTs = Math.floor(point.ts / intervalMs) * intervalMs;
+    const existing = buckets.get(bucketTs) || { ts: bucketTs, closeTs: -Infinity, price: point.price };
+    if (point.ts >= existing.closeTs) {
+      existing.closeTs = point.ts;
+      existing.price = point.price;
+    }
+    buckets.set(bucketTs, existing);
+  }
+  return Array.from(buckets.values())
+    .sort((a, b) => a.ts - b.ts)
+    .slice(-MANDELBROT_SPOT_PATH_MAX_POINTS)
+    .map((point) => ({
+      ts: point.ts,
+      hour: new Date(point.ts).toISOString().slice(0, 13),
+      price: roundForAdvisory(point.price, 2),
+    }))
+    .filter((point) => Number.isFinite(point.price));
+};
+
+const quantile = (values, q) => {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (sorted.length === 0) return null;
+  const index = (sorted.length - 1) * q;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + ((sorted[upper] - sorted[lower]) * (index - lower));
+};
+
+const average = (values) => {
+  const finite = values.filter(Number.isFinite);
+  if (finite.length === 0) return null;
+  return finite.reduce((sum, value) => sum + value, 0) / finite.length;
+};
+
+const getSpotPathPriceNear = (samples, targetTs) => {
+  const toleranceMs = MANDELBROT_SPOT_PATH_INTERVAL_HOURS * 2.5 * 60 * 60 * 1000;
+  for (let i = samples.length - 1; i >= 0; i--) {
+    if (samples[i].ts <= targetTs) {
+      return targetTs - samples[i].ts <= toleranceMs ? samples[i].price : null;
+    }
+  }
+  for (const sample of samples) {
+    if (sample.ts >= targetTs) {
+      return sample.ts - targetTs <= toleranceMs ? sample.price : null;
+    }
+  }
+  return null;
+};
+
+const buildMandelbrotSpotPathContext = ({
+  spotPrice,
+  spotRows = [],
+  nowMs = Date.now(),
+  source = 'spot_prices_hourly',
+}) => {
+  const currentSpot = Number(spotPrice);
+  const samples = buildHourlySpotPathSamples(spotRows);
+  const windows = {
+    '1h': 1,
+    '6h': 6,
+    '24h': 24,
+    '7d': 24 * 7,
+    '14d': 24 * 14,
+    '30d': 24 * 30,
+  };
+  const returnsPct = {};
+  for (const [label, hours] of Object.entries(windows)) {
+    const prior = getSpotPathPriceNear(samples, nowMs - hours * 60 * 60 * 1000);
+    returnsPct[label] = currentSpot > 0 && prior > 0
+      ? roundForAdvisory(((currentSpot - prior) / prior) * 100, 3)
+      : null;
+  }
+
+  const hourlyMoves = [];
+  for (let i = 1; i < samples.length; i++) {
+    const previous = samples[i - 1];
+    const current = samples[i];
+    if (!(previous.price > 0) || !(current.price > 0)) continue;
+    hourlyMoves.push({
+      hour: current.hour,
+      pct: ((current.price - previous.price) / previous.price) * 100,
+    });
+  }
+  const absMoves = hourlyMoves.map((move) => Math.abs(move.pct));
+  const totalAbsMove = absMoves.reduce((sum, value) => sum + value, 0);
+  const sortedAbsMoves = [...absMoves].sort((a, b) => b - a);
+  const topShare = (count) => totalAbsMove > 0
+    ? roundForAdvisory((sortedAbsMoves.slice(0, count).reduce((sum, value) => sum + value, 0) / totalAbsMove) * 100, 2)
+    : null;
+  const largeMoveThreshold = quantile(absMoves, 0.75);
+  let adjacentLargeMoveCount = 0;
+  if (Number.isFinite(largeMoveThreshold)) {
+    for (let i = 1; i < absMoves.length; i++) {
+      if (absMoves[i] >= largeMoveThreshold && absMoves[i - 1] >= largeMoveThreshold) {
+        adjacentLargeMoveCount += 1;
+      }
+    }
+  }
+
+  return {
+    source,
+    lookback_days: MANDELBROT_SPOT_PATH_LOOKBACK_DAYS,
+    sample_interval_hours: MANDELBROT_SPOT_PATH_INTERVAL_HOURS,
+    sample_format: '[hours_from_now, spot_price]',
+    current_spot: roundForAdvisory(currentSpot, 2),
+    point_count: samples.length,
+    first_sample_hour: samples[0]?.hour || null,
+    last_sample_hour: samples[samples.length - 1]?.hour || null,
+    returns_pct: returnsPct,
+    hourly_move_stats_pct: {
+      average_abs: roundForAdvisory(average(absMoves), 3),
+      median_abs: roundForAdvisory(quantile(absMoves, 0.5), 3),
+      p90_abs: roundForAdvisory(quantile(absMoves, 0.9), 3),
+      max_up: roundForAdvisory(Math.max(0, ...hourlyMoves.map((move) => move.pct)), 3),
+      max_down: roundForAdvisory(Math.min(0, ...hourlyMoves.map((move) => move.pct)), 3),
+    },
+    jump_counts: {
+      abs_gt_0_5pct: absMoves.filter((value) => value > 0.5).length,
+      abs_gt_1pct: absMoves.filter((value) => value > 1).length,
+      abs_gt_2pct: absMoves.filter((value) => value > 2).length,
+      abs_gt_3pct: absMoves.filter((value) => value > 3).length,
+    },
+    concentration_pct: {
+      top_5_hourly_abs_moves_share: topShare(5),
+      top_10_hourly_abs_moves_share: topShare(10),
+    },
+    vol_clustering_proxy: {
+      large_move_threshold_p75_abs_pct: roundForAdvisory(largeMoveThreshold, 3),
+      adjacent_large_move_pairs: adjacentLargeMoveCount,
+    },
+    largest_hourly_moves: {
+      up: hourlyMoves
+        .filter((move) => move.pct > 0)
+        .sort((a, b) => b.pct - a.pct)
+        .slice(0, 5)
+        .map((move) => [move.hour, roundForAdvisory(move.pct, 3)]),
+      down: hourlyMoves
+        .filter((move) => move.pct < 0)
+        .sort((a, b) => a.pct - b.pct)
+        .slice(0, 5)
+        .map((move) => [move.hour, roundForAdvisory(move.pct, 3)]),
+    },
+    samples_oldest_to_newest: samples.map((point) => [
+      Math.round((point.ts - nowMs) / (60 * 60 * 1000)),
+      point.price,
+    ]),
+  };
+};
+
 const generateMandelbrotRegimeContext = async ({
   spotPrice,
-  momentum,
+  spotPathContext,
   sentiment,
   wikiSignals,
 }) => {
@@ -5395,14 +5562,14 @@ Use Mandelbrot's finance framing from *The (Mis)Behavior of Markets* and *Fracta
 Focus on:
 - whether skew, funding, open interest, spread/depth, and option pricing suggest unstable distribution geometry
 - whether volatility and option-market participation are clustering across the supplied windows
-- roughness versus smoothness of the recent price path
+- roughness versus smoothness of the supplied 30-day hourly spot path
 - whether movement is concentrated into bursts rather than dispersed smoothly
 - whether the process appears mild or wild, smooth or discontinuous
 
-Momentum discipline:
-- Treat spot momentum as secondary path context, not the main thesis.
-- Use momentum only to describe roughness, burstiness, discontinuity, or scaling instability.
-- Do not frame the regime primarily as upward/downward momentum unless skew, OI, funding, liquidity, or option pricing confirms that directional label matters.
+Spot-path discipline:
+- Treat the hourly spot path as structural evidence for roughness, burstiness, discontinuity, concentration, and scaling instability.
+- Do not reduce the path to a simple upward/downward momentum label.
+- Do not frame the regime primarily as directional unless skew, OI, funding, liquidity, or option pricing confirms that directional label matters.
 
 Operational definitions:
 - Roughness: the path is jagged, bursty, reversal-heavy, and unevenly distributed through time rather than unfolding gradually.
@@ -5436,9 +5603,8 @@ Return JSON only:
 === SENTIMENT / DISTRIBUTION BY WINDOW ===
 ${JSON.stringify(summarizeSentimentWindowsForLLM(sentiment?.windows || {}), null, 2)}
 
-=== PRICE PATH CONTEXT (SECONDARY) ===
-Spot: $${spotPrice}
-Momentum: ${JSON.stringify(momentum, null, 2)}
+=== SPOT PATH CONTEXT (30D, HOURLY) ===
+${JSON.stringify(spotPathContext || buildMandelbrotSpotPathContext({ spotPrice, spotRows: [] }), null, 2)}
 
 === WIKI SIGNALS ===
 ${JSON.stringify(wikiSignals || null, null, 2)}
@@ -8554,6 +8720,34 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
     }
   }
 
+  let mandelbrotSpotPathContext = buildMandelbrotSpotPathContext({
+    spotPrice,
+    spotRows: [],
+    nowMs,
+    source: 'unavailable',
+  });
+  if (db) {
+    try {
+      let spotPathRows = [];
+      let source = 'spot_prices_hourly';
+      if (typeof db.getSpotPricesHourly === 'function') {
+        spotPathRows = db.getSpotPricesHourly(since30dSentiment) || [];
+      }
+      if (spotPathRows.length === 0 && typeof db.getRecentSpotPrices === 'function') {
+        spotPathRows = db.getRecentSpotPrices(since30dSentiment) || [];
+        source = 'spot_prices_raw_downsampled';
+      }
+      mandelbrotSpotPathContext = buildMandelbrotSpotPathContext({
+        spotPrice,
+        spotRows: spotPathRows,
+        nowMs,
+        source,
+      });
+    } catch (e) {
+      console.log(`📋 Advisory: failed to fetch Mandelbrot spot path: ${e.message}`);
+    }
+  }
+
   // Account health — margin + budget discipline
   const ethBalance = balances.find(b => b.asset_name === 'ETH')?.amount || 0;
   const usdcBalance = balances.find(b => b.asset_name === 'USDC')?.amount || 0;
@@ -8715,7 +8909,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
   try {
     mandelbrotContext = await generateMandelbrotRegimeContext({
       spotPrice,
-      momentum,
+      spotPathContext: mandelbrotSpotPathContext,
       sentiment,
       wikiSignals,
     });

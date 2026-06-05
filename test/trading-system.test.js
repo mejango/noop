@@ -1388,6 +1388,16 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(SCRIPT_SOURCE.includes('raise min_score/min_bid or lower priority'));
   });
 
+  test('Mandelbrot prompt uses 30-day hourly spot path instead of momentum labels', () => {
+    assert.ok(SCRIPT_SOURCE.includes('const MANDELBROT_SPOT_PATH_LOOKBACK_DAYS = 30'));
+    assert.ok(SCRIPT_SOURCE.includes('=== SPOT PATH CONTEXT (30D, HOURLY) ==='));
+    assert.ok(SCRIPT_SOURCE.includes("sample_format: '[hours_from_now, spot_price]'"));
+    assert.ok(SCRIPT_SOURCE.includes('samples_oldest_to_newest'));
+    assert.ok(SCRIPT_SOURCE.includes('Do not reduce the path to a simple upward/downward momentum label'));
+    assert.ok(SCRIPT_SOURCE.includes('db.getSpotPricesHourly(since30dSentiment)'));
+    assert.ok(!SCRIPT_SOURCE.includes('Momentum: ${JSON.stringify(momentum, null, 2)}'));
+  });
+
   test('detects missing required watcher rules in an agenda', () => {
     const requirements = [
       { type: 'entry', action: 'buy_put' },
