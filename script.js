@@ -266,6 +266,8 @@ const REJECTED_ACTION_BACKOFF_MS = 60 * 60 * 1000;
 // Trading parameters - CALLS  
 const CALL_EXPIRATION_RANGE = [5, 12];
 const CALL_DELTA_RANGE = [0.04, 0.12]; // Positive delta for calls
+const SELL_CALL_FALLBACK_MIN_BID = 4;
+const SELL_CALL_FALLBACK_MIN_SCORE = 65;
 
 // Call buyback thresholds
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Harvest short calls once at least this much premium is captured
@@ -5048,6 +5050,26 @@ const buildAgendaFromValidatedRules = (rules = []) => ({
 });
 
 const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
+  if (requirement?.type === 'entry' && requirement?.action === 'sell_call') {
+    return {
+      rule_type: 'entry',
+      action: 'sell_call',
+      instrument_name: null,
+      criteria: {
+        option_type: 'C',
+        delta_range: CALL_DELTA_RANGE,
+        dte_range: CALL_EXPIRATION_RANGE,
+        min_bid: SELL_CALL_FALLBACK_MIN_BID,
+        min_score: SELL_CALL_FALLBACK_MIN_SCORE,
+      },
+      budget_limit: null,
+      priority: 'low',
+      reasoning: `Required sell-call coverage fallback: patient watcher for favorable short-dated call premium only; requires ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE, delta ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]}, bid >= $${SELL_CALL_FALLBACK_MIN_BID.toFixed(2)}, and call score >= ${SELL_CALL_FALLBACK_MIN_SCORE}.`,
+      advisory_id: context.advisoryId || null,
+      preferred_order_type: 'post_only',
+    };
+  }
+
   if (requirement?.type !== 'exit' || requirement?.action !== 'buyback_call' || !requirement.instrument_name) {
     return null;
   }

@@ -37,6 +37,8 @@ const PUT_ROLL_DTE_THRESHOLD = 25;
 const PUT_MONETIZATION_PROFIT_THRESHOLD = 1000;
 const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
+const SELL_CALL_FALLBACK_MIN_BID = 4;
+const SELL_CALL_FALLBACK_MIN_SCORE = 65;
 
 const parseExpiryFromInstrument = (name) => {
   if (!name) return null;
@@ -634,6 +636,23 @@ const buildAgendaFromValidatedRules = (rules = []) => ({
 });
 
 const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
+  if (requirement.type === 'entry' && requirement.action === 'sell_call') {
+    return {
+      rule_type: 'entry',
+      action: 'sell_call',
+      instrument_name: null,
+      criteria: {
+        option_type: 'C',
+        delta_range: CALL_DELTA_RANGE,
+        dte_range: CALL_EXPIRATION_RANGE,
+        min_bid: SELL_CALL_FALLBACK_MIN_BID,
+        min_score: SELL_CALL_FALLBACK_MIN_SCORE,
+      },
+      priority: 'low',
+      preferred_order_type: 'post_only',
+    };
+  }
+
   if (requirement.type !== 'exit' || requirement.action !== 'buyback_call') return null;
   const snapshot = (context.positionSnapshots || []).find((item) => item.instrument === requirement.instrument_name);
   const entryPrice = Number(snapshot?.avg_entry_price);
@@ -1396,6 +1415,28 @@ describe('Standing rulebook coverage requirements', () => {
       { field: 'unrealized_pnl_pct', op: 'gte', value: 80 },
     ]);
     assert.strictEqual(fallback.criteria.max_buyback_price, 3.82);
+    assert.strictEqual(fallback.preferred_order_type, 'post_only');
+  });
+
+  test('adds canonical sell-call coverage after validation drops advisor entry rule', () => {
+    const requirements = [
+      { type: 'entry', action: 'sell_call' },
+    ];
+    const validatedRules = [];
+    const missing = findMissingRulebookRequirements(buildAgendaFromValidatedRules(validatedRules), requirements);
+    const fallback = buildCanonicalRequiredWatcherRule(missing[0]);
+
+    assert.strictEqual(fallback.rule_type, 'entry');
+    assert.strictEqual(fallback.action, 'sell_call');
+    assert.strictEqual(fallback.instrument_name, null);
+    assert.deepStrictEqual(fallback.criteria, {
+      option_type: 'C',
+      delta_range: CALL_DELTA_RANGE,
+      dte_range: CALL_EXPIRATION_RANGE,
+      min_bid: SELL_CALL_FALLBACK_MIN_BID,
+      min_score: SELL_CALL_FALLBACK_MIN_SCORE,
+    });
+    assert.strictEqual(fallback.priority, 'low');
     assert.strictEqual(fallback.preferred_order_type, 'post_only');
   });
 });
