@@ -8,6 +8,7 @@
  */
 
 const assert = require('assert');
+const fs = require('fs');
 const path = require('path');
 
 let passed = 0, failed = 0;
@@ -26,6 +27,8 @@ const describe = (name, fn) => {
   console.log(`\n${name}`);
   fn();
 };
+
+const SCRIPT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'script.js'), 'utf8');
 
 // ============================================================================
 // Pure functions (copied from script.js to keep tests self-contained)
@@ -1376,6 +1379,13 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(requirement.instruction.includes('bid / abs(delta)'));
     assert.ok(requirement.instruction.includes('min_bid'));
     assert.ok(requirement.instruction.includes('do not use a broad spot_price floor'));
+  });
+
+  test('advisor prompt forbids non-spot sell-call market conditions', () => {
+    assert.ok(SCRIPT_SOURCE.includes('sell_call market_conditions may only use spot_price'));
+    assert.ok(SCRIPT_SOURCE.includes('For sell_call, market_conditions may only contain spot_price conditions'));
+    assert.ok(SCRIPT_SOURCE.includes('Do not encode non-spot evidence in market_conditions'));
+    assert.ok(SCRIPT_SOURCE.includes('raise min_score/min_bid or lower priority'));
   });
 
   test('detects missing required watcher rules in an agenda', () => {
