@@ -1420,6 +1420,15 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(SCRIPT_SOURCE.includes('raise min_score/min_bid or lower priority'));
   });
 
+  test('advisor prompt anchors sell-call min_score to rolling call value context', () => {
+    assert.ok(SCRIPT_SOURCE.includes('getSellCallScoreSamples'));
+    assert.ok(SCRIPT_SOURCE.includes('call_value_context'));
+    assert.ok(SCRIPT_SOURCE.includes('Current CALL score:'));
+    assert.ok(SCRIPT_SOURCE.includes('Prior ${context.window_days}d best CALL score'));
+    assert.ok(SCRIPT_SOURCE.includes('SELL-CALL VALUE CONTEXT'));
+    assert.ok(SCRIPT_SOURCE.includes('min_score should be above the weak current score'));
+  });
+
   test('Mandelbrot prompt uses 30-day hourly spot path instead of momentum labels', () => {
     assert.ok(SCRIPT_SOURCE.includes('const MANDELBROT_SPOT_PATH_LOOKBACK_DAYS = 30'));
     assert.ok(SCRIPT_SOURCE.includes('=== SPOT PATH CONTEXT (30D, HOURLY) ==='));

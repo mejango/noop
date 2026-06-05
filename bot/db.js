@@ -625,6 +625,50 @@ const stmts = {
     LIMIT 1
   `),
 
+  getSellCallScoreSamples: db.prepare(`
+    SELECT
+      timestamp,
+      MAX(bid_delta_value) as score
+    FROM options_snapshots
+    WHERE timestamp > @since
+      AND timestamp < @before
+      AND (option_type = 'C' OR instrument_name LIKE '%-C')
+      AND delta >= @min_delta
+      AND delta <= @max_delta
+      AND bid_price > 0
+      AND bid_delta_value > 0
+      AND expiry IS NOT NULL
+      AND ((expiry - strftime('%s', timestamp)) / 86400.0) >= @min_dte
+      AND ((expiry - strftime('%s', timestamp)) / 86400.0) <= @max_dte
+    GROUP BY timestamp
+    ORDER BY timestamp ASC
+  `),
+
+  getBestSellCallScoreDetail: db.prepare(`
+    SELECT
+      timestamp,
+      instrument_name,
+      delta,
+      bid_price,
+      strike,
+      expiry,
+      bid_delta_value as score,
+      ((expiry - strftime('%s', timestamp)) / 86400.0) as dte
+    FROM options_snapshots
+    WHERE timestamp > @since
+      AND timestamp < @before
+      AND (option_type = 'C' OR instrument_name LIKE '%-C')
+      AND delta >= @min_delta
+      AND delta <= @max_delta
+      AND bid_price > 0
+      AND bid_delta_value > 0
+      AND expiry IS NOT NULL
+      AND ((expiry - strftime('%s', timestamp)) / 86400.0) >= @min_dte
+      AND ((expiry - strftime('%s', timestamp)) / 86400.0) <= @max_dte
+    ORDER BY bid_delta_value DESC
+    LIMIT 1
+  `),
+
   getBestCallDetail: db.prepare(`
     SELECT instrument_name, delta, bid_price, strike, expiry
     FROM options_snapshots
@@ -1445,6 +1489,37 @@ const getBestBuyPutScoreDetail = ({
   max_dte: maxDte,
 }) || null;
 
+const getSellCallScoreSamples = ({
+  since,
+  before,
+  minDelta = 0.04,
+  maxDelta = 0.12,
+  minDte = 5,
+  maxDte = 12,
+}) => stmts.getSellCallScoreSamples.all({
+  since,
+  before,
+  min_delta: minDelta,
+  max_delta: maxDelta,
+  min_dte: minDte,
+  max_dte: maxDte,
+});
+const getBestSellCallScoreDetail = ({
+  since,
+  before,
+  minDelta = 0.04,
+  maxDelta = 0.12,
+  minDte = 5,
+  maxDte = 12,
+}) => stmts.getBestSellCallScoreDetail.get({
+  since,
+  before,
+  min_delta: minDelta,
+  max_delta: maxDelta,
+  min_dte: minDte,
+  max_dte: maxDte,
+}) || null;
+
 const getOptionsDistribution = (since) => stmts.getOptionsDistribution.all({ since });
 
 // Hourly helpers for correlation engine
@@ -1898,6 +1973,8 @@ module.exports = {
   getBestScores,
   getBuyPutScoreSamples,
   getBestBuyPutScoreDetail,
+  getSellCallScoreSamples,
+  getBestSellCallScoreDetail,
   insertOrder,
   getRecentOrders,
   getOrdersInRange,

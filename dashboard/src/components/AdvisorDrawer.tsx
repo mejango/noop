@@ -386,16 +386,22 @@ function renderAdvisoryContextArtifact(content: string) {
 
   const rolling = isPlainObject(parsed.rolling_option_value_context) ? parsed.rolling_option_value_context : parsed;
   const put = isPlainObject(rolling.put_value_context) ? rolling.put_value_context : {};
+  const call = isPlainObject(rolling.call_value_context) ? rolling.call_value_context : {};
   const budget = isPlainObject(rolling.put_budget_context) ? rolling.put_budget_context : {};
   const action = isPlainObject(rolling.action_pressure) ? rolling.action_pressure : {};
   const spot = isPlainObject(rolling.spot_price_action) ? rolling.spot_price_action : {};
   const current = isPlainObject(put.current_detail) ? put.current_detail : null;
+  const currentCall = isPlainObject(call.current_detail) ? call.current_detail : null;
 
   const rows = ([
     ['PUT score', put.current_score],
     ['Prior best', put.prior_window_best_score],
     ['Vs prior best', put.current_vs_prior_best_pct != null ? `${put.current_vs_prior_best_pct}%` : null],
     ['Fresh best', put.is_strict_fresh_best ? 'yes' : 'no'],
+    ['CALL score', call.current_score],
+    ['CALL prior best', call.prior_window_best_score],
+    ['CALL vs best', call.current_vs_prior_best_pct != null ? `${call.current_vs_prior_best_pct}%` : null],
+    ['CALL percentile', call.percentile_vs_prior_window],
     ['Spot action', spot.state],
     ['Budget left', budget.remaining != null ? `$${budget.remaining}` : null],
     ['Fresh-best review', action.requires_buy_put_decision ? 'yes' : 'no'],
@@ -418,6 +424,11 @@ function renderAdvisoryContextArtifact(content: string) {
       {current && (
         <p className="text-[10px] text-gray-400 leading-relaxed">
           {String(current.instrument || 'current put')} delta={String(current.delta ?? 'n/a')} ask=${String(current.ask_price ?? 'n/a')} DTE={String(current.dte ?? 'n/a')}
+        </p>
+      )}
+      {currentCall && (
+        <p className="text-[10px] text-gray-400 leading-relaxed">
+          {String(currentCall.instrument || 'current call')} delta={String(currentCall.delta ?? 'n/a')} bid=${String(currentCall.bid_price ?? 'n/a')} DTE={String(currentCall.dte ?? 'n/a')}
         </p>
       )}
     </div>
