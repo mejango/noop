@@ -151,10 +151,10 @@ const getSellPutProtectionGate = (rule, values, context = {}) => {
   }
 
   const livePnlPct = Number(values?.unrealized_pnl_pct);
-  const patientPnlPct = Number(values?.patient_sell_put_pnl_pct);
+  const fairValuePnlPct = Number(values?.patient_sell_put_fair_value_pnl_pct);
   const pnlPct = Math.max(
     Number.isFinite(livePnlPct) ? livePnlPct : -Infinity,
-    Number.isFinite(patientPnlPct) ? patientPnlPct : -Infinity
+    Number.isFinite(fairValuePnlPct) ? fairValuePnlPct : -Infinity
   );
   if (Number.isFinite(pnlPct) && pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD) {
     const plannedSellAmount = Number(context.plannedSellAmount ?? context.position?.amount ?? 0);
@@ -187,7 +187,30 @@ const getAdvisorSellPutLimitPrice = (criteria) => {
   return Number.isFinite(explicit) && explicit > 0 ? explicit : null;
 };
 
-const getPatientSellPutPlan = (rule, criteria, position) => {
+const getLongPutFairValueProof = (position, values = {}) => {
+  const entryPrice = Number(position?.avg_entry_price);
+  if (!(entryPrice > 0)) return null;
+  const parts = String(position?.instrument_name || '').split('-');
+  const strike = Number(parts[2]);
+  const spotPrice = Number(values?.spot_price);
+  const intrinsicValue = parts[3] === 'P' && Number.isFinite(strike) && spotPrice > 0
+    ? Math.max(0, strike - spotPrice)
+    : 0;
+  const markPrice = Number(values?.mark_price);
+  const normalizedMarkPrice = Number.isFinite(markPrice) && markPrice > 0 ? markPrice : 0;
+  const fairValuePrice = Math.max(
+    normalizedMarkPrice,
+    intrinsicValue
+  );
+  if (!(fairValuePrice > 0)) return null;
+  return {
+    price: fairValuePrice,
+    pnlPct: ((fairValuePrice - entryPrice) / entryPrice) * 100,
+    source: intrinsicValue > normalizedMarkPrice ? 'intrinsic_value' : 'mark_price',
+  };
+};
+
+const getPatientSellPutPlan = (rule, criteria, position, values = {}) => {
   if (!rule || rule.action !== 'sell_put') return null;
   if (criteria?.put_exit_intent !== 'monetize_tail_win') return null;
   const limitPrice = getAdvisorSellPutLimitPrice(criteria);
@@ -195,7 +218,16 @@ const getPatientSellPutPlan = (rule, criteria, position) => {
   if (!(limitPrice > 0) || !(entryPrice > 0)) return null;
   const pnlPct = ((limitPrice - entryPrice) / entryPrice) * 100;
   if (!(pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
-  return { limitPrice, pnlPct, preferredOrderType: 'post_only' };
+  const fairValueProof = getLongPutFairValueProof(position, values);
+  if (!(Number(fairValueProof?.pnlPct) > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
+  return {
+    limitPrice,
+    pnlPct,
+    fairValuePrice: fairValueProof.price,
+    fairValuePnlPct: fairValueProof.pnlPct,
+    fairValueSource: fairValueProof.source,
+    preferredOrderType: 'post_only',
+  };
 };
 
 const getTradeCashflow = (order) => {
@@ -5302,16 +5334,19 @@ describe('Full schema: exit monitoring for put rolling', () => {
       min_exit_price: 60.00,
       tranche_fraction: 0.25,
     };
-    const liveValues = { dte: 63.7, unrealized_pnl_pct: 300, execution_price: 20 };
+    const liveValues = { dte: 63.7, unrealized_pnl_pct: 300, execution_price: 20, mark_price: 61, spot_price: 1505 };
     const plan = getPatientSellPutPlan(
       { action: 'sell_put', preferred_order_type: 'post_only' },
       criteria,
-      position
+      position,
+      liveValues
     );
     const plannedValues = {
       ...liveValues,
       patient_sell_put_pnl_pct: plan.pnlPct,
       patient_sell_put_limit_price: plan.limitPrice,
+      patient_sell_put_fair_value_pnl_pct: plan.fairValuePnlPct,
+      patient_sell_put_fair_value_price: plan.fairValuePrice,
     };
     const amount = getSellPutExitAmount(position, plannedValues, criteria);
     const gate = getSellPutProtectionGate(
@@ -5322,8 +5357,44 @@ describe('Full schema: exit monitoring for put rolling', () => {
 
     assert.strictEqual(plan.limitPrice, 60);
     assert.strictEqual(plan.pnlPct, 1100);
+    assert.strictEqual(plan.fairValuePrice, 61);
+    assert.strictEqual(plan.fairValuePnlPct, 1120);
     assert.strictEqual(amount, 1.0);
     assert.strictEqual(gate.allowed, true);
+  });
+
+  test('tail-win min_exit_price alone does not trigger before current value clears threshold', () => {
+    const position = { instrument_name: 'ETH-20260731-1500-P', amount: 7.1, direction: 'long', avg_entry_price: 26.81 };
+    const criteria = {
+      put_exit_intent: 'monetize_tail_win',
+      min_exit_price: 400,
+      tranche_fraction: 0.25,
+    };
+    const liveValues = {
+      dte: 55.8,
+      unrealized_pnl_pct: 288.37,
+      execution_price: 104.13,
+      mark_price: 104.13,
+      spot_price: 1800,
+    };
+    const plan = getPatientSellPutPlan(
+      { action: 'sell_put', preferred_order_type: 'post_only' },
+      criteria,
+      position,
+      liveValues
+    );
+    const gate = getSellPutProtectionGate(
+      { action: 'sell_put' },
+      {
+        ...liveValues,
+        patient_sell_put_pnl_pct: ((criteria.min_exit_price - position.avg_entry_price) / position.avg_entry_price) * 100,
+        patient_sell_put_limit_price: criteria.min_exit_price,
+      },
+      { criteria, position, positions: [position], plannedSellAmount: 1.775 }
+    );
+
+    assert.strictEqual(plan, null, 'Advisor floor is not current monetization proof');
+    assert.strictEqual(gate.allowed, false, 'Protection gate should block before current bid/mark/intrinsic clears 1000%');
   });
 
   test('long-dated put at monetization boundary is still blocked', () => {

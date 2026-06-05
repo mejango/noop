@@ -5849,7 +5849,31 @@ const getAdvisorSellPutLimitPrice = (criteria) => {
   return Number.isFinite(explicit) && explicit > 0 ? explicit : null;
 };
 
-const getPatientSellPutPlan = (rule, criteria, position) => {
+const getLongPutFairValueProof = (position, values = {}) => {
+  const entryPrice = Number(position?.avg_entry_price);
+  if (!(entryPrice > 0)) return null;
+
+  const parsed = parseAdvisoryOptionInstrument(position?.instrument_name);
+  const spotPrice = Number(values?.spot_price);
+  const intrinsicValue = parsed?.optionType === 'P' && Number.isFinite(parsed.strike) && spotPrice > 0
+    ? Math.max(0, parsed.strike - spotPrice)
+    : 0;
+  const markPrice = Number(values?.mark_price);
+  const normalizedMarkPrice = Number.isFinite(markPrice) && markPrice > 0 ? markPrice : 0;
+  const fairValuePrice = Math.max(
+    normalizedMarkPrice,
+    intrinsicValue
+  );
+  if (!(fairValuePrice > 0)) return null;
+
+  return {
+    price: fairValuePrice,
+    pnlPct: ((fairValuePrice - entryPrice) / entryPrice) * 100,
+    source: intrinsicValue > normalizedMarkPrice ? 'intrinsic_value' : 'mark_price',
+  };
+};
+
+const getPatientSellPutPlan = (rule, criteria, position, values = {}) => {
   if (!rule || rule.action !== 'sell_put') return null;
   if (getPutExitIntent(criteria) !== 'monetize_tail_win') return null;
 
@@ -5860,9 +5884,15 @@ const getPatientSellPutPlan = (rule, criteria, position) => {
   const pnlPct = ((limitPrice - entryPrice) / entryPrice) * 100;
   if (!(pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
 
+  const fairValueProof = getLongPutFairValueProof(position, values);
+  if (!(Number(fairValueProof?.pnlPct) > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
+
   return {
     limitPrice,
     pnlPct,
+    fairValuePrice: fairValueProof.price,
+    fairValuePnlPct: fairValueProof.pnlPct,
+    fairValueSource: fairValueProof.source,
     preferredOrderType: normalizePreferredOrderType(rule.action, rule.preferred_order_type) || 'post_only',
   };
 };
@@ -6152,12 +6182,12 @@ const getSellPutProtectionGate = (rule, values, context = {}) => {
   }
 
   const livePnlPct = Number(values?.unrealized_pnl_pct);
-  const patientPnlPct = Number(values?.patient_sell_put_pnl_pct);
-  const pnlPct = Math.max(
+  const fairValuePnlPct = Number(values?.patient_sell_put_fair_value_pnl_pct);
+  const proofPnlPct = Math.max(
     Number.isFinite(livePnlPct) ? livePnlPct : -Infinity,
-    Number.isFinite(patientPnlPct) ? patientPnlPct : -Infinity
+    Number.isFinite(fairValuePnlPct) ? fairValuePnlPct : -Infinity
   );
-  if (Number.isFinite(pnlPct) && pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD) {
+  if (Number.isFinite(proofPnlPct) && proofPnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD) {
     const plannedSellAmount = Number(context.plannedSellAmount ?? context.position?.amount ?? 0);
     if (!leavesDownsideProtectionAfterSale(context.position, context.positions || [], plannedSellAmount)) {
       return {
@@ -6169,10 +6199,11 @@ const getSellPutProtectionGate = (rule, values, context = {}) => {
   }
 
   const dteText = Number.isFinite(dte) ? dte.toFixed(2) : 'n/a';
-  const pnlText = Number.isFinite(pnlPct) ? `${pnlPct.toFixed(2)}%` : 'n/a';
+  const livePnlText = Number.isFinite(livePnlPct) ? `${livePnlPct.toFixed(2)}%` : 'n/a';
+  const fairPnlText = Number.isFinite(fairValuePnlPct) ? `${fairValuePnlPct.toFixed(2)}%` : 'n/a';
   return {
     allowed: false,
-    reason: `protective long put exit requires dte <= ${PUT_ROLL_DTE_THRESHOLD} for rolling or extreme executable pnl > ${PUT_MONETIZATION_PROFIT_THRESHOLD}% for monetization; actual dte=${dteText}, executable_pnl=${pnlText}`,
+    reason: `protective long put exit requires dte <= ${PUT_ROLL_DTE_THRESHOLD} for rolling or extreme current pnl proof > ${PUT_MONETIZATION_PROFIT_THRESHOLD}% for monetization; actual dte=${dteText}, executable_pnl=${livePnlText}, fair_value_pnl=${fairPnlText}`,
   };
 };
 
@@ -6332,6 +6363,9 @@ const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, 
     : null;
   const livePnlPct = Number(currentValues.unrealized_pnl_pct);
   const patientPnlPct = Number(triggerData?.patient_sell_put_pnl_pct ?? currentValues.patient_sell_put_pnl_pct);
+  const fairValuePnlPct = Number(triggerData?.patient_sell_put_fair_value_pnl_pct ?? currentValues.patient_sell_put_fair_value_pnl_pct);
+  const fairValuePrice = Number(triggerData?.patient_sell_put_fair_value_price ?? currentValues.patient_sell_put_fair_value_price);
+  const fairValueSource = triggerData?.patient_sell_put_fair_value_source || currentValues.patient_sell_put_fair_value_source || 'n/a';
   const dte = Number(currentValues.dte);
   const liveBid = Number(currentValues.execution_price ?? currentPrice ?? action.price);
   const advisorFloor = Number(advisorLimitPrice ?? triggerData?.patient_sell_put_limit_price ?? currentValues.patient_sell_put_limit_price);
@@ -6343,10 +6377,10 @@ const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, 
   return [
     'Sell-put exit confirmation context:',
     `- Intent=${intent}. sell_put closes an owned long put; it is reduce_only and capital-releasing, not a naked short-put entry.`,
-    `- Current executable exit: live_bid=${fmtPrice(liveBid)}, live_unrealized_pnl_pct=${fmt(livePnlPct)}%, patient_floor_pnl_pct=${fmt(patientPnlPct)}%, dte=${fmt(dte)}, delta=${fmt(Number(currentValues.delta), 4)}, theta=${fmt(Number(currentValues.theta), 4)}.`,
+    `- Current exit proof: live_bid=${fmtPrice(liveBid)}, live_unrealized_pnl_pct=${fmt(livePnlPct)}%, fair_value=${fmtPrice(fairValuePrice)} (${fairValueSource}), fair_value_pnl_pct=${fmt(fairValuePnlPct)}%, patient_floor_pnl_pct=${fmt(patientPnlPct)}%, dte=${fmt(dte)}, delta=${fmt(Number(currentValues.delta), 4)}, theta=${fmt(Number(currentValues.theta), 4)}.`,
     `- Protection discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
     `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use a patient synthetic reduce-only gtc/post_only limit at or above the floor for monetize_tail_win; zero fill is better than dumping into a thin bid.`,
-    `- roll_protection requires DTE <= ${PUT_ROLL_DTE_THRESHOLD} and longer-dated protection already in the book. monetize_tail_win requires executable PnL > ${PUT_MONETIZATION_PROFIT_THRESHOLD}% and tranching while retaining protection; even then, confirm only if selling this chunk is wiser than keeping convexity.`,
+    `- roll_protection requires DTE <= ${PUT_ROLL_DTE_THRESHOLD} and longer-dated protection already in the book. monetize_tail_win requires current executable or fair-value PnL proof > ${PUT_MONETIZATION_PROFIT_THRESHOLD}% and tranching while retaining protection; the patient floor is price discipline, not trigger proof. Even then, confirm only if selling this chunk is wiser than keeping convexity.`,
   ].join('\n');
 };
 
@@ -6744,7 +6778,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           ticker,
           instrument
         );
-        const patientSellPutPlan = getPatientSellPutPlan(rule, criteria, position);
+        const patientSellPutPlan = getPatientSellPutPlan(rule, criteria, position, values);
         const plannedValues = {
           ...values,
           ...(patientBuybackPlan ? {
@@ -6755,6 +6789,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           ...(patientSellPutPlan ? {
             patient_sell_put_pnl_pct: patientSellPutPlan.pnlPct,
             patient_sell_put_limit_price: patientSellPutPlan.limitPrice,
+            patient_sell_put_fair_value_pnl_pct: patientSellPutPlan.fairValuePnlPct,
+            patient_sell_put_fair_value_price: patientSellPutPlan.fairValuePrice,
+            patient_sell_put_fair_value_source: patientSellPutPlan.fairValueSource,
           } : {}),
         };
         const triggered = evaluateConditions(criteria.conditions, criteria.condition_logic, values)
@@ -6831,6 +6868,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               patient_buyback_price_reason: patientBuybackPlan?.priceReason ?? null,
               patient_sell_put_pnl_pct: patientSellPutPlan?.pnlPct ?? null,
               patient_sell_put_limit_price: patientSellPutPlan?.limitPrice ?? null,
+              patient_sell_put_fair_value_pnl_pct: patientSellPutPlan?.fairValuePnlPct ?? null,
+              patient_sell_put_fair_value_price: patientSellPutPlan?.fairValuePrice ?? null,
+              patient_sell_put_fair_value_source: patientSellPutPlan?.fairValueSource ?? null,
               buyback_intent: rule.action === 'buyback_call' ? getBuybackIntent(criteria) : null,
               put_exit_intent: rule.action === 'sell_put' ? getPutExitIntent(criteria) : null,
               tranche_fraction: rule.action === 'sell_put' && plannedSellPutAmount != null && Number(position.amount) > 0
