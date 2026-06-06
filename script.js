@@ -6499,6 +6499,22 @@ const getOpenRestingExitOrders = () => {
   return db.getOpenRestingOrders().filter(order => order.action === 'buyback_call' || order.action === 'sell_put');
 };
 
+const inferActionFromOpenOrder = (order, trackedOrder = null) => {
+  const explicitAction = trackedOrder?.action || order?.action;
+  if (explicitAction) return explicitAction;
+  const instrumentName = order?.instrument_name || trackedOrder?.instrument_name || '';
+  const direction = String(order?.direction || trackedOrder?.direction || '').toLowerCase();
+  if (instrumentName.endsWith('-C')) {
+    if (direction === 'sell') return 'sell_call';
+    if (direction === 'buy') return 'buyback_call';
+  }
+  if (instrumentName.endsWith('-P')) {
+    if (direction === 'buy') return 'buy_put';
+    if (direction === 'sell') return 'sell_put';
+  }
+  return null;
+};
+
 const getBlockingRestingOrderForEntryCandidate = (action, candidate, price, restingOrders = null) => {
   if (!db || !candidate?.name) return null;
   const sameInstrumentOrders = (restingOrders || db.getOpenRestingOrders())
@@ -6518,6 +6534,127 @@ const getBlockingRestingOrderForEntryCandidate = (action, candidate, price, rest
   }
 
   return sameInstrumentOrders[0] || null;
+};
+
+const validateRestingSellCallEntryOrder = ({
+  order,
+  activeRules = [],
+  instruments = [],
+  tickerMap = {},
+  marginState = null,
+  positions = [],
+  spotPrice = 0,
+}) => {
+  const instrumentName = order?.instrument_name;
+  if (!instrumentName) return { valid: true, unchecked: true, reason: 'missing instrument name' };
+
+  const sellCallRules = (activeRules || []).filter((rule) =>
+    rule?.rule_type === 'entry' && rule?.action === 'sell_call'
+  );
+  if (sellCallRules.length === 0) return { valid: false, reason: 'no active sell_call entry rule' };
+
+  const instrument = (instruments || []).find((item) => item.instrument_name === instrumentName);
+  const ticker = tickerMap?.[instrumentName];
+  if (!instrument || !ticker) {
+    return { valid: true, unchecked: true, reason: 'live instrument/ticker unavailable' };
+  }
+
+  const orderLimitPrice = Number(order?.limit_price || 0);
+  if (!(orderLimitPrice > 0)) return { valid: false, reason: 'missing order limit price' };
+
+  const dte = computeDteFromInstrumentName(instrumentName);
+  if (!Number.isFinite(dte)) return { valid: false, reason: 'unable to compute DTE' };
+
+  const delta = Number(ticker?.option_pricing?.d) || 0;
+  const absDelta = Math.abs(delta);
+  const strike = Number(instrument?.option_details?.strike || instrumentName.split('-')?.[2] || 0) || 0;
+  const score = absDelta > 0 ? orderLimitPrice / absDelta : 0;
+  const reasons = [];
+
+  for (const rule of sellCallRules) {
+    let criteria;
+    try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { criteria = null; }
+    if (!criteria || typeof criteria !== 'object') {
+      reasons.push(`rule ${rule.id}: malformed criteria`);
+      continue;
+    }
+
+    if (criteria.option_type && criteria.option_type !== 'C') {
+      reasons.push(`rule ${rule.id}: option_type ${criteria.option_type} is not C`);
+      continue;
+    }
+
+    const dteRange = criteria.dte_range;
+    if (Array.isArray(dteRange) && (dte < dteRange[0] || dte > dteRange[1])) {
+      reasons.push(`rule ${rule.id}: dte ${dte.toFixed(2)} outside ${JSON.stringify(dteRange)}`);
+      continue;
+    }
+    if (!isSellCallCandidateInStrategyRange(dte, delta)) {
+      reasons.push(`rule ${rule.id}: outside sell-call strategy range (dte=${dte.toFixed(2)}, delta=${delta.toFixed(4)})`);
+      continue;
+    }
+
+    const deltaRange = criteria.delta_range;
+    if (Array.isArray(deltaRange) && (delta < deltaRange[0] || delta > deltaRange[1])) {
+      reasons.push(`rule ${rule.id}: delta ${delta.toFixed(4)} outside ${JSON.stringify(deltaRange)}`);
+      continue;
+    }
+
+    const maxStrikePct = Number(criteria.max_strike_pct || 0);
+    if (maxStrikePct > 0 && Number(spotPrice) > 0 && strike >= maxStrikePct * Number(spotPrice)) {
+      reasons.push(`rule ${rule.id}: strike ${strike} outside max_strike_pct ${maxStrikePct}`);
+      continue;
+    }
+
+    const marketConditions = criteria.market_conditions || null;
+    const hasMarketConditions = Array.isArray(marketConditions)
+      ? marketConditions.length > 0
+      : Boolean(marketConditions);
+    if (hasMarketConditions && !evaluateConditions(marketConditions, 'all', { spot_price: spotPrice })) {
+      reasons.push(`rule ${rule.id}: market_conditions no longer satisfied`);
+      continue;
+    }
+
+    const minBid = Number(criteria.min_bid ?? 0);
+    if (minBid > 0 && orderLimitPrice < minBid) {
+      reasons.push(`rule ${rule.id}: order limit $${orderLimitPrice.toFixed(4)} below min_bid $${minBid.toFixed(4)}`);
+      continue;
+    }
+
+    const minScore = Number(criteria.min_score ?? 0);
+    if (minScore > 0 && score + 1e-9 < minScore) {
+      reasons.push(`rule ${rule.id}: order_limit_score ${score.toFixed(2)} below min_score ${minScore.toFixed(2)}`);
+      continue;
+    }
+
+    if (marginState) {
+      const currentUtilization = estimateDisplayedMarginUtilization(marginState);
+      const effectiveCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
+      if (currentUtilization != null && currentUtilization > effectiveCapPct + 1e-9) {
+        reasons.push(`rule ${rule.id}: margin utilization ${(currentUtilization * 100).toFixed(2)}% above entry cap ${(effectiveCapPct * 100).toFixed(2)}%`);
+        continue;
+      }
+    }
+
+    return {
+      valid: true,
+      ruleId: rule.id,
+      score,
+      delta,
+      dte,
+      orderLimitPrice,
+      reason: `rule ${rule.id} still satisfied (order_limit_score=${score.toFixed(2)}, delta=${delta.toFixed(4)}, dte=${dte.toFixed(2)})`,
+    };
+  }
+
+  return {
+    valid: false,
+    score,
+    delta,
+    dte,
+    orderLimitPrice,
+    reason: reasons.join('; ') || 'no active sell_call entry rule matched order',
+  };
 };
 
 const findRestingExitOrderForRule = (restingOrders, rule) => {
@@ -7462,7 +7599,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
 // ─── LLM-Driven Trading: Open Order Management ──────────────────────────────
 
-const manageOpenOrders = async (tickerMap) => {
+const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spotPrice = 0) => {
   if (process.env.DRY_RUN === '1') return; // No real orders in dry run
   if (!db) return;
 
@@ -7560,11 +7697,18 @@ const manageOpenOrders = async (tickerMap) => {
   );
   // Entry rules match by criteria, not instrument. Check if any entry rule's action matches the order's direction.
   const activeEntryActions = new Set(activeRules.filter(r => r.rule_type === 'entry').map(r => r.action));
+  let openOrderMarginState = null;
+  if (openOrders.some((order) => inferActionFromOpenOrder(order) === 'sell_call')) {
+    try { openOrderMarginState = await fetchSubaccount(); } catch { /* ok */ }
+  }
 
   for (const order of openOrders) {
     const ageMs = Date.now() - (order.creation_timestamp || 0);
     const ageHours = ageMs / (1000 * 60 * 60);
     const filled = Number(order.filled_amount || 0);
+    const tracked = trackedResting.find((item) => item.order_id === order.order_id)
+      || trackedResting.find((item) => ordersRoughlyMatch(item, order));
+    const inferredAction = inferActionFromOpenOrder(order, tracked);
 
     // Cancel stale orders (>8h) or orphaned orders
     const isStale = ageHours > 8;
@@ -7577,15 +7721,31 @@ const manageOpenOrders = async (tickerMap) => {
       || (isBuyOrder && order.instrument_name?.endsWith('-C') && activeEntryActions.has('buyback_call'))
       || (!isBuyOrder && order.instrument_name?.endsWith('-P') && activeEntryActions.has('sell_put'));
     const isOrphaned = !matchesExitRule && !matchesEntryAction;
+    let invalidRestingEntryReason = null;
 
-    if (isStale || isOrphaned) {
-      const reason = isStale ? `stale (${ageHours.toFixed(1)}h old)` : 'orphaned (no matching active rule)';
+    if (!isStale && !isOrphaned && tracked && inferredAction === 'sell_call') {
+      const validation = validateRestingSellCallEntryOrder({
+        order,
+        activeRules,
+        instruments,
+        tickerMap,
+        marginState: openOrderMarginState,
+        positions,
+        spotPrice,
+      });
+      if (!validation.valid) {
+        invalidRestingEntryReason = `resting sell_call no longer satisfies active rule: ${validation.reason}`;
+      }
+    }
+
+    if (isStale || isOrphaned || invalidRestingEntryReason) {
+      const reason = invalidRestingEntryReason
+        || (isStale ? `stale (${ageHours.toFixed(1)}h old)` : 'orphaned (no matching active rule)');
       console.log(`🗑️ Cancelling ${order.instrument_name} order ${order.order_id}: ${reason}`);
       const result = await cancelOrder(order.order_id, order.instrument_name);
 
       // Update our tracking table
       db.updateRestingOrder(order.order_id, 'cancelled', filled);
-      const tracked = trackedResting.find((item) => item.order_id === order.order_id);
       if (tracked?.pending_action_id) {
         db.updatePendingAction(tracked.pending_action_id, {
           status: filled > 0 ? 'executed' : 'cancelled',
@@ -10191,7 +10351,7 @@ const runBot = async () => {
 
     // ── LLM-Driven Trading ─────────────────────────────────────────
     try {
-      await manageOpenOrders(tickerMap);
+      await manageOpenOrders(tickerMap, positions, instruments, spotPrice);
       await evaluateTradingRules(positions, instruments, tickerMap, spotPrice);
       await confirmAndExecutePending(instruments, tickerMap, spotPrice);
     } catch (error) {

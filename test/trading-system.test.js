@@ -3977,6 +3977,81 @@ describe('Resting order dedup for entry rules', () => {
   });
 });
 
+describe('Resting sell-call entry live revalidation', () => {
+  const validateRestingSellCallForTest = ({ orderLimitPrice, delta, dte, rule }) => {
+    const criteria = rule.criteria;
+    if (criteria.dte_range && (dte < criteria.dte_range[0] || dte > criteria.dte_range[1])) {
+      return { valid: false, reason: 'dte' };
+    }
+    if (!isSellCallCandidateInStrategyRange(dte, delta)) {
+      return { valid: false, reason: 'strategy_range' };
+    }
+    if (criteria.delta_range && (delta < criteria.delta_range[0] || delta > criteria.delta_range[1])) {
+      return { valid: false, reason: 'delta' };
+    }
+    if (criteria.min_bid != null && orderLimitPrice < criteria.min_bid) {
+      return { valid: false, reason: 'min_bid' };
+    }
+    const score = Math.abs(delta) > 0 ? orderLimitPrice / Math.abs(delta) : 0;
+    if (criteria.min_score != null && score < criteria.min_score) {
+      return { valid: false, reason: 'min_score', score };
+    }
+    return { valid: true, score };
+  };
+
+  test('resting sell-call entry becomes invalid when current delta makes order score too low', () => {
+    const rule = {
+      criteria: {
+        option_type: 'C',
+        delta_range: [0.04, 0.12],
+        dte_range: [5, 12],
+        min_score: 72,
+        min_bid: 5,
+      },
+    };
+
+    const result = validateRestingSellCallForTest({
+      orderLimitPrice: 8.4,
+      delta: 0.117,
+      dte: 5.85,
+      rule,
+    });
+
+    assert.strictEqual(result.valid, false);
+    assert.strictEqual(result.reason, 'min_score');
+    assert.ok(result.score < 72);
+  });
+
+  test('resting sell-call entry remains valid when order price still satisfies live score and ranges', () => {
+    const rule = {
+      criteria: {
+        option_type: 'C',
+        delta_range: [0.04, 0.12],
+        dte_range: [5, 12],
+        min_score: 72,
+        min_bid: 5,
+      },
+    };
+
+    const result = validateRestingSellCallForTest({
+      orderLimitPrice: 8.4,
+      delta: 0.11647,
+      dte: 5.85,
+      rule,
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.ok(result.score >= 72);
+  });
+
+  test('open-order maintenance wires sell-call revalidation before stale fill', () => {
+    assert.ok(SCRIPT_SOURCE.includes('validateRestingSellCallEntryOrder'));
+    assert.ok(SCRIPT_SOURCE.includes('resting sell_call no longer satisfies active rule'));
+    assert.ok(SCRIPT_SOURCE.includes('order_limit_score'));
+    assert.ok(SCRIPT_SOURCE.includes('await manageOpenOrders(tickerMap, positions, instruments, spotPrice)'));
+  });
+});
+
 describe('Resting order dedup for advisor-led exit rules', () => {
   const findRestingExitOrderForRule = (restingOrders, rule) => {
     if (!Array.isArray(restingOrders) || !rule) return null;
