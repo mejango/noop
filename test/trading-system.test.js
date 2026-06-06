@@ -36,6 +36,8 @@ const SCRIPT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'script.js'), '
 
 const CALL_EXPIRATION_RANGE = [5, 12];
 const CALL_DELTA_RANGE = [0.04, 0.12];
+const PUT_DELTA_RANGE = [-0.12, -0.02];
+const BUY_PUT_ADVISORY_DTE_RANGE = [45, 75];
 const PUT_ROLL_DTE_THRESHOLD = 25;
 const PUT_MONETIZATION_PROFIT_THRESHOLD = 1000;
 const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
@@ -4049,6 +4051,112 @@ describe('Resting sell-call entry live revalidation', () => {
     assert.ok(SCRIPT_SOURCE.includes('resting sell_call no longer satisfies active rule'));
     assert.ok(SCRIPT_SOURCE.includes('order_limit_score'));
     assert.ok(SCRIPT_SOURCE.includes('await manageOpenOrders(tickerMap, positions, instruments, spotPrice)'));
+  });
+});
+
+describe('Resting buy-put entry live revalidation', () => {
+  const validateRestingBuyPutForTest = ({ orderLimitPrice, delta, dte, rule, currentSignal = null }) => {
+    const criteria = rule.criteria;
+    if (criteria.dte_range && (dte < criteria.dte_range[0] || dte > criteria.dte_range[1])) {
+      return { valid: false, reason: 'dte' };
+    }
+    if (dte < BUY_PUT_ADVISORY_DTE_RANGE[0] || dte > BUY_PUT_ADVISORY_DTE_RANGE[1]) {
+      return { valid: false, reason: 'strategy_dte' };
+    }
+    if (criteria.delta_range && (delta < criteria.delta_range[0] || delta > criteria.delta_range[1])) {
+      return { valid: false, reason: 'delta' };
+    }
+    if (delta < PUT_DELTA_RANGE[0] || delta > PUT_DELTA_RANGE[1]) {
+      return { valid: false, reason: 'strategy_delta' };
+    }
+    const valueSignal = normalizeBuyPutValueSignal(criteria.value_signal ?? criteria.buy_put_signal);
+    if (valueSignal && !buyPutValueSignalMatches(valueSignal, currentSignal)) {
+      return { valid: false, reason: 'value_signal' };
+    }
+    const score = Math.abs(delta) > 0 ? Math.abs(delta) / orderLimitPrice : 0;
+    if (criteria.min_score != null && score < criteria.min_score) {
+      return { valid: false, reason: 'min_score', score };
+    }
+    if (criteria.target_score != null && score < criteria.target_score) {
+      return { valid: false, reason: 'target_score', score };
+    }
+    return { valid: true, score };
+  };
+
+  test('resting buy-put entry becomes invalid when current delta makes limit score too low', () => {
+    const rule = {
+      criteria: {
+        option_type: 'P',
+        delta_range: [-0.12, -0.02],
+        dte_range: [45, 75],
+        min_score: 0.004,
+        target_score: 0.0045,
+      },
+    };
+
+    const result = validateRestingBuyPutForTest({
+      orderLimitPrice: 20,
+      delta: -0.075,
+      dte: 63,
+      rule,
+    });
+
+    assert.strictEqual(result.valid, false);
+    assert.strictEqual(result.reason, 'min_score');
+    assert.ok(result.score < 0.004);
+  });
+
+  test('resting buy-put entry remains valid when patient limit still satisfies target score', () => {
+    const rule = {
+      criteria: {
+        option_type: 'P',
+        delta_range: [-0.12, -0.02],
+        dte_range: [45, 75],
+        min_score: 0.004,
+        target_score: 0.0045,
+        value_signal: 'strict_fresh_best',
+      },
+    };
+
+    const result = validateRestingBuyPutForTest({
+      orderLimitPrice: 20,
+      delta: -0.095,
+      dte: 63,
+      rule,
+      currentSignal: 'strict_fresh_best',
+    });
+
+    assert.strictEqual(result.valid, true);
+    assert.ok(result.score >= 0.0045);
+  });
+
+  test('resting buy-put entry is cancelled when explicit value signal expires', () => {
+    const rule = {
+      criteria: {
+        option_type: 'P',
+        delta_range: [-0.12, -0.02],
+        dte_range: [45, 75],
+        min_score: 0.004,
+        value_signal: 'strict_fresh_best',
+      },
+    };
+
+    const result = validateRestingBuyPutForTest({
+      orderLimitPrice: 20,
+      delta: -0.095,
+      dte: 63,
+      rule,
+      currentSignal: null,
+    });
+
+    assert.strictEqual(result.valid, false);
+    assert.strictEqual(result.reason, 'value_signal');
+  });
+
+  test('open-order maintenance wires buy-put revalidation before stale fill', () => {
+    assert.ok(SCRIPT_SOURCE.includes('validateRestingBuyPutEntryOrder'));
+    assert.ok(SCRIPT_SOURCE.includes('resting buy_put no longer satisfies active rule'));
+    assert.ok(SCRIPT_SOURCE.includes('order_limit_score'));
   });
 });
 

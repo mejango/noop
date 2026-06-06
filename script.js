@@ -6657,6 +6657,160 @@ const validateRestingSellCallEntryOrder = ({
   };
 };
 
+const validateRestingBuyPutEntryOrder = ({
+  order,
+  activeRules = [],
+  instruments = [],
+  tickerMap = {},
+  spotPrice = 0,
+  buyPutContext = null,
+  putBudgetRemaining = null,
+}) => {
+  const instrumentName = order?.instrument_name;
+  if (!instrumentName) return { valid: true, unchecked: true, reason: 'missing instrument name' };
+
+  const buyPutRules = (activeRules || []).filter((rule) =>
+    rule?.rule_type === 'entry' && rule?.action === 'buy_put'
+  );
+  if (buyPutRules.length === 0) return { valid: false, reason: 'no active buy_put entry rule' };
+
+  const instrument = (instruments || []).find((item) => item.instrument_name === instrumentName);
+  const ticker = tickerMap?.[instrumentName];
+  if (!instrument || !ticker) {
+    return { valid: true, unchecked: true, reason: 'live instrument/ticker unavailable' };
+  }
+
+  const orderLimitPrice = Number(order?.limit_price || 0);
+  if (!(orderLimitPrice > 0)) return { valid: false, reason: 'missing order limit price' };
+
+  const dte = computeDteFromInstrumentName(instrumentName);
+  if (!Number.isFinite(dte)) return { valid: false, reason: 'unable to compute DTE' };
+
+  const delta = Number(ticker?.option_pricing?.d) || 0;
+  const absDelta = Math.abs(delta);
+  const strike = Number(instrument?.option_details?.strike || instrumentName.split('-')?.[2] || 0) || 0;
+  const orderLimitScore = absDelta > 0 ? absDelta / orderLimitPrice : 0;
+  const orderAmount = Math.max(0, Number(order?.amount || 0));
+  const orderValue = orderLimitPrice * orderAmount;
+  const reasons = [];
+
+  for (const rule of buyPutRules) {
+    let criteria;
+    try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { criteria = null; }
+    if (!criteria || typeof criteria !== 'object') {
+      reasons.push(`rule ${rule.id}: malformed criteria`);
+      continue;
+    }
+
+    if (criteria.option_type && criteria.option_type !== 'P') {
+      reasons.push(`rule ${rule.id}: option_type ${criteria.option_type} is not P`);
+      continue;
+    }
+
+    const dteRange = criteria.dte_range;
+    if (Array.isArray(dteRange) && (dte < dteRange[0] || dte > dteRange[1])) {
+      reasons.push(`rule ${rule.id}: dte ${dte.toFixed(2)} outside ${JSON.stringify(dteRange)}`);
+      continue;
+    }
+    if (dte < BUY_PUT_ADVISORY_DTE_RANGE[0] || dte > BUY_PUT_ADVISORY_DTE_RANGE[1]) {
+      reasons.push(`rule ${rule.id}: outside buy-put strategy DTE range (dte=${dte.toFixed(2)})`);
+      continue;
+    }
+
+    const deltaRange = criteria.delta_range;
+    if (Array.isArray(deltaRange) && (delta < deltaRange[0] || delta > deltaRange[1])) {
+      reasons.push(`rule ${rule.id}: delta ${delta.toFixed(4)} outside ${JSON.stringify(deltaRange)}`);
+      continue;
+    }
+    if (delta < PUT_DELTA_RANGE[0] || delta > PUT_DELTA_RANGE[1]) {
+      reasons.push(`rule ${rule.id}: outside buy-put strategy delta range (delta=${delta.toFixed(4)})`);
+      continue;
+    }
+
+    const maxStrikePct = Number(criteria.max_strike_pct || 0);
+    if (maxStrikePct > 0 && Number(spotPrice) > 0 && strike >= maxStrikePct * Number(spotPrice)) {
+      reasons.push(`rule ${rule.id}: strike ${strike} outside max_strike_pct ${maxStrikePct}`);
+      continue;
+    }
+
+    const marketConditions = criteria.market_conditions || null;
+    const hasMarketConditions = Array.isArray(marketConditions)
+      ? marketConditions.length > 0
+      : Boolean(marketConditions);
+    if (hasMarketConditions && !evaluateConditions(marketConditions, 'all', { spot_price: spotPrice })) {
+      reasons.push(`rule ${rule.id}: market_conditions no longer satisfied`);
+      continue;
+    }
+
+    const rawValueSignal = criteria.value_signal ?? criteria.buy_put_signal;
+    const valueSignal = normalizeBuyPutValueSignal(rawValueSignal);
+    if (hasExplicitBuyPutValueSignal(rawValueSignal) && !valueSignal) {
+      reasons.push(`rule ${rule.id}: unknown value_signal=${rawValueSignal}`);
+      continue;
+    }
+    if (valueSignal && buyPutContext) {
+      const currentSignal = buyPutContext?.action_pressure?.signal || null;
+      if (!buyPutValueSignalMatches(valueSignal, currentSignal)) {
+        reasons.push(`rule ${rule.id}: value_signal ${valueSignal} no longer matches current signal ${currentSignal || 'none'}`);
+        continue;
+      }
+    }
+
+    const minScore = Number(criteria.min_score ?? 0);
+    if (minScore > 0 && orderLimitScore + 1e-12 < minScore) {
+      reasons.push(`rule ${rule.id}: order_limit_score ${orderLimitScore.toFixed(6)} below min_score ${minScore.toFixed(6)}`);
+      continue;
+    }
+
+    let targetScore = Number(criteria.target_score ?? 0) > 0 ? Number(criteria.target_score) : null;
+    const contextTargetScore = Number(buyPutContext?.action_pressure?.target_score || 0);
+    const contextSignal = buyPutContext?.action_pressure?.signal || null;
+    if (isActionableBuyPutSignal(contextSignal) && contextTargetScore > 0 && (targetScore == null || targetScore > contextTargetScore)) {
+      targetScore = contextTargetScore;
+    }
+    if (targetScore != null && orderLimitScore + 1e-12 < targetScore) {
+      reasons.push(`rule ${rule.id}: order_limit_score ${orderLimitScore.toFixed(6)} below target_score ${targetScore.toFixed(6)}`);
+      continue;
+    }
+
+    const ruleBudget = Number(rule.budget_limit || 0);
+    if (ruleBudget > 0 && orderValue > ruleBudget + 0.01) {
+      reasons.push(`rule ${rule.id}: order value $${orderValue.toFixed(2)} above rule budget $${ruleBudget.toFixed(2)}`);
+      continue;
+    }
+    if (botData.putBudgetForCycle > 0) {
+      const remaining = Number(putBudgetRemaining);
+      if (!(remaining > 0.20)) {
+        reasons.push(`rule ${rule.id}: put budget exhausted`);
+        continue;
+      }
+      if (orderValue > remaining + 0.01) {
+        reasons.push(`rule ${rule.id}: order value $${orderValue.toFixed(2)} above remaining put budget $${remaining.toFixed(2)}`);
+        continue;
+      }
+    }
+
+    return {
+      valid: true,
+      ruleId: rule.id,
+      score: orderLimitScore,
+      delta,
+      dte,
+      orderLimitPrice,
+      reason: `rule ${rule.id} still satisfied (order_limit_score=${orderLimitScore.toFixed(6)}, delta=${delta.toFixed(4)}, dte=${dte.toFixed(2)})`,
+    };
+  }
+
+  return {
+    valid: false,
+    score: orderLimitScore,
+    delta,
+    dte,
+    orderLimitPrice,
+    reason: reasons.join('; ') || 'no active buy_put entry rule matched order',
+  };
+};
+
 const findRestingExitOrderForRule = (restingOrders, rule) => {
   if (!Array.isArray(restingOrders) || !rule) return null;
   return restingOrders.find(order =>
@@ -7701,6 +7855,27 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
   if (openOrders.some((order) => inferActionFromOpenOrder(order) === 'sell_call')) {
     try { openOrderMarginState = await fetchSubaccount(); } catch { /* ok */ }
   }
+  let openOrderBuyPutContext = null;
+  const hasTrackedRestingBuyPut = openOrders.some((order) => {
+    const tracked = trackedResting.find((item) => item.order_id === order.order_id)
+      || trackedResting.find((item) => ordersRoughlyMatch(item, order));
+    return tracked && inferActionFromOpenOrder(order, tracked) === 'buy_put';
+  });
+  if (hasTrackedRestingBuyPut) {
+    let recentPendingActions = [];
+    try { recentPendingActions = db.getRecentPendingActions(50); } catch { /* ok */ }
+    openOrderBuyPutContext = buildRollingOptionValueContext({
+      tickerMap,
+      momentum: {
+        mediumTerm: botData.mediumTermMomentum,
+        shortTerm: botData.shortTermMomentum,
+      },
+      putBudgetRemaining: Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought),
+      activeRules,
+      recentPendingActions,
+      openRestingOrders: trackedResting,
+    });
+  }
 
   for (const order of openOrders) {
     const ageMs = Date.now() - (order.creation_timestamp || 0);
@@ -7735,6 +7910,20 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
       });
       if (!validation.valid) {
         invalidRestingEntryReason = `resting sell_call no longer satisfies active rule: ${validation.reason}`;
+      }
+    }
+    if (!isStale && !isOrphaned && tracked && inferredAction === 'buy_put') {
+      const validation = validateRestingBuyPutEntryOrder({
+        order,
+        activeRules,
+        instruments,
+        tickerMap,
+        spotPrice,
+        buyPutContext: openOrderBuyPutContext,
+        putBudgetRemaining: Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought),
+      });
+      if (!validation.valid) {
+        invalidRestingEntryReason = `resting buy_put no longer satisfies active rule: ${validation.reason}`;
       }
     }
 
