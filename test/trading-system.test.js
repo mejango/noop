@@ -958,6 +958,7 @@ const formatSellCallConfirmationContext = ({ action, triggerData, ticker, curren
 const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, advisorLimitPrice, currentPrice }) => {
   if (action?.action !== 'sell_put') return '';
   const criteria = typeof action.rule_criteria === 'string' ? JSON.parse(action.rule_criteria) : (action.rule_criteria || {});
+  const intent = triggerData?.put_exit_intent || criteria.put_exit_intent || 'n/a';
   const currentValues = triggerData?.current_values || {};
   const position = (livePositions || []).find((item) => item?.instrument_name === action.instrument_name);
   const plannedAmount = Number(action.amount);
@@ -965,17 +966,30 @@ const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, 
   const totalLongPuts = getTotalLongPutAmount(livePositions || []);
   const remainingLongPuts = Number.isFinite(plannedAmount) ? Math.max(0, totalLongPuts - plannedAmount) : null;
   const retainsProtection = position ? leavesDownsideProtectionAfterSale(position, livePositions || [], plannedAmount) : null;
+  const hasLongerDatedProtection = position ? hasLongerDatedPutProtection(position, livePositions || []) : null;
   const livePnlPct = Number(currentValues.unrealized_pnl_pct);
   const patientPnlPct = Number(triggerData?.patient_sell_put_pnl_pct ?? currentValues.patient_sell_put_pnl_pct);
   const advisorFloor = Number(advisorLimitPrice ?? triggerData?.patient_sell_put_limit_price ?? currentValues.patient_sell_put_limit_price);
   const trancheFraction = Number(triggerData?.tranche_fraction ?? (positionAmount > 0 ? plannedAmount / positionAmount : NaN));
   const fmt = (value, digits = 2) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
-  return [
+  const baseLines = [
     'Sell-put exit confirmation context:',
-    `- Intent=${triggerData?.put_exit_intent || criteria.put_exit_intent || 'n/a'}. sell_put closes an owned long put; it is reduce_only and capital-releasing, not a naked short-put entry.`,
+    `- Intent=${intent}. sell_put closes an owned long put; it is reduce_only and capital-releasing, not a naked short-put entry.`,
     `- Current executable exit: live_bid=${fmtPrice(currentValues.execution_price ?? currentPrice ?? action.price)}, live_unrealized_pnl_pct=${fmt(livePnlPct)}%, patient_floor_pnl_pct=${fmt(patientPnlPct)}%.`,
-    `- Protection discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
+  ];
+
+  if (intent === 'roll_protection') {
+    return [
+      ...baseLines,
+      `- Roll discipline: planned_close_amount=${fmt(plannedAmount, 4)} of aging_position_amount=${fmt(positionAmount, 4)}, longer_dated_protection_in_book=${hasLongerDatedProtection == null ? 'unknown' : hasLongerDatedProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
+      `- Roll confirmation rule: confirm when DTE <= ${PUT_ROLL_DTE_THRESHOLD}, this closes an owned long put, and longer-dated long put protection remains in the book after sale. Do not apply monetize_tail_win tranche_fraction/profit-threshold rules to roll_protection; a full close of the aging instrument and negative PnL are allowed roll facts.`,
+    ].join('\n');
+  }
+
+  return [
+    ...baseLines,
+    `- Tail-win discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
     `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use a patient synthetic reduce-only gtc/post_only limit at or above the floor for monetize_tail_win; zero fill is better than dumping into a thin bid.`,
   ].join('\n');
 };
@@ -5505,6 +5519,22 @@ describe('Full schema: exit monitoring for put rolling', () => {
     assert.strictEqual(gate.allowed, false);
   });
 
+  test('roll_protection can fully close an underwater aging put when longer protection remains', () => {
+    const position = { instrument_name: 'ETH-20260626-1000-P', amount: 10.0, direction: 'long', avg_entry_price: 10.00 };
+    const longerPut = { instrument_name: 'ETH-20260731-1500-P', amount: 7.1, direction: 'long', avg_entry_price: 26.81 };
+    const criteria = { put_exit_intent: 'roll_protection' };
+    const values = { dte: 19.22, unrealized_pnl_pct: -84.16, execution_price: 2.10 };
+    const amount = getSellPutExitAmount(position, values, criteria);
+    const gate = getSellPutProtectionGate(
+      { action: 'sell_put' },
+      values,
+      { criteria, position, positions: [position, longerPut], plannedSellAmount: amount }
+    );
+
+    assert.strictEqual(amount, 10.0);
+    assert.strictEqual(gate.allowed, true);
+  });
+
   test('long-dated put can be considered after extreme asymmetric upside', () => {
     const position = { instrument_name: 'ETH-20260731-1500-P', amount: 4.0, direction: 'long', avg_entry_price: 5.00 };
     const values = { dte: 63.7, unrealized_pnl_pct: 1200, execution_price: 120 };
@@ -6648,6 +6678,46 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('retain_downside_protection=yes'));
     assert.ok(context.includes('Advisor exit floor: $120.0000'));
     assert.ok(context.includes('zero fill is better than dumping into a thin bid'));
+  });
+
+  test('sell_put roll confirmation context does not import tail-win tranche discipline', () => {
+    const context = formatSellPutConfirmationContext({
+      action: {
+        action: 'sell_put',
+        instrument_name: 'ETH-20260626-1000-P',
+        amount: 10,
+        price: 2.1,
+        rule_criteria: {
+          put_exit_intent: 'roll_protection',
+          requires_longer_dated_protection: true,
+          conditions: [{ field: 'dte', op: 'lte', value: 25 }],
+          condition_logic: 'all',
+        },
+      },
+      triggerData: {
+        put_exit_intent: 'roll_protection',
+        current_values: {
+          execution_price: 2.1,
+          unrealized_pnl_pct: -84.16,
+          dte: 19.22,
+        },
+      },
+      livePositions: [
+        { instrument_name: 'ETH-20260626-1000-P', direction: 'long', amount: 10 },
+        { instrument_name: 'ETH-20260731-1500-P', direction: 'long', amount: 7.1 },
+      ],
+      currentPrice: 2.1,
+    });
+
+    assert.ok(context.includes('Intent=roll_protection'));
+    assert.ok(context.includes('planned_close_amount=10.0000'));
+    assert.ok(context.includes('longer_dated_protection_in_book=yes'));
+    assert.ok(context.includes('total_long_puts_after_sale=7.1000'));
+    assert.ok(context.includes('full close of the aging instrument'));
+    assert.ok(context.includes('negative PnL are allowed roll facts'));
+    assert.ok(context.includes('Do not apply monetize_tail_win tranche_fraction/profit-threshold rules'));
+    assert.ok(!context.includes('tranche_fraction=1.0000'));
+    assert.ok(!context.includes('Tail-win discipline'));
   });
 
   test('confirmation scope is last-mile execution, not a second advisory', () => {

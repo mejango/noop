@@ -5110,7 +5110,7 @@ const buildRulebookRequirements = ({
         type: 'exit',
         instrument_name: snapshot.instrument,
         applies: 'open long put',
-        instruction: `Create a reduce-only sell_put watcher with put_exit_intent="roll_protection" only if longer-dated put protection is already in the book, or put_exit_intent="monetize_tail_win" only after executable PnL reaches >${PUT_MONETIZATION_PROFIT_THRESHOLD}%. Monetization must include min_exit_price/limit_price, be tranched, and retain downside protection after each sale.`,
+        instruction: `Create a reduce-only sell_put watcher with put_exit_intent="roll_protection" only if DTE <= ${PUT_ROLL_DTE_THRESHOLD} and longer-dated put protection is already in the book; a roll may close the aging instrument fully. Use put_exit_intent="monetize_tail_win" only after executable PnL reaches >${PUT_MONETIZATION_PROFIT_THRESHOLD}%. Monetization must include min_exit_price/limit_price, be tranched, and retain downside protection after each sale.`,
       });
     }
     if (snapshot?.direction === 'short' && snapshot?.option_type === 'C') {
@@ -6475,15 +6475,31 @@ const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, 
   const trancheFraction = Number(triggerData?.tranche_fraction ?? (
     Number.isFinite(plannedAmount) && positionAmount > 0 ? plannedAmount / positionAmount : NaN
   ));
+  const hasLongerDatedProtection = position
+    ? hasLongerDatedPutProtection(position, livePositions || [])
+    : null;
   const fmt = (value, digits = 2) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
-  return [
+  const baseLines = [
     'Sell-put exit confirmation context:',
     `- Intent=${intent}. sell_put closes an owned long put; it is reduce_only and capital-releasing, not a naked short-put entry.`,
     `- Current exit proof: live_bid=${fmtPrice(liveBid)}, live_unrealized_pnl_pct=${fmt(livePnlPct)}%, fair_value=${fmtPrice(fairValuePrice)} (${fairValueSource}), fair_value_pnl_pct=${fmt(fairValuePnlPct)}%, patient_floor_pnl_pct=${fmt(patientPnlPct)}%, dte=${fmt(dte)}, delta=${fmt(Number(currentValues.delta), 4)}, theta=${fmt(Number(currentValues.theta), 4)}.`,
-    `- Protection discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
+  ];
+
+  if (intent === 'roll_protection') {
+    return [
+      ...baseLines,
+      `- Roll discipline: planned_close_amount=${fmt(plannedAmount, 4)} of aging_position_amount=${fmt(positionAmount, 4)}, longer_dated_protection_in_book=${hasLongerDatedProtection == null ? 'unknown' : hasLongerDatedProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
+      `- Roll confirmation rule: confirm when DTE <= ${PUT_ROLL_DTE_THRESHOLD}, this closes an owned long put, and longer-dated long put protection remains in the book after sale. Do not apply monetize_tail_win tranche_fraction/profit-threshold rules to roll_protection; a full close of the aging instrument and negative PnL are allowed roll facts.`,
+      '- Reject roll_protection only for DTE above the roll window, missing longer-dated protection, missing/unsafe executable price, non-reduce-only/non-closeable execution, or a sale that would remove all book downside protection.',
+    ].join('\n');
+  }
+
+  return [
+    ...baseLines,
+    `- Tail-win discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
     `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use a patient synthetic reduce-only gtc/post_only limit at or above the floor for monetize_tail_win; zero fill is better than dumping into a thin bid.`,
-    `- roll_protection requires DTE <= ${PUT_ROLL_DTE_THRESHOLD} and longer-dated protection already in the book. monetize_tail_win requires current executable or fair-value PnL proof > ${PUT_MONETIZATION_PROFIT_THRESHOLD}% and tranching while retaining protection; the patient floor is price discipline, not trigger proof. Even then, confirm only if selling this chunk is wiser than keeping convexity.`,
+    `- monetize_tail_win requires current executable or fair-value PnL proof > ${PUT_MONETIZATION_PROFIT_THRESHOLD}% and tranching while retaining protection; the patient floor is price discipline, not trigger proof. Confirm only if selling this chunk is wiser than keeping convexity.`,
   ].join('\n');
 };
 
@@ -8174,7 +8190,7 @@ const getStandingRulebookDisciplinePrompt = () => [
   '- sell_call market_conditions may only use spot_price as optional supporting context. Do not put momentum, margin, regime, volatility, DTE, delta, score, bid, or custom fields inside market_conditions; express those through min_score, min_bid, delta_range, dte_range, priority, and reasoning.',
   '- Do not use broad spot_price floors as a proxy for sell_call recovery, stability, or good premium. After a sharp drop, spot can remain above a floor while call selling is still unattractive.',
   `- sell_call rules must stay inside the normal call sale universe: ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE and ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]} delta.`,
-  `- sell_put rules must declare put_exit_intent. Use "roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long puts. Use "monetize_tail_win" only when executable unrealized_pnl_pct > ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. Never sell all downside protection at once or dump into sparse crash bids.`,
+  `- sell_put rules must declare put_exit_intent. Use "roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long puts; roll_protection may close the aging instrument fully because the replacement protection is already on. Use "monetize_tail_win" only when executable unrealized_pnl_pct > ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. For monetization, never sell all downside protection at once or dump into sparse crash bids.`,
   '- buyback_call rules must declare buyback_intent. Use "profit_capture" for 80%+ executable capture or a patient synthetic reduce-only resting limit whose price would achieve that capture. Use "threat_management" only for genuine short-call danger; price rising alone is not enough.',
   '- Do not omit a required watcher just because it is not currently triggered. Tighten criteria instead.',
 ].join('\n');
@@ -8183,7 +8199,7 @@ const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normal
 
 const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, keep two intents separate. Intent 1 is profit/capacity reset while the short call is winning: use buyback_intent="profit_capture" and executable unrealized_pnl_pct >= ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic trigger, or set a patient max_buyback_price/target_capture_pct where the bid would capture at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% if filled. Do not add DTE or mark_price blockers for this intent; executable capture already uses the live buyback ask. Intent 2 is threat management when the short call is genuinely dangerous and time/range for recovery is running out: use buyback_intent="threat_management" with allow_below_profit_floor=true, and conditions on real threat facts such as delta, spot vs strike, and remaining DTE. Do not prematurely buy back just because price is rising; spot can come back down, and buying back fear premium can make us the sucker of the trade. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks only when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
 
-const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long put protection. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. Never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Even when the hard trigger is satisfied, confirm only if the full market context says selling a tranche is wise rather than prematurely cutting convexity. If you reject a sell_put, do it because removing protection is strategically unwise, not because the exit itself uses more margin.`;
+const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long put protection. For roll_protection, a full close of the aging instrument is allowed, negative PnL is not a rejection reason, and monetize_tail_win tranche/profit thresholds do not apply because replacement protection is already in the book. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. For monetization, never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Even when the monetization hard trigger is satisfied, confirm only if the full market context says selling a tranche is wise rather than prematurely cutting convexity. If you reject a sell_put, do it because the typed intent's requirements fail or removing protection is strategically unwise, not because the exit itself uses more margin.`;
 
 const getConfirmationJsonOnlyPrompt = () => 'Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.';
 
