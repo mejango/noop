@@ -996,6 +996,64 @@ const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, 
 
 const getConfirmationScopePrompt = () => 'CONFIRMATION SCOPE: This is a last-mile execution check, not a second scheduled advisory.';
 
+const normalizeLearningText = (value) => String(value || '').toLowerCase();
+
+const confirmationLessonMatches = (lesson, includeKeywords = [], excludeKeywords = []) => {
+  const text = normalizeLearningText(lesson?.lesson || lesson?.summary || '');
+  if (!text) return false;
+  if (excludeKeywords.some((keyword) => text.includes(keyword))) return false;
+  return includeKeywords.some((keyword) => text.includes(keyword));
+};
+
+const getConfirmationLearningScope = (action) => {
+  switch (action) {
+    case 'sell_call':
+      return {
+        includeReviews: false,
+        reviewFamily: 'short_call_campaign',
+        include: ['sell_call', 'sell call', 'selling calls', 'call premium', 'short call entry', 'strike selection', 'premium collection'],
+        exclude: ['buyback', 'buy back', 'bought back', 'exit timing', 'close short call', 'closing short call'],
+        note: 'sell_call is an entry. Buyback-call exit timing lessons are not valid vetoes for a fresh sell_call entry; use live bid/score/margin facts and the active sell_call rule.',
+      };
+    case 'buyback_call':
+      return {
+        includeReviews: true,
+        reviewFamily: 'short_call_campaign',
+        include: ['buyback', 'buy back', 'bought back', 'short call', 'call exit', 'exit timing', 'expiry payoff', 'mark pain'],
+        exclude: ['buy_put', 'buy put', 'sell_put', 'sell put'],
+        note: 'buyback_call is a short-call exit. Short-call campaign reviews and buyback timing lessons may inform this last-mile exit check.',
+      };
+    default:
+      return null;
+  }
+};
+
+const formatConfirmationLearningContext = (action, recentTradeReviews = [], activeTradeLessons = []) => {
+  const scope = getConfirmationLearningScope(action);
+  if (!scope) return '';
+
+  const relevantReviews = scope.includeReviews
+    ? (recentTradeReviews || []).filter((review) => review?.action_family === scope.reviewFamily).slice(0, 3)
+    : [];
+  const relevantLessons = (activeTradeLessons || [])
+    .filter((lesson) => confirmationLessonMatches(lesson, scope.include, scope.exclude))
+    .slice(0, 3);
+  const omittedCount = Math.max(0, (recentTradeReviews?.length || 0) - relevantReviews.length)
+    + Math.max(0, (activeTradeLessons?.length || 0) - relevantLessons.length);
+
+  return [
+    'Action-scoped learning context:',
+    `- ${scope.note}`,
+    `- Omitted unrelated confirmation memories: ${omittedCount}. Do not import omitted lessons or reviews into this action's decision.`,
+    relevantReviews.length > 0
+      ? `Relevant recent trade reviews:\n${relevantReviews.map((r) => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}`
+      : '- Relevant recent trade reviews: none for this action scope.',
+    relevantLessons.length > 0
+      ? `Relevant active trade lessons:\n${relevantLessons.map((l) => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}`
+      : '- Relevant active trade lessons: none for this action scope.',
+  ].join('\n');
+};
+
 const clampSellCallQtyToEntryCap = ({
   desiredQty,
   amountStep,
@@ -2602,23 +2660,23 @@ describe('Order result classification (zero-fill detection)', () => {
 // 10. Order type resolution from voter consensus
 // ============================================================================
 
-const resolveOrderType = (haikuVote, codexVote) => {
-  const confirmedOrderType = (haikuVote?.order_type || codexVote?.order_type || 'ioc');
+const resolveOrderType = (anthropicVote, codexVote) => {
+  const confirmedOrderType = (anthropicVote?.order_type || codexVote?.order_type || 'ioc');
   const validOrderTypes = ['ioc', 'gtc', 'post_only'];
   return validOrderTypes.includes(confirmedOrderType) ? confirmedOrderType : 'ioc';
 };
 
-const resolveExecutionPrice = (haikuVote, codexVote, currentPrice, actionPrice) => {
-  const voterLimitPrice = haikuVote?.limit_price || codexVote?.limit_price;
+const resolveExecutionPrice = (anthropicVote, codexVote, currentPrice, actionPrice) => {
+  const voterLimitPrice = anthropicVote?.limit_price || codexVote?.limit_price;
   return (typeof voterLimitPrice === 'number' && voterLimitPrice > 0) ? voterLimitPrice : (currentPrice || actionPrice);
 };
 
 describe('Order type resolution from voter consensus', () => {
-  test('haiku picks gtc, codex picks ioc → uses haiku (gtc)', () => {
+  test('anthropic picks gtc, codex picks ioc → uses anthropic (gtc)', () => {
     assert.strictEqual(resolveOrderType({ order_type: 'gtc' }, { order_type: 'ioc' }), 'gtc');
   });
 
-  test('haiku null, codex picks post_only → uses codex', () => {
+  test('anthropic null, codex picks post_only → uses codex', () => {
     assert.strictEqual(resolveOrderType(null, { order_type: 'post_only' }), 'post_only');
   });
 
@@ -2626,25 +2684,25 @@ describe('Order type resolution from voter consensus', () => {
     assert.strictEqual(resolveOrderType(null, null), 'ioc');
   });
 
-  test('haiku picks invalid type → falls back to ioc', () => {
+  test('anthropic picks invalid type → falls back to ioc', () => {
     assert.strictEqual(resolveOrderType({ order_type: 'market' }, null), 'ioc');
   });
 
-  test('haiku has no order_type field, codex has gtc → uses codex', () => {
+  test('anthropic has no order_type field, codex has gtc → uses codex', () => {
     assert.strictEqual(resolveOrderType({ confirm: true }, { order_type: 'gtc' }), 'gtc');
   });
 
-  test('both have order_type, haiku takes priority', () => {
+  test('both have order_type, anthropic takes priority', () => {
     assert.strictEqual(resolveOrderType({ order_type: 'post_only' }, { order_type: 'gtc' }), 'post_only');
   });
 });
 
 describe('Execution price resolution from voter consensus', () => {
-  test('haiku sets limit_price → uses it', () => {
+  test('anthropic sets limit_price → uses it', () => {
     assert.strictEqual(resolveExecutionPrice({ limit_price: 4.50 }, null, 5.00, 5.50), 4.50);
   });
 
-  test('codex sets limit_price, haiku null → uses codex', () => {
+  test('codex sets limit_price, anthropic null → uses codex', () => {
     assert.strictEqual(resolveExecutionPrice(null, { limit_price: 3.00 }, 5.00, 5.50), 3.00);
   });
 
@@ -3283,11 +3341,11 @@ describe('execution price validation', () => {
 // 17. Voting logic correctness
 // ============================================================================
 
-const resolveVotingDecision = (haikuVote, codexVote) => {
-  if (haikuVote && codexVote) {
-    return (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
-  } else if (haikuVote) {
-    return haikuVote.confirm ? 'confirmed' : 'rejected';
+const resolveVotingDecision = (anthropicVote, codexVote) => {
+  if (anthropicVote && codexVote) {
+    return (anthropicVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
+  } else if (anthropicVote) {
+    return anthropicVote.confirm ? 'confirmed' : 'rejected';
   } else if (codexVote) {
     return codexVote.confirm ? 'confirmed' : 'rejected';
   }
@@ -3303,19 +3361,19 @@ describe('Voting logic', () => {
     assert.strictEqual(resolveVotingDecision({ confirm: false }, { confirm: false }), 'rejected');
   });
 
-  test('haiku confirms, codex rejects → rejected (conservative)', () => {
+  test('anthropic confirms, codex rejects → rejected (conservative)', () => {
     assert.strictEqual(resolveVotingDecision({ confirm: true }, { confirm: false }), 'rejected');
   });
 
-  test('haiku rejects, codex confirms → rejected (conservative)', () => {
+  test('anthropic rejects, codex confirms → rejected (conservative)', () => {
     assert.strictEqual(resolveVotingDecision({ confirm: false }, { confirm: true }), 'rejected');
   });
 
-  test('only haiku responds, confirms → confirmed', () => {
+  test('only anthropic responds, confirms → confirmed', () => {
     assert.strictEqual(resolveVotingDecision({ confirm: true }, null), 'confirmed');
   });
 
-  test('only haiku responds, rejects → rejected', () => {
+  test('only anthropic responds, rejects → rejected', () => {
     assert.strictEqual(resolveVotingDecision({ confirm: false }, null), 'rejected');
   });
 
@@ -5655,11 +5713,11 @@ describe('Confirmation voting logic', () => {
   // Tests the voting matrix: both confirm → execute, both reject → reject,
   // split → reject (conservative), one fails → use the other
 
-  const resolveVote = (haikuVote, codexVote) => {
-    if (haikuVote && codexVote) {
-      return (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
-    } else if (haikuVote) {
-      return haikuVote.confirm ? 'confirmed' : 'rejected';
+  const resolveVote = (anthropicVote, codexVote) => {
+    if (anthropicVote && codexVote) {
+      return (anthropicVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
+    } else if (anthropicVote) {
+      return anthropicVote.confirm ? 'confirmed' : 'rejected';
     } else if (codexVote) {
       return codexVote.confirm ? 'confirmed' : 'rejected';
     }
@@ -5676,27 +5734,27 @@ describe('Confirmation voting logic', () => {
     assert.strictEqual(result, 'rejected');
   });
 
-  test('split vote (haiku yes, codex no) → rejected (conservative)', () => {
+  test('split vote (anthropic yes, codex no) → rejected (conservative)', () => {
     const result = resolveVote({ confirm: true, reasoning: 'ok' }, { confirm: false, reasoning: 'ruin risk' });
     assert.strictEqual(result, 'rejected');
   });
 
-  test('split vote (haiku no, codex yes) → rejected (conservative)', () => {
+  test('split vote (anthropic no, codex yes) → rejected (conservative)', () => {
     const result = resolveVote({ confirm: false, reasoning: 'overpaying' }, { confirm: true, reasoning: 'convex' });
     assert.strictEqual(result, 'rejected');
   });
 
-  test('haiku fails, codex confirms → confirmed (single advisor fallback)', () => {
+  test('anthropic fails, codex confirms → confirmed (single advisor fallback)', () => {
     const result = resolveVote(null, { confirm: true, reasoning: 'looks good' });
     assert.strictEqual(result, 'confirmed');
   });
 
-  test('haiku confirms, codex fails → confirmed (single advisor fallback)', () => {
+  test('anthropic confirms, codex fails → confirmed (single advisor fallback)', () => {
     const result = resolveVote({ confirm: true, reasoning: 'disciplined' }, null);
     assert.strictEqual(result, 'confirmed');
   });
 
-  test('haiku fails, codex rejects → rejected', () => {
+  test('anthropic fails, codex rejects → rejected', () => {
     const result = resolveVote(null, { confirm: false, reasoning: 'no' });
     assert.strictEqual(result, 'rejected');
   });
@@ -6300,15 +6358,15 @@ describe('advisor-led buyback confirmation discipline', () => {
     );
   };
 
-  const resolveVote = ({ haikuVote, codexVote, buybackContext, liveMarketPrice }) => {
+  const resolveVote = ({ anthropicVote, codexVote, buybackContext, liveMarketPrice }) => {
     const deterministicPatientBuyback = buybackContext?.patientSatisfied === true
       && Number(buybackContext?.patientLimitPrice) > 0
       && Number(liveMarketPrice) > 0;
     let decision;
-    if (haikuVote && codexVote) {
-      decision = (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
-    } else if (haikuVote) {
-      decision = haikuVote.confirm ? 'confirmed' : 'rejected';
+    if (anthropicVote && codexVote) {
+      decision = (anthropicVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
+    } else if (anthropicVote) {
+      decision = anthropicVote.confirm ? 'confirmed' : 'rejected';
     } else if (codexVote) {
       decision = codexVote.confirm ? 'confirmed' : 'rejected';
     } else {
@@ -6321,9 +6379,9 @@ describe('advisor-led buyback confirmation discipline', () => {
     if (
       decision === 'rejected'
       && advisorBuybackRuleSatisfied
-      && haikuVote
+      && anthropicVote
       && codexVote
-      && (haikuVote.confirm || codexVote.confirm)
+      && (anthropicVote.confirm || codexVote.confirm)
     ) {
       decision = 'confirmed';
     }
@@ -6444,7 +6502,7 @@ describe('advisor-led buyback confirmation discipline', () => {
 
   test('split review confirms when an active advisor buyback rule is satisfied', () => {
     const decision = resolveVote({
-      haikuVote: { confirm: false, reasoning: 'mechanical exit' },
+      anthropicVote: { confirm: false, reasoning: 'mechanical exit' },
       codexVote: { confirm: true, reasoning: 'advisor rule triggered' },
       buybackContext: { satisfied: true },
       liveMarketPrice: 0.6,
@@ -6466,7 +6524,7 @@ describe('advisor-led buyback confirmation discipline', () => {
 
   test('patient buyback bid override confirms even when both reviewers reject live ask economics', () => {
     const decision = resolveVote({
-      haikuVote: { confirm: false, reasoning: 'live ask below threshold' },
+      anthropicVote: { confirm: false, reasoning: 'live ask below threshold' },
       codexVote: { confirm: false, reasoning: 'live executable capture below 80%' },
       buybackContext: {
         ...buildBuybackContext({ actual: 52.88, patientCapturePct: 80 }),
@@ -6480,7 +6538,7 @@ describe('advisor-led buyback confirmation discipline', () => {
 
   test('deterministic patient buyback does not retry when both reviewers fail to return JSON', () => {
     const decision = resolveVote({
-      haikuVote: null,
+      anthropicVote: null,
       codexVote: null,
       buybackContext: {
         ...buildBuybackContext({ actual: 52.88, patientCapturePct: 80 }),
@@ -6494,7 +6552,7 @@ describe('advisor-led buyback confirmation discipline', () => {
 
   test('patient buyback override still requires live market price and explicit patient limit', () => {
     assert.strictEqual(resolveVote({
-      haikuVote: { confirm: false },
+      anthropicVote: { confirm: false },
       codexVote: { confirm: false },
       buybackContext: {
         ...buildBuybackContext({ actual: 52.88, patientCapturePct: 80 }),
@@ -6504,7 +6562,7 @@ describe('advisor-led buyback confirmation discipline', () => {
     }), 'rejected');
 
     assert.strictEqual(resolveVote({
-      haikuVote: { confirm: false },
+      anthropicVote: { confirm: false },
       codexVote: { confirm: false },
       buybackContext: buildBuybackContext({ actual: 52.88, patientCapturePct: 80 }),
       liveMarketPrice: 9,
@@ -6522,14 +6580,14 @@ describe('advisor-led buyback confirmation discipline', () => {
 
   test('split review still rejects when the buyback rule is not satisfied or price is missing', () => {
     assert.strictEqual(resolveVote({
-      haikuVote: { confirm: false },
+      anthropicVote: { confirm: false },
       codexVote: { confirm: true },
       buybackContext: { satisfied: false },
       liveMarketPrice: 0.6,
     }), 'rejected');
 
     assert.strictEqual(resolveVote({
-      haikuVote: { confirm: false },
+      anthropicVote: { confirm: false },
       codexVote: { confirm: true },
       buybackContext: { satisfied: true },
       liveMarketPrice: null,
@@ -6725,6 +6783,56 @@ describe('confirmation prompt margin context', () => {
 
     assert.ok(context.includes('last-mile execution check'));
     assert.ok(context.includes('not a second scheduled advisory'));
+  });
+
+  test('confirmation learning scope prevents buyback lessons from vetoing sell_call entries', () => {
+    const context = formatConfirmationLearningContext(
+      'sell_call',
+      [
+        {
+          instrument_name: 'ETH-20260612-2000-C',
+          action_family: 'short_call_campaign',
+          review_status: 'costly',
+          review_window_days: 3,
+          summary: 'Premature buybacks below strike converted short calls into losses.',
+        },
+      ],
+      [
+        { lesson: 'Avoid buybacks below strike; exit timing should wait for expiry payoff.', evidence_count: 3 },
+        { lesson: 'Require stronger call premium before selling calls in weak markets.', evidence_count: 2 },
+      ]
+    );
+
+    assert.ok(context.includes('sell_call is an entry'));
+    assert.ok(context.includes('Buyback-call exit timing lessons are not valid vetoes'));
+    assert.ok(context.includes('Relevant recent trade reviews: none'));
+    assert.ok(context.includes('Require stronger call premium'));
+    assert.ok(!context.includes('Premature buybacks'));
+    assert.ok(!context.includes('Avoid buybacks below strike'));
+  });
+
+  test('confirmation learning scope keeps buyback lessons for buyback_call exits', () => {
+    const context = formatConfirmationLearningContext(
+      'buyback_call',
+      [
+        {
+          instrument_name: 'ETH-20260612-2000-C',
+          action_family: 'short_call_campaign',
+          review_status: 'costly',
+          review_window_days: 3,
+          summary: 'Premature buybacks below strike converted short calls into losses.',
+        },
+      ],
+      [
+        { lesson: 'Avoid buybacks below strike; distinguish mark pain from expiry payoff.', evidence_count: 3 },
+        { lesson: 'Put exit monetization must stay tranched.', evidence_count: 1 },
+      ]
+    );
+
+    assert.ok(context.includes('buyback_call is a short-call exit'));
+    assert.ok(context.includes('ETH-20260612-2000-C'));
+    assert.ok(context.includes('Avoid buybacks below strike'));
+    assert.ok(!context.includes('Put exit monetization'));
   });
 
   test('call discipline wording distinguishes entry caps from true emergencies', () => {

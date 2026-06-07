@@ -8201,6 +8201,81 @@ const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyba
 
 const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long put protection. For roll_protection, a full close of the aging instrument is allowed, negative PnL is not a rejection reason, and monetize_tail_win tranche/profit thresholds do not apply because replacement protection is already in the book. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. For monetization, never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Even when the monetization hard trigger is satisfied, confirm only if the full market context says selling a tranche is wise rather than prematurely cutting convexity. If you reject a sell_put, do it because the typed intent's requirements fail or removing protection is strategically unwise, not because the exit itself uses more margin.`;
 
+const normalizeLearningText = (value) => String(value || '').toLowerCase();
+
+const confirmationLessonMatches = (lesson, includeKeywords = [], excludeKeywords = []) => {
+  const text = normalizeLearningText(lesson?.lesson || lesson?.summary || '');
+  if (!text) return false;
+  if (excludeKeywords.some((keyword) => text.includes(keyword))) return false;
+  return includeKeywords.some((keyword) => text.includes(keyword));
+};
+
+const getConfirmationLearningScope = (action) => {
+  switch (action) {
+    case 'sell_call':
+      return {
+        includeReviews: false,
+        reviewFamily: 'short_call_campaign',
+        include: ['sell_call', 'sell call', 'selling calls', 'call premium', 'short call entry', 'strike selection', 'premium collection'],
+        exclude: ['buyback', 'buy back', 'bought back', 'exit timing', 'close short call', 'closing short call'],
+        note: 'sell_call is an entry. Buyback-call exit timing lessons are not valid vetoes for a fresh sell_call entry; use live bid/score/margin facts and the active sell_call rule.',
+      };
+    case 'buy_put':
+      return {
+        includeReviews: false,
+        reviewFamily: 'long_put_campaign',
+        include: ['buy_put', 'buy put', 'buying puts', 'put entry', 'insurance', 'protection cost', 'cheap convexity'],
+        exclude: ['sell_put', 'sell put', 'roll_protection', 'roll protection', 'monetize', 'tail win'],
+        note: 'buy_put is an entry. Put-exit/monetization lessons are not valid vetoes for a fresh buy_put entry; use live value-signal, score, budget, and rule facts.',
+      };
+    case 'buyback_call':
+      return {
+        includeReviews: true,
+        reviewFamily: 'short_call_campaign',
+        include: ['buyback', 'buy back', 'bought back', 'short call', 'call exit', 'exit timing', 'expiry payoff', 'mark pain'],
+        exclude: ['buy_put', 'buy put', 'sell_put', 'sell put'],
+        note: 'buyback_call is a short-call exit. Short-call campaign reviews and buyback timing lessons may inform this last-mile exit check.',
+      };
+    case 'sell_put':
+      return {
+        includeReviews: true,
+        reviewFamily: 'long_put_campaign',
+        include: ['sell_put', 'sell put', 'selling put', 'long put', 'put exit', 'roll_protection', 'roll protection', 'monetize', 'tail win', 'downside protection'],
+        exclude: ['sell_call', 'sell call', 'buyback', 'buy back'],
+        note: 'sell_put is a long-put exit. Long-put campaign reviews and put-exit lessons may inform this last-mile exit check, scoped to the typed put_exit_intent.',
+      };
+    default:
+      return null;
+  }
+};
+
+const formatConfirmationLearningContext = (action, recentTradeReviews = [], activeTradeLessons = []) => {
+  const scope = getConfirmationLearningScope(action);
+  if (!scope) return '';
+
+  const relevantReviews = scope.includeReviews
+    ? (recentTradeReviews || []).filter((review) => review?.action_family === scope.reviewFamily).slice(0, 3)
+    : [];
+  const relevantLessons = (activeTradeLessons || [])
+    .filter((lesson) => confirmationLessonMatches(lesson, scope.include, scope.exclude))
+    .slice(0, 3);
+
+  const omittedCount = Math.max(0, (recentTradeReviews?.length || 0) - relevantReviews.length)
+    + Math.max(0, (activeTradeLessons?.length || 0) - relevantLessons.length);
+
+  return [
+    'Action-scoped learning context:',
+    `- ${scope.note}`,
+    `- Omitted unrelated confirmation memories: ${omittedCount}. Do not import omitted lessons or reviews into this action's decision.`,
+    relevantReviews.length > 0
+      ? `Relevant recent trade reviews:\n${relevantReviews.map((r) => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}`
+      : '- Relevant recent trade reviews: none for this action scope.',
+    relevantLessons.length > 0
+      ? `Relevant active trade lessons:\n${relevantLessons.map((l) => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}`
+      : '- Relevant active trade lessons: none for this action scope.',
+  ].join('\n');
+};
+
 const getConfirmationJsonOnlyPrompt = () => 'Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.';
 
 const normalizePreferredOrderType = (action, preferredOrderType) => {
@@ -8715,6 +8790,11 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         advisorLimitPrice: advisorSellPutLimitPrice,
         currentPrice,
       });
+      const confirmationLearningContext = formatConfirmationLearningContext(
+        action.action,
+        recentTradeReviews,
+        activeTradeLessons
+      );
       const recentFailedEntry = getRecentFailedEntry(action.action, action.instrument_name);
       const callMarginContext = getCallMarginContext(
         action.action,
@@ -8753,8 +8833,7 @@ ${ruleReasoningLine}
 Triggered because: ${action.trigger_details || 'N/A'}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
 ${recentFailedEntry?.reason ? `Recent execution friction on this exact instrument/action: ${recentFailedEntry.reason}` : ''}
-${recentTradeReviews.length > 0 ? `Recent trade reviews:\n${recentTradeReviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}` : ''}
-${activeTradeLessons.length > 0 ? `Active trade lessons:\n${activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}` : ''}
+${confirmationLearningContext}
 ${getConfirmationScopePrompt()}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
 ${getActionOrderTypeHardRule(action.action)}
@@ -8766,12 +8845,12 @@ ${getConfirmationJsonOnlyPrompt()}
 No explanation outside the JSON.
 JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, "limit_price": <number or null for market>, "reasoning": "..." }`;
 
-      // Vote 1: Claude Haiku (Spitznagel temperament)
-      let haikuVote = null;
-      let haikuFailure = null;
+      // Vote 1: Claude Sonnet (Spitznagel temperament)
+      let anthropicVote = null;
+      let anthropicFailure = null;
       try {
-        const haikuResp = await axios.post('https://api.anthropic.com/v1/messages', {
-          model: 'claude-haiku-4-5-20251001',
+        const anthropicResp = await axios.post('https://api.anthropic.com/v1/messages', {
+          model: ANTHROPIC_SONNET_MODEL,
           max_tokens: 256,
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
 ${getConfirmationScopePrompt()}
@@ -8791,26 +8870,26 @@ ${getConfirmationJsonOnlyPrompt()}`,
           },
           timeout: 15000,
         });
-        const haikuText = haikuResp.data?.content?.[0]?.text || '';
-        if (!haikuText.trim()) {
-          haikuFailure = 'empty response';
+        const anthropicText = anthropicResp.data?.content?.[0]?.text || '';
+        if (!anthropicText.trim()) {
+          anthropicFailure = 'empty response';
         } else {
-          haikuVote = extractConfirmationVote(haikuText);
-          if (!haikuVote) {
-            haikuFailure = `parse error (len=${haikuText.length})`;
-            const preview = haikuText.replace(/\s+/g, ' ').trim().slice(0, 200);
-            console.log(`⚠️ Haiku confirmation parse preview: ${preview}`);
+          anthropicVote = extractConfirmationVote(anthropicText);
+          if (!anthropicVote) {
+            anthropicFailure = `parse error (len=${anthropicText.length})`;
+            const preview = anthropicText.replace(/\s+/g, ' ').trim().slice(0, 200);
+            console.log(`⚠️ Sonnet confirmation parse preview: ${preview}`);
           }
         }
       } catch (e) {
         if (e.code === 'ECONNABORTED') {
-          haikuFailure = 'timeout';
+          anthropicFailure = 'timeout';
         } else if (e.response?.status) {
-          haikuFailure = `http ${e.response.status}`;
+          anthropicFailure = `http ${e.response.status}`;
         } else {
-          haikuFailure = e.message;
+          anthropicFailure = e.message;
         }
-        console.log(`⚠️ Haiku confirmation failed: ${haikuFailure}`);
+        console.log(`⚠️ Sonnet confirmation failed: ${anthropicFailure}`);
       }
 
       // Vote 2: OpenAI GPT (Taleb temperament)
@@ -8859,12 +8938,12 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       // Voting logic
       let decision;
       let decisionOverrideReason = null;
-      if (haikuVote && codexVote) {
+      if (anthropicVote && codexVote) {
         // Both voted
-        decision = (haikuVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
-      } else if (haikuVote) {
+        decision = (anthropicVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
+      } else if (anthropicVote) {
         // Single advisor fallback
-        decision = haikuVote.confirm ? 'confirmed' : 'rejected';
+        decision = anthropicVote.confirm ? 'confirmed' : 'rejected';
       } else if (codexVote) {
         decision = codexVote.confirm ? 'confirmed' : 'rejected';
       } else {
@@ -8886,9 +8965,9 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       if (
         decision === 'rejected'
         && advisorBuybackRuleSatisfied
-        && haikuVote
+        && anthropicVote
         && codexVote
-        && (haikuVote.confirm || codexVote.confirm)
+        && (anthropicVote.confirm || codexVote.confirm)
       ) {
         decision = 'confirmed';
         const overrideCapture = buybackConfirmationContext.patientSatisfied
@@ -8901,16 +8980,16 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       }
 
       const reasoning = [
-        haikuVote ? `Haiku: ${haikuVote.confirm ? 'CONFIRM' : 'REJECT'} — ${haikuVote.reasoning || 'no reason'}` : `Haiku: FAILED — ${haikuFailure || 'unknown error'}`,
+        anthropicVote ? `Sonnet: ${anthropicVote.confirm ? 'CONFIRM' : 'REJECT'} — ${anthropicVote.reasoning || 'no reason'}` : `Sonnet: FAILED — ${anthropicFailure || 'unknown error'}`,
         codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : `OpenAI: FAILED — ${codexFailure || 'unknown error'}`,
         decisionOverrideReason,
       ].filter(Boolean).join(' | ');
 
-      // Resolve order type from voter consensus (prefer haiku's pick, fallback to codex)
+      // Resolve order type from voter consensus (prefer Anthropic's pick, fallback to OpenAI)
       let confirmedOrderType = (
-        (haikuVote?.confirm ? haikuVote.order_type : null)
+        (anthropicVote?.confirm ? anthropicVote.order_type : null)
         || (codexVote?.confirm ? codexVote.order_type : null)
-        || haikuVote?.order_type
+        || anthropicVote?.order_type
         || codexVote?.order_type
         || advisoryOrderPref
         || 'ioc'
@@ -8994,9 +9073,9 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       // Resolve limit price: voter can override, otherwise use current market price
       // Sanity check: voter price must be within 50% of market price (prevents LLM hallucinating insane prices)
       const voterLimitPrice = (
-        (haikuVote?.confirm ? haikuVote.limit_price : null)
+        (anthropicVote?.confirm ? anthropicVote.limit_price : null)
         || (codexVote?.confirm ? codexVote.limit_price : null)
-        || haikuVote?.limit_price
+        || anthropicVote?.limit_price
         || codexVote?.limit_price
       );
       const defaultActionPrice = currentPrice || action.price;
