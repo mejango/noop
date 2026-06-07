@@ -359,10 +359,28 @@ const getPutBudgetPortfolioValue = (ethBalance, usdcBalance, spotPrice) => {
   return usdcValue + ethValue;
 };
 
+const getFallbackPutBudgetPortfolioValue = (spotPrice) => {
+  if (!db?.getLatestPortfolioSnapshot) return { value: 0, source: null, error: null };
+  try {
+    const snap = db.getLatestPortfolioSnapshot();
+    if (!snap) return { value: 0, source: null, error: null };
+    const value = getPutBudgetPortfolioValue(
+      Number(snap.eth_balance || 0),
+      Number(snap.usdc_balance || 0),
+      Number(spotPrice || snap.spot_price || 0)
+    );
+    return value > 0
+      ? { value, source: 'latest_portfolio_snapshot', error: null }
+      : { value: 0, source: null, error: 'latest portfolio snapshot has no positive insured value' };
+  } catch (e) {
+    return { value: 0, source: null, error: e.message };
+  }
+};
+
 // Recalculate put budget at cycle boundaries.
 // Budget = insuredBaseValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
 // Called each tick — resets cycle when PERIOD elapses.
-const maybeResetPutCycle = (portfolioValue) => {
+const maybeResetPutCycle = (portfolioValue, options = {}) => {
   const now = Date.now();
   const cycleExpired = botData.putCycleStart && (now - botData.putCycleStart) >= PERIOD;
   const noCycle = !botData.putCycleStart;
@@ -374,9 +392,22 @@ const maybeResetPutCycle = (portfolioValue) => {
       botData.putUnspentBuyLimit = prevRemaining;
     }
 
-    // Calculate new cycle budget from current portfolio value
     const cyclesPerYear = 365 / BOT_CONFIG.PERIOD_DAYS;
-    const newBudget = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
+    const numericPortfolioValue = Number(portfolioValue) || 0;
+    const canUsePortfolioValue = numericPortfolioValue > 0;
+    const canReusePreviousBudget = cycleExpired && Number(botData.putBudgetForCycle) > 0;
+    if (!canUsePortfolioValue && !canReusePreviousBudget) {
+      const skipReason = options.skipReason ? ` (${options.skipReason})` : '';
+      console.log(`📋 Put cycle ${noCycle ? 'start' : 'reset'} skipped: no positive insured portfolio value available${skipReason}`);
+      return false;
+    }
+
+    // Calculate new cycle budget from current portfolio value, or reuse the previous
+    // budget if live account reads are temporarily unavailable. Avoid leaving cycles
+    // stuck at "ended" because one collateral fetch returned empty.
+    const newBudget = canUsePortfolioValue
+      ? numericPortfolioValue * PUT_ANNUAL_RATE / cyclesPerYear
+      : Number(botData.putBudgetForCycle);
 
     botData.putCycleStart = now;
     botData.putBudgetForCycle = newBudget;
@@ -386,8 +417,14 @@ const maybeResetPutCycle = (portfolioValue) => {
     const insuredBasisNote = PUT_INSURED_EXTERNAL_ETH > 0
       ? ` | +${PUT_INSURED_EXTERNAL_ETH.toFixed(4)} external ETH insured`
       : '';
-    console.log(`📋 Put cycle ${noCycle ? 'started' : 'reset'}: $${newBudget.toFixed(2)} budget (${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of $${portfolioValue.toFixed(0)} insured base / ${cyclesPerYear.toFixed(1)} cycles/yr)${botData.putUnspentBuyLimit > 0 ? ` + $${botData.putUnspentBuyLimit.toFixed(2)} rollover` : ''}${insuredBasisNote}`);
+    const basisText = canUsePortfolioValue
+      ? `$${numericPortfolioValue.toFixed(0)} insured base`
+      : `previous $${newBudget.toFixed(2)} cycle budget fallback`;
+    const sourceText = options.source ? ` via ${options.source}` : '';
+    console.log(`📋 Put cycle ${noCycle ? 'started' : 'reset'}: $${newBudget.toFixed(2)} budget (${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of ${basisText} / ${cyclesPerYear.toFixed(1)} cycles/yr)${botData.putUnspentBuyLimit > 0 ? ` + $${botData.putUnspentBuyLimit.toFixed(2)} rollover` : ''}${insuredBasisNote}${sourceText}`);
+    return true;
   }
+  return false;
 };
 
 const getAmountStep = (opt) =>
@@ -10676,13 +10713,32 @@ const runBot = async () => {
     // ── Put budget cycle management ───────────────────────────────
     if (spotPrice) {
       try {
-        let balances = [];
-        try { balances = await fetchCollaterals(); } catch { /* ok */ }
-        const ethBal = Number(balances.find(b => b.asset_name === 'ETH')?.amount || 0);
-        const usdcBal = Number(balances.find(b => b.asset_name === 'USDC')?.amount || 0);
-        botData.ethBalance = ethBal;
-        const insuredPortfolioValue = getPutBudgetPortfolioValue(ethBal, usdcBal, spotPrice);
-        if (insuredPortfolioValue > 0) maybeResetPutCycle(insuredPortfolioValue);
+        let insuredPortfolioValue = 0;
+        let budgetSource = 'live_collateral';
+        let skipReason = null;
+
+        try {
+          const balances = await fetchCollaterals();
+          const ethBal = Number(balances.find(b => b.asset_name === 'ETH')?.amount || 0);
+          const usdcBal = Number(balances.find(b => b.asset_name === 'USDC')?.amount || 0);
+          botData.ethBalance = ethBal;
+          insuredPortfolioValue = getPutBudgetPortfolioValue(ethBal, usdcBal, spotPrice);
+          if (!(insuredPortfolioValue > 0)) skipReason = 'live collateral returned no positive insured value';
+        } catch (e) {
+          skipReason = `live collateral fetch failed: ${e.message}`;
+        }
+
+        if (!(insuredPortfolioValue > 0)) {
+          const fallback = getFallbackPutBudgetPortfolioValue(spotPrice);
+          if (fallback.value > 0) {
+            insuredPortfolioValue = fallback.value;
+            budgetSource = fallback.source;
+          } else if (fallback.error) {
+            skipReason = skipReason ? `${skipReason}; ${fallback.error}` : fallback.error;
+          }
+        }
+
+        maybeResetPutCycle(insuredPortfolioValue, { source: budgetSource, skipReason });
       } catch (e) { console.log('📋 Cycle check failed:', e.message); }
     }
 
