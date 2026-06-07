@@ -44,6 +44,8 @@ const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
 const SELL_CALL_FALLBACK_MIN_BID = 4;
 const SELL_CALL_FALLBACK_MIN_SCORE = 65;
+const VENUE_AMOUNT_DECIMALS = 2;
+const VENUE_MIN_ORDER_AMOUNT = 0.1;
 
 const parseExpiryFromInstrument = (name) => {
   if (!name) return null;
@@ -1097,10 +1099,10 @@ const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
     instrument?.option_details?.price_step ??
     0
   );
+  const isOption = Boolean(instrument?.option_details?.option_type || instrument?.base_asset_sub_id);
+  if (isOption) return Math.max(configuredStep || 0, 0.1);
   if (configuredStep > 0) return configuredStep;
-  if (fallbackPrice >= 10) return 0.1;
-  if (fallbackPrice >= 1) return 0.1;
-  return 0.01;
+  return fallbackPrice >= 1 ? 0.1 : 0.01;
 };
 
 const roundToStep = (value, step, mode = 'nearest') => {
@@ -1126,6 +1128,27 @@ const normalizePriceToStep = (value, step, mode = 'nearest') => {
   })();
   return Number(rounded.toFixed(decimals));
 };
+
+const normalizeOrderPriceForVenue = (price, instrument, direction = 'buy') => {
+  const step = getInstrumentPriceStep(instrument, Number(price));
+  const mode = direction === 'buy' ? 'down' : direction === 'sell' ? 'up' : 'nearest';
+  const normalized = normalizePriceToStep(price, step, mode);
+  return {
+    price: normalized > 0 ? normalized : Number(price),
+    step,
+    mode,
+  };
+};
+
+const floorOrderAmountToVenuePrecision = (amount) => {
+  const numeric = Number(amount);
+  if (!(numeric > 0)) return 0;
+  const scale = 10 ** VENUE_AMOUNT_DECIMALS;
+  return Math.floor((numeric + 1e-12) * scale) / scale;
+};
+
+const isVenueOrderAmountTradable = (amount) =>
+  floorOrderAmountToVenuePrecision(amount) > VENUE_MIN_ORDER_AMOUNT;
 
 const avoidRoundNumberRestingPrice = (direction, price, step) => {
   const numericPrice = Number(price);
@@ -6900,6 +6923,39 @@ describe('post_only retry price discipline', () => {
     assert.ok(retry);
     assert.ok(Math.abs(retry.retryPrice - 5.9) < 0.0000001, `Expected ~5.9, got ${retry.retryPrice}`);
     assert.strictEqual(retry.step, 0.1);
+  });
+});
+
+describe('venue order normalization', () => {
+  test('option buy price rounds down to one-decimal venue grid', () => {
+    const normalized = normalizeOrderPriceForVenue(
+      0.85,
+      { option_details: { option_type: 'C' }, base_asset_sub_id: '1' },
+      'buy'
+    );
+
+    assert.strictEqual(normalized.step, 0.1);
+    assert.strictEqual(normalized.mode, 'down');
+    assert.strictEqual(normalized.price, 0.8);
+  });
+
+  test('option sell price rounds up to one-decimal venue grid', () => {
+    const normalized = normalizeOrderPriceForVenue(
+      10.04,
+      { option_details: { option_type: 'C' }, base_asset_sub_id: '1' },
+      'sell'
+    );
+
+    assert.strictEqual(normalized.step, 0.1);
+    assert.strictEqual(normalized.mode, 'up');
+    assert.strictEqual(normalized.price, 10.1);
+  });
+
+  test('dust amounts at or below venue minimum are not tradable', () => {
+    assert.strictEqual(floorOrderAmountToVenuePrecision(0.039), 0.03);
+    assert.strictEqual(isVenueOrderAmountTradable(0.039), false);
+    assert.strictEqual(isVenueOrderAmountTradable(0.1), false);
+    assert.strictEqual(isVenueOrderAmountTradable(0.11), true);
   });
 });
 

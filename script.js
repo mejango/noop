@@ -323,6 +323,8 @@ let botData = {
 };
 
 const DEFAULT_AMOUNT_STEP = 0.001;
+const VENUE_AMOUNT_DECIMALS = 2;
+const VENUE_MIN_ORDER_AMOUNT = 0.1;
 
 let botData = createBotData();
 
@@ -390,6 +392,19 @@ const maybeResetPutCycle = (portfolioValue) => {
 
 const getAmountStep = (opt) =>
   Number(opt?.options?.amount_step) || Number(opt?.amount_step) || DEFAULT_AMOUNT_STEP;
+
+const floorOrderAmountToVenuePrecision = (amount) => {
+  const numeric = Number(amount);
+  if (!(numeric > 0)) return 0;
+  const scale = 10 ** VENUE_AMOUNT_DECIMALS;
+  return Math.floor((numeric + 1e-12) * scale) / scale;
+};
+
+const formatVenueOrderAmount = (amount) =>
+  floorOrderAmountToVenuePrecision(amount).toFixed(VENUE_AMOUNT_DECIMALS);
+
+const isVenueOrderAmountTradable = (amount) =>
+  floorOrderAmountToVenuePrecision(amount) > VENUE_MIN_ORDER_AMOUNT;
 
 const quantizeDown = (x, step) => {
   if (!Number.isFinite(x) || !Number.isFinite(step) || step <= 0) return 0;
@@ -2193,9 +2208,9 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     const timestamp = Date.now(); // Current UTC timestamp in ms
     const signature = await signMessage(wallet, timestamp);
     const signatureExpirySec = Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 900 : 86400));
-    const step = getInstrumentPriceStep(instrument, Number(price));
-    const normalizedPrice = normalizePriceToStep(price, step, 'nearest');
-    const limitPrice = normalizedPrice > 0 ? normalizedPrice : Number(price);
+    const orderPrice = normalizeOrderPriceForVenue(price, instrument, direction);
+    const step = orderPrice.step;
+    const limitPrice = orderPrice.price;
     const limitPriceString = limitPrice.toFixed(getStepDecimals(step));
 
     const order = {
@@ -2203,7 +2218,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         subaccount_id: SUBACCOUNT_ID,
         direction,
         limit_price: limitPriceString,
-        amount: amount.toString(),
+        amount: formatVenueOrderAmount(amount),
         // Give IOC orders extra buffer for signer/exchange clock skew. Derive rejects borderline 300s expiries.
         signature_expiry_sec: signatureExpirySec, // IOC: 15min, GTC/post_only: 24h
         max_fee: Math.max(0.08 * limitPrice, 10.0).toFixed(2).toString(), // Max fee per unit of volume (USDC). Generous ceiling — actual fee is much lower (~0.1% of notional)
@@ -6873,12 +6888,6 @@ const getExistingRestingExitOrder = (action, instrumentName, restingOrders = [])
   ) || null;
 };
 
-const floorOrderAmountToVenuePrecision = (amount) => {
-  const numeric = Number(amount);
-  if (!(numeric > 0)) return 0;
-  return Math.floor((numeric + 1e-12) * 100) / 100;
-};
-
 const getSyntheticReduceOnlyPreflight = ({ action, instrumentName, amount, orderType, triggerData = {}, ruleCriteria = {}, positions = [], restingOrders = [] }) => {
   if (!isReduceOnlyExitAction(action)) {
     return { allowed: true, reduceOnly: false, amount: Number(amount) || 0, synthetic: false, reason: 'entry_action' };
@@ -7628,6 +7637,15 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           }
         }
         if (qty < step) continue;
+        const venueQty = floorOrderAmountToVenuePrecision(qty);
+        if (!isVenueOrderAmountTradable(venueQty)) {
+          console.log(
+            `📋 Skip ${rule.action} ${best.name}: qty=${qty.toFixed(4)} normalizes to ${venueQty.toFixed(VENUE_AMOUNT_DECIMALS)},`
+            + ` not above venue minimum ${VENUE_MIN_ORDER_AMOUNT}`
+          );
+          continue;
+        }
+        qty = venueQty;
 
         // If the best instrument already has a resting entry order, decide whether to keep or adjust it.
         const existingResting = openRestingEntryOrders.find(order => order.instrument_name === best.name && order.action === rule.action);
@@ -8046,13 +8064,14 @@ const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
     instrument?.option_details?.price_step ??
     0
   );
+  const isOption = Boolean(instrument?.option_details?.option_type || instrument?.base_asset_sub_id);
+  if (isOption) {
+    // Derive option orders currently reject >1 decimal place even when some metadata
+    // is missing or too fine, e.g. "limit price 0.85 must not have more than 1 decimals".
+    return Math.max(configuredStep || 0, 0.1);
+  }
   if (configuredStep > 0) return configuredStep;
-  if (fallbackPrice >= 10) return 0.1;
-  // Derive option quotes above $1 trade on a 1-decimal grid when instrument metadata
-  // does not expose a usable price step. Falling back to $0.05 produced repeated
-  // venue rejects like "must not have more than 1 decimal places" for 5.x quotes.
-  if (fallbackPrice >= 1) return 0.1;
-  return 0.01;
+  return fallbackPrice >= 1 ? 0.1 : 0.01;
 };
 
 const roundToStep = (value, step, mode = 'nearest') => {
@@ -8080,6 +8099,17 @@ const normalizePriceToStep = (value, step, mode = 'nearest') => {
   const rounded = roundToStep(Number(value), step, mode);
   const decimals = getStepDecimals(step);
   return Number(rounded.toFixed(decimals));
+};
+
+const normalizeOrderPriceForVenue = (price, instrument, direction = 'buy') => {
+  const step = getInstrumentPriceStep(instrument, Number(price));
+  const mode = direction === 'buy' ? 'down' : direction === 'sell' ? 'up' : 'nearest';
+  const normalized = normalizePriceToStep(price, step, mode);
+  return {
+    price: normalized > 0 ? normalized : Number(price),
+    step,
+    mode,
+  };
 };
 
 const avoidRoundNumberRestingPrice = (direction, price, step) => {
@@ -8424,11 +8454,34 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     }
   }
 
+  const venueAmount = floorOrderAmountToVenuePrecision(amount);
+  if (!isVenueOrderAmountTradable(venueAmount)) {
+    const reason = `Order amount ${Number(amount).toFixed(4)} normalizes to ${venueAmount.toFixed(VENUE_AMOUNT_DECIMALS)}, not above venue minimum ${VENUE_MIN_ORDER_AMOUNT}`;
+    console.log(`📋 Skip ${action} ${instrumentName}: ${reason}`);
+    if (db) db.insertOrder({
+      action,
+      success: false,
+      reason,
+      instrument_name: instrumentName,
+      spot_price: spotPrice,
+      price,
+      intended_amount: amount,
+    });
+    return { failed: true, reason };
+  }
+  amount = venueAmount;
+
+  const venuePrice = normalizeOrderPriceForVenue(price, instrument, direction);
+  if (Math.abs(venuePrice.price - Number(price)) > 1e-9) {
+    console.log(`📋 normalized ${action} ${instrumentName} limit $${price} -> $${venuePrice.price} (${direction}, step=$${venuePrice.step})`);
+    price = venuePrice.price;
+  }
+
   let order;
   try {
     order = await placeOrder(
       instrumentName,
-      amount.toFixed(2),
+      formatVenueOrderAmount(amount),
       direction,
       price,
       addr,
