@@ -10918,16 +10918,6 @@ const runBot = async () => {
           await reviewExpiredHypotheses();
           await extractHypothesisLessons();
         }).catch(e => {
-          const status = Number(e?.status || e?.cause?.response?.status || e?.response?.status || 0);
-          const nonRetryableClientError = status >= 400 && status < 500 && status !== 429;
-          if (nonRetryableClientError) {
-            // Keep the timestamp set so configuration/model-access failures do not
-            // retry every short trading tick. The next journal cadence will retry.
-            persistCycleState();
-            console.log('📓 Journal generation failed (non-retryable this interval):', e.message);
-            return;
-          }
-          // Roll back transient failures so they retry next tick.
           botData.lastJournalGeneration = prevJournalTs;
           persistCycleState();
           console.log('📓 Journal generation failed (will retry next tick):', e.message);
