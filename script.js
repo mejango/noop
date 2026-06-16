@@ -4719,17 +4719,12 @@ Use this wiki context to:
 
     const userMessage = `Here is today's snapshot for journal analysis:\n\n${JSON.stringify(snapshot, null, 2)}\n\nWrite exactly 3 journal entries: one regime_note, one hypothesis, one observation. Use the <journal type="..."> tags. Do NOT write a suggestion entry.`;
 
-    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+    const response = await callAnthropicWithMinuteBoundaryRetry({
+      label: 'Journal generation',
       model: ANTHROPIC_SONNET_MODEL,
-      max_tokens: 4096,
+      maxTokens: 4096,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
-    }, {
-      headers: {
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
       timeout: 120000,
     });
 
@@ -4779,8 +4774,12 @@ Use this wiki context to:
     }
     return parsedEntries;
   } catch (e) {
-    console.log('📓 Journal generation failed:', e.message);
-    throw e;
+    const detail = formatAnthropicErrorForLog(e);
+    console.log('📓 Journal generation failed:', detail);
+    const wrapped = new Error(detail);
+    wrapped.cause = e;
+    wrapped.status = e?.response?.status;
+    throw wrapped;
   }
 };
 
@@ -4816,6 +4815,24 @@ const getAnthropicErrorMessage = (error) => {
   const apiMessage = error?.response?.data?.error?.message;
   if (apiMessage) return apiMessage;
   return error?.message || 'Unknown Anthropic error';
+};
+
+const formatAnthropicErrorForLog = (error) => {
+  const status = error?.response?.status;
+  const data = error?.response?.data;
+  const apiError = data?.error || {};
+  const type = apiError.type || data?.type || null;
+  const message = apiError.message || data?.message || error?.message || 'Unknown Anthropic error';
+  const requestId = error?.response?.headers?.['request-id'] || error?.response?.headers?.['anthropic-request-id'] || null;
+  const parts = [];
+  if (status) parts.push(`status=${status}`);
+  if (type) parts.push(`type=${type}`);
+  parts.push(`message=${message}`);
+  if (requestId) parts.push(`request_id=${requestId}`);
+  if (data && !apiError.message && !data.message) {
+    try { parts.push(`body=${JSON.stringify(data).slice(0, 1000)}`); } catch { /* ignore */ }
+  }
+  return parts.join(' | ');
 };
 
 const isAnthropicAccelerationLimitError = (error) => {
@@ -10901,7 +10918,16 @@ const runBot = async () => {
           await reviewExpiredHypotheses();
           await extractHypothesisLessons();
         }).catch(e => {
-          // Roll back so it retries next tick
+          const status = Number(e?.status || e?.cause?.response?.status || e?.response?.status || 0);
+          const nonRetryableClientError = status >= 400 && status < 500 && status !== 429;
+          if (nonRetryableClientError) {
+            // Keep the timestamp set so configuration/model-access failures do not
+            // retry every short trading tick. The next journal cadence will retry.
+            persistCycleState();
+            console.log('📓 Journal generation failed (non-retryable this interval):', e.message);
+            return;
+          }
+          // Roll back transient failures so they retry next tick.
           botData.lastJournalGeneration = prevJournalTs;
           persistCycleState();
           console.log('📓 Journal generation failed (will retry next tick):', e.message);
