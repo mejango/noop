@@ -4808,8 +4808,8 @@ const callOpenAI = async (systemPrompt, userPrompt, { maxTokens = 2048, timeout 
   }
 };
 
-const ANTHROPIC_SONNET_MODEL = 'claude-sonnet-4-20250514';
-const ANTHROPIC_OPUS_MODEL = 'claude-opus-4-20250514';
+const ANTHROPIC_SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+const ANTHROPIC_OPUS_MODEL = process.env.ANTHROPIC_OPUS_MODEL || 'claude-opus-4-8';
 
 const getAnthropicErrorMessage = (error) => {
   const apiMessage = error?.response?.data?.error?.message;
