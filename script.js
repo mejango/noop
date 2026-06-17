@@ -5425,133 +5425,6 @@ const assessmentUsesUnsupportedMetricLanguage = (text) => {
   return null;
 };
 
-const buildAdvisoryObservationThesis = (sentiment24h) => {
-  if (!sentiment24h || typeof sentiment24h !== 'object') return null;
-
-  const skewDirection = String(sentiment24h.options_skew?.direction || '').toLowerCase();
-  const oiChangePct = Number(sentiment24h.aggregate_oi?.change_pct);
-  const oiIsFinite = Number.isFinite(oiChangePct);
-
-  if (skewDirection.includes('narrow') && oiIsFinite && oiChangePct > 0) {
-    return 'Narrowing skew with rising open interest suggests repositioning rather than one-way panic.';
-  }
-  if (skewDirection.includes('narrow') && oiIsFinite && oiChangePct < 0) {
-    return 'Narrowing skew with fading open interest suggests compression and weaker conviction.';
-  }
-  if (skewDirection.includes('widen') && oiIsFinite && oiChangePct > 0) {
-    return 'Widening skew with rising open interest suggests demand for protection is building.';
-  }
-  if (skewDirection.includes('widen') && oiIsFinite && oiChangePct < 0) {
-    return 'Widening skew with falling open interest suggests fear is lingering but participation is thinning.';
-  }
-  if (oiIsFinite && oiChangePct > 0) {
-    return 'Open interest is expanding, so participation is building rather than clearing.';
-  }
-  if (oiIsFinite && oiChangePct < 0) {
-    return 'Open interest is fading, so participation is thinning.';
-  }
-  if (skewDirection.includes('narrow')) {
-    return 'Skew is narrowing, which points to less urgency for downside protection.';
-  }
-  if (skewDirection.includes('widen')) {
-    return 'Skew is widening, which points to a more defensive options posture.';
-  }
-  return null;
-};
-
-const buildAdvisoryStanceSummary = ({
-  putBudgetRemaining,
-  secondOpinion = null,
-  entryRulesCount = 0,
-  exitRulesCount = 0,
-}) => {
-  const vetoCount = secondOpinion?.vetoes?.length || 0;
-  const noEntryRules = entryRulesCount === 0;
-  const noExitRules = exitRulesCount === 0;
-
-  if (noEntryRules && noExitRules) {
-    if (vetoCount > 0) {
-      return `Taleb vetoed ${vetoCount} proposed rule${vetoCount === 1 ? '' : 's'}, so the stance is to sit on hands and wait for cleaner asymmetry.`;
-    }
-    if (Number.isFinite(putBudgetRemaining) && putBudgetRemaining < 1) {
-      return `Put budget remaining $${Number(putBudgetRemaining).toFixed(2)} leaves little room for fresh deployment, so the stance is to sit on hands and wait for cleaner asymmetry.`;
-    }
-    return 'The stance is to sit on hands and wait for cleaner asymmetry.';
-  }
-
-  if (!noEntryRules && noExitRules) {
-    return 'The stance is selective deployment where pricing is favorable.';
-  }
-
-  if (noEntryRules && !noExitRules) {
-    return 'The stance is maintenance over fresh deployment: manage existing risk, do not add new exposure.';
-  }
-
-  return 'The stance is active repositioning: add selectively while cleaning up existing risk.';
-};
-
-const buildFactualAdvisoryAssessment = ({
-  spotPrice,
-  momentum,
-  mandelbrotContext,
-  sentiment,
-  putBudgetRemaining,
-  secondOpinion = null,
-  entryRulesCount = 0,
-  exitRulesCount = 0,
-  positionSnapshots = [],
-  exitRules = [],
-}) => {
-  const parts = [];
-  if (Number.isFinite(spotPrice) && spotPrice > 0) {
-    parts.push(`ETH at $${spotPrice.toFixed(0)}.`);
-  }
-
-  if (mandelbrotContext?.regime) {
-    const regimeLabel = String(mandelbrotContext.regime).replace(/_/g, ' ');
-    const confidence = Number(mandelbrotContext.confidence || 0);
-    parts.push(confidence > 0
-      ? `ETH is in a ${regimeLabel} regime (${(confidence * 100).toFixed(0)}% confidence).`
-      : `${regimeLabel} regime.`);
-  } else if (momentum?.mediumTerm?.main) {
-    parts.push(`Medium-term momentum is ${momentum.mediumTerm.main}.`);
-  }
-
-  const sentiment24h = summarizeSentimentWindowsForLLM(sentiment?.windows || {})['24h'];
-  if (sentiment24h) {
-    const skew = sentiment24h.options_skew;
-    const oi = sentiment24h.aggregate_oi;
-    const skewText = skew?.current_pct != null
-      ? `options skew ${formatSignedPct(skew.current_pct, 2)} (${skew.direction || 'unknown'})`
-      : null;
-    const oiText = oi?.change_pct != null
-      ? `open interest ${formatSignedPct(oi.change_pct, 1)}`
-      : null;
-    if (skewText || oiText) {
-      parts.push([skewText, oiText].filter(Boolean).join(', ') + '.');
-    }
-  }
-
-  const observationThesis = buildAdvisoryObservationThesis(sentiment24h);
-  if (observationThesis) {
-    parts.push(observationThesis);
-  }
-
-  parts.push(buildAdvisoryStanceSummary({
-    putBudgetRemaining,
-    secondOpinion,
-    entryRulesCount,
-    exitRulesCount,
-  }));
-
-  const summary = parts.join(' ').replace(/\s+/g, ' ').trim() || 'No assessment produced.';
-  return ensureAssessmentHasPositionPlan({
-    assessment: summary,
-    positionSnapshots,
-    exitRules,
-  });
-};
-
 const normalizeSpotPathRow = (row) => {
   if (!row || typeof row !== 'object') return null;
   const timestamp = row.hour || row.timestamp || row.time;
@@ -9860,18 +9733,7 @@ Produce your trading agenda JSON now.`;
         if (typeof primaryAgenda.assessment === 'string') {
           const unsupportedPattern = assessmentUsesUnsupportedMetricLanguage(primaryAgenda.assessment);
           if (unsupportedPattern) {
-            primaryAgenda.assessment = buildFactualAdvisoryAssessment({
-              spotPrice,
-              momentum,
-              mandelbrotContext,
-              sentiment,
-              putBudgetRemaining,
-              entryRulesCount: primaryAgenda.entry_rules?.length || 0,
-              exitRulesCount: primaryAgenda.exit_rules?.length || 0,
-              positionSnapshots: positionAdviceSnapshots,
-              exitRules: primaryAgenda.exit_rules || [],
-            });
-            console.log(`📋 Advisory Step 1: replaced unsupported assessment wording (${unsupportedPattern}) with factual summary`);
+            console.log(`📋 Advisory Step 1: assessment contains unsupported wording (${unsupportedPattern}); preserving advisor text`);
           }
         }
         console.log(`📋 Advisory Step 1: got ${primaryAgenda.entry_rules?.length || 0} entry rules, ${primaryAgenda.exit_rules?.length || 0} exit rules`);
@@ -10115,19 +9977,7 @@ Synthesize the final agenda now.`;
         if (typeof finalAgenda.assessment === 'string') {
           const unsupportedPattern = assessmentUsesUnsupportedMetricLanguage(finalAgenda.assessment);
           if (unsupportedPattern) {
-            finalAgenda.assessment = buildFactualAdvisoryAssessment({
-              spotPrice,
-              momentum,
-              mandelbrotContext,
-              sentiment,
-              putBudgetRemaining,
-              secondOpinion,
-              entryRulesCount: finalAgenda.entry_rules?.length || 0,
-              exitRulesCount: finalAgenda.exit_rules?.length || 0,
-              positionSnapshots: positionAdviceSnapshots,
-              exitRules: finalAgenda.exit_rules || [],
-            });
-            console.log(`📋 Advisory Step 3: replaced unsupported assessment wording (${unsupportedPattern}) with factual summary`);
+            console.log(`📋 Advisory Step 3: assessment contains unsupported wording (${unsupportedPattern}); preserving advisor text`);
           }
         }
         console.log(`📋 Advisory Step 3: synthesized ${finalAgenda.entry_rules?.length || 0} entry rules, ${finalAgenda.exit_rules?.length || 0} exit rules`);
