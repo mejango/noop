@@ -374,8 +374,8 @@ const deriveClosedTradeCampaigns = (orders, now = Date.now()) => {
 };
 
 const ASSESSMENT_UNSUPPORTED_PATTERNS = [
-  /\befficiency\b/i,
-  /\bthreshold\b/i,
+  /\b(?:put|call|deployment)\s+efficiency\b/i,
+  /\bantifragility\s+score\b/i,
 ];
 
 const assessmentUsesUnsupportedMetricLanguage = (text) => {
@@ -1939,6 +1939,11 @@ describe('advisory assessment terminology guard', () => {
 
   test('allows plain factual budget language', () => {
     const pattern = assessmentUsesUnsupportedMetricLanguage('ETH at $2305. Put budget remaining $0.15.');
+    assert.strictEqual(pattern, null);
+  });
+
+  test('allows named policy threshold language', () => {
+    const pattern = assessmentUsesUnsupportedMetricLanguage('Buyback_call requires executable unrealized_pnl_pct above the 80% threshold.');
     assert.strictEqual(pattern, null);
   });
 

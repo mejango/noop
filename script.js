@@ -5412,8 +5412,8 @@ const parseTalebSecondOpinion = (text) => {
 };
 
 const ASSESSMENT_UNSUPPORTED_PATTERNS = [
-  /\befficiency\b/i,
-  /\bthreshold\b/i,
+  /\b(?:put|call|deployment)\s+efficiency\b/i,
+  /\bantifragility\s+score\b/i,
 ];
 
 const assessmentUsesUnsupportedMetricLanguage = (text) => {
