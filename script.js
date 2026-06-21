@@ -2766,7 +2766,7 @@ const fetchAndFilterInstruments = async (spotPrice) => {
     const instruments = response.data.result;
     console.log(`📊 Found ${instruments.length} total instruments`);
 
-    // Filter for put candidates (negative delta, longer expiration, strike < 0.8 * spot)
+    // Filter for OTM put candidates; delta and value discipline are applied after ticker enrichment.
     const putCandidates = instruments.filter(instrument => {
       const expiration = new Date(instrument.option_details.expiry * 1000);
       const now = new Date();
@@ -2777,7 +2777,7 @@ const fetchAndFilterInstruments = async (spotPrice) => {
              daysToExpiry <= PUT_EXPIRATION_RANGE[1] &&
              instrument.instrument_type === 'option' &&
              instrument.option_details.option_type === 'P' &&
-             (!spotPrice || (strikePrice < spotPrice && strikePrice > 0.60 * spotPrice));
+             (!spotPrice || strikePrice < spotPrice);
     });
 
     // Filter for call candidates (positive delta, shorter expiration, strike > 1.10 * spot)
