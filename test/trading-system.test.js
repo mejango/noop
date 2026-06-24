@@ -5730,6 +5730,106 @@ describe('Confirmation voting logic', () => {
   });
 });
 
+describe('Buy-put patient maker confirmation override', () => {
+  const buildBuyPutPatientMakerContext = (action, triggerData = {}, advisorLimitPrice = null, liveMarketPrice = null) => {
+    if (action?.action !== 'buy_put') return { satisfied: false };
+    const criteria = action.rule_criteria || {};
+    const plannedScore = Number(triggerData?.planned_score ?? triggerData?.score);
+    const minScore = Number(criteria.min_score ?? triggerData?.min_score);
+    const targetScore = Number(criteria.target_score ?? triggerData?.target_score);
+    const requiredScore = Math.max(
+      Number.isFinite(minScore) && minScore > 0 ? minScore : 0,
+      Number.isFinite(targetScore) && targetScore > 0 ? targetScore : 0
+    );
+    const limitPrice = Number(advisorLimitPrice ?? triggerData?.advisor_limit_price);
+    const liveAsk = Number(liveMarketPrice);
+    return {
+      satisfied: plannedScore + 1e-9 >= requiredScore && limitPrice > 0 && liveAsk > limitPrice,
+      plannedScore,
+      requiredScore,
+      limitPrice,
+      liveAsk,
+    };
+  };
+
+  const isMarketabilityMisclassification = (reason) => {
+    const text = String(reason || '').toLowerCase();
+    const referencesAsk = text.includes('live ask') || text.includes('current ask') || text.includes('best ask') || text.includes('ask of');
+    const referencesLimit = text.includes('limit price') || text.includes('target limit') || text.includes('desired execution price') || text.includes('approved limit');
+    const treatsMakerBidAsImpossible = text.includes('unachievable') || text.includes('not achievable') || text.includes('not immediately marketable') || text.includes('above the target limit') || text.includes('above target limit') || text.includes('cannot fill');
+    return referencesAsk && referencesLimit && treatsMakerBidAsImpossible;
+  };
+
+  const applyBuyPutOverride = ({ action, triggerData, advisorLimitPrice, liveMarketPrice, anthropicVote, codexVote }) => {
+    let decision = anthropicVote && codexVote
+      ? (anthropicVote.confirm && codexVote.confirm ? 'confirmed' : 'rejected')
+      : anthropicVote
+        ? (anthropicVote.confirm ? 'confirmed' : 'rejected')
+        : codexVote
+          ? (codexVote.confirm ? 'confirmed' : 'rejected')
+          : 'retry';
+    const context = buildBuyPutPatientMakerContext(action, triggerData, advisorLimitPrice, liveMarketPrice);
+    const oneConfirmed = Boolean(anthropicVote?.confirm || codexVote?.confirm);
+    const makerBidMisclassified = context.satisfied
+      && oneConfirmed
+      && (
+        (anthropicVote && !anthropicVote.confirm && isMarketabilityMisclassification(anthropicVote.reasoning))
+        || (codexVote && !codexVote.confirm && isMarketabilityMisclassification(codexVote.reasoning))
+      );
+    if (decision === 'rejected' && makerBidMisclassified) decision = 'confirmed';
+    return { decision, context, makerBidMisclassified };
+  };
+
+  test('split vote confirms when only objection is below-ask maker bid being called unachievable', () => {
+    const result = applyBuyPutOverride({
+      action: { action: 'buy_put', rule_criteria: { min_score: 0.0031, target_score: 0.0031 } },
+      triggerData: { planned_score: 0.003102, advisor_limit_price: 16.45 },
+      advisorLimitPrice: 16.45,
+      liveMarketPrice: 23.6,
+      anthropicVote: { confirm: true, order_type: 'post_only', reasoning: 'planned score meets threshold' },
+      codexVote: { confirm: false, reasoning: 'Live ask of $23.60 is above the target limit price of $16.45, making the trade unachievable at the desired execution price.' },
+    });
+
+    assert.strictEqual(result.context.satisfied, true);
+    assert.strictEqual(result.makerBidMisclassified, true);
+    assert.strictEqual(result.decision, 'confirmed');
+  });
+
+  test('does not override concrete buy-put risk rejection', () => {
+    const result = applyBuyPutOverride({
+      action: { action: 'buy_put', rule_criteria: { min_score: 0.0031, target_score: 0.0031 } },
+      triggerData: { planned_score: 0.003102, advisor_limit_price: 16.45 },
+      advisorLimitPrice: 16.45,
+      liveMarketPrice: 23.6,
+      anthropicVote: { confirm: true, reasoning: 'planned score meets threshold' },
+      codexVote: { confirm: false, reasoning: 'Reject because account is under liquidation and budget is unavailable.' },
+    });
+
+    assert.strictEqual(result.makerBidMisclassified, false);
+    assert.strictEqual(result.decision, 'rejected');
+  });
+
+  test('does not override when planned bid no longer satisfies the score threshold', () => {
+    const result = applyBuyPutOverride({
+      action: { action: 'buy_put', rule_criteria: { min_score: 0.0031, target_score: 0.0031 } },
+      triggerData: { planned_score: 0.0029, advisor_limit_price: 16.45 },
+      advisorLimitPrice: 16.45,
+      liveMarketPrice: 23.6,
+      anthropicVote: { confirm: true, reasoning: 'ok' },
+      codexVote: { confirm: false, reasoning: 'Live ask is above target limit price and unachievable.' },
+    });
+
+    assert.strictEqual(result.context.satisfied, false);
+    assert.strictEqual(result.decision, 'rejected');
+  });
+
+  test('source wires the narrow override into live confirmation', () => {
+    assert.ok(SCRIPT_SOURCE.includes('buildBuyPutPatientMakerContext'));
+    assert.ok(SCRIPT_SOURCE.includes('isBuyPutMakerBidMarketabilityMisclassification'));
+    assert.ok(SCRIPT_SOURCE.includes('buy_put_patient_maker_override'));
+  });
+});
+
 // ============================================================================
 // 40. Full schema: cooldown prevents rapid-fire entries
 // ============================================================================
