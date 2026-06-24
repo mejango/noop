@@ -7287,7 +7287,10 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const lastExec = db.getLastExecutedAction(rule.action);
         if (lastExec) {
           const elapsed = Date.now() - new Date(lastExec).getTime();
-          if (elapsed < 3600000) continue; // 1 hour cooldown
+          if (elapsed < 3600000) {
+            console.log(`📋 Entry skip: ${rule.action} action cooldown active for ${formatCooldownMinutes(3600000 - elapsed)}`);
+            continue; // 1 hour cooldown
+          }
         }
 
         const buyPutContext = rule.action === 'buy_put' ? getBuyPutOpportunityContext() : null;
@@ -7303,7 +7306,13 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         // Put budget discipline: skip if cycle budget exhausted
         if (rule.action === 'buy_put' && botData.putBudgetForCycle > 0) {
           const putRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought - reservedCapacity.putBudget;
-          if (putRemaining <= 0.20) continue;
+          if (putRemaining <= 0.20) {
+            console.log(
+              `📋 Entry skip: buy_put budget unavailable; remaining=$${putRemaining.toFixed(2)}`
+              + ` (cycle=$${botData.putBudgetForCycle.toFixed(2)}, rollover=$${botData.putUnspentBuyLimit.toFixed(2)}, spent=$${botData.putNetBought.toFixed(2)}, reserved=$${reservedCapacity.putBudget.toFixed(2)})`
+            );
+            continue;
+          }
         }
 
         // Call exposure cap: the buffer is safety, not planned entry capacity.
@@ -7326,7 +7335,10 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
 
         // Dedup: skip if already pending or confirmed
-        if (db.hasPendingActionForRule(rule.id)) continue;
+        if (db.hasPendingActionForRule(rule.id)) {
+          console.log(`📋 Entry skip: ${rule.action} rule ${rule.id} already has pending/confirmed/resting action`);
+          continue;
+        }
 
         if (workingEntryActions.some((action) => action.action === rule.action && action.status !== 'resting')) {
           console.log(`📋 Entry skip: ${rule.action} already has a pending or confirmed entry order`);
@@ -7363,7 +7375,10 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
         if (rule.action === 'buy_put' && valueSignal) {
           const currentSignal = buyPutContext?.action_pressure?.signal || null;
-          if (!buyPutValueSignalMatches(valueSignal, currentSignal)) continue;
+          if (!buyPutValueSignalMatches(valueSignal, currentSignal)) {
+            console.log(`📋 Entry skip: buy_put rule ${rule.id} value_signal=${valueSignal} does not match current signal ${currentSignal || 'none'}`);
+            continue;
+          }
         }
         if (canReplaceRestingBuyPut) {
           const signalTargetScore = Number(buyPutContext?.action_pressure?.target_score || 0);
