@@ -1875,6 +1875,7 @@ const buildRecentRelativePutValueContext = ({
 const isActionableBuyPutSignal = (signal) => (
   signal === 'strict_fresh_best'
   || signal === 'spot_drop_option_repricing_lag'
+  || signal === 'recent_relative_value'
 );
 
 const BUY_PUT_VALUE_SIGNALS = new Set([
@@ -8170,9 +8171,9 @@ const getFreshBestBuyPutDisciplinePrompt = () => [
   'FRESH-BEST BUY-PUT DISCIPLINE:',
   `- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d window using buy-put DTE discipline (${BUY_PUT_ADVISORY_DTE_RANGE[0]}-${BUY_PUT_ADVISORY_DTE_RANGE[1]} DTE). A strict fresh best means the market is offering the best delta-per-dollar protection seen in that window.`,
   '- The spot-lag repricing check catches a different cheap-convexity window: spot has dropped and the put score has locally jumped or moved near the rolling best before asks fully recalibrate.',
-  `- The recent-relative value check catches a local value window versus the last ${BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS}h, but it is weaker than a ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d fresh best because the local window may simply be less bad. Use signal=recent_relative_value only explicitly, with stricter min_score/target_score, budget discipline, and a concrete reason it is true value rather than locally expensive insurance.`,
+  `- The recent-relative value check catches a local value window versus the last ${BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS}h, but it is weaker than a ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d fresh best because the local window may simply be less bad. Use stricter min_score/target_score, budget discipline, and a concrete reason it is true value rather than locally expensive insurance.`,
   '- If requires_buy_put_decision=yes, explicitly evaluate whether to emit a buy_put rule or explain why patience/no-buy is still the better stance. This is a value signal, not an instruction to override discipline.',
-  '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch strict_fresh_best or spot_drop_option_repricing_lag on a later tick without waiting for a new advisory. This wildcard does not match recent_relative_value.',
+  '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch strict_fresh_best, spot_drop_option_repricing_lag, or recent_relative_value on a later tick without waiting for a new advisory. Use min_score and target_score to keep this wildcard disciplined.',
   '- If value_signal is present, still include option_type, delta_range, dte_range, budget_limit, and sane min_score/target_score bounds so the watcher cannot buy low-quality protection.',
   '- If signal=spot_drop_option_repricing_lag, the edge may vanish quickly; prefer ioc or gtc with the supplied near-live target_score instead of a deeply patient post_only bid.',
   '- If signal=recent_relative_value, prefer post_only or gtc with the supplied target_score unless other facts show urgency.',
