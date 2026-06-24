@@ -1614,6 +1614,35 @@ const floorOptionPriceCents = (value) => {
   return Math.max(0.01, Math.floor((numeric + 1e-9) * 100) / 100);
 };
 
+const getBuyPutEntryPricing = ({ askPrice, absDelta, minScore = null, targetScore = null }) => {
+  const liveAsk = Number(askPrice) || 0;
+  const delta = Math.abs(Number(absDelta) || 0);
+  const liveScore = liveAsk > 0 && delta > 0 ? delta / liveAsk : 0;
+  const min = Number(minScore ?? 0);
+  const target = Number(targetScore ?? 0);
+  const requiredScore = Math.max(min > 0 ? min : 0, target > 0 ? target : 0);
+  const thresholdPrice = requiredScore > 0 && delta > 0
+    ? floorOptionPriceCents(delta / requiredScore)
+    : null;
+
+  let limitPrice = liveAsk > 0 ? liveAsk : null;
+  let priceSource = 'live_ask';
+  if (thresholdPrice != null && (!(limitPrice > 0) || thresholdPrice < limitPrice)) {
+    limitPrice = thresholdPrice;
+    priceSource = 'score_threshold';
+  }
+
+  const plannedScore = limitPrice > 0 && delta > 0 ? delta / limitPrice : 0;
+  return {
+    liveScore,
+    plannedScore,
+    limitPrice,
+    thresholdPrice,
+    requiredScore,
+    priceSource,
+  };
+};
+
 const parseAdvisoryOptionInstrument = (name) => {
   const parts = String(name || '').split('-');
   if (parts.length !== 4 || !/^\d{8}$/.test(parts[1])) return null;
@@ -6342,6 +6371,7 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   const bestAsk = Number(currentPrice || action.price);
   const targetScore = Number(triggerData?.target_score);
   const minScore = Number(criteria.min_score ?? triggerData?.min_score);
+  const liveScore = Number(triggerData?.live_score);
   const limitPrice = Number(advisorLimitPrice) > 0 && bestAsk > 0
     ? Math.min(Number(advisorLimitPrice), bestAsk)
     : Number(advisorLimitPrice) > 0
@@ -6357,10 +6387,10 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   return [
     'Buy-put value confirmation context:',
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(Number(triggerData?.dte), 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
-    `- Planned execution limit: ${fmtPrice(limitPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit.`,
-    `- Trigger threshold: min_score=${fmt(minScore)}. Execution target: target_score=${fmt(targetScore)} is a limit-price target, not a minimum trigger threshold; trigger_score below target_score is expected when resting below the live ask.`,
-    `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus trigger_score >= min_score is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
-    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there; do not reject as "not achievable" merely because it is not immediately marketable.`,
+    `- Planned execution limit: ${fmtPrice(limitPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit; live_ask_score=${fmt(liveScore)}.`,
+    `- Thresholds: min_score=${fmt(minScore)}, target_score=${fmt(targetScore)}. For patient maker bids, planned_score at our limit is the economic gate; live_ask_score may be below threshold because we are not willing to lift the ask.`,
+    `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
+    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there as our market; do not reject as "not achievable" merely because it is not immediately marketable.`,
     '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
     '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit.',
   ].join('\n');
@@ -7446,16 +7476,28 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             // Filter by min_bid (for sells)
             if (minBid != null && bidPrice < minBid) { filterStats.bidOut++; continue; }
 
-            // Score: puts = |delta| / askPrice, calls = bidPrice / |delta|
+            // Score: puts use the planned bid when making a patient market.
+            // Calls still use executable bid premium divided by delta.
             const absDelta = Math.abs(delta);
             let score;
+            let liveScore = null;
+            let candidateLimitPrice = null;
+            let scoreThresholdPrice = null;
+            let priceSource = null;
             if (optionType === 'P') {
-              score = askPrice > 0 ? absDelta / askPrice : 0;
+              const pricing = getBuyPutEntryPricing({ askPrice, absDelta, minScore, targetScore });
+              score = pricing.plannedScore;
+              liveScore = pricing.liveScore;
+              candidateLimitPrice = pricing.limitPrice;
+              scoreThresholdPrice = pricing.thresholdPrice;
+              priceSource = pricing.priceSource;
             } else {
               score = absDelta > 0 ? bidPrice / absDelta : 0;
             }
 
+            if (optionType === 'P' && !(candidateLimitPrice > 0)) { filterStats.scoreOut++; continue; }
             if (minScore != null && score < minScore) { filterStats.scoreOut++; continue; }
+            if (optionType === 'P' && targetScore != null && score < targetScore) { filterStats.scoreOut++; continue; }
 
             const amountStep = instrument.options?.amount_step || 0.01;
 
@@ -7470,6 +7512,10 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               bidPrice,
               bidAmount,
               score,
+              liveScore,
+              candidateLimitPrice,
+              scoreThresholdPrice,
+              priceSource,
               strike,
               amountStep,
             });
@@ -7527,14 +7573,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
         // Calculate amount: min of rule budget_limit, put cycle budget remaining, and book liquidity
         const livePrice = optionType === 'P' ? best.askPrice : best.bidPrice;
-        let price = livePrice;
-        let advisorLimitPrice = null;
-        if (rule.action === 'buy_put' && targetScore != null && Math.abs(best.delta) > 0) {
-          advisorLimitPrice = floorOptionPriceCents(Math.abs(best.delta) / targetScore);
-          if (advisorLimitPrice != null) {
-            price = Math.min(livePrice, advisorLimitPrice);
-          }
-        }
+        const advisorLimitPrice = rule.action === 'buy_put'
+          ? best.scoreThresholdPrice
+          : null;
+        let price = rule.action === 'buy_put' && Number(best.candidateLimitPrice) > 0
+          ? Number(best.candidateLimitPrice)
+          : livePrice;
         if (price <= 0) continue;
 
         let maxByBudget = (rule.budget_limit || Infinity) / price;
@@ -7570,7 +7614,14 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             maxByBudget = Math.min(maxByBudget, maxQtyAtCap);
           }
         }
-        const bookLiq = optionType === 'P' ? best.askAmount : best.bidAmount;
+        const buyPutMakerBid = rule.action === 'buy_put'
+          && (
+            best.priceSource === 'score_threshold'
+            || (Number(best.askPrice) > 0 && price < Number(best.askPrice) - 1e-9)
+          );
+        const bookLiq = optionType === 'P'
+          ? (buyPutMakerBid ? Infinity : best.askAmount)
+          : best.bidAmount;
         const step = best.amountStep || 0.01;
         const raw = Math.min(maxByBudget, bookLiq, 20);
         let qty = Math.floor(raw / step) * step;
@@ -7707,9 +7758,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             candidates_evaluated: candidates.length,
             projected_utilization: projectedDisplayedUtilization,
             live_price: livePrice,
+            live_score: rule.action === 'buy_put' ? best.liveScore : null,
+            planned_score: rule.action === 'buy_put' ? best.score : null,
+            price_source: rule.action === 'buy_put' ? best.priceSource : null,
             advisor_limit_price: advisorLimitPrice,
             target_score: targetScore,
-            target_score_nudge_pct: targetScore != null && best.score > 0 ? +(((targetScore / best.score) - 1) * 100).toFixed(2) : null,
+            target_score_nudge_pct: targetScore != null && Number(best.liveScore) > 0 ? +(((targetScore / best.liveScore) - 1) * 100).toFixed(2) : null,
             buy_put_signal: rule.action === 'buy_put' ? buyPutContext?.action_pressure?.signal || null : null,
             spot_repricing_lag: rule.action === 'buy_put' ? buyPutContext?.spot_repricing_lag_context || null : null,
             recent_relative_value: rule.action === 'buy_put' ? buyPutContext?.recent_relative_value_context || null : null,

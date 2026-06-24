@@ -799,6 +799,7 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   const liveDelta = Number(ticker?.option_pricing?.d);
   const bestAsk = Number(currentPrice || action.price);
   const targetScore = Number(triggerData?.target_score);
+  const liveScore = Number(triggerData?.live_score);
   const limitPrice = Number(advisorLimitPrice) > 0 && bestAsk > 0
     ? Math.min(Number(advisorLimitPrice), bestAsk)
     : Number(advisorLimitPrice) > 0
@@ -811,10 +812,10 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   return [
     'Buy-put value confirmation context:',
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}.`,
-    `- Planned execution limit: ${fmtPrice(limitPrice)}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit.`,
-    `- Trigger threshold: min_score=n/a. Execution target: target_score=${fmt(targetScore)} is a limit-price target, not a minimum trigger threshold; trigger_score below target_score is expected when resting below the live ask.`,
-    `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus trigger_score >= min_score is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
-    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there; do not reject as "not achievable" merely because it is not immediately marketable.`,
+    `- Planned execution limit: ${fmtPrice(limitPrice)}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit; live_ask_score=${fmt(liveScore)}.`,
+    `- Thresholds: min_score=n/a, target_score=${fmt(targetScore)}. For patient maker bids, planned_score at our limit is the economic gate; live_ask_score may be below threshold because we are not willing to lift the ask.`,
+    `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
+    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there as our market; do not reject as "not achievable" merely because it is not immediately marketable.`,
     '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
     '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit.',
   ].join('\n');
@@ -2337,6 +2338,20 @@ describe('Entry rule matching (integration)', () => {
     // Scores: 0.25/0.04=6.25, 0.30/0.05=6.0, 0.40/0.08=5.0
     assert.strictEqual(scored[0].name, 'ETH-20260501-1400-P'); // Best ratio
     assert.ok(Math.abs(scored[0].score - 6.25) < 0.001, `Expected 6.25, got ${scored[0].score}`);
+  });
+
+  test('buy_put maker bid can satisfy score when live ask is too rich', () => {
+    const absDelta = 0.08;
+    const askPrice = 18;
+    const minScore = 0.004;
+    const targetScore = 0.005;
+    const liveAskScore = absDelta / askPrice;
+    const thresholdPrice = Math.floor((absDelta / Math.max(minScore, targetScore)) * 100) / 100;
+    const plannedScore = absDelta / thresholdPrice;
+
+    assert.ok(liveAskScore < targetScore, 'Live ask should not pass the patient target');
+    assert.strictEqual(thresholdPrice, 16);
+    assert.ok(plannedScore >= targetScore, 'Resting bid should satisfy the target score');
   });
 
   test('entry rule candidate scoring: call scoring = bidPrice / |delta|', () => {
@@ -6673,6 +6688,7 @@ describe('confirmation prompt margin context', () => {
         score: 0.004014,
         delta: -0.0843,
         target_score: 0.00401,
+        live_score: 0.0037,
         buy_put_signal: 'spot_drop_option_repricing_lag',
       },
       ticker: { a: 21, option_pricing: { d: '-0.0737' } },
@@ -6682,7 +6698,9 @@ describe('confirmation prompt margin context', () => {
 
     assert.ok(context.includes('Trigger score: 0.004014'));
     assert.ok(context.includes('planned_score=0.004014'));
-    assert.ok(context.includes('target_score=0.004010 is a limit-price target, not a minimum trigger threshold'));
+    assert.ok(context.includes('live_ask_score=0.003700'));
+    assert.ok(context.includes('planned_score at our limit is the economic gate'));
+    assert.ok(context.includes('live_ask_score may be below threshold'));
     assert.ok(context.includes('post_only/gtc can rest there'));
     assert.ok(context.includes('live_delta=-0.0737'));
     assert.ok(context.includes('Prior IOC zero fill'));
