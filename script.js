@@ -6708,13 +6708,6 @@ const validateRestingBuyPutEntryOrder = ({
       reasons.push(`rule ${rule.id}: unknown value_signal=${rawValueSignal}`);
       continue;
     }
-    if (valueSignal && buyPutContext) {
-      const currentSignal = buyPutContext?.action_pressure?.signal || null;
-      if (!buyPutValueSignalMatches(valueSignal, currentSignal)) {
-        reasons.push(`rule ${rule.id}: value_signal ${valueSignal} no longer matches current signal ${currentSignal || 'none'}`);
-        continue;
-      }
-    }
 
     const minScore = Number(criteria.min_score ?? 0);
     if (minScore > 0 && orderLimitScore + 1e-12 < minScore) {

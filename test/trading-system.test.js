@@ -4012,9 +4012,10 @@ describe('Resting buy-put entry live revalidation', () => {
     if (delta < PUT_DELTA_RANGE[0] || delta > PUT_DELTA_RANGE[1]) {
       return { valid: false, reason: 'strategy_delta' };
     }
-    const valueSignal = normalizeBuyPutValueSignal(criteria.value_signal ?? criteria.buy_put_signal);
-    if (valueSignal && !buyPutValueSignalMatches(valueSignal, currentSignal)) {
-      return { valid: false, reason: 'value_signal' };
+    const rawValueSignal = criteria.value_signal ?? criteria.buy_put_signal;
+    const valueSignal = normalizeBuyPutValueSignal(rawValueSignal);
+    if (hasExplicitBuyPutValueSignal(rawValueSignal) && !valueSignal) {
+      return { valid: false, reason: 'unknown_value_signal' };
     }
     const score = Math.abs(delta) > 0 ? Math.abs(delta) / orderLimitPrice : 0;
     if (criteria.min_score != null && score < criteria.min_score) {
@@ -4073,13 +4074,14 @@ describe('Resting buy-put entry live revalidation', () => {
     assert.ok(result.score >= 0.0045);
   });
 
-  test('resting buy-put entry is cancelled when explicit value signal expires', () => {
+  test('resting buy-put entry stays valid when trigger signal expires but economics still satisfy rule', () => {
     const rule = {
       criteria: {
         option_type: 'P',
         delta_range: [-0.12, -0.02],
         dte_range: [45, 75],
         min_score: 0.004,
+        target_score: 0.0045,
         value_signal: 'strict_fresh_best',
       },
     };
@@ -4092,8 +4094,31 @@ describe('Resting buy-put entry live revalidation', () => {
       currentSignal: null,
     });
 
+    assert.strictEqual(result.valid, true);
+    assert.ok(result.score >= 0.0045);
+  });
+
+  test('resting buy-put entry is cancelled when rule has unknown value signal', () => {
+    const rule = {
+      criteria: {
+        option_type: 'P',
+        delta_range: [-0.12, -0.02],
+        dte_range: [45, 75],
+        min_score: 0.004,
+        value_signal: 'made_up_signal',
+      },
+    };
+
+    const result = validateRestingBuyPutForTest({
+      orderLimitPrice: 20,
+      delta: -0.095,
+      dte: 63,
+      rule,
+      currentSignal: 'strict_fresh_best',
+    });
+
     assert.strictEqual(result.valid, false);
-    assert.strictEqual(result.reason, 'value_signal');
+    assert.strictEqual(result.reason, 'unknown_value_signal');
   });
 
   test('open-order maintenance wires buy-put revalidation before stale fill', () => {
