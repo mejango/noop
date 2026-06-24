@@ -5680,6 +5680,16 @@ describe('Confirmation voting logic', () => {
 // ============================================================================
 
 describe('Entry cooldown logic', () => {
+  const isIocZeroFillFailure = (failure) => (
+    String(failure?.reason || failure?.execution_result || '')
+      .toLowerCase()
+      .includes('zero fill (ioc)')
+  );
+  const shouldSkipForFailedEntryCooldown = (action, failure) => {
+    if (!failure) return false;
+    return !isIocZeroFillFailure(failure);
+  };
+
   test('no prior execution → no cooldown', () => {
     const lastExec = null;
     const cooldownActive = lastExec && (Date.now() - new Date(lastExec).getTime()) < 3600000;
@@ -5705,6 +5715,21 @@ describe('Entry cooldown logic', () => {
     const elapsed = Date.now() - new Date(lastExec).getTime();
     const cooldownActive = elapsed < 3600000;
     assert.strictEqual(cooldownActive, false, 'Exactly 1 hour should not be in cooldown');
+  });
+
+  test('buy_put IOC zero-fill failure does not block next opportunity', () => {
+    const failure = { reason: 'Zero fill (IOC) — no liquidity at $15' };
+    assert.strictEqual(shouldSkipForFailedEntryCooldown('buy_put', failure), false);
+  });
+
+  test('sell_call IOC zero-fill failure does not block next opportunity', () => {
+    const failure = { reason: 'Zero fill (IOC) — no matching orders at $8.5' };
+    assert.strictEqual(shouldSkipForFailedEntryCooldown('sell_call', failure), false);
+  });
+
+  test('non-zero-fill buy_put failure still blocks during cooldown', () => {
+    const failure = { reason: 'Order error: venue unavailable' };
+    assert.strictEqual(shouldSkipForFailedEntryCooldown('buy_put', failure), true);
   });
 });
 

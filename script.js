@@ -7654,8 +7654,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
         const recentFailedEntry = getRecentFailedEntry(rule.action, best.name);
         if (recentFailedEntry) {
-          console.log(`📋 Skip ${rule.action} ${best.name}: failed recently, cooling down (${recentFailedEntry.reason || 'recent execution failure'})`);
-          continue;
+          if (isIocZeroFillFailure(recentFailedEntry)) {
+            console.log(`📋 Retry ${rule.action} ${best.name}: recent IOC zero fill is not a cooldown blocker (${recentFailedEntry.reason || 'zero fill'})`);
+          } else {
+            console.log(`📋 Skip ${rule.action} ${best.name}: failed recently, cooling down (${recentFailedEntry.reason || 'recent execution failure'})`);
+            continue;
+          }
         }
 
         db.insertPendingAction({
@@ -7957,6 +7961,12 @@ const getRecentFailedEntry = (action, instrumentName, cooldownMs = FAILED_ENTRY_
     reason: lastFailed.execution_result || null,
   };
 };
+
+const isIocZeroFillFailure = (failure) => (
+  String(failure?.reason || failure?.execution_result || '')
+    .toLowerCase()
+    .includes('zero fill (ioc)')
+);
 
 const adaptOrderTypeFromFailureHistory = (action, instrumentName, proposedOrderType) => {
   const validOrderTypes = getAllowedOrderTypesForAction(action);
