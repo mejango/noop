@@ -814,6 +814,7 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     `- Trigger threshold: min_score=n/a. Execution target: target_score=${fmt(targetScore)} is a limit-price target, not a minimum trigger threshold; trigger_score below target_score is expected when resting below the live ask.`,
     `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus trigger_score >= min_score is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
     `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there; do not reject as "not achievable" merely because it is not immediately marketable.`,
+    '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
     '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit.',
   ].join('\n');
 };
@@ -5733,6 +5734,55 @@ describe('Entry cooldown logic', () => {
   });
 });
 
+describe('Recent execution friction confirmation context', () => {
+  const isIocZeroFillFailure = (failure) => (
+    String(failure?.reason || failure?.execution_result || '')
+      .toLowerCase()
+      .includes('zero fill (ioc)')
+  );
+  const formatRecentExecutionFrictionContext = (action, failure) => {
+    const reason = failure?.reason || failure?.execution_result;
+    if (!reason) return '';
+    if (!isIocZeroFillFailure(failure)) {
+      return `Recent execution friction on this exact instrument/action: ${reason}`;
+    }
+
+    const routingGuidance = action === 'buy_put'
+      ? 'For buy_put entries, confirm when the current trigger, advisor limit, budget, and risk facts remain valid; use gtc/post_only at the approved limit when liquidity is sparse, and use ioc only when immediacy is worth another possible zero fill.'
+      : 'For entries, confirm when the current trigger and risk gates remain valid; use route selection to handle thin liquidity.';
+
+    return [
+      `Recent execution routing note for this exact instrument/action: ${reason}`,
+      '- Prior IOC zero fill means no visible/matching liquidity accepted the limit at that instant. It is not a reviewer rejection, not a cooldown blocker, and not evidence that the active rule trigger is invalid.',
+      `- ${routingGuidance}`,
+    ].join('\n');
+  };
+
+  test('buy_put IOC zero fill is routing context, not a rejection reason', () => {
+    const context = formatRecentExecutionFrictionContext('buy_put', {
+      reason: 'Zero fill (IOC) — no liquidity at $15',
+    });
+
+    assert.ok(context.includes('Recent execution routing note'));
+    assert.ok(context.includes('not a reviewer rejection'));
+    assert.ok(context.includes('not a cooldown blocker'));
+    assert.ok(context.includes('not evidence that the active rule trigger is invalid'));
+    assert.ok(context.includes('confirm when the current trigger, advisor limit, budget, and risk facts remain valid'));
+    assert.ok(!context.includes('Recent execution friction on this exact instrument/action'));
+  });
+
+  test('non-zero-fill failures remain generic execution friction', () => {
+    const context = formatRecentExecutionFrictionContext('buy_put', {
+      reason: 'Venue unavailable',
+    });
+
+    assert.strictEqual(
+      context,
+      'Recent execution friction on this exact instrument/action: Venue unavailable'
+    );
+  });
+});
+
 // ============================================================================
 // 41. Full schema: DRY_RUN budget tracking without real orders
 // ============================================================================
@@ -6596,6 +6646,8 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('target_score=0.004010 is a limit-price target, not a minimum trigger threshold'));
     assert.ok(context.includes('post_only/gtc can rest there'));
     assert.ok(context.includes('live_delta=-0.0737'));
+    assert.ok(context.includes('Prior IOC zero fill'));
+    assert.ok(context.includes('liquidity/routing context only'));
     assert.ok(context.includes('Do not invent a different target score'));
   });
 

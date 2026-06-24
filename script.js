@@ -6360,6 +6360,7 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     `- Trigger threshold: min_score=${fmt(minScore)}. Execution target: target_score=${fmt(targetScore)} is a limit-price target, not a minimum trigger threshold; trigger_score below target_score is expected when resting below the live ask.`,
     `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus trigger_score >= min_score is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
     `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there; do not reject as "not achievable" merely because it is not immediately marketable.`,
+    '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
     '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit.',
   ].join('\n');
 };
@@ -7968,6 +7969,26 @@ const isIocZeroFillFailure = (failure) => (
     .includes('zero fill (ioc)')
 );
 
+const formatRecentExecutionFrictionContext = (action, failure) => {
+  const reason = failure?.reason || failure?.execution_result;
+  if (!reason) return '';
+  if (!isIocZeroFillFailure(failure)) {
+    return `Recent execution friction on this exact instrument/action: ${reason}`;
+  }
+
+  const routingGuidance = action === 'buy_put'
+    ? 'For buy_put entries, confirm when the current trigger, advisor limit, budget, and risk facts remain valid; use gtc/post_only at the approved limit when liquidity is sparse, and use ioc only when immediacy is worth another possible zero fill.'
+    : isReduceOnlyExitAction(action)
+      ? 'For exit actions, confirm when the exit rule remains valid; choose the allowed route for the exit intent, treating zero fill as price/liquidity feedback rather than a failed thesis.'
+      : 'For entries, confirm when the current trigger and risk gates remain valid; use route selection to handle thin liquidity.';
+
+  return [
+    `Recent execution routing note for this exact instrument/action: ${reason}`,
+    '- Prior IOC zero fill means no visible/matching liquidity accepted the limit at that instant. It is not a reviewer rejection, not a cooldown blocker, and not evidence that the active rule trigger is invalid.',
+    `- ${routingGuidance}`,
+  ].join('\n');
+};
+
 const adaptOrderTypeFromFailureHistory = (action, instrumentName, proposedOrderType) => {
   const validOrderTypes = getAllowedOrderTypesForAction(action);
   const normalized = validOrderTypes.includes(proposedOrderType) ? proposedOrderType : 'ioc';
@@ -8822,7 +8843,7 @@ ${sellPutConfirmationPrompt}
 ${ruleReasoningLine}
 Triggered because: ${action.trigger_details || 'N/A'}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
-${recentFailedEntry?.reason ? `Recent execution friction on this exact instrument/action: ${recentFailedEntry.reason}` : ''}
+${formatRecentExecutionFrictionContext(action.action, recentFailedEntry)}
 ${confirmationLearningContext}
 ${getConfirmationScopePrompt()}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
