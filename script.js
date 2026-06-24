@@ -6454,6 +6454,17 @@ const getOpenRestingEntryOrders = () => {
   return db.getOpenRestingOrders().filter(order => order.action === 'buy_put' || order.action === 'sell_call');
 };
 
+const hasPendingOrConfirmedActionForRule = (ruleId) => {
+  if (!db || !ruleId) return false;
+  if (typeof db.hasPendingOrConfirmedActionForRule === 'function') {
+    return db.hasPendingOrConfirmedActionForRule(ruleId);
+  }
+  return db.getRecentPendingActions(200).some((action) =>
+    Number(action?.rule_id) === Number(ruleId)
+    && ['pending', 'confirmed'].includes(action?.status)
+  );
+};
+
 const getOpenRestingExitOrders = () => {
   if (!db) return [];
   return db.getOpenRestingOrders().filter(order => order.action === 'buyback_call' || order.action === 'sell_put');
@@ -7287,6 +7298,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           }
         }
 
+        const restingEntryForRule = openRestingEntryOrders.find((order) =>
+          Number(order.rule_id) === Number(rule.id)
+          && order.action === rule.action
+        );
+        const hasRestingEntryForRule = Boolean(restingEntryForRule);
         const buyPutContext = rule.action === 'buy_put' ? getBuyPutOpportunityContext() : null;
         const canReplaceRestingBuyPut = Boolean(
           rule.action === 'buy_put'
@@ -7294,7 +7310,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         );
         const capacityOrders = canReplaceRestingBuyPut
           ? openRestingEntryOrders.filter((order) => order.action !== 'buy_put')
-          : openRestingEntryOrders;
+          : openRestingEntryOrders.filter((order) =>
+            !(rule.action === 'buy_put'
+              && order.action === 'buy_put'
+              && Number(order.rule_id) === Number(rule.id))
+          );
         const reservedCapacity = summarizeReservedEntryCapacity(capacityOrders);
 
         // Put budget discipline: skip if cycle budget exhausted
@@ -7328,9 +7348,10 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           }
         }
 
-        // Dedup: skip if already pending or confirmed
-        if (db.hasPendingActionForRule(rule.id)) {
-          console.log(`📋 Entry skip: ${rule.action} rule ${rule.id} already has pending/confirmed/resting action`);
+        // Dedup: pending/confirmed actions block duplicates. Resting actions flow
+        // through the candidate scan so we can keep, adjust, or replace them.
+        if (hasPendingOrConfirmedActionForRule(rule.id)) {
+          console.log(`📋 Entry skip: ${rule.action} rule ${rule.id} already has pending/confirmed action`);
           continue;
         }
 
@@ -7369,7 +7390,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
         if (rule.action === 'buy_put' && valueSignal) {
           const currentSignal = buyPutContext?.action_pressure?.signal || null;
-          if (!buyPutValueSignalMatches(valueSignal, currentSignal)) {
+          if (!buyPutValueSignalMatches(valueSignal, currentSignal) && !hasRestingEntryForRule) {
             console.log(`📋 Entry skip: buy_put rule ${rule.id} value_signal=${valueSignal} does not match current signal ${currentSignal || 'none'}`);
             continue;
           }

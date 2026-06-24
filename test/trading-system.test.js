@@ -1917,6 +1917,10 @@ describe('DB operations (isolated test database)', () => {
       SELECT COUNT(*) as count FROM pending_actions
       WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed', 'resting')
     `),
+    hasPendingOrConfirmedActionForRule: testDb.prepare(`
+      SELECT COUNT(*) as count FROM pending_actions
+      WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed')
+    `),
     getLastExecutedAction: testDb.prepare(`
       SELECT executed_at FROM pending_actions
       WHERE action = @action AND status = 'executed'
@@ -1982,6 +1986,7 @@ describe('DB operations (isolated test database)', () => {
   const getActiveRulesByType = (ruleType) => stmts.getActiveRulesByType.all({ rule_type: ruleType });
   const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ status });
   const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
+  const hasPendingOrConfirmedActionForRule = (ruleId) => (stmts.hasPendingOrConfirmedActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
   const getLastExecutedAction = (action) => stmts.getLastExecutedAction.get({ action })?.executed_at || null;
   const getLastRejectedAction = (action, instrumentName) => stmts.getLastRejectedAction.get({ action, instrument_name: instrumentName }) || null;
 
@@ -2153,6 +2158,7 @@ describe('DB operations (isolated test database)', () => {
     });
 
     assert.strictEqual(hasPendingActionForRule(ruleId), true);
+    assert.strictEqual(hasPendingOrConfirmedActionForRule(ruleId), true);
   });
 
   test('hasPendingActionForRule: executed action returns false', () => {
@@ -2224,6 +2230,7 @@ describe('DB operations (isolated test database)', () => {
     });
 
     assert.strictEqual(hasPendingActionForRule(ruleId), true);
+    assert.strictEqual(hasPendingOrConfirmedActionForRule(ruleId), false);
   });
 
   test('rejected action is retrievable for one-hour backoff checks', () => {
@@ -4125,6 +4132,12 @@ describe('Resting buy-put entry live revalidation', () => {
     assert.ok(SCRIPT_SOURCE.includes('validateRestingBuyPutEntryOrder'));
     assert.ok(SCRIPT_SOURCE.includes('resting buy_put no longer satisfies active rule'));
     assert.ok(SCRIPT_SOURCE.includes('order_limit_score'));
+  });
+
+  test('resting buy-put entries can flow through entry scan for repricing', () => {
+    assert.ok(SCRIPT_SOURCE.includes('hasPendingOrConfirmedActionForRule(rule.id)'));
+    assert.ok(SCRIPT_SOURCE.includes('Resting actions flow'));
+    assert.ok(SCRIPT_SOURCE.includes('!hasRestingEntryForRule'));
   });
 });
 

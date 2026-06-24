@@ -1174,6 +1174,11 @@ const stmts = {
     WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed', 'resting')
   `),
 
+  hasPendingOrConfirmedActionForRule: db.prepare(`
+    SELECT COUNT(*) as count FROM pending_actions
+    WHERE rule_id = @rule_id AND status IN ('pending', 'confirmed')
+  `),
+
   getLastExecutedAction: db.prepare(`
     SELECT executed_at FROM pending_actions
     WHERE action = @action AND status = 'executed'
@@ -1202,7 +1207,10 @@ const stmts = {
     VALUES (@order_id, @pending_action_id, @instrument_name, @action, @direction, @amount, @limit_price)
   `),
   getOpenRestingOrders: db.prepare(`
-    SELECT * FROM resting_orders WHERE status = 'open'
+    SELECT ro.*, pa.rule_id AS rule_id
+    FROM resting_orders ro
+    LEFT JOIN pending_actions pa ON ro.pending_action_id = pa.id
+    WHERE ro.status = 'open'
   `),
   updateRestingOrder: db.prepare(`
     UPDATE resting_orders SET status = @status, filled_amount = @filled_amount WHERE order_id = @order_id
@@ -1819,6 +1827,7 @@ const deactivateRuleById = (id) => stmts.deactivateRuleById.run({ id }).changes 
 const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ status });
 const getRecentPendingActions = (limit = 20) => stmts.getRecentPendingActions.all({ limit });
 const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
+const hasPendingOrConfirmedActionForRule = (ruleId) => (stmts.hasPendingOrConfirmedActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
 const getLastExecutedAction = (action) => stmts.getLastExecutedAction.get({ action })?.executed_at || null;
 const getLastFailedAction = (action, instrumentName) => stmts.getLastFailedAction.get({ action, instrument_name: instrumentName }) || null;
 const getLastRejectedAction = (action, instrumentName) => stmts.getLastRejectedAction.get({ action, instrument_name: instrumentName }) || null;
@@ -2023,6 +2032,7 @@ module.exports = {
   getPendingActions,
   getRecentPendingActions,
   hasPendingActionForRule,
+  hasPendingOrConfirmedActionForRule,
   getLastExecutedAction,
   getLastFailedAction,
   getLastRejectedAction,
