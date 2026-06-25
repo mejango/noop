@@ -6399,7 +6399,7 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   ].join('\n');
 };
 
-const buildBuyPutPatientMakerContext = (action, triggerData = {}, advisorLimitPrice = null, liveMarketPrice = null) => {
+const buildBuyPutPatientMakerContext = (action, triggerData = {}, advisorLimitPrice = null, liveMarketPrice = null, options = {}) => {
   if (action?.action !== 'buy_put') return { satisfied: false };
 
   const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
@@ -6412,6 +6412,15 @@ const buildBuyPutPatientMakerContext = (action, triggerData = {}, advisorLimitPr
   );
   const limitPrice = Number(advisorLimitPrice ?? triggerData?.advisor_limit_price);
   const liveAsk = Number(liveMarketPrice);
+  const amount = Number(action?.amount);
+  const plannedOutlay = Number.isFinite(amount) && amount > 0 && Number.isFinite(limitPrice) && limitPrice > 0
+    ? amount * limitPrice
+    : null;
+  const putBudgetRemaining = Number(options.putBudgetRemaining);
+  const hasBudgetCap = Number.isFinite(putBudgetRemaining) && putBudgetRemaining >= 0;
+  const budgetSatisfied = !hasBudgetCap
+    || (Number.isFinite(plannedOutlay) && plannedOutlay <= putBudgetRemaining + 0.01);
+  const liquidationSafe = !options.marginState?.is_under_liquidation;
 
   const scoreSatisfied = Number.isFinite(plannedScore)
     && plannedScore > 0
@@ -6423,32 +6432,16 @@ const buildBuyPutPatientMakerContext = (action, triggerData = {}, advisorLimitPr
     && liveAsk > limitPrice;
 
   return {
-    satisfied: scoreSatisfied && patientBid,
+    satisfied: scoreSatisfied && patientBid && budgetSatisfied && liquidationSafe,
     plannedScore,
     requiredScore,
     limitPrice,
     liveAsk,
+    plannedOutlay,
+    putBudgetRemaining: hasBudgetCap ? putBudgetRemaining : null,
+    budgetSatisfied,
+    liquidationSafe,
   };
-};
-
-const isBuyPutMakerBidMarketabilityMisclassification = (reason) => {
-  const text = String(reason || '').toLowerCase();
-  if (!text) return false;
-  const referencesAsk = text.includes('live ask')
-    || text.includes('current ask')
-    || text.includes('best ask')
-    || text.includes('ask of');
-  const referencesLimit = text.includes('limit price')
-    || text.includes('target limit')
-    || text.includes('desired execution price')
-    || text.includes('approved limit');
-  const treatsMakerBidAsImpossible = text.includes('unachievable')
-    || text.includes('not achievable')
-    || text.includes('not immediately marketable')
-    || text.includes('above the target limit')
-    || text.includes('above target limit')
-    || text.includes('cannot fill');
-  return referencesAsk && referencesLimit && treatsMakerBidAsImpossible;
 };
 
 const formatSellCallConfirmationContext = ({ action, triggerData, ticker, currentPrice }) => {
@@ -9093,19 +9086,21 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         action,
         triggerData,
         advisorEntryLimitPrice,
-        liveMarketPrice
+        liveMarketPrice,
+        {
+          marginState,
+          putBudgetRemaining: botData.putBudgetForCycle > 0
+            ? botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought
+            : null,
+        }
       );
       const confirmedByAtLeastOneReviewer = Boolean(anthropicVote?.confirm || codexVote?.confirm);
-      const buyPutMakerBidMisclassified = Boolean(
+      const buyPutPatientMakerOverride = Boolean(
         buyPutPatientMakerContext.satisfied
         && confirmedByAtLeastOneReviewer
-        && (
-          (anthropicVote && !anthropicVote.confirm && isBuyPutMakerBidMarketabilityMisclassification(anthropicVote.reasoning))
-          || (codexVote && !codexVote.confirm && isBuyPutMakerBidMarketabilityMisclassification(codexVote.reasoning))
-        )
       );
-      const buyPutMakerBidOverrideReason = buyPutMakerBidMisclassified
-        ? `buy_put_patient_maker_override: planned bid $${buyPutPatientMakerContext.limitPrice.toFixed(4)} scores ${buyPutPatientMakerContext.plannedScore.toFixed(6)} >= required ${buyPutPatientMakerContext.requiredScore.toFixed(6)} while live ask is $${buyPutPatientMakerContext.liveAsk.toFixed(4)}; below-ask maker bids are the intended market, not an unachievable trade`
+      const buyPutMakerBidOverrideReason = buyPutPatientMakerOverride
+        ? `buy_put_patient_maker_override: planned bid $${buyPutPatientMakerContext.limitPrice.toFixed(4)} scores ${buyPutPatientMakerContext.plannedScore.toFixed(6)} >= required ${buyPutPatientMakerContext.requiredScore.toFixed(6)} while live ask is $${buyPutPatientMakerContext.liveAsk.toFixed(4)}; planned outlay $${buyPutPatientMakerContext.plannedOutlay?.toFixed(2) || 'n/a'} remains within budget; below-ask maker bids are the intended market`
         : null;
 
       // Voting logic
@@ -9151,7 +9146,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           : 'available patient/live capture';
         decisionOverrideReason = `advisor_rule_buyback_override: active rule capture ${overrideCaptureText} satisfies ${buybackConfirmationContext.op} ${buybackConfirmationContext.threshold}% and one reviewer confirmed`;
       }
-      if (decision === 'rejected' && buyPutMakerBidMisclassified) {
+      if (decision === 'rejected' && buyPutPatientMakerOverride) {
         decision = 'confirmed';
         decisionOverrideReason = buyPutMakerBidOverrideReason;
       }
