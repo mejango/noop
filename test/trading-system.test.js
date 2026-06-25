@@ -513,7 +513,7 @@ const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
   const required = normalizeBuyPutValueSignal(requiredSignal);
   if (hasExplicitBuyPutValueSignal(requiredSignal) && !required) return false;
   if (!required) return true;
-  if (required === 'any_actionable_buy_put') return isActionableBuyPutSignal(currentSignal);
+  if (required === 'any_actionable_buy_put') return true;
   return currentSignal === required;
 };
 
@@ -794,12 +794,16 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
 };
 const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice }) => {
   if (action?.action !== 'buy_put') return '';
+  const criteria = action.rule_criteria || {};
   const triggerScore = Number(triggerData?.score);
   const triggerDelta = Number(triggerData?.delta);
   const liveDelta = Number(ticker?.option_pricing?.d);
   const bestAsk = Number(currentPrice || action.price);
   const targetScore = Number(triggerData?.target_score);
   const liveScore = Number(triggerData?.live_score);
+  const requiredValueSignal = triggerData?.required_value_signal || criteria.value_signal || criteria.buy_put_signal || null;
+  const currentValueSignal = triggerData?.buy_put_signal || null;
+  const isStandingPatientBid = requiredValueSignal === 'any_actionable_buy_put' && currentValueSignal === 'standing_patient_bid';
   const limitPrice = Number(advisorLimitPrice) > 0 && bestAsk > 0
     ? Math.min(Number(advisorLimitPrice), bestAsk)
     : Number(advisorLimitPrice) > 0
@@ -814,7 +818,7 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}.`,
     `- Planned execution limit: ${fmtPrice(limitPrice)}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit; live_ask_score=${fmt(liveScore)}.`,
     `- Thresholds: min_score=n/a, target_score=${fmt(targetScore)}. For patient maker bids, planned_score at our limit is the economic gate; live_ask_score may be below threshold because we are not willing to lift the ask.`,
-    `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
+    `- value_signal=${currentValueSignal || 'n/a'}, required_value_signal=${requiredValueSignal || 'n/a'}. ${isStandingPatientBid ? 'This is a standing patient bid: no spike signal is active, but the bid is still valid if planned_score meets threshold and budget/risk gates remain valid.' : 'A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.'}`,
     `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there as our market; do not reject as "not achievable" merely because it is not immediately marketable.`,
     '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
     '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit.',
@@ -1307,10 +1311,11 @@ describe('Fresh-best buy-put advisory review', () => {
     assert.strictEqual(result.executionStyle, 'patient_limit');
   });
 
-  test('standing value_signal watcher matches actionable buy-put signals', () => {
+  test('standing value_signal watcher can quote patient buy-put bids without active signal', () => {
     assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'strict_fresh_best'), true);
     assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'spot_drop_option_repricing_lag'), true);
     assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', 'recent_relative_value'), true);
+    assert.strictEqual(buyPutValueSignalMatches('any_actionable_buy_put', null), true);
     assert.strictEqual(buyPutValueSignalMatches('recent_value', 'recent_relative_value'), true);
     assert.strictEqual(buyPutValueSignalMatches('strict_fresh_best', 'spot_drop_option_repricing_lag'), false);
     assert.strictEqual(buyPutValueSignalMatches('fresh_best', 'strict_fresh_best'), true);
@@ -6806,6 +6811,32 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('Prior IOC zero fill'));
     assert.ok(context.includes('liquidity/routing context only'));
     assert.ok(context.includes('Do not invent a different target score'));
+  });
+
+  test('buy_put confirmation context explains standing patient bid without active signal', () => {
+    const context = formatBuyPutConfirmationContext({
+      action: {
+        action: 'buy_put',
+        price: 23.6,
+        rule_criteria: { value_signal: 'any_actionable_buy_put' },
+      },
+      triggerData: {
+        score: 0.003102,
+        delta: -0.051,
+        target_score: 0.0031,
+        live_score: 0.00216,
+        buy_put_signal: 'standing_patient_bid',
+        required_value_signal: 'any_actionable_buy_put',
+      },
+      ticker: { a: 23.6, option_pricing: { d: '-0.051' } },
+      currentPrice: 23.6,
+      advisorLimitPrice: 16.45,
+    });
+
+    assert.ok(context.includes('value_signal=standing_patient_bid'));
+    assert.ok(context.includes('required_value_signal=any_actionable_buy_put'));
+    assert.ok(context.includes('no spike signal is active'));
+    assert.ok(context.includes('bid is still valid if planned_score meets threshold'));
   });
 
   test('sell_call confirmation context carries advisor score gates', () => {

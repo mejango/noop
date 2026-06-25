@@ -1933,7 +1933,7 @@ const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
   const required = normalizeBuyPutValueSignal(requiredSignal);
   if (hasExplicitBuyPutValueSignal(requiredSignal) && !required) return false;
   if (!required) return true;
-  if (required === 'any_actionable_buy_put') return isActionableBuyPutSignal(currentSignal);
+  if (required === 'any_actionable_buy_put') return true;
   return currentSignal === required;
 };
 
@@ -6372,6 +6372,9 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   const targetScore = Number(triggerData?.target_score);
   const minScore = Number(criteria.min_score ?? triggerData?.min_score);
   const liveScore = Number(triggerData?.live_score);
+  const requiredValueSignal = triggerData?.required_value_signal || criteria.value_signal || criteria.buy_put_signal || null;
+  const currentValueSignal = triggerData?.buy_put_signal || null;
+  const isStandingPatientBid = requiredValueSignal === 'any_actionable_buy_put' && currentValueSignal === 'standing_patient_bid';
   const limitPrice = Number(advisorLimitPrice) > 0 && bestAsk > 0
     ? Math.min(Number(advisorLimitPrice), bestAsk)
     : Number(advisorLimitPrice) > 0
@@ -6389,7 +6392,7 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(Number(triggerData?.dte), 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
     `- Planned execution limit: ${fmtPrice(limitPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit; live_ask_score=${fmt(liveScore)}.`,
     `- Thresholds: min_score=${fmt(minScore)}, target_score=${fmt(targetScore)}. For patient maker bids, planned_score at our limit is the economic gate; live_ask_score may be below threshold because we are not willing to lift the ask.`,
-    `- value_signal=${triggerData?.buy_put_signal || 'n/a'}. A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.`,
+    `- value_signal=${currentValueSignal || 'n/a'}, required_value_signal=${requiredValueSignal || 'n/a'}. ${isStandingPatientBid ? 'This is a standing patient bid: no spike signal is active, but the bid is still valid if planned_score meets threshold and budget/risk gates remain valid.' : 'A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.'}`,
     `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there as our market; do not reject as "not achievable" merely because it is not immediately marketable.`,
     '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
     '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit.',
@@ -7470,10 +7473,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           console.log(`📋 Entry skip: buy_put rule ${rule.id} has unknown value_signal=${rawValueSignal}`);
           continue;
         }
+        const currentBuyPutSignal = rule.action === 'buy_put'
+          ? buyPutContext?.action_pressure?.signal || null
+          : null;
         if (rule.action === 'buy_put' && valueSignal) {
-          const currentSignal = buyPutContext?.action_pressure?.signal || null;
-          if (!buyPutValueSignalMatches(valueSignal, currentSignal) && !hasRestingEntryForRule) {
-            console.log(`📋 Entry skip: buy_put rule ${rule.id} value_signal=${valueSignal} does not match current signal ${currentSignal || 'none'}`);
+          if (!buyPutValueSignalMatches(valueSignal, currentBuyPutSignal) && !hasRestingEntryForRule) {
+            console.log(`📋 Entry skip: buy_put rule ${rule.id} value_signal=${valueSignal} does not match current signal ${currentBuyPutSignal || 'none'}`);
             continue;
           }
         }
@@ -7750,7 +7755,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             }
 
             const lag = buyPutContext.spot_repricing_lag_context || {};
-            const signal = buyPutContext.action_pressure?.signal || 'unknown';
+            const signal = currentBuyPutSignal || (valueSignal === 'any_actionable_buy_put' ? 'standing_patient_bid' : 'unknown');
             console.log(`📋 Replace resting ${rule.action}: cancel ${sameActionResting.order_id} ${sameActionResting.instrument_name} @ $${Number(sameActionResting.limit_price).toFixed(4)} -> ${best.name} @ $${price.toFixed(4)} (${signal}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%, spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%)`);
             const cancelled = await cancelOrder(sameActionResting.order_id, sameActionResting.instrument_name);
             if (!cancelled) {
@@ -7816,10 +7821,13 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             advisor_limit_price: advisorLimitPrice,
             target_score: targetScore,
             target_score_nudge_pct: targetScore != null && Number(best.liveScore) > 0 ? +(((targetScore / best.liveScore) - 1) * 100).toFixed(2) : null,
-            buy_put_signal: rule.action === 'buy_put' ? buyPutContext?.action_pressure?.signal || null : null,
+            buy_put_signal: rule.action === 'buy_put'
+              ? currentBuyPutSignal || (valueSignal === 'any_actionable_buy_put' ? 'standing_patient_bid' : null)
+              : null,
+            required_value_signal: rule.action === 'buy_put' ? valueSignal || null : null,
             spot_repricing_lag: rule.action === 'buy_put' ? buyPutContext?.spot_repricing_lag_context || null : null,
             recent_relative_value: rule.action === 'buy_put' ? buyPutContext?.recent_relative_value_context || null : null,
-            preferred_order_type: buyPutContext?.action_pressure?.signal === 'spot_drop_option_repricing_lag' ? 'ioc' : normalizePreferredOrderType(rule.action, rule.preferred_order_type),
+            preferred_order_type: currentBuyPutSignal === 'spot_drop_option_repricing_lag' ? 'ioc' : normalizePreferredOrderType(rule.action, rule.preferred_order_type),
           },
         });
         triggeredCount++;
@@ -8293,7 +8301,7 @@ const getFreshBestBuyPutDisciplinePrompt = () => [
   '- The spot-lag repricing check catches a different cheap-convexity window: spot has dropped and the put score has locally jumped or moved near the rolling best before asks fully recalibrate.',
   `- The recent-relative value check catches a local value window versus the last ${BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS}h, but it is weaker than a ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d fresh best because the local window may simply be less bad. Use stricter min_score/target_score, budget discipline, and a concrete reason it is true value rather than locally expensive insurance.`,
   '- If requires_buy_put_decision=yes, explicitly evaluate whether to emit a buy_put rule or explain why patience/no-buy is still the better stance. This is a value signal, not an instruction to override discipline.',
-  '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch strict_fresh_best, spot_drop_option_repricing_lag, or recent_relative_value on a later tick without waiting for a new advisory. Use min_score and target_score to keep this wildcard disciplined.',
+  '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch strict_fresh_best, spot_drop_option_repricing_lag, recent_relative_value, or a patient maker bid at the rule price without waiting for a new advisory. Signal absence means quote patiently at the score-derived price; it does not mean no possible bid. Use min_score and target_score to keep this wildcard disciplined.',
   '- If value_signal is present, still include option_type, delta_range, dte_range, budget_limit, and sane min_score/target_score bounds so the watcher cannot buy low-quality protection.',
   '- If signal=spot_drop_option_repricing_lag, the edge may vanish quickly; prefer ioc or gtc with the supplied near-live target_score instead of a deeply patient post_only bid.',
   '- If signal=recent_relative_value, prefer post_only or gtc with the supplied target_score unless other facts show urgency.',
