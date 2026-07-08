@@ -44,6 +44,7 @@ const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
 const SELL_CALL_FALLBACK_MIN_BID = 4;
 const SELL_CALL_FALLBACK_MIN_SCORE = 65;
+const SELL_CALL_FALLBACK_MIN_EDGE_SCORE = 80;
 const VENUE_AMOUNT_DECIMALS = 2;
 const VENUE_MIN_ORDER_AMOUNT = 0.1;
 
@@ -529,7 +530,7 @@ const buildRulebookRequirements = ({ putBudgetRemaining = 0, accountHealth = {},
     requirements.push({
       type: 'entry',
       action: 'sell_call',
-      instruction: 'Create a standing sell_call watcher only for favorable call premium. Encode value with min_score (call score = bid / abs(delta)) plus min_bid, DTE, delta, and margin criteria; do not use a broad spot_price floor as a substitute for better premium or post-drop recovery.',
+      instruction: 'Create a standing sell_call watcher only for favorable call premium. Encode value with min_edge_score plus min_bid, DTE, delta, and margin criteria. The edge score combines raw call score, spread quality, premium trend, put-stress/skew warnings, OI context, and DTE; raw call score alone is not enough, and do not use a broad spot_price floor as a substitute for better premium or post-drop recovery.',
     });
   }
 
@@ -569,7 +570,7 @@ const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
         delta_range: CALL_DELTA_RANGE,
         dte_range: CALL_EXPIRATION_RANGE,
         min_bid: SELL_CALL_FALLBACK_MIN_BID,
-        min_score: SELL_CALL_FALLBACK_MIN_SCORE,
+        min_edge_score: SELL_CALL_FALLBACK_MIN_EDGE_SCORE,
       },
       priority: 'low',
       preferred_order_type: 'post_only',
@@ -836,14 +837,18 @@ const formatSellCallConfirmationContext = ({ action, triggerData, ticker, curren
   const executionBid = Number(currentPrice || action.price);
   const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
   const plannedScore = Math.abs(scoreDelta) > 0 && executionBid > 0 ? executionBid / Math.abs(scoreDelta) : null;
+  const sellCallResearch = triggerData?.sell_call_research || {};
+  const edgeScore = Number(triggerData?.selection_score ?? sellCallResearch?.selection_score);
+  const minEdgeScore = Number(criteria.min_edge_score);
   const fmt = (value, digits = 4) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
   return [
     'Sell-call value confirmation context:',
     `- Trigger score: ${fmt(triggerScore, 2)} using call score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
-    `- Rule gates: min_score=${fmt(Number(criteria.min_score), 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}.`,
+    `- Rule gates: min_edge_score=${fmt(minEdgeScore, 2)}, legacy_min_score=${fmt(Number(criteria.min_score), 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}.`,
+    `- Composite edge: edge_score=${fmt(edgeScore, 2)}, recommendation=${sellCallResearch?.recommendation || 'n/a'}.`,
     `- Live reference: executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}, planned_score=${fmt(plannedScore, 2)}.`,
-    '- Confirm sell_call when the fresh bid/score/margin facts satisfy the advisor rule. Trigger score and planned_score are current execution facts; do not let stale advisory-creation prose override them.',
+    '- Confirm sell_call when the fresh bid, composite edge score, min_bid, delta/DTE, and margin facts satisfy the advisor rule. Raw call score alone is not enough when the composite edge or explicit warnings contradict it.',
   ].join('\n');
 };
 
@@ -1385,7 +1390,7 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(requirements.some((req) => req.type === 'exit' && req.action === 'buyback_call' && req.instrument_name === 'ETH-20260529-2400-C'));
   });
 
-  test('sell_call watcher requirement demands score-based premium value', () => {
+  test('sell_call watcher requirement demands composite edge value', () => {
     const requirements = buildRulebookRequirements({
       accountHealth: {
         margin: { is_under_liquidation: false, margin_usage_pct: 49.8 },
@@ -1395,8 +1400,9 @@ describe('Standing rulebook coverage requirements', () => {
     const requirement = requirements.find((req) => req.type === 'entry' && req.action === 'sell_call');
 
     assert.ok(requirement);
-    assert.ok(requirement.instruction.includes('min_score'));
-    assert.ok(requirement.instruction.includes('bid / abs(delta)'));
+    assert.ok(requirement.instruction.includes('min_edge_score'));
+    assert.ok(requirement.instruction.includes('raw call score alone is not enough'));
+    assert.ok(requirement.instruction.includes('put-stress/skew'));
     assert.ok(requirement.instruction.includes('min_bid'));
     assert.ok(requirement.instruction.includes('do not use a broad spot_price floor'));
   });
@@ -1405,16 +1411,17 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(SCRIPT_SOURCE.includes('sell_call market_conditions may only use spot_price'));
     assert.ok(SCRIPT_SOURCE.includes('For sell_call, market_conditions may only contain spot_price conditions'));
     assert.ok(SCRIPT_SOURCE.includes('Do not encode non-spot evidence in market_conditions'));
-    assert.ok(SCRIPT_SOURCE.includes('raise min_score/min_bid or lower priority'));
+    assert.ok(SCRIPT_SOURCE.includes('raise min_edge_score/min_bid or lower priority'));
   });
 
-  test('advisor prompt anchors sell-call min_score to rolling call value context', () => {
+  test('advisor prompt anchors sell-call min_edge_score to rolling call edge context', () => {
     assert.ok(SCRIPT_SOURCE.includes('getSellCallScoreSamples'));
     assert.ok(SCRIPT_SOURCE.includes('call_value_context'));
-    assert.ok(SCRIPT_SOURCE.includes('Current CALL score:'));
+    assert.ok(SCRIPT_SOURCE.includes('Current CALL raw score:'));
     assert.ok(SCRIPT_SOURCE.includes('Prior ${context.window_days}d best CALL score'));
-    assert.ok(SCRIPT_SOURCE.includes('SELL-CALL VALUE CONTEXT'));
-    assert.ok(SCRIPT_SOURCE.includes('min_score should be above the weak current score'));
+    assert.ok(SCRIPT_SOURCE.includes('CALL edge gate:'));
+    assert.ok(SCRIPT_SOURCE.includes('High put value is a sell-call warning'));
+    assert.ok(SCRIPT_SOURCE.includes('min_edge_score should be above the weak current edge'));
   });
 
   test('Mandelbrot prompt uses 30-day hourly spot path instead of momentum labels', () => {
@@ -1483,7 +1490,7 @@ describe('Standing rulebook coverage requirements', () => {
       delta_range: CALL_DELTA_RANGE,
       dte_range: CALL_EXPIRATION_RANGE,
       min_bid: SELL_CALL_FALLBACK_MIN_BID,
-      min_score: SELL_CALL_FALLBACK_MIN_SCORE,
+      min_edge_score: SELL_CALL_FALLBACK_MIN_EDGE_SCORE,
     });
     assert.strictEqual(fallback.priority, 'low');
     assert.strictEqual(fallback.preferred_order_type, 'post_only');
@@ -6882,15 +6889,20 @@ describe('confirmation prompt margin context', () => {
           delta_range: [0.04, 0.12],
           dte_range: [5, 12],
           min_bid: 4,
-          min_score: 50,
+          min_edge_score: 80,
         },
       },
       triggerData: {
         score: 68.55,
+        selection_score: 91.2,
         delta: 0.1182,
         dte: 8.7,
         strike: 2100,
         live_price: 8.1,
+        sell_call_research: {
+          recommendation: 'acceptable',
+          edge_components: { raw_score: 68.55, candidate_spread_pct: 8.2, market_spread_pct: 11.4, market_best_put_score: 0.0021, market_skew_pct: 4.8 },
+        },
       },
       ticker: { b: 8.1, option_pricing: { d: '0.1182' } },
       currentPrice: 8.1,
@@ -6898,12 +6910,12 @@ describe('confirmation prompt margin context', () => {
 
     assert.ok(context.includes('Sell-call value confirmation context'));
     assert.ok(context.includes('Trigger score: 68.55'));
-    assert.ok(context.includes('min_score=50.00'));
+    assert.ok(context.includes('min_edge_score=80.00'));
+    assert.ok(context.includes('edge_score=91.20'));
     assert.ok(context.includes('min_bid=$4.0000'));
     assert.ok(context.includes('planned_score=68.53'));
-    assert.ok(context.includes('fresh bid/score/margin facts satisfy the advisor rule'));
-    assert.ok(context.includes('Trigger score and planned_score are current execution facts'));
-    assert.ok(context.includes('do not let stale advisory-creation prose override them'));
+    assert.ok(context.includes('fresh bid, composite edge score, min_bid, delta/DTE, and margin facts satisfy the advisor rule'));
+    assert.ok(context.includes('Raw call score alone is not enough'));
   });
 
   test('sell_put confirmation context preserves tail monetization floor and tranche discipline', () => {
