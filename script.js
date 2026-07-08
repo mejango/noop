@@ -276,6 +276,7 @@ const SELL_CALL_RESEARCH_STRONG_DTE_RANGE = [7, 9];
 const SELL_CALL_RESEARCH_MODERATE_SCORE_RANGE = [56.7, 91.5];
 const SELL_CALL_RESEARCH_STRONG_SCORE_RANGE = [71.8, 91.5];
 const SELL_CALL_RESEARCH_SCORE_SPIKE_CAUTION_PCT = 15;
+const CANDIDATE_OBSERVATION_TOP_N = 8;
 
 // Call buyback thresholds
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Harvest short calls once at least this much premium is captured
@@ -5857,6 +5858,129 @@ const classifySellCallResearchBand = ({ score, dte, scoreTrend24hPct = null } = 
   };
 };
 
+const telemetryNumber = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
+const logRuleDecisionSafe = (decision) => {
+  if (!db || typeof db.insertRuleDecision !== 'function') return null;
+  try {
+    return db.insertRuleDecision(decision);
+  } catch (e) {
+    console.log(`DB: rule decision write failed: ${e.message}`);
+    return null;
+  }
+};
+
+const recordCandidateObservationsSafe = (observations) => {
+  if (!db || typeof db.insertCandidateObservations !== 'function' || !Array.isArray(observations) || observations.length === 0) {
+    return null;
+  }
+  try {
+    return db.insertCandidateObservations(observations);
+  } catch (e) {
+    console.log(`DB: candidate observation write failed: ${e.message}`);
+    return null;
+  }
+};
+
+const getCandidateOptionType = (candidate, criteria = {}) => (
+  criteria.option_type
+  || candidate?.instrument?.option_details?.option_type
+  || (String(candidate?.name || '').endsWith('-P') ? 'P' : String(candidate?.name || '').endsWith('-C') ? 'C' : null)
+);
+
+const getCandidateExpiry = (candidate) => {
+  const directExpiry = telemetryNumber(candidate?.instrument?.option_details?.expiry);
+  if (directExpiry != null) return directExpiry;
+  const parsedExpiry = parseExpiryFromInstrument(candidate?.name);
+  const parsedSeconds = parsedExpiry ? parsedExpiry.getTime() / 1000 : null;
+  return Number.isFinite(parsedSeconds) ? parsedSeconds : null;
+};
+
+const buildCandidateObservationRows = ({
+  candidates = [],
+  rule,
+  criteria = {},
+  selectedName = null,
+  decisionStatus = 'observed',
+  selectionReason = null,
+  pendingActionId = null,
+  spotPrice = null,
+  tickTimestamp = null,
+  context = null,
+} = {}) => {
+  if (!Array.isArray(candidates) || candidates.length === 0 || !rule?.action) return [];
+  const observedAt = tickTimestamp || new Date().toISOString();
+  const dteRange = Array.isArray(criteria.dte_range) ? criteria.dte_range : [];
+  const deltaRange = Array.isArray(criteria.delta_range) ? criteria.delta_range : [];
+
+  return candidates.slice(0, CANDIDATE_OBSERVATION_TOP_N).map((candidate, index) => {
+    const ticker = candidate?.ticker || {};
+    const bidPrice = telemetryNumber(candidate?.bidPrice ?? ticker.b);
+    const askPrice = telemetryNumber(candidate?.askPrice ?? ticker.a);
+    const markPrice = telemetryNumber(candidate?.markPrice ?? ticker.M);
+    const bidAmount = telemetryNumber(candidate?.bidAmount ?? ticker.B);
+    const askAmount = telemetryNumber(candidate?.askAmount ?? ticker.A);
+    const research = candidate?.sellCallResearch || null;
+    const isSelected = Boolean(selectedName && candidate?.name === selectedName);
+    const metadata = {
+      ...(context || {}),
+      price_source: candidate?.priceSource || null,
+      score_threshold_price: candidate?.scoreThresholdPrice ?? null,
+      candidate_limit_price: candidate?.candidateLimitPrice ?? null,
+      live_score: candidate?.liveScore ?? null,
+      research_reason: research?.reason || null,
+    };
+
+    return {
+      observed_at: observedAt,
+      tick_id: observedAt,
+      rule_id: rule.id,
+      pending_action_id: isSelected ? pendingActionId : null,
+      action: rule.action,
+      instrument_name: candidate.name,
+      option_type: getCandidateOptionType(candidate, criteria),
+      candidate_rank: index + 1,
+      selected: isSelected,
+      decision_status: isSelected ? decisionStatus : 'not_selected',
+      selection_reason: isSelected
+        ? selectionReason
+        : (selectedName ? `ranked below selected ${selectedName}` : selectionReason),
+      spot_price: spotPrice,
+      strike: candidate?.strike ?? candidate?.instrument?.option_details?.strike ?? null,
+      expiry: getCandidateExpiry(candidate),
+      dte: candidate?.dte ?? null,
+      delta: candidate?.delta ?? ticker?.option_pricing?.d ?? null,
+      bid_price: bidPrice,
+      ask_price: askPrice,
+      mark_price: markPrice,
+      bid_amount: bidAmount,
+      ask_amount: askAmount,
+      spread_pct: bidPrice != null && askPrice != null && markPrice > 0 ? (askPrice - bidPrice) / markPrice : null,
+      depth: (bidAmount || 0) + (askAmount || 0),
+      implied_vol: ticker?.option_pricing?.i ?? ticker?.details?.impliedVol ?? null,
+      open_interest: ticker?.stats?.oi ?? ticker?.open_interest ?? null,
+      raw_score: candidate?.score ?? null,
+      selection_score: candidate?.selectionScore ?? candidate?.score ?? null,
+      score_band: research?.score_band || null,
+      dte_bucket: research?.dte_bucket || null,
+      research_recommendation: research?.recommendation || null,
+      score_trend_24h_pct: research?.score_trend_24h_pct ?? null,
+      spot_ret_6h: context?.spot_ret_6h ?? null,
+      spot_ret_24h: context?.spot_ret_24h ?? null,
+      rule_min_score: criteria.min_score ?? null,
+      rule_min_bid: criteria.min_bid ?? null,
+      rule_dte_min: dteRange[0] ?? null,
+      rule_dte_max: dteRange[1] ?? null,
+      rule_delta_min: deltaRange[0] ?? null,
+      rule_delta_max: deltaRange[1] ?? null,
+      metadata,
+    };
+  });
+};
+
 const computeCurrentValues = (position, ticker, spotPrice) => {
   const dte = computeDteFromInstrumentName(position.instrument_name);
   const markPrice = Number(ticker?.M) || position.mark_price || 0;
@@ -7316,6 +7440,16 @@ const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice,
 
 const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice) => {
   let triggeredCount = 0;
+  const evaluationTimestamp = new Date().toISOString();
+  const logDecision = (rule, decision) => logRuleDecisionSafe({
+    evaluated_at: evaluationTimestamp,
+    rule_id: rule?.id ?? null,
+    rule_type: rule?.rule_type ?? null,
+    action: rule?.action ?? null,
+    instrument_name: rule?.instrument_name ?? null,
+    spot_price: spotPrice,
+    ...decision,
+  });
 
   // ── Exit rules ─────────────────────────────────────────────────────────────
   try {
@@ -7324,7 +7458,14 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
     for (const rule of exitRules) {
       try {
         const position = positions.find(p => p.instrument_name === rule.instrument_name);
-        if (!position) continue;
+        if (!position) {
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'no_position',
+            reason: 'No live position matched exit rule instrument',
+          });
+          continue;
+        }
 
         const ticker = tickerMap[rule.instrument_name];
         const values = getRuleEvaluationValues(position, ticker, spotPrice, rule.action);
@@ -7333,6 +7474,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { criteria = null; }
         if (!criteria || typeof criteria !== 'object' || !Array.isArray(criteria.conditions)) {
           console.log(`📋 Exit rule ${rule.id}: skipping — criteria missing structured conditions`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'malformed_criteria',
+            reason: 'Exit criteria missing structured conditions',
+            criteria_json: criteria || rule.criteria || null,
+          });
           continue;
         }
         const instrument = instruments.find(item => item.instrument_name === rule.instrument_name);
@@ -7360,7 +7507,16 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const triggered = evaluateConditions(criteria.conditions, criteria.condition_logic, values)
           || Boolean(patientBuybackPlan)
           || Boolean(patientSellPutPlan);
-        if (!triggered) continue;
+        if (!triggered) {
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'conditions_not_met',
+            reason: 'Exit conditions did not trigger',
+            criteria_json: criteria,
+            context_json: { current_values: plannedValues },
+          });
+          continue;
+        }
         const plannedSellPutAmount = rule.action === 'sell_put'
           ? getSellPutExitAmount(rule, criteria, position, plannedValues)
           : null;
@@ -7368,6 +7524,13 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const buybackGate = getBuybackCaptureGate(rule, criteria, plannedValues);
         if (!buybackGate.allowed) {
           console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} — ${buybackGate.reason}`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'buyback_gate',
+            reason: buybackGate.reason,
+            criteria_json: criteria,
+            context_json: { current_values: plannedValues },
+          });
           continue;
         }
         const putExitGate = getSellPutProtectionGate(rule, plannedValues, {
@@ -7378,11 +7541,26 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         });
         if (!putExitGate.allowed) {
           console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} — ${putExitGate.reason}`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'put_exit_gate',
+            reason: putExitGate.reason,
+            criteria_json: criteria,
+            context_json: { current_values: plannedValues },
+          });
           continue;
         }
 
         // Dedup: skip if there's already a pending/confirmed action for this rule
-        if (db.hasPendingActionForRule(rule.id)) continue;
+        if (db.hasPendingActionForRule(rule.id)) {
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'pending_duplicate',
+            reason: 'Rule already has pending or confirmed action',
+            criteria_json: criteria,
+          });
+          continue;
+        }
 
         const recentRejection = getRecentRejectedAction(rule.action, rule.instrument_name);
         if (recentRejection) {
@@ -7393,6 +7571,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             console.log(`📋 Exit retry: ${rule.action} ${rule.instrument_name} ignoring stale patient-buyback threshold rejection; patient bid $${patientBuybackPlan.limitPrice.toFixed(4)} captures ${patientBuybackPlan.capturePct.toFixed(2)}%`);
           } else {
             console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} rejected recently; backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'recent_rejection',
+              reason: recentRejection.reason || 'Recent rejection backoff',
+              criteria_json: criteria,
+            });
             continue;
           }
         }
@@ -7400,6 +7584,14 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const existingRestingExit = findRestingExitOrderForRule(openRestingExitOrders, rule);
         if (existingRestingExit) {
           console.log(`📋 Keep resting ${rule.action} ${rule.instrument_name}: existing advisor-backed order already on book @ $${Number(existingRestingExit.limit_price).toFixed(4)} x ${Number(existingRestingExit.amount).toFixed(2)}`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'existing_resting_exit',
+            reason: 'Existing advisor-backed exit order already on book',
+            price: existingRestingExit.limit_price,
+            amount: existingRestingExit.amount,
+            criteria_json: criteria,
+          });
           continue;
         }
 
@@ -7413,10 +7605,19 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         // Skip selling worthless positions — mark < $0.10 means nothing to recover
         if (rule.action === 'sell_put' && markPrice < 0.10) {
           console.log(`📋 Exit skip: ${rule.instrument_name} mark $${markPrice.toFixed(4)} — worthless, let expire`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'worthless_position',
+            reason: `Mark ${markPrice.toFixed(4)} below exit value floor`,
+            price: markPrice,
+            amount: plannedSellPutAmount ?? position.amount,
+            criteria_json: criteria,
+            context_json: { current_values: plannedValues },
+          });
           continue;
         }
 
-        db.insertPendingAction({
+        const pendingResult = db.insertPendingAction({
           rule_id: rule.id,
           action: rule.action,
           instrument_name: rule.instrument_name,
@@ -7442,6 +7643,18 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
             },
           });
+        const pendingActionId = pendingResult?.lastInsertRowid ?? null;
+        logDecision(rule, {
+          decision_status: 'triggered',
+          reason_code: 'exit_triggered',
+          reason: 'Exit rule triggered pending action',
+          selected_instrument: rule.instrument_name,
+          price,
+          amount: plannedSellPutAmount ?? position.amount,
+          pending_action_id: pendingActionId,
+          criteria_json: criteria,
+          context_json: { current_values: plannedValues },
+        });
         triggeredCount++;
         console.log(`📋 Exit triggered: ${rule.action} ${rule.instrument_name}`);
       } catch (e) {
@@ -7488,6 +7701,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { criteria = null; }
         if (!criteria || typeof criteria !== 'object' || !criteria.option_type) {
           console.log(`📋 Entry rule ${rule.id}: skipping — criteria missing structured fields (need option_type, delta_range, dte_range)`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'malformed_criteria',
+            reason: 'Entry criteria missing structured fields',
+            criteria_json: criteria || rule.criteria || null,
+          });
           try {
             const deactivated = db.deactivateRuleById ? db.deactivateRuleById(rule.id) : 0;
             if (deactivated > 0) {
@@ -7505,6 +7724,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           const elapsed = Date.now() - new Date(lastExec).getTime();
           if (elapsed < 3600000) {
             console.log(`📋 Entry skip: ${rule.action} action cooldown active for ${formatCooldownMinutes(3600000 - elapsed)}`);
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'action_cooldown',
+              reason: `Action cooldown active for ${formatCooldownMinutes(3600000 - elapsed)}`,
+              criteria_json: criteria,
+            });
             continue; // 1 hour cooldown
           }
         }
@@ -7536,6 +7761,18 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               `📋 Entry skip: buy_put budget unavailable; remaining=$${putRemaining.toFixed(2)}`
               + ` (cycle=$${botData.putBudgetForCycle.toFixed(2)}, rollover=$${botData.putUnspentBuyLimit.toFixed(2)}, spent=$${botData.putNetBought.toFixed(2)}, reserved=$${reservedCapacity.putBudget.toFixed(2)})`
             );
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'put_budget_unavailable',
+              reason: `buy_put budget unavailable; remaining=$${putRemaining.toFixed(2)}`,
+              criteria_json: criteria,
+              context_json: {
+                cycle_budget: botData.putBudgetForCycle,
+                rollover: botData.putUnspentBuyLimit,
+                spent: botData.putNetBought,
+                reserved: reservedCapacity.putBudget,
+              },
+            });
             continue;
           }
         }
@@ -7544,6 +7781,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         if (rule.action === 'sell_call') {
           if (!liveMarginState) {
             console.log(`📋 Skip ${rule.action}: margin state unavailable`);
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'margin_state_unavailable',
+              reason: 'Unable to fetch margin state for sell_call entry',
+              criteria_json: criteria,
+            });
             continue;
           }
           const effectiveCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
@@ -7551,10 +7794,23 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           const currentUtilization = estimateProjectedDisplayedMarginUtilization(liveMarginState, provisionalCallOrderMargin);
           if (currentUtilization == null) {
             console.log(`📋 Skip ${rule.action}: unable to compute margin utilization`);
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'margin_utilization_unavailable',
+              reason: 'Unable to compute projected margin utilization',
+              criteria_json: criteria,
+            });
             continue;
           }
           if (currentUtilization >= effectiveCapPct) {
             console.log(`📋 Call entry cap reached: ${(currentUtilization * 100).toFixed(1)}% >= ${(effectiveCapPct * 100).toFixed(1)}% target cap; ${(effectiveLimitPct * 100).toFixed(1)}% buffer is reserved for execution drift`);
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'call_exposure_cap_reached',
+              reason: `Current utilization ${(currentUtilization * 100).toFixed(1)}% >= target cap ${(effectiveCapPct * 100).toFixed(1)}%`,
+              criteria_json: criteria,
+              context_json: { current_utilization: currentUtilization, target_cap_pct: effectiveCapPct, effective_limit_pct: effectiveLimitPct },
+            });
             continue;
           }
         }
@@ -7563,11 +7819,23 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         // through the candidate scan so we can keep, adjust, or replace them.
         if (hasPendingOrConfirmedActionForRule(rule.id)) {
           console.log(`📋 Entry skip: ${rule.action} rule ${rule.id} already has pending/confirmed action`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'pending_duplicate',
+            reason: 'Rule already has pending or confirmed entry action',
+            criteria_json: criteria,
+          });
           continue;
         }
 
         if (workingEntryActions.some((action) => action.action === rule.action && action.status !== 'resting')) {
           console.log(`📋 Entry skip: ${rule.action} already has a pending or confirmed entry order`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'working_action_duplicate',
+            reason: 'Action already has pending or confirmed entry order',
+            criteria_json: criteria,
+          });
           continue;
         }
 
@@ -7593,10 +7861,25 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           : Boolean(marketConditions);
         if (hasMarketConditions) {
           const marketValues = { spot_price: spotPrice };
-          if (!evaluateConditions(marketConditions, 'all', marketValues)) continue;
+          if (!evaluateConditions(marketConditions, 'all', marketValues)) {
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'market_conditions_not_met',
+              reason: 'Entry market conditions did not pass',
+              criteria_json: criteria,
+              context_json: { market_values: marketValues },
+            });
+            continue;
+          }
         }
         if (rule.action === 'buy_put' && hasExplicitBuyPutValueSignal(rawValueSignal) && !valueSignal) {
           console.log(`📋 Entry skip: buy_put rule ${rule.id} has unknown value_signal=${rawValueSignal}`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'unknown_value_signal',
+            reason: `Unknown value_signal=${rawValueSignal}`,
+            criteria_json: criteria,
+          });
           continue;
         }
         const currentBuyPutSignal = rule.action === 'buy_put'
@@ -7605,6 +7888,13 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         if (rule.action === 'buy_put' && valueSignal) {
           if (!buyPutValueSignalMatches(valueSignal, currentBuyPutSignal) && !hasRestingEntryForRule) {
             console.log(`📋 Entry skip: buy_put rule ${rule.id} value_signal=${valueSignal} does not match current signal ${currentBuyPutSignal || 'none'}`);
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'value_signal_mismatch',
+              reason: `Required value_signal=${valueSignal} did not match current signal ${currentBuyPutSignal || 'none'}`,
+              criteria_json: criteria,
+              context_json: { required_value_signal: valueSignal, current_buy_put_signal: currentBuyPutSignal || null },
+            });
             continue;
           }
         }
@@ -7716,6 +8006,14 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         if (candidates.length === 0) {
           const filtered = Object.entries(filterStats).filter(([k, v]) => k !== 'total' && v > 0).map(([k, v]) => `${k}=${v}`).join(', ');
           console.log(`📋 Rule ${rule.id} (${rule.action}): 0 candidates from ${filterStats.total} tickers — filtered by: ${filtered || 'no tickers'}`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'no_candidates',
+            reason: `0 candidates from ${filterStats.total} tickers; filtered by ${filtered || 'no tickers'}`,
+            candidates_evaluated: 0,
+            criteria_json: criteria,
+            context_json: { filter_stats: filterStats },
+          });
           if (optionType || dteRange) {
             const expirySummary = new Map();
             for (const instrName of Object.keys(tickerMap)) {
@@ -7760,11 +8058,49 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         });
         if (!best) {
           console.log(`📋 Rule ${rule.id} (${rule.action}): ${candidates.length} candidate(s) blocked by same-instrument resting orders`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'all_candidates_blocked_by_resting',
+            reason: `${candidates.length} candidate(s) blocked by same-instrument resting orders`,
+            candidates_evaluated: candidates.length,
+            criteria_json: criteria,
+            context_json: { filter_stats: filterStats },
+          });
+          recordCandidateObservationsSafe(buildCandidateObservationRows({
+            candidates,
+            rule,
+            criteria,
+            selectedName: null,
+            decisionStatus: 'skipped',
+            selectionReason: 'all candidates blocked by same-instrument resting orders',
+            spotPrice,
+            tickTimestamp: evaluationTimestamp,
+            context: { filter_stats: filterStats, blocked_by_resting_order: candidates.length },
+          }));
           continue;
         }
         if (blockedByRestingOrder > 0) {
           console.log(`📋 Rule ${rule.id} (${rule.action}): skipped ${blockedByRestingOrder} candidate(s) with same-instrument resting orders; selected ${best.name}`);
         }
+        const candidateTelemetryContext = {
+          filter_stats: filterStats,
+          blocked_by_resting_order: blockedByRestingOrder,
+          required_value_signal: rule.action === 'buy_put' ? valueSignal || null : null,
+          current_buy_put_signal: rule.action === 'buy_put' ? currentBuyPutSignal || null : null,
+          target_score: targetScore,
+        };
+        const recordCandidateFrame = (decisionStatus, selectionReason, pendingActionId = null, extraContext = {}) => recordCandidateObservationsSafe(buildCandidateObservationRows({
+          candidates,
+          rule,
+          criteria,
+          selectedName: best.name,
+          decisionStatus,
+          selectionReason,
+          pendingActionId,
+          spotPrice,
+          tickTimestamp: evaluationTimestamp,
+          context: { ...candidateTelemetryContext, ...extraContext },
+        }));
 
         // Calculate amount: min of rule budget_limit, put cycle budget remaining, and book liquidity
         const livePrice = optionType === 'P' ? best.askPrice : best.bidPrice;
@@ -7774,7 +8110,23 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         let price = rule.action === 'buy_put' && Number(best.candidateLimitPrice) > 0
           ? Number(best.candidateLimitPrice)
           : livePrice;
-        if (price <= 0) continue;
+        if (price <= 0) {
+          const reason = 'Selected candidate had non-positive execution price';
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'invalid_price',
+            reason,
+            candidates_evaluated: candidates.length,
+            selected_instrument: best.name,
+            raw_score: best.score,
+            selection_score: best.selectionScore,
+            price,
+            criteria_json: criteria,
+            context_json: { ...candidateTelemetryContext, live_price: livePrice },
+          });
+          recordCandidateFrame('skipped', reason, null, { live_price: livePrice, price });
+          continue;
+        }
 
         let maxByBudget = (rule.budget_limit || Infinity) / price;
         let sellCallMarginDebug = null;
@@ -7840,13 +8192,54 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             );
           }
         }
-        if (qty < step) continue;
+        if (qty < step) {
+          const reason = `No tradable size after budget/liquidity/margin caps; desired=${raw.toFixed(4)}, step=${step.toFixed(4)}`;
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'quantity_below_step',
+            reason,
+            candidates_evaluated: candidates.length,
+            selected_instrument: best.name,
+            raw_score: best.score,
+            selection_score: best.selectionScore,
+            price,
+            amount: qty,
+            criteria_json: criteria,
+            context_json: { ...candidateTelemetryContext, raw_quantity: raw, step, sell_call_margin: sellCallMarginDebug },
+          });
+          recordCandidateFrame('skipped', reason, null, {
+            price,
+            raw_quantity: raw,
+            step,
+            sell_call_margin: sellCallMarginDebug,
+          });
+          continue;
+        }
         const venueQty = floorOrderAmountToVenuePrecision(qty);
         if (!isVenueOrderAmountTradable(venueQty)) {
           console.log(
             `📋 Skip ${rule.action} ${best.name}: qty=${qty.toFixed(4)} normalizes to ${venueQty.toFixed(VENUE_AMOUNT_DECIMALS)},`
             + ` not above venue minimum ${VENUE_MIN_ORDER_AMOUNT}`
           );
+          const reason = `Venue amount ${venueQty.toFixed(VENUE_AMOUNT_DECIMALS)} not above minimum ${VENUE_MIN_ORDER_AMOUNT}`;
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'venue_quantity_too_small',
+            reason,
+            candidates_evaluated: candidates.length,
+            selected_instrument: best.name,
+            raw_score: best.score,
+            selection_score: best.selectionScore,
+            price,
+            amount: venueQty,
+            criteria_json: criteria,
+            context_json: { ...candidateTelemetryContext, qty_before_venue_rounding: qty },
+          });
+          recordCandidateFrame('skipped', reason, null, {
+            price,
+            qty_before_venue_rounding: qty,
+            venue_qty: venueQty,
+          });
           continue;
         }
         qty = venueQty;
@@ -7856,6 +8249,33 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         if (existingResting) {
           if (!restingOrderNeedsAdjustment(existingResting, price, qty, best.instrument)) {
             console.log(`📋 Keep resting ${rule.action} ${best.name}: existing order already aligned @ $${Number(existingResting.limit_price).toFixed(4)} x ${Number(existingResting.amount).toFixed(2)}`);
+            const reason = 'Existing resting entry order already aligned with selected candidate';
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'existing_resting_aligned',
+              reason,
+              candidates_evaluated: candidates.length,
+              selected_instrument: best.name,
+              raw_score: best.score,
+              selection_score: best.selectionScore,
+              price,
+              amount: qty,
+              pending_action_id: existingResting.pending_action_id ?? null,
+              criteria_json: criteria,
+              context_json: {
+                ...candidateTelemetryContext,
+                existing_order_id: existingResting.order_id,
+                existing_price: existingResting.limit_price,
+                existing_amount: existingResting.amount,
+              },
+            });
+            recordCandidateFrame('skipped', reason, existingResting.pending_action_id ?? null, {
+              price,
+              amount: qty,
+              existing_order_id: existingResting.order_id,
+              existing_price: existingResting.limit_price,
+              existing_amount: existingResting.amount,
+            });
             continue;
           }
 
@@ -7863,6 +8283,26 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           const cancelled = await cancelOrder(existingResting.order_id, existingResting.instrument_name);
           if (!cancelled) {
             console.log(`📋 Keep resting ${rule.action} ${best.name}: cancel failed, re-evaluate next tick`);
+            const reason = 'Existing resting order cancellation failed before adjustment';
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'resting_cancel_failed',
+              reason,
+              candidates_evaluated: candidates.length,
+              selected_instrument: best.name,
+              raw_score: best.score,
+              selection_score: best.selectionScore,
+              price,
+              amount: qty,
+              pending_action_id: existingResting.pending_action_id ?? null,
+              criteria_json: criteria,
+              context_json: { ...candidateTelemetryContext, existing_order_id: existingResting.order_id },
+            });
+            recordCandidateFrame('skipped', reason, existingResting.pending_action_id ?? null, {
+              price,
+              amount: qty,
+              existing_order_id: existingResting.order_id,
+            });
             continue;
           }
           db.updateRestingOrder(existingResting.order_id, 'cancelled', existingResting.filled_amount || 0);
@@ -7889,6 +8329,33 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             );
             if (!canReplaceDifferentResting) {
               console.log(`📋 Entry skip: ${rule.action} already has a resting entry order (${sameActionResting.instrument_name})`);
+              const reason = `Same action already has resting entry order on ${sameActionResting.instrument_name}`;
+              logDecision(rule, {
+                decision_status: 'skipped',
+                reason_code: 'same_action_resting_order',
+                reason,
+                candidates_evaluated: candidates.length,
+                selected_instrument: best.name,
+                raw_score: best.score,
+                selection_score: best.selectionScore,
+                price,
+                amount: qty,
+                pending_action_id: sameActionResting.pending_action_id ?? null,
+                criteria_json: criteria,
+                context_json: {
+                  ...candidateTelemetryContext,
+                  resting_instrument: sameActionResting.instrument_name,
+                  resting_order_id: sameActionResting.order_id,
+                  resting_price: sameActionResting.limit_price,
+                },
+              });
+              recordCandidateFrame('skipped', reason, sameActionResting.pending_action_id ?? null, {
+                price,
+                amount: qty,
+                resting_instrument: sameActionResting.instrument_name,
+                resting_order_id: sameActionResting.order_id,
+                resting_price: sameActionResting.limit_price,
+              });
               continue;
             }
 
@@ -7898,6 +8365,26 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             const cancelled = await cancelOrder(sameActionResting.order_id, sameActionResting.instrument_name);
             if (!cancelled) {
               console.log(`📋 Keep resting ${rule.action} ${sameActionResting.instrument_name}: cancel failed, re-evaluate next tick`);
+              const reason = `Resting ${rule.action} replacement cancel failed`;
+              logDecision(rule, {
+                decision_status: 'skipped',
+                reason_code: 'replacement_cancel_failed',
+                reason,
+                candidates_evaluated: candidates.length,
+                selected_instrument: best.name,
+                raw_score: best.score,
+                selection_score: best.selectionScore,
+                price,
+                amount: qty,
+                pending_action_id: sameActionResting.pending_action_id ?? null,
+                criteria_json: criteria,
+                context_json: { ...candidateTelemetryContext, resting_order_id: sameActionResting.order_id },
+              });
+              recordCandidateFrame('skipped', reason, sameActionResting.pending_action_id ?? null, {
+                price,
+                amount: qty,
+                resting_order_id: sameActionResting.order_id,
+              });
               continue;
             }
             db.updateRestingOrder(sameActionResting.order_id, 'cancelled', sameActionResting.filled_amount || 0);
@@ -7920,12 +8407,58 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const blockingRestingOrder = getBlockingRestingOrderForEntryCandidate(rule.action, best, price);
         if (blockingRestingOrder) {
           console.log(`📋 Skip ${rule.action} ${best.name}: blocking resting ${blockingRestingOrder.action || 'order'} already on book @ $${Number(blockingRestingOrder.limit_price || 0).toFixed(4)}`);
+          const reason = `Blocking resting ${blockingRestingOrder.action || 'order'} already on book`;
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'blocking_resting_order',
+            reason,
+            candidates_evaluated: candidates.length,
+            selected_instrument: best.name,
+            raw_score: best.score,
+            selection_score: best.selectionScore,
+            price,
+            amount: qty,
+            pending_action_id: blockingRestingOrder.pending_action_id ?? null,
+            criteria_json: criteria,
+            context_json: {
+              ...candidateTelemetryContext,
+              blocking_action: blockingRestingOrder.action || null,
+              blocking_order_id: blockingRestingOrder.order_id || null,
+              blocking_price: blockingRestingOrder.limit_price || null,
+            },
+          });
+          recordCandidateFrame('skipped', reason, blockingRestingOrder.pending_action_id ?? null, {
+            price,
+            amount: qty,
+            blocking_action: blockingRestingOrder.action || null,
+            blocking_order_id: blockingRestingOrder.order_id || null,
+            blocking_price: blockingRestingOrder.limit_price || null,
+          });
           continue;
         }
 
         const recentRejection = getRecentRejectedAction(rule.action, best.name);
         if (recentRejection) {
           console.log(`📋 Skip ${rule.action} ${best.name}: rejected recently, backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
+          const reason = recentRejection.reason || 'Recent rejection backoff';
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'recent_rejection',
+            reason,
+            candidates_evaluated: candidates.length,
+            selected_instrument: best.name,
+            raw_score: best.score,
+            selection_score: best.selectionScore,
+            price,
+            amount: qty,
+            criteria_json: criteria,
+            context_json: { ...candidateTelemetryContext, rejection_remaining_ms: recentRejection.remaining },
+          });
+          recordCandidateFrame('skipped', reason, null, {
+            price,
+            amount: qty,
+            rejection_remaining_ms: recentRejection.remaining,
+          });
           continue;
         }
 
@@ -7935,11 +8468,30 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             console.log(`📋 Retry ${rule.action} ${best.name}: recent IOC zero fill is not a cooldown blocker (${recentFailedEntry.reason || 'zero fill'})`);
           } else {
             console.log(`📋 Skip ${rule.action} ${best.name}: failed recently, cooling down (${recentFailedEntry.reason || 'recent execution failure'})`);
+            const reason = recentFailedEntry.reason || 'Recent execution failure cooldown';
+            logDecision(rule, {
+              decision_status: 'skipped',
+              reason_code: 'recent_failed_entry',
+              reason,
+              candidates_evaluated: candidates.length,
+              selected_instrument: best.name,
+              raw_score: best.score,
+              selection_score: best.selectionScore,
+              price,
+              amount: qty,
+              criteria_json: criteria,
+              context_json: { ...candidateTelemetryContext, failed_elapsed_ms: recentFailedEntry.elapsed },
+            });
+            recordCandidateFrame('skipped', reason, null, {
+              price,
+              amount: qty,
+              failed_elapsed_ms: recentFailedEntry.elapsed,
+            });
             continue;
           }
         }
 
-        db.insertPendingAction({
+        const pendingResult = db.insertPendingAction({
           rule_id: rule.id,
           action: rule.action,
           instrument_name: best.name,
@@ -7980,6 +8532,35 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             preferred_order_type: currentBuyPutSignal === 'spot_drop_option_repricing_lag' ? 'ioc' : normalizePreferredOrderType(rule.action, rule.preferred_order_type),
           },
         });
+        const pendingActionId = pendingResult?.lastInsertRowid ?? null;
+        logDecision(rule, {
+          decision_status: 'triggered',
+          reason_code: 'candidate_selected',
+          reason: 'Selected candidate created pending entry action',
+          candidates_evaluated: candidates.length,
+          selected_instrument: best.name,
+          raw_score: best.score,
+          selection_score: best.selectionScore,
+          price,
+          amount: qty,
+          pending_action_id: pendingActionId,
+          criteria_json: criteria,
+          context_json: {
+            ...candidateTelemetryContext,
+            projected_utilization: projectedDisplayedUtilization,
+            live_price: livePrice,
+            live_score: rule.action === 'buy_put' ? best.liveScore : null,
+            planned_score: rule.action === 'buy_put' ? best.score : null,
+            price_source: rule.action === 'buy_put' ? best.priceSource : null,
+            sell_call_research: rule.action === 'sell_call' ? best.sellCallResearch || null : null,
+          },
+        });
+        recordCandidateFrame('triggered', 'selected candidate created pending entry action', pendingActionId, {
+          price,
+          amount: qty,
+          projected_utilization: projectedDisplayedUtilization,
+          live_price: livePrice,
+        });
         triggeredCount++;
         openRestingEntryOrders.push({
           order_id: `pending-${rule.id}-${best.name}`,
@@ -7988,6 +8569,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           direction: rule.action === 'buy_put' ? 'buy' : 'sell',
           amount: qty,
           limit_price: price,
+          pending_action_id: pendingActionId,
         });
         if (rule.action === 'sell_call' && liveMarginState) {
           provisionalCallOrderMargin += qty * estimateShortCallMarginPerUnit(
@@ -8094,6 +8676,7 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
           success: filledAmt > 0,
           reason: `Resting order ${status} — filled ${filledAmt}/${tracked.amount}${finalStatus?.cancel_reason ? ` (${finalStatus.cancel_reason})` : ''}`,
           instrument_name: tracked.instrument_name,
+          pending_action_id: tracked.pending_action_id ?? null,
           strike: null, expiry: null, delta: null,
           price: fillPrice, intended_amount: tracked.amount,
           filled_amount: filledAmt, fill_price: filledAmt > 0 ? fillPrice : null,
@@ -8605,12 +9188,20 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
 };
 
 const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc', tickerMap = {}, pendingActionId = null, executionContext = {}) => {
+  const insertExecutionOrder = (payload) => {
+    if (!db) return;
+    db.insertOrder({
+      ...payload,
+      pending_action_id: payload.pending_action_id ?? pendingActionId,
+    });
+  };
+
   // DRY_RUN mode: track budget discipline but skip actual order
   if (process.env.DRY_RUN === '1') {
     const totalValue = amount * price;
     if (action === 'buy_put') botData.putNetBought += totalValue;
     persistCycleState();
-    if (db) db.insertOrder({
+    insertExecutionOrder({
       action, success: true, reason: `DRY RUN: simulated ${action} (${orderType})`,
       instrument_name: instrumentName, strike: null, expiry: null,
       delta: null, price, intended_amount: amount,
@@ -8636,7 +9227,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     } catch (error) {
       const reason = `Synthetic reduce-only guard blocked resting ${action}: unable to verify venue open orders (${error.message})`;
       console.error(`❌ ${reason}`);
-      if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice, price, intended_amount: amount });
+      insertExecutionOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice, price, intended_amount: amount });
       return { failed: true, reason };
     }
     const syntheticPreflight = getSyntheticReduceOnlyPreflight({
@@ -8653,7 +9244,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     if (!syntheticPreflight.allowed) {
       const reason = `Synthetic reduce-only guard blocked resting ${action}: ${syntheticPreflight.reason}`;
       console.error(`❌ ${reason}`);
-      if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice, price, intended_amount: amount });
+      insertExecutionOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice, price, intended_amount: amount });
       return { failed: true, reason };
     }
 
@@ -8670,7 +9261,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   if (!(Number(price) > 0)) {
     const reason = `Invalid execution price for ${action}: ${price}`;
     console.error(`❌ ${reason}`);
-    if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
+    insertExecutionOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
     return { failed: true, reason };
   }
 
@@ -8715,7 +9306,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   if (!isVenueOrderAmountTradable(venueAmount)) {
     const reason = `Order amount ${Number(amount).toFixed(4)} normalizes to ${venueAmount.toFixed(VENUE_AMOUNT_DECIMALS)}, not above venue minimum ${VENUE_MIN_ORDER_AMOUNT}`;
     console.log(`📋 Skip ${action} ${instrumentName}: ${reason}`);
-    if (db) db.insertOrder({
+    insertExecutionOrder({
       action,
       success: false,
       reason,
@@ -8750,19 +9341,19 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   } catch (error) {
     console.error(`❌ Error placing ${action} order for ${instrumentName}:`, error.message);
     const reason = `Order error: ${error.message}`;
-    if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
+    insertExecutionOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
     return { failed: true, reason };
   }
 
   if (!order) {
     const reason = 'Order placement failed';
-    if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
+    insertExecutionOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
     return { failed: true, reason };
   }
 
   if (order.zero_fill_rejected) {
     console.log(`⚠️ Zero fill: ${action} ${instrumentName} @ $${price} [IOC] — no liquidity inside limit`);
-    if (db) db.insertOrder({
+    insertExecutionOrder({
       action, success: false, reason: `Zero fill (IOC) — no matching orders at $${price}`,
       instrument_name: instrumentName,
       strike: instrument.option_details?.strike || null,
@@ -8777,7 +9368,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
 
   if (order.placement_error) {
     const reason = `Venue rejected order: ${order.placement_error}`;
-    if (db) db.insertOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice, price, intended_amount: amount });
+    insertExecutionOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice, price, intended_amount: amount });
     return { failed: true, reason };
   }
 
@@ -8844,7 +9435,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
           reason: retryOrder?.error || retryOrder?.placement_error || order.error || null,
         });
         console.log(`📋 post_only retry failed: ${action} ${instrumentName} — ${finalContext}`);
-        if (db) db.insertOrder({
+        insertExecutionOrder({
           action, success: false,
           reason: `post_only rejected after maker retry: ${finalContext}`,
           instrument_name: instrumentName, spot_price: spotPrice,
@@ -8865,7 +9456,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     } else if (orderType === 'post_only' && retryPlan && !retryMarginCheck.allowed) {
       const blockedContext = `${initialContext}, margin_guard=${retryMarginCheck.reason}`;
       console.log(`📋 post_only retry blocked: ${action} ${instrumentName} — ${blockedContext}`);
-      if (db) db.insertOrder({
+      insertExecutionOrder({
         action, success: false,
         reason: `post_only retry blocked by margin guard: ${blockedContext}`,
         instrument_name: instrumentName, spot_price: spotPrice,
@@ -8884,7 +9475,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       };
     } else {
       console.log(`📋 post_only rejected: ${action} ${instrumentName} @ $${price} — no maker retry available (${initialContext})`);
-      if (db) db.insertOrder({
+      insertExecutionOrder({
         action, success: false,
         reason: `post_only rejected without retry: ${initialContext}`,
         instrument_name: instrumentName, spot_price: spotPrice,
@@ -8910,7 +9501,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   // Zero-fill detection: IOC orders that matched nothing
   if (filledAmt === 0 && orderType === 'ioc') {
     console.log(`⚠️ Zero fill: ${action} ${instrumentName} @ $${price} [IOC] — no liquidity`);
-    if (db) db.insertOrder({
+    insertExecutionOrder({
       action, success: false, reason: `Zero fill (IOC) — no matching orders at $${price}`,
       instrument_name: instrumentName,
       strike: instrument.option_details?.strike || null,
@@ -8953,7 +9544,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   if (db) {
     const strike = instrument.option_details?.strike || null;
     const expiry = instrument.option_details?.expiry || null;
-    db.insertOrder({
+    insertExecutionOrder({
       action, success: true, reason: `LLM-confirmed ${action} [${orderType}]`,
       instrument_name: instrumentName, strike, expiry,
       delta: null, price, intended_amount: amount,
@@ -11034,6 +11625,28 @@ const runBot = async () => {
           portfolio_value_usd: portfolioValue,
         });
       } catch (e) { console.log('DB: portfolio snapshot failed:', e.message); }
+
+      try {
+        if (typeof db.evaluateDueDecisionOutcomes === 'function') {
+          const outcomeResult = db.evaluateDueDecisionOutcomes({ now: tickTimestamp, limit: 750 });
+          if (outcomeResult?.scanned > 0) {
+            console.log(`📊 Decision outcomes labeled: scanned=${outcomeResult.scanned} evaluated=${outcomeResult.evaluated} missing=${outcomeResult.missing}`);
+          }
+        }
+      } catch (e) {
+        console.log('DB: decision outcome labeling failed:', e.message);
+      }
+
+      try {
+        if (typeof db.refreshPositionLifecycle === 'function') {
+          const lifecycleResult = db.refreshPositionLifecycle();
+          if (lifecycleResult?.refreshed > 0) {
+            console.log(`📊 Position lifecycle refreshed: ${lifecycleResult.refreshed} instrument/family rows`);
+          }
+        }
+      } catch (e) {
+        console.log('DB: position lifecycle refresh failed:', e.message);
+      }
     }
 
     console.log('='.repeat(60));

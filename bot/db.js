@@ -299,6 +299,7 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_orders_timestamp ON orders(timestamp);
 `);
+try { db.exec('ALTER TABLE orders ADD COLUMN pending_action_id INTEGER'); } catch {}
 
 // Hypothesis tracking columns (idempotent)
 try { db.exec('ALTER TABLE bot_state ADD COLUMN last_check INTEGER NOT NULL DEFAULT 0'); } catch {}
@@ -379,7 +380,9 @@ db.exec(`
     near_put_oi REAL, near_call_oi REAL,
     far_put_oi REAL, far_call_oi REAL,
     total_oi REAL, pc_ratio REAL,
-    expiry_count INTEGER
+    expiry_count INTEGER,
+    avg_put_iv REAL,
+    avg_call_iv REAL
   );
   CREATE INDEX IF NOT EXISTS idx_oi_snapshots_timestamp ON oi_snapshots(timestamp);
 
@@ -419,7 +422,137 @@ db.exec(`
     archived_at TEXT,
     is_active INTEGER NOT NULL DEFAULT 1
   );
+
+  CREATE TABLE IF NOT EXISTS candidate_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    tick_id TEXT,
+    rule_id INTEGER,
+    pending_action_id INTEGER,
+    action TEXT NOT NULL,
+    instrument_name TEXT NOT NULL,
+    option_type TEXT,
+    candidate_rank INTEGER,
+    selected INTEGER NOT NULL DEFAULT 0,
+    decision_status TEXT,
+    selection_reason TEXT,
+    spot_price REAL,
+    strike REAL,
+    expiry INTEGER,
+    dte REAL,
+    delta REAL,
+    bid_price REAL,
+    ask_price REAL,
+    mark_price REAL,
+    bid_amount REAL,
+    ask_amount REAL,
+    spread_pct REAL,
+    depth REAL,
+    implied_vol REAL,
+    open_interest REAL,
+    raw_score REAL,
+    selection_score REAL,
+    score_band TEXT,
+    dte_bucket TEXT,
+    research_recommendation TEXT,
+    score_trend_24h_pct REAL,
+    spot_ret_6h REAL,
+    spot_ret_24h REAL,
+    rule_min_score REAL,
+    rule_min_bid REAL,
+    rule_dte_min REAL,
+    rule_dte_max REAL,
+    rule_delta_min REAL,
+    rule_delta_max REAL,
+    metadata TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_candidate_observations_observed_at ON candidate_observations(observed_at);
+  CREATE INDEX IF NOT EXISTS idx_candidate_observations_action ON candidate_observations(action, observed_at);
+  CREATE INDEX IF NOT EXISTS idx_candidate_observations_instrument ON candidate_observations(instrument_name, observed_at);
+  CREATE INDEX IF NOT EXISTS idx_candidate_observations_pending ON candidate_observations(pending_action_id);
+  CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument_ts ON options_snapshots(instrument_name, timestamp);
+
+  CREATE TABLE IF NOT EXISTS decision_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observation_id INTEGER NOT NULL REFERENCES candidate_observations(id),
+    horizon_hours INTEGER NOT NULL,
+    due_at TEXT NOT NULL,
+    evaluated_at TEXT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    future_quote_at TEXT,
+    future_spot_at TEXT,
+    future_spot REAL,
+    spot_return REAL,
+    future_bid REAL,
+    future_ask REAL,
+    future_mark REAL,
+    future_score REAL,
+    sell_entry_pnl REAL,
+    sell_capture_pct REAL,
+    buy_entry_pnl REAL,
+    buy_capture_pct REAL,
+    spot_min REAL,
+    spot_max REAL,
+    error TEXT,
+    UNIQUE(observation_id, horizon_hours)
+  );
+  CREATE INDEX IF NOT EXISTS idx_decision_outcomes_due ON decision_outcomes(status, due_at);
+  CREATE INDEX IF NOT EXISTS idx_decision_outcomes_observation ON decision_outcomes(observation_id);
+
+  CREATE TABLE IF NOT EXISTS rule_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evaluated_at TEXT NOT NULL,
+    rule_id INTEGER,
+    rule_type TEXT,
+    action TEXT,
+    instrument_name TEXT,
+    decision_status TEXT NOT NULL,
+    reason_code TEXT,
+    reason TEXT,
+    candidates_evaluated INTEGER,
+    selected_instrument TEXT,
+    raw_score REAL,
+    selection_score REAL,
+    price REAL,
+    amount REAL,
+    spot_price REAL,
+    pending_action_id INTEGER,
+    criteria_json TEXT,
+    context_json TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_rule_decisions_time ON rule_decisions(evaluated_at);
+  CREATE INDEX IF NOT EXISTS idx_rule_decisions_rule ON rule_decisions(rule_id, evaluated_at);
+  CREATE INDEX IF NOT EXISTS idx_rule_decisions_status ON rule_decisions(decision_status, reason_code);
+
+  CREATE TABLE IF NOT EXISTS position_lifecycle (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    instrument_name TEXT NOT NULL,
+    action_family TEXT NOT NULL,
+    option_type TEXT,
+    strike REAL,
+    expiry INTEGER,
+    opened_at TEXT,
+    closed_at TEXT,
+    status TEXT NOT NULL,
+    opened_amount REAL DEFAULT 0,
+    closed_amount REAL DEFAULT 0,
+    net_amount REAL DEFAULT 0,
+    premium_opened REAL DEFAULT 0,
+    premium_closed REAL DEFAULT 0,
+    net_credit REAL DEFAULT 0,
+    avg_open_price REAL,
+    avg_close_price REAL,
+    spot_open REAL,
+    spot_close REAL,
+    order_ids TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(instrument_name, action_family)
+  );
+  CREATE INDEX IF NOT EXISTS idx_position_lifecycle_status ON position_lifecycle(status, action_family);
+  CREATE INDEX IF NOT EXISTS idx_position_lifecycle_opened ON position_lifecycle(opened_at);
 `);
+try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_put_iv REAL'); } catch {}
+try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_call_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE trade_reviews ADD COLUMN review_window_days INTEGER NOT NULL DEFAULT 1'); } catch {}
 try { db.exec('ALTER TABLE trade_reviews ADD COLUMN horizon_end_at TEXT'); } catch {}
 
@@ -965,8 +1098,10 @@ const stmts = {
 
   insertOrder: db.prepare(`
     INSERT INTO orders (timestamp, action, success, reason, instrument_name, strike, expiry,
+      pending_action_id,
       delta, price, intended_amount, filled_amount, fill_price, total_value, spot_price, raw_response)
     VALUES (@timestamp, @action, @success, @reason, @instrument_name, @strike, @expiry,
+      @pending_action_id,
       @delta, @price, @intended_amount, @filled_amount, @fill_price, @total_value, @spot_price, @raw_response)
   `),
 
@@ -1255,6 +1390,154 @@ const stmts = {
       COUNT(*) as total_orders
     FROM orders
   `),
+
+  insertCandidateObservation: db.prepare(`
+    INSERT INTO candidate_observations (
+      observed_at, tick_id, rule_id, pending_action_id, action, instrument_name, option_type,
+      candidate_rank, selected, decision_status, selection_reason, spot_price, strike, expiry, dte, delta,
+      bid_price, ask_price, mark_price, bid_amount, ask_amount, spread_pct, depth, implied_vol, open_interest,
+      raw_score, selection_score, score_band, dte_bucket, research_recommendation, score_trend_24h_pct,
+      spot_ret_6h, spot_ret_24h, rule_min_score, rule_min_bid, rule_dte_min, rule_dte_max,
+      rule_delta_min, rule_delta_max, metadata
+    ) VALUES (
+      @observed_at, @tick_id, @rule_id, @pending_action_id, @action, @instrument_name, @option_type,
+      @candidate_rank, @selected, @decision_status, @selection_reason, @spot_price, @strike, @expiry, @dte, @delta,
+      @bid_price, @ask_price, @mark_price, @bid_amount, @ask_amount, @spread_pct, @depth, @implied_vol, @open_interest,
+      @raw_score, @selection_score, @score_band, @dte_bucket, @research_recommendation, @score_trend_24h_pct,
+      @spot_ret_6h, @spot_ret_24h, @rule_min_score, @rule_min_bid, @rule_dte_min, @rule_dte_max,
+      @rule_delta_min, @rule_delta_max, @metadata
+    )
+  `),
+
+  insertDecisionOutcome: db.prepare(`
+    INSERT OR IGNORE INTO decision_outcomes (observation_id, horizon_hours, due_at)
+    VALUES (@observation_id, @horizon_hours, @due_at)
+  `),
+
+  getDueDecisionOutcomes: db.prepare(`
+    SELECT
+      o.id as outcome_id,
+      o.horizon_hours,
+      o.due_at,
+      c.id as observation_id,
+      c.observed_at,
+      c.action,
+      c.instrument_name,
+      c.option_type,
+      c.spot_price,
+      c.bid_price,
+      c.ask_price,
+      c.mark_price,
+      c.delta
+    FROM decision_outcomes o
+    JOIN candidate_observations c ON c.id = o.observation_id
+    WHERE o.status = 'pending'
+      AND o.due_at <= @now
+    ORDER BY o.due_at ASC
+    LIMIT @limit
+  `),
+
+  getOutcomeFutureQuote: db.prepare(`
+    SELECT timestamp, bid_price, ask_price, mark_price, delta, bid_delta_value, ask_delta_value
+    FROM options_snapshots
+    WHERE instrument_name = @instrument_name
+      AND timestamp >= @due_at
+      AND timestamp < @until
+    ORDER BY timestamp ASC
+    LIMIT 1
+  `),
+
+  getOutcomeFutureSpot: db.prepare(`
+    SELECT timestamp, price
+    FROM spot_prices
+    WHERE timestamp >= @due_at
+      AND timestamp < @until
+      AND price BETWEEN 100 AND 20000
+    ORDER BY timestamp ASC
+    LIMIT 1
+  `),
+
+  getOutcomeSpotPath: db.prepare(`
+    SELECT MIN(price) as spot_min, MAX(price) as spot_max
+    FROM spot_prices
+    WHERE timestamp >= @observed_at
+      AND timestamp <= @due_at
+      AND price BETWEEN 100 AND 20000
+  `),
+
+  updateDecisionOutcome: db.prepare(`
+    UPDATE decision_outcomes SET
+      evaluated_at = @evaluated_at,
+      status = @status,
+      future_quote_at = @future_quote_at,
+      future_spot_at = @future_spot_at,
+      future_spot = @future_spot,
+      spot_return = @spot_return,
+      future_bid = @future_bid,
+      future_ask = @future_ask,
+      future_mark = @future_mark,
+      future_score = @future_score,
+      sell_entry_pnl = @sell_entry_pnl,
+      sell_capture_pct = @sell_capture_pct,
+      buy_entry_pnl = @buy_entry_pnl,
+      buy_capture_pct = @buy_capture_pct,
+      spot_min = @spot_min,
+      spot_max = @spot_max,
+      error = @error
+    WHERE id = @id
+  `),
+
+  insertRuleDecision: db.prepare(`
+    INSERT INTO rule_decisions (
+      evaluated_at, rule_id, rule_type, action, instrument_name, decision_status,
+      reason_code, reason, candidates_evaluated, selected_instrument, raw_score,
+      selection_score, price, amount, spot_price, pending_action_id, criteria_json, context_json
+    ) VALUES (
+      @evaluated_at, @rule_id, @rule_type, @action, @instrument_name, @decision_status,
+      @reason_code, @reason, @candidates_evaluated, @selected_instrument, @raw_score,
+      @selection_score, @price, @amount, @spot_price, @pending_action_id, @criteria_json, @context_json
+    )
+  `),
+
+  getLifecycleOrderRows: db.prepare(`
+    SELECT id, timestamp, action, instrument_name, strike, expiry, filled_amount, fill_price, total_value, spot_price
+    FROM orders
+    WHERE success = 1
+      AND COALESCE(filled_amount, 0) > 0
+      AND action IN ('buy_put', 'sell_put', 'sell_call', 'buyback_call')
+    ORDER BY timestamp ASC
+  `),
+
+  upsertPositionLifecycle: db.prepare(`
+    INSERT INTO position_lifecycle (
+      instrument_name, action_family, option_type, strike, expiry, opened_at, closed_at, status,
+      opened_amount, closed_amount, net_amount, premium_opened, premium_closed, net_credit,
+      avg_open_price, avg_close_price, spot_open, spot_close, order_ids, updated_at
+    ) VALUES (
+      @instrument_name, @action_family, @option_type, @strike, @expiry, @opened_at, @closed_at, @status,
+      @opened_amount, @closed_amount, @net_amount, @premium_opened, @premium_closed, @net_credit,
+      @avg_open_price, @avg_close_price, @spot_open, @spot_close, @order_ids, datetime('now')
+    )
+    ON CONFLICT(instrument_name, action_family) DO UPDATE SET
+      option_type = @option_type,
+      strike = @strike,
+      expiry = @expiry,
+      opened_at = @opened_at,
+      closed_at = @closed_at,
+      status = @status,
+      opened_amount = @opened_amount,
+      closed_amount = @closed_amount,
+      net_amount = @net_amount,
+      premium_opened = @premium_opened,
+      premium_closed = @premium_closed,
+      net_credit = @net_credit,
+      avg_open_price = @avg_open_price,
+      avg_close_price = @avg_close_price,
+      spot_open = @spot_open,
+      spot_close = @spot_close,
+      order_ids = @order_ids,
+      updated_at = datetime('now')
+  `),
 };
 
 // ─── Helper Functions ─────────────────────────────────────────────────────────
@@ -1292,7 +1575,11 @@ const insertSpotPrice = (spotPrice, momentumResult, botData, timestamp) => {
   return result;
 };
 
-const toNum = (v) => v != null && v !== '' ? Number(v) : null;
+const toNum = (v) => {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
 const toHourKey = (ts) => ts.slice(0, 13) + ':00:00Z';
 
 const insertOptionsSnapshotBatch = (options, timestamp) => {
@@ -1549,6 +1836,7 @@ const insertOrder = (data) => {
     instrument_name: data.instrument_name || null,
     strike: toNum(data.strike),
     expiry: data.expiry || null,
+    pending_action_id: data.pending_action_id ?? null,
     delta: toNum(data.delta),
     price: toNum(data.price),
     intended_amount: toNum(data.intended_amount),
@@ -1562,6 +1850,250 @@ const insertOrder = (data) => {
 
 const getRecentOrders = (since, limit = 50) => stmts.getRecentOrders.all({ since, limit });
 const getOrdersInRange = (from, to) => stmts.getOrdersInRange.all({ from, to });
+
+const DECISION_OUTCOME_HORIZONS_HOURS = [1, 6, 24, 48, 72];
+const addHoursIso = (iso, hours) => new Date(new Date(iso).getTime() + hours * 60 * 60 * 1000).toISOString();
+
+const insertCandidateObservations = (observations = [], horizons = DECISION_OUTCOME_HORIZONS_HOURS) => {
+  if (!Array.isArray(observations) || observations.length === 0) return { inserted: 0, outcomes: 0 };
+  let inserted = 0;
+  let outcomes = 0;
+  const insert = db.transaction((items) => {
+    for (const item of items) {
+      if (!item?.action || !item?.instrument_name) continue;
+      const observedAt = item.observed_at || new Date().toISOString();
+      const result = stmts.insertCandidateObservation.run({
+        observed_at: observedAt,
+        tick_id: item.tick_id || null,
+        rule_id: item.rule_id ?? null,
+        pending_action_id: item.pending_action_id ?? null,
+        action: item.action,
+        instrument_name: item.instrument_name,
+        option_type: item.option_type || null,
+        candidate_rank: item.candidate_rank ?? null,
+        selected: item.selected ? 1 : 0,
+        decision_status: item.decision_status || null,
+        selection_reason: item.selection_reason || null,
+        spot_price: toNum(item.spot_price),
+        strike: toNum(item.strike),
+        expiry: item.expiry ?? null,
+        dte: toNum(item.dte),
+        delta: toNum(item.delta),
+        bid_price: toNum(item.bid_price),
+        ask_price: toNum(item.ask_price),
+        mark_price: toNum(item.mark_price),
+        bid_amount: toNum(item.bid_amount),
+        ask_amount: toNum(item.ask_amount),
+        spread_pct: toNum(item.spread_pct),
+        depth: toNum(item.depth),
+        implied_vol: toNum(item.implied_vol),
+        open_interest: toNum(item.open_interest),
+        raw_score: toNum(item.raw_score),
+        selection_score: toNum(item.selection_score),
+        score_band: item.score_band || null,
+        dte_bucket: item.dte_bucket || null,
+        research_recommendation: item.research_recommendation || null,
+        score_trend_24h_pct: toNum(item.score_trend_24h_pct),
+        spot_ret_6h: toNum(item.spot_ret_6h),
+        spot_ret_24h: toNum(item.spot_ret_24h),
+        rule_min_score: toNum(item.rule_min_score),
+        rule_min_bid: toNum(item.rule_min_bid),
+        rule_dte_min: toNum(item.rule_dte_min),
+        rule_dte_max: toNum(item.rule_dte_max),
+        rule_delta_min: toNum(item.rule_delta_min),
+        rule_delta_max: toNum(item.rule_delta_max),
+        metadata: item.metadata ? (typeof item.metadata === 'string' ? item.metadata : JSON.stringify(item.metadata)) : null,
+      });
+      inserted++;
+      const observationId = result.lastInsertRowid;
+      for (const horizon of horizons) {
+        if (!(Number(horizon) > 0)) continue;
+        const dueAt = addHoursIso(observedAt, Number(horizon));
+        stmts.insertDecisionOutcome.run({
+          observation_id: observationId,
+          horizon_hours: Number(horizon),
+          due_at: dueAt,
+        });
+        outcomes++;
+      }
+    }
+  });
+  insert(observations);
+  return { inserted, outcomes };
+};
+
+const evaluateDueDecisionOutcomes = ({ now = new Date().toISOString(), limit = 500, quoteWindowHours = 6 } = {}) => {
+  const due = stmts.getDueDecisionOutcomes.all({ now, limit });
+  let evaluated = 0;
+  let missing = 0;
+  const update = db.transaction((items) => {
+    for (const row of items) {
+      const until = addHoursIso(row.due_at, quoteWindowHours);
+      const quote = stmts.getOutcomeFutureQuote.get({
+        instrument_name: row.instrument_name,
+        due_at: row.due_at,
+        until,
+      }) || null;
+      const spot = stmts.getOutcomeFutureSpot.get({
+        due_at: row.due_at,
+        until,
+      }) || null;
+      const path = stmts.getOutcomeSpotPath.get({
+        observed_at: row.observed_at,
+        due_at: row.due_at,
+      }) || {};
+      const entryBid = toNum(row.bid_price);
+      const entryAsk = toNum(row.ask_price);
+      const futureBid = toNum(quote?.bid_price);
+      const futureAsk = toNum(quote?.ask_price);
+      const futureMark = toNum(quote?.mark_price);
+      const absDelta = Math.abs(toNum(quote?.delta) || toNum(row.delta) || 0);
+      const isCall = row.action === 'sell_call' || row.option_type === 'C' || row.instrument_name?.endsWith('-C');
+      const futureScore = isCall
+        ? (toNum(quote?.bid_delta_value) ?? (futureBid != null && absDelta > 0 ? futureBid / absDelta : null))
+        : (toNum(quote?.ask_delta_value) ?? (futureAsk != null && absDelta > 0 ? absDelta / futureAsk : null));
+      const futureSpot = toNum(spot?.price);
+      const entrySpot = toNum(row.spot_price);
+      const sellEntryPnl = entryBid != null && futureAsk != null ? entryBid - futureAsk : null;
+      const buyEntryPnl = entryAsk != null && futureBid != null ? futureBid - entryAsk : null;
+      const status = quote || spot ? 'evaluated' : 'missing';
+      if (status === 'evaluated') evaluated++;
+      else missing++;
+      stmts.updateDecisionOutcome.run({
+        id: row.outcome_id,
+        evaluated_at: now,
+        status,
+        future_quote_at: quote?.timestamp || null,
+        future_spot_at: spot?.timestamp || null,
+        future_spot: futureSpot,
+        spot_return: futureSpot != null && entrySpot > 0 ? (futureSpot / entrySpot) - 1 : null,
+        future_bid: futureBid,
+        future_ask: futureAsk,
+        future_mark: futureMark,
+        future_score: futureScore,
+        sell_entry_pnl: sellEntryPnl,
+        sell_capture_pct: sellEntryPnl != null && entryBid > 0 ? sellEntryPnl / entryBid : null,
+        buy_entry_pnl: buyEntryPnl,
+        buy_capture_pct: buyEntryPnl != null && entryAsk > 0 ? buyEntryPnl / entryAsk : null,
+        spot_min: toNum(path.spot_min),
+        spot_max: toNum(path.spot_max),
+        error: status === 'missing' ? `No quote or spot found within ${quoteWindowHours}h after due_at` : null,
+      });
+    }
+  });
+  update(due);
+  return { scanned: due.length, evaluated, missing };
+};
+
+const insertRuleDecision = (decision = {}) => {
+  if (!decision.decision_status) return null;
+  return stmts.insertRuleDecision.run({
+    evaluated_at: decision.evaluated_at || new Date().toISOString(),
+    rule_id: decision.rule_id ?? null,
+    rule_type: decision.rule_type || null,
+    action: decision.action || null,
+    instrument_name: decision.instrument_name || null,
+    decision_status: decision.decision_status,
+    reason_code: decision.reason_code || null,
+    reason: decision.reason || null,
+    candidates_evaluated: decision.candidates_evaluated ?? null,
+    selected_instrument: decision.selected_instrument || null,
+    raw_score: toNum(decision.raw_score),
+    selection_score: toNum(decision.selection_score),
+    price: toNum(decision.price),
+    amount: toNum(decision.amount),
+    spot_price: toNum(decision.spot_price),
+    pending_action_id: decision.pending_action_id ?? null,
+    criteria_json: decision.criteria_json
+      ? (typeof decision.criteria_json === 'string' ? decision.criteria_json : JSON.stringify(decision.criteria_json))
+      : null,
+    context_json: decision.context_json
+      ? (typeof decision.context_json === 'string' ? decision.context_json : JSON.stringify(decision.context_json))
+      : null,
+  });
+};
+
+const parseLifecycleInstrument = (instrumentName) => {
+  const parts = String(instrumentName || '').split('-');
+  if (parts.length !== 4 || !/^\d{8}$/.test(parts[1])) return {};
+  const expiryDate = new Date(`${parts[1].slice(0, 4)}-${parts[1].slice(4, 6)}-${parts[1].slice(6, 8)}T08:00:00Z`);
+  return {
+    strike: toNum(parts[2]),
+    expiry: Number.isFinite(expiryDate.getTime()) ? Math.floor(expiryDate.getTime() / 1000) : null,
+    optionType: parts[3],
+  };
+};
+
+const refreshPositionLifecycle = ({ nowMs = Date.now() } = {}) => {
+  const rows = stmts.getLifecycleOrderRows.all();
+  const groups = new Map();
+  for (const row of rows) {
+    const actionFamily = ['sell_call', 'buyback_call'].includes(row.action)
+      ? 'short_call'
+      : ['buy_put', 'sell_put'].includes(row.action)
+        ? 'long_put'
+        : null;
+    if (!actionFamily || !row.instrument_name) continue;
+    const key = `${actionFamily}:${row.instrument_name}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+
+  const upsert = db.transaction((items) => {
+    for (const [key, group] of items) {
+      const [actionFamily, instrumentName] = key.split(':');
+      const parsed = parseLifecycleInstrument(instrumentName);
+      const openActions = actionFamily === 'short_call' ? new Set(['sell_call']) : new Set(['buy_put']);
+      const closeActions = actionFamily === 'short_call' ? new Set(['buyback_call']) : new Set(['sell_put']);
+      const openRows = group.filter((row) => openActions.has(row.action));
+      const closeRows = group.filter((row) => closeActions.has(row.action));
+      const openedAmount = openRows.reduce((sum, row) => sum + (toNum(row.filled_amount) || 0), 0);
+      const closedAmount = closeRows.reduce((sum, row) => sum + (toNum(row.filled_amount) || 0), 0);
+      const premiumOpened = openRows.reduce((sum, row) => sum + (toNum(row.total_value) || 0), 0);
+      const premiumClosed = closeRows.reduce((sum, row) => sum + (toNum(row.total_value) || 0), 0);
+      const netAmount = openedAmount - closedAmount;
+      const expiryMs = parsed.expiry ? parsed.expiry * 1000 : null;
+      const expired = expiryMs != null && expiryMs <= nowMs;
+      const status = netAmount <= 1e-9
+        ? 'closed'
+        : expired
+          ? 'expired'
+          : 'open';
+      const openedAt = openRows[0]?.timestamp || group[0]?.timestamp || null;
+      const closedAt = status === 'closed'
+        ? (closeRows.at(-1)?.timestamp || null)
+        : status === 'expired' && expiryMs != null
+          ? new Date(expiryMs).toISOString()
+          : null;
+      const netCredit = actionFamily === 'short_call'
+        ? premiumOpened - premiumClosed
+        : premiumClosed - premiumOpened;
+      stmts.upsertPositionLifecycle.run({
+        instrument_name: instrumentName,
+        action_family: actionFamily,
+        option_type: parsed.optionType || null,
+        strike: parsed.strike ?? toNum(group.find((row) => row.strike != null)?.strike),
+        expiry: parsed.expiry ?? null,
+        opened_at: openedAt,
+        closed_at: closedAt,
+        status,
+        opened_amount: openedAmount,
+        closed_amount: closedAmount,
+        net_amount: netAmount,
+        premium_opened: premiumOpened,
+        premium_closed: premiumClosed,
+        net_credit: netCredit,
+        avg_open_price: openedAmount > 0 ? premiumOpened / openedAmount : null,
+        avg_close_price: closedAmount > 0 ? premiumClosed / closedAmount : null,
+        spot_open: toNum(openRows.find((row) => row.spot_price != null)?.spot_price),
+        spot_close: toNum(closeRows.at(-1)?.spot_price),
+        order_ids: JSON.stringify(group.map((row) => row.id)),
+      });
+    }
+  });
+  upsert([...groups.entries()]);
+  return { refreshed: groups.size };
+};
 
 const getAvgCallPremium7d = () => {
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -1987,6 +2519,10 @@ module.exports = {
   insertOrder,
   getRecentOrders,
   getOrdersInRange,
+  insertCandidateObservations,
+  evaluateDueDecisionOutcomes,
+  insertRuleDecision,
+  refreshPositionLifecycle,
   insertJournalEntry,
   getRecentJournalEntries,
   insertJournalEntryFull,
