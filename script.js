@@ -6405,7 +6405,7 @@ const buildBuyPutPatientMakerContext = (action, triggerData = {}, advisorLimitPr
   const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
   const plannedScore = Number(triggerData?.planned_score ?? triggerData?.score);
   const minScore = Number(criteria.min_score ?? triggerData?.min_score);
-  const targetScore = Number(criteria.target_score ?? triggerData?.target_score);
+  const targetScore = Number(triggerData?.target_score ?? criteria.target_score);
   const requiredScore = Math.max(
     Number.isFinite(minScore) && minScore > 0 ? minScore : 0,
     Number.isFinite(targetScore) && targetScore > 0 ? targetScore : 0

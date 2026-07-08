@@ -5741,7 +5741,7 @@ describe('Buy-put patient maker confirmation override', () => {
     const criteria = action.rule_criteria || {};
     const plannedScore = Number(triggerData?.planned_score ?? triggerData?.score);
     const minScore = Number(criteria.min_score ?? triggerData?.min_score);
-    const targetScore = Number(criteria.target_score ?? triggerData?.target_score);
+    const targetScore = Number(triggerData?.target_score ?? criteria.target_score);
     const requiredScore = Math.max(
       Number.isFinite(minScore) && minScore > 0 ? minScore : 0,
       Number.isFinite(targetScore) && targetScore > 0 ? targetScore : 0
@@ -5808,6 +5808,23 @@ describe('Buy-put patient maker confirmation override', () => {
       options: { putBudgetRemaining: 52.89, marginState: { is_under_liquidation: false } },
     });
 
+    assert.strictEqual(result.context.satisfied, true);
+    assert.strictEqual(result.patientMakerOverride, true);
+    assert.strictEqual(result.decision, 'confirmed');
+  });
+
+  test('split vote uses trigger target score that priced the pending bid', () => {
+    const result = applyBuyPutOverride({
+      action: { action: 'buy_put', amount: 5, rule_criteria: { min_score: 0.0042, target_score: 0.006 } },
+      triggerData: { planned_score: 0.004201, target_score: 0.0042, advisor_limit_price: 10.38 },
+      advisorLimitPrice: 10.38,
+      liveMarketPrice: 19.3,
+      anthropicVote: { confirm: true, order_type: 'post_only', reasoning: 'planned score meets trigger target' },
+      codexVote: { confirm: false, reasoning: 'Live ask is above target limit price and cannot fill immediately.' },
+      options: { putBudgetRemaining: 52.89, marginState: { is_under_liquidation: false } },
+    });
+
+    assert.strictEqual(result.context.requiredScore, 0.0042);
     assert.strictEqual(result.context.satisfied, true);
     assert.strictEqual(result.patientMakerOverride, true);
     assert.strictEqual(result.decision, 'confirmed');
