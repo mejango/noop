@@ -23,13 +23,34 @@ function authorized(req: NextRequest) {
     && crypto.timingSafeEqual(expectedBuffer, tokenBuffer);
 }
 
+function dbPath() {
+  const dataDir = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
+  return path.join(dataDir, 'noop.db');
+}
+
+export async function HEAD(req: NextRequest) {
+  if (!authorized(req)) {
+    return new NextResponse(null, { status: 401 });
+  }
+
+  const sourcePath = dbPath();
+  const { size } = await fsp.stat(sourcePath);
+  return new NextResponse(null, {
+    headers: {
+      'cache-control': 'no-store',
+      'content-disposition': 'attachment; filename="noop-research.db"',
+      'content-length': String(size),
+      'content-type': 'application/vnd.sqlite3',
+    },
+  });
+}
+
 export async function GET(req: NextRequest) {
   if (!authorized(req)) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   }
 
-  const dataDir = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
-  const sourcePath = path.join(dataDir, 'noop.db');
+  const sourcePath = dbPath();
   const snapshotPath = path.join('/tmp', `noop-research-${Date.now()}-${process.pid}.db`);
 
   let db: Database.Database | null = null;
