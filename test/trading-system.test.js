@@ -520,7 +520,13 @@ const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
 
 const buildRulebookRequirements = ({ putBudgetRemaining = 0, accountHealth = {}, positionSnapshots = [] } = {}) => {
   const requirements = [];
-  if (Number(putBudgetRemaining) > 1) requirements.push({ type: 'entry', action: 'buy_put' });
+  if (Number(putBudgetRemaining) > 1) {
+    requirements.push({
+      type: 'entry',
+      action: 'buy_put',
+      instruction: 'Create a patient standing buy_put watcher with favorable min_score/target_score price criteria plus tight-spread, lower-IV/skew, OI-support, and crash-payoff edge context; do not chase higher delta by itself or require an immediately marketable buy.',
+    });
+  }
 
   const margin = accountHealth.margin || {};
   const call = accountHealth.callMarginDiscipline || {};
@@ -804,6 +810,15 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   const liveScore = Number(triggerData?.live_score);
   const requiredValueSignal = triggerData?.required_value_signal || criteria.value_signal || criteria.buy_put_signal || null;
   const currentValueSignal = triggerData?.buy_put_signal || null;
+  const buyPutResearch = triggerData?.buy_put_research || {};
+  const edgeScore = Number(triggerData?.selection_score ?? buyPutResearch?.selection_score);
+  const edgeComponents = buyPutResearch?.edge_components || {};
+  const edgeWarnings = [
+    buyPutResearch?.spread_caution ? 'spread' : null,
+    buyPutResearch?.iv_caution ? 'iv' : null,
+    buyPutResearch?.skew_caution ? 'skew' : null,
+    buyPutResearch?.weak_shock_payoff_caution ? 'weak_shock_payoff' : null,
+  ].filter(Boolean);
   const isStandingPatientBid = requiredValueSignal === 'any_actionable_buy_put' && currentValueSignal === 'standing_patient_bid';
   const limitPrice = Number(advisorLimitPrice) > 0 && bestAsk > 0
     ? Math.min(Number(advisorLimitPrice), bestAsk)
@@ -819,10 +834,11 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}.`,
     `- Planned execution limit: ${fmtPrice(limitPrice)}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit; live_ask_score=${fmt(liveScore)}.`,
     `- Thresholds: min_score=n/a, target_score=${fmt(targetScore)}. For patient maker bids, planned_score at our limit is the economic gate; live_ask_score may be below threshold because we are not willing to lift the ask.`,
+    `- Composite edge context: edge_score=${fmt(edgeScore, 2)}, recommendation=${buyPutResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, candidate_iv_pct:${fmt(edgeComponents.candidate_iv_pct, 2)}, market_put_iv_pct:${fmt(edgeComponents.market_put_iv_pct, 2)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, oi_24h:${fmt(edgeComponents.market_oi_delta_24h_pct, 2)}, shock40:${fmt(edgeComponents.shock_payoff_multiple_40pct, 2)}x}.`,
     `- value_signal=${currentValueSignal || 'n/a'}, required_value_signal=${requiredValueSignal || 'n/a'}. ${isStandingPatientBid ? 'This is a standing patient bid: no spike signal is active, but the bid is still valid if planned_score meets threshold and budget/risk gates remain valid.' : 'A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.'}`,
     `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there as our market; do not reject as "not achievable" merely because it is not immediately marketable.`,
     '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
-    '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit.',
+    '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit. Edge context helps identify stale/wide/overpriced insurance, but it does not replace the explicit min_score/target_score price contract.',
   ].join('\n');
 };
 
@@ -1407,6 +1423,19 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(requirement.instruction.includes('do not use a broad spot_price floor'));
   });
 
+  test('buy_put watcher requirement demands edge-quality context without delta chasing', () => {
+    const requirements = buildRulebookRequirements({ putBudgetRemaining: 123 });
+    const requirement = requirements.find((req) => req.type === 'entry' && req.action === 'buy_put');
+
+    assert.ok(requirement);
+    assert.ok(requirement.instruction.includes('min_score/target_score'));
+    assert.ok(requirement.instruction.includes('tight-spread'));
+    assert.ok(requirement.instruction.includes('lower-IV/skew'));
+    assert.ok(requirement.instruction.includes('OI-support'));
+    assert.ok(requirement.instruction.includes('crash-payoff'));
+    assert.ok(requirement.instruction.includes('do not chase higher delta by itself'));
+  });
+
   test('advisor prompt forbids non-spot sell-call market conditions', () => {
     assert.ok(SCRIPT_SOURCE.includes('sell_call market_conditions may only use spot_price'));
     assert.ok(SCRIPT_SOURCE.includes('For sell_call, market_conditions may only contain spot_price conditions'));
@@ -1422,6 +1451,14 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(SCRIPT_SOURCE.includes('CALL edge gate:'));
     assert.ok(SCRIPT_SOURCE.includes('High put value is a sell-call warning'));
     assert.ok(SCRIPT_SOURCE.includes('min_edge_score should be above the weak current edge'));
+  });
+
+  test('advisor prompt anchors buy-put edge to spread IV skew OI and shock payoff', () => {
+    assert.ok(SCRIPT_SOURCE.includes('PUT edge gate:'));
+    assert.ok(SCRIPT_SOURCE.includes('Raw buy-put score is the price primitive, not the whole edge'));
+    assert.ok(SCRIPT_SOURCE.includes('Do not treat higher delta as a standalone buy-put advantage'));
+    assert.ok(SCRIPT_SOURCE.includes('30/40/50% drawdown payoff'));
+    assert.ok(SCRIPT_SOURCE.includes('For buy_put, include min_edge_score only when you want an explicit spread/IV/skew/OI/shock-payoff floor'));
   });
 
   test('Mandelbrot prompt uses 30-day hourly spot path instead of momentum labels', () => {
@@ -6835,6 +6872,22 @@ describe('confirmation prompt margin context', () => {
         target_score: 0.00401,
         live_score: 0.0037,
         buy_put_signal: 'spot_drop_option_repricing_lag',
+        selection_score: 128.4,
+        buy_put_research: {
+          recommendation: 'acceptable',
+          spread_caution: false,
+          iv_caution: false,
+          skew_caution: false,
+          weak_shock_payoff_caution: false,
+          edge_components: {
+            candidate_spread_pct: 4.3,
+            candidate_iv_pct: 61.2,
+            market_put_iv_pct: 63.1,
+            market_skew_pct: 5.8,
+            market_oi_delta_24h_pct: 4.7,
+            shock_payoff_multiple_40pct: 3.2,
+          },
+        },
       },
       ticker: { a: 21, option_pricing: { d: '-0.0737' } },
       currentPrice: 21,
@@ -6846,11 +6899,16 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('live_ask_score=0.003700'));
     assert.ok(context.includes('planned_score at our limit is the economic gate'));
     assert.ok(context.includes('live_ask_score may be below threshold'));
+    assert.ok(context.includes('Composite edge context'));
+    assert.ok(context.includes('edge_score=128.40'));
+    assert.ok(context.includes('shock40:3.20x'));
+    assert.ok(context.includes('oi_24h:4.70'));
     assert.ok(context.includes('post_only/gtc can rest there'));
     assert.ok(context.includes('live_delta=-0.0737'));
     assert.ok(context.includes('Prior IOC zero fill'));
     assert.ok(context.includes('liquidity/routing context only'));
     assert.ok(context.includes('Do not invent a different target score'));
+    assert.ok(context.includes('does not replace the explicit min_score/target_score price contract'));
   });
 
   test('buy_put confirmation context explains standing patient bid without active signal', () => {
