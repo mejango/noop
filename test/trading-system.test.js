@@ -565,6 +565,18 @@ const buildAgendaFromValidatedRules = (rules = []) => ({
   exit_rules: rules.filter((rule) => rule.rule_type === 'exit'),
 });
 
+const hasLongerDatedPutProtectionSnapshot = (snapshot, snapshots = []) => {
+  const currentDte = Number(snapshot?.dte);
+  if (!Number.isFinite(currentDte)) return false;
+  return snapshots.some((candidate) =>
+    candidate?.instrument !== snapshot?.instrument
+    && candidate?.direction === 'long'
+    && candidate?.option_type === 'P'
+    && Number(candidate?.amount) > 0
+    && Number(candidate?.dte) > currentDte
+  );
+};
+
 const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
   if (requirement.type === 'entry' && requirement.action === 'sell_call') {
     return {
@@ -577,6 +589,49 @@ const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
         dte_range: CALL_EXPIRATION_RANGE,
         min_bid: SELL_CALL_FALLBACK_MIN_BID,
         min_edge_score: SELL_CALL_FALLBACK_MIN_EDGE_SCORE,
+      },
+      priority: 'low',
+      preferred_order_type: 'post_only',
+    };
+  }
+
+  if (requirement.type === 'exit' && requirement.action === 'sell_put') {
+    const snapshot = (context.positionSnapshots || []).find((item) => item.instrument === requirement.instrument_name);
+    const canRoll = snapshot
+      && Number(snapshot.dte) <= PUT_ROLL_DTE_THRESHOLD
+      && hasLongerDatedPutProtectionSnapshot(snapshot, context.positionSnapshots || []);
+    if (canRoll) {
+      return {
+        rule_type: 'exit',
+        action: 'sell_put',
+        instrument_name: requirement.instrument_name,
+        criteria: {
+          put_exit_intent: 'roll_protection',
+          conditions: [{ field: 'dte', op: 'lte', value: PUT_ROLL_DTE_THRESHOLD }],
+          condition_logic: 'all',
+          requires_longer_dated_protection: true,
+        },
+        priority: 'low',
+        preferred_order_type: 'ioc',
+      };
+    }
+
+    const entryPrice = Number(snapshot?.avg_entry_price);
+    const minExitPrice = entryPrice > 0
+      ? Number((entryPrice * (1 + PUT_MONETIZATION_PROFIT_THRESHOLD / 100) + 0.01).toFixed(2))
+      : null;
+    if (!(minExitPrice > 0)) return null;
+    return {
+      rule_type: 'exit',
+      action: 'sell_put',
+      instrument_name: requirement.instrument_name,
+      criteria: {
+        put_exit_intent: 'monetize_tail_win',
+        conditions: [{ field: 'unrealized_pnl_pct', op: 'gt', value: PUT_MONETIZATION_PROFIT_THRESHOLD }],
+        condition_logic: 'all',
+        min_exit_price: minExitPrice,
+        tranche_fraction: PUT_MONETIZATION_MAX_TRANCHE_FRACTION,
+        retain_downside_protection: true,
       },
       priority: 'low',
       preferred_order_type: 'post_only',
@@ -1531,6 +1586,77 @@ describe('Standing rulebook coverage requirements', () => {
     });
     assert.strictEqual(fallback.priority, 'low');
     assert.strictEqual(fallback.preferred_order_type, 'post_only');
+  });
+
+  test('adds canonical long-put monetization coverage after validation drops advisor sell-put rule', () => {
+    const requirements = [
+      { type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260828-1000-P' },
+    ];
+    const missing = findMissingRulebookRequirements(buildAgendaFromValidatedRules([]), requirements);
+    const fallback = buildCanonicalRequiredWatcherRule(missing[0], {
+      positionSnapshots: [
+        {
+          instrument: 'ETH-20260828-1000-P',
+          direction: 'long',
+          option_type: 'P',
+          amount: 1,
+          dte: 48,
+          avg_entry_price: 10.38,
+        },
+      ],
+    });
+
+    assert.strictEqual(fallback.rule_type, 'exit');
+    assert.strictEqual(fallback.action, 'sell_put');
+    assert.strictEqual(fallback.instrument_name, 'ETH-20260828-1000-P');
+    assert.strictEqual(fallback.criteria.put_exit_intent, 'monetize_tail_win');
+    assert.deepStrictEqual(fallback.criteria.conditions, [
+      { field: 'unrealized_pnl_pct', op: 'gt', value: PUT_MONETIZATION_PROFIT_THRESHOLD },
+    ]);
+    assert.strictEqual(fallback.criteria.min_exit_price, 114.19);
+    assert.strictEqual(fallback.criteria.tranche_fraction, PUT_MONETIZATION_MAX_TRANCHE_FRACTION);
+    assert.strictEqual(fallback.criteria.retain_downside_protection, true);
+    assert.strictEqual(fallback.preferred_order_type, 'post_only');
+  });
+
+  test('adds canonical long-put roll coverage only when longer protection exists', () => {
+    const fallback = buildCanonicalRequiredWatcherRule(
+      { type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260717-1000-P' },
+      {
+        positionSnapshots: [
+          {
+            instrument: 'ETH-20260717-1000-P',
+            direction: 'long',
+            option_type: 'P',
+            amount: 1,
+            dte: 6,
+            avg_entry_price: 5,
+          },
+          {
+            instrument: 'ETH-20260828-1000-P',
+            direction: 'long',
+            option_type: 'P',
+            amount: 1,
+            dte: 48,
+            avg_entry_price: 10,
+          },
+        ],
+      }
+    );
+
+    assert.strictEqual(fallback.criteria.put_exit_intent, 'roll_protection');
+    assert.deepStrictEqual(fallback.criteria.conditions, [
+      { field: 'dte', op: 'lte', value: PUT_ROLL_DTE_THRESHOLD },
+    ]);
+    assert.strictEqual(fallback.criteria.requires_longer_dated_protection, true);
+    assert.strictEqual(fallback.preferred_order_type, 'ioc');
+  });
+
+  test('repair path preserves prior assessment when repaired agenda omits it', () => {
+    assert.ok(SCRIPT_SOURCE.includes('assessment: selectAssessmentText('));
+    assert.ok(SCRIPT_SOURCE.includes('repairedAgenda.assessment'));
+    assert.ok(SCRIPT_SOURCE.includes('previousAgenda.assessment'));
+    assert.ok(SCRIPT_SOURCE.includes("normalized === 'no assessment produced'"));
   });
 });
 

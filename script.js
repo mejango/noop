@@ -5831,6 +5831,60 @@ const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
     };
   }
 
+  if (requirement?.type === 'exit' && requirement?.action === 'sell_put' && requirement.instrument_name) {
+    const snapshot = (context.positionSnapshots || []).find((item) => item?.instrument === requirement.instrument_name);
+    const canRoll = snapshot
+      && Number(snapshot.dte) <= PUT_ROLL_DTE_THRESHOLD
+      && hasLongerDatedPutProtectionSnapshot(snapshot, context.positionSnapshots || []);
+    if (canRoll) {
+      return {
+        rule_type: 'exit',
+        action: 'sell_put',
+        instrument_name: requirement.instrument_name,
+        criteria: {
+          put_exit_intent: 'roll_protection',
+          conditions: [
+            { field: 'dte', op: 'lte', value: PUT_ROLL_DTE_THRESHOLD },
+          ],
+          condition_logic: 'all',
+          requires_longer_dated_protection: true,
+        },
+        budget_limit: null,
+        priority: 'low',
+        reasoning: `Required long-put coverage fallback: reduce-only roll watcher because ${requirement.instrument_name} is inside the ${PUT_ROLL_DTE_THRESHOLD} DTE roll window and longer-dated put protection is already in the book.`,
+        advisory_id: context.advisoryId || null,
+        preferred_order_type: 'ioc',
+      };
+    }
+
+    const entryPrice = Number(snapshot?.avg_entry_price);
+    const minExitPrice = entryPrice > 0
+      ? Number((entryPrice * (1 + PUT_MONETIZATION_PROFIT_THRESHOLD / 100) + 0.01).toFixed(2))
+      : null;
+    if (!(minExitPrice > 0)) return null;
+
+    return {
+      rule_type: 'exit',
+      action: 'sell_put',
+      instrument_name: requirement.instrument_name,
+      criteria: {
+        put_exit_intent: 'monetize_tail_win',
+        conditions: [
+          { field: 'unrealized_pnl_pct', op: 'gt', value: PUT_MONETIZATION_PROFIT_THRESHOLD },
+        ],
+        condition_logic: 'all',
+        min_exit_price: minExitPrice,
+        tranche_fraction: PUT_MONETIZATION_MAX_TRANCHE_FRACTION,
+        retain_downside_protection: true,
+      },
+      budget_limit: null,
+      priority: 'low',
+      reasoning: `Required long-put coverage fallback: dormant tail-win monetization watcher; only sell up to ${(PUT_MONETIZATION_MAX_TRANCHE_FRACTION * 100).toFixed(0)}% at executable PnL > ${PUT_MONETIZATION_PROFIT_THRESHOLD}% with min exit price $${minExitPrice.toFixed(2)}, preserving remaining downside protection.`,
+      advisory_id: context.advisoryId || null,
+      preferred_order_type: 'post_only',
+    };
+  }
+
   if (requirement?.type !== 'exit' || requirement?.action !== 'buyback_call' || !requirement.instrument_name) {
     return null;
   }
@@ -5951,6 +6005,22 @@ const ensureAssessmentHasPositionPlan = ({
   });
   if (lines.length === 0) return base;
   return `${base}\n\nThesis breakdown:\n${lines.map((line) => `- ${line}`).join('\n')}`;
+};
+
+const isPlaceholderAssessmentText = (value) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  return !normalized || normalized === 'no assessment produced' || normalized === 'synthesized assessment';
+};
+
+const selectAssessmentText = (...candidates) => {
+  for (const candidate of candidates) {
+    if (!isPlaceholderAssessmentText(candidate)) return String(candidate).trim();
+  }
+  for (const candidate of candidates) {
+    const text = String(candidate || '').trim();
+    if (text) return text;
+  }
+  return 'No assessment produced';
 };
 
 const buildMandelbrotContextBlock = (mandelbrotContext) => {
@@ -11754,7 +11824,7 @@ Synthesize the final agenda now.`;
   }
 
   finalAgenda.assessment = ensureAssessmentHasPositionPlan({
-    assessment: finalAgenda.assessment || primaryAgenda.assessment || 'No assessment produced',
+    assessment: selectAssessmentText(finalAgenda.assessment, primaryAgenda.assessment),
     positionSnapshots: positionAdviceSnapshots,
     exitRules: finalAgenda.exit_rules || [],
   });
@@ -11804,9 +11874,24 @@ Return the full repaired agenda JSON.`,
       const repairedText = repairResponse.data?.content?.[0]?.text || '';
       const repairedAgenda = extractJSON(repairedText);
       if (repairedAgenda) {
-        finalAgenda = repairedAgenda;
+        const previousAgenda = finalAgenda || {};
+        finalAgenda = {
+          ...previousAgenda,
+          ...repairedAgenda,
+          assessment: selectAssessmentText(
+            repairedAgenda.assessment,
+            previousAgenda.assessment,
+            primaryAgenda.assessment
+          ),
+          entry_rules: Array.isArray(repairedAgenda.entry_rules)
+            ? repairedAgenda.entry_rules
+            : (Array.isArray(previousAgenda.entry_rules) ? previousAgenda.entry_rules : []),
+          exit_rules: Array.isArray(repairedAgenda.exit_rules)
+            ? repairedAgenda.exit_rules
+            : (Array.isArray(previousAgenda.exit_rules) ? previousAgenda.exit_rules : []),
+        };
         finalAgenda.assessment = ensureAssessmentHasPositionPlan({
-          assessment: finalAgenda.assessment || 'No assessment produced',
+          assessment: selectAssessmentText(finalAgenda.assessment, previousAgenda.assessment, primaryAgenda.assessment),
           positionSnapshots: positionAdviceSnapshots,
           exitRules: finalAgenda.exit_rules || [],
         });
@@ -11916,6 +12001,13 @@ Return the full repaired agenda JSON.`,
     }
   }
 
+  const persistedAgenda = buildAgendaFromValidatedRules(allRules);
+  finalAgenda.assessment = ensureAssessmentHasPositionPlan({
+    assessment: selectAssessmentText(finalAgenda.assessment, primaryAgenda.assessment),
+    positionSnapshots: positionAdviceSnapshots,
+    exitRules: persistedAgenda.exit_rules,
+  });
+
   // Write rules to database
   if (db) {
     try {
@@ -11927,7 +12019,7 @@ Return the full repaired agenda JSON.`,
   }
 
   // Journal the assessment
-  const assessmentText = finalAgenda.assessment || primaryAgenda.assessment || 'No assessment produced';
+  const assessmentText = selectAssessmentText(finalAgenda.assessment, primaryAgenda.assessment);
   if (db) {
     try {
       db.insertJournalEntry('advisory', assessmentText);
@@ -11950,9 +12042,11 @@ Return the full repaired agenda JSON.`,
     }
   }
 
-  const entryCount = finalAgenda.entry_rules?.length || 0;
-  const exitCount = finalAgenda.exit_rules?.length || 0;
-  console.log(`📋 Advisory ${advisoryId}: complete — ${entryCount} entry rules, ${exitCount} exit rules`);
+  const entryCount = persistedAgenda.entry_rules.length;
+  const exitCount = persistedAgenda.exit_rules.length;
+  const rawEntryCount = finalAgenda.entry_rules?.length || 0;
+  const rawExitCount = finalAgenda.exit_rules?.length || 0;
+  console.log(`📋 Advisory ${advisoryId}: complete — ${entryCount} active entry rules, ${exitCount} active exit rules (${rawEntryCount} entry/${rawExitCount} exit before validation/fallback)`);
 
   // Track advisory state for dashboards and retry cadence (persisted to survive restarts)
   botData.lastAdvisorySpotPrice = spotPrice;
