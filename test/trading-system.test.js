@@ -48,6 +48,12 @@ const SELL_CALL_FALLBACK_MIN_EDGE_SCORE = 80;
 const VENUE_AMOUNT_DECIMALS = 2;
 const VENUE_MIN_ORDER_AMOUNT = 0.1;
 
+const finiteOrNull = (value) => {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
 const parseExpiryFromInstrument = (name) => {
   if (!name) return null;
   const parts = name.split('-');
@@ -911,14 +917,27 @@ const formatSellCallConfirmationContext = ({ action, triggerData, ticker, curren
   const sellCallResearch = triggerData?.sell_call_research || {};
   const edgeScore = Number(triggerData?.selection_score ?? sellCallResearch?.selection_score);
   const minEdgeScore = Number(criteria.min_edge_score);
+  const legacyMinScore = Number(criteria.min_score);
+  const hasMinEdgeScore = Number.isFinite(minEdgeScore) && minEdgeScore > 0;
+  const hasLegacyMinScore = Number.isFinite(legacyMinScore) && legacyMinScore > 0;
+  const edgeGateStatus = hasMinEdgeScore
+    ? (Number.isFinite(edgeScore) && edgeScore + 1e-9 >= minEdgeScore ? 'PASS' : 'FAIL')
+    : 'NOT_CONFIGURED';
+  const rawGateStatus = hasMinEdgeScore
+    ? 'NOT_APPLICABLE (min_edge_score takes precedence)'
+    : hasLegacyMinScore
+      ? (Number.isFinite(triggerScore) && triggerScore + 1e-9 >= legacyMinScore ? 'PASS' : 'FAIL')
+      : 'NOT_CONFIGURED';
   const fmt = (value, digits = 4) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
   return [
     'Sell-call value confirmation context:',
-    `- Trigger score: ${fmt(triggerScore, 2)} using call score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
-    `- Rule gates: min_edge_score=${fmt(minEdgeScore, 2)}, legacy_min_score=${fmt(Number(criteria.min_score), 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}.`,
+    `- Raw score: ${fmt(triggerScore, 2)} using raw_score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
+    `- Rule gates: min_edge_score=${fmt(minEdgeScore, 2)}, legacy_min_score=${fmt(legacyMinScore, 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}.`,
     `- Composite edge: edge_score=${fmt(edgeScore, 2)}, recommendation=${sellCallResearch?.recommendation || 'n/a'}.`,
+    `- Typed value gates: edge_gate=${edgeGateStatus}${hasMinEdgeScore ? ` (edge_score=${fmt(edgeScore, 2)} ${edgeGateStatus === 'PASS' ? '>=' : '<'} min_edge_score=${fmt(minEdgeScore, 2)})` : ''}; raw_gate=${rawGateStatus}${!hasMinEdgeScore && hasLegacyMinScore ? ` (raw_score=${fmt(triggerScore, 2)} ${rawGateStatus === 'PASS' ? '>=' : '<'} legacy_min_score=${fmt(legacyMinScore, 2)})` : ''}.`,
     `- Live reference: executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}, planned_score=${fmt(plannedScore, 2)}.`,
+    '- Gate semantics: min_edge_score is compared only with edge_score. legacy_min_score is compared with raw_score only when min_edge_score is not configured. Never describe a passing typed gate as failed. A passing value gate does not force confirmation; reject only for a separate, concrete fresh market, warning, or risk fact and name that fact explicitly.',
     '- Confirm sell_call when the fresh bid, composite edge score, min_bid, delta/DTE, and margin facts satisfy the advisor rule. Raw call score alone is not enough when the composite edge or explicit warnings contradict it.',
   ].join('\n');
 };
@@ -1145,6 +1164,38 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
   return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
 };
 
+
+// ============================================================================
+// 0. Missing numeric evidence
+// ============================================================================
+
+describe('finiteOrNull', () => {
+  test('keeps missing numeric evidence unknown instead of coercing it to zero', () => {
+    assert.strictEqual(finiteOrNull(null), null);
+    assert.strictEqual(finiteOrNull(undefined), null);
+    assert.strictEqual(finiteOrNull(''), null);
+    assert.strictEqual(finiteOrNull('   '), null);
+  });
+
+  test('preserves observed zero and finite numeric strings', () => {
+    assert.strictEqual(finiteOrNull(0), 0);
+    assert.strictEqual(finiteOrNull('0'), 0);
+    assert.strictEqual(finiteOrNull('7.42'), 7.42);
+  });
+
+  test('missing sell-call trend cannot earn the stable or improving multiplier', () => {
+    const numericTrend24h = finiteOrNull(null);
+    const scoreStableOrImproving = Number.isFinite(numericTrend24h) && numericTrend24h >= -3;
+
+    assert.strictEqual(scoreStableOrImproving, false);
+    assert.ok(SCRIPT_SOURCE.includes("if (value == null || (typeof value === 'string' && value.trim() === '')) return null;"));
+    assert.ok(SCRIPT_SOURCE.includes('const numericTrend24h = finiteOrNull(scoreTrend24hPct);'));
+    assert.ok(SCRIPT_SOURCE.includes('score_trend_24h_pct: roundForAdvisory(numericTrend24h, 2)'));
+    assert.ok(SCRIPT_SOURCE.includes('const currentCallScore = currentCall ? finiteOrNull(currentCall.score) : null;'));
+    assert.ok(SCRIPT_SOURCE.includes('scoreTrend24hPct: entrySellCallScoreTrend24hPct'));
+    assert.ok(SCRIPT_SOURCE.includes('scoreTrend24hPct: openOrderSellCallScoreTrend24hPct'));
+  });
+});
 
 // ============================================================================
 // 1. parseExpiryFromInstrument
@@ -7093,13 +7144,52 @@ describe('confirmation prompt margin context', () => {
     });
 
     assert.ok(context.includes('Sell-call value confirmation context'));
-    assert.ok(context.includes('Trigger score: 68.55'));
+    assert.ok(context.includes('Raw score: 68.55'));
     assert.ok(context.includes('min_edge_score=80.00'));
     assert.ok(context.includes('edge_score=91.20'));
+    assert.ok(context.includes('edge_gate=PASS (edge_score=91.20 >= min_edge_score=80.00)'));
+    assert.ok(context.includes('raw_gate=NOT_APPLICABLE (min_edge_score takes precedence)'));
     assert.ok(context.includes('min_bid=$4.0000'));
     assert.ok(context.includes('planned_score=68.53'));
+    assert.ok(context.includes('min_edge_score is compared only with edge_score'));
     assert.ok(context.includes('fresh bid, composite edge score, min_bid, delta/DTE, and margin facts satisfy the advisor rule'));
     assert.ok(context.includes('Raw call score alone is not enough'));
+  });
+
+  test('sell_call confirmation does not mistake a raw score below the composite edge threshold for a failed gate', () => {
+    const context = formatSellCallConfirmationContext({
+      action: {
+        action: 'sell_call',
+        price: 6.46,
+        rule_criteria: {
+          option_type: 'C',
+          delta_range: [0.04, 0.12],
+          dte_range: [5, 12],
+          min_bid: 4,
+          min_edge_score: 55,
+        },
+      },
+      triggerData: {
+        score: 53.86,
+        selection_score: 57.27,
+        delta: 0.12,
+        dte: 8,
+        strike: 2050,
+        live_price: 6.46,
+        sell_call_research: { recommendation: 'caution', wide_spread_caution: true },
+      },
+      ticker: { b: 6.46, option_pricing: { d: '0.12' } },
+      currentPrice: 6.46,
+    });
+
+    assert.ok(context.includes('Raw score: 53.86'));
+    assert.ok(context.includes('edge_gate=PASS (edge_score=57.27 >= min_edge_score=55.00)'));
+    assert.ok(context.includes('raw_gate=NOT_APPLICABLE (min_edge_score takes precedence)'));
+    assert.ok(context.includes('Never describe a passing typed gate as failed'));
+    assert.ok(context.includes('A passing value gate does not force confirmation'));
+    assert.ok(SCRIPT_SOURCE.includes('Raw score: ${fmt(triggerScore, 2)} using raw_score'));
+    assert.ok(SCRIPT_SOURCE.includes('Typed value gates: edge_gate=${edgeGateStatus}'));
+    assert.ok(SCRIPT_SOURCE.includes('min_edge_score is compared only with edge_score'));
   });
 
   test('sell_put confirmation context preserves tail monetization floor and tranche discipline', () => {

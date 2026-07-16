@@ -1695,6 +1695,7 @@ const computeDteAt = (expiry, nowMs = Date.now()) => {
 };
 
 const finiteOrNull = (value) => {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return null;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
 };
@@ -2220,6 +2221,26 @@ const computeScoreTrendPct = (samples, currentScore, hours) => {
   return avg > 0 ? roundForAdvisory(((currentScore - avg) / avg) * 100, 2) : null;
 };
 
+const loadSellCallScoreTrend24hPct = (currentScore, before = new Date().toISOString()) => {
+  const score = finiteOrNull(currentScore);
+  if (!(score > 0) || !db || typeof db.getSellCallScoreSamples !== 'function') return null;
+  const since = new Date(Date.now() - ADVISORY_OPTION_VALUE_WINDOW_DAYS * 86400000).toISOString();
+  try {
+    const samples = db.getSellCallScoreSamples({
+      since,
+      before,
+      minDelta: CALL_DELTA_RANGE[0],
+      maxDelta: CALL_DELTA_RANGE[1],
+      minDte: CALL_EXPIRATION_RANGE[0],
+      maxDte: CALL_EXPIRATION_RANGE[1],
+    });
+    return computeScoreTrendPct(samples, score, 24);
+  } catch (e) {
+    console.log(`📋 Sell-call score trend unavailable: ${e.message}`);
+    return null;
+  }
+};
+
 const summarizeRecentScoreWindow = (samples, currentScore, hours) => {
   if (!(currentScore > 0) || !Array.isArray(samples) || samples.length === 0) {
     return { hours, samples: 0 };
@@ -2480,8 +2501,10 @@ const buildRollingOptionValueContext = ({
   const freshBest = currentScore > 0 && priorBestScore > 0 && currentScore > priorBestScore;
   const priorCallScores = priorCallSamples.map((row) => Number(row.score)).filter((score) => score > 0);
   const priorCallBestScore = priorCallScores.length > 0 ? Math.max(...priorCallScores) : null;
-  const currentCallScore = Number(currentCall?.score || 0);
-  const currentCallVsPriorBestPct = priorCallBestScore > 0 ? (currentCallScore / priorCallBestScore) * 100 : null;
+  const currentCallScore = currentCall ? finiteOrNull(currentCall.score) : null;
+  const currentCallVsPriorBestPct = currentCallScore != null && priorCallBestScore > 0
+    ? (currentCallScore / priorCallBestScore) * 100
+    : null;
   const callPercentile = currentCallScore > 0 && priorCallScores.length > 0
     ? (priorCallScores.filter((score) => score <= currentCallScore).length / priorCallScores.length) * 100
     : null;
@@ -6365,7 +6388,7 @@ const classifySellCallResearchBand = ({
 } = {}) => {
   const numericScore = Number(score);
   const numericDte = Number(dte);
-  const numericTrend24h = Number(scoreTrend24hPct);
+  const numericTrend24h = finiteOrNull(scoreTrend24hPct);
   const numericBid = Number(bidPrice);
   const numericAsk = Number(askPrice);
   const numericMark = Number(markPrice);
@@ -6534,6 +6557,7 @@ const classifySellCallResearchBand = ({
       market_best_put_score: roundForAdvisory(marketBestPutScore, 6),
       market_skew_pct: roundForAdvisory(marketSkew != null ? marketSkew * 100 : null, 2),
       market_oi_delta_24h_pct: roundForAdvisory(marketOiDelta24hPct, 2),
+      score_trend_24h_pct: roundForAdvisory(numericTrend24h, 2),
       bid_price: roundForAdvisory(numericBid, 4),
       depth: roundForAdvisory(depth, 2),
       implied_vol: roundForAdvisory(finiteOrNull(impliedVol), 4),
@@ -7428,6 +7452,17 @@ const formatSellCallConfirmationContext = ({ action, triggerData, ticker, curren
   const sellCallResearch = triggerData?.sell_call_research || {};
   const edgeScore = Number(triggerData?.selection_score ?? sellCallResearch?.selection_score);
   const minEdgeScore = Number(criteria.min_edge_score);
+  const legacyMinScore = Number(criteria.min_score);
+  const hasMinEdgeScore = Number.isFinite(minEdgeScore) && minEdgeScore > 0;
+  const hasLegacyMinScore = Number.isFinite(legacyMinScore) && legacyMinScore > 0;
+  const edgeGateStatus = hasMinEdgeScore
+    ? (Number.isFinite(edgeScore) && edgeScore + 1e-9 >= minEdgeScore ? 'PASS' : 'FAIL')
+    : 'NOT_CONFIGURED';
+  const rawGateStatus = hasMinEdgeScore
+    ? 'NOT_APPLICABLE (min_edge_score takes precedence)'
+    : hasLegacyMinScore
+      ? (Number.isFinite(triggerScore) && triggerScore + 1e-9 >= legacyMinScore ? 'PASS' : 'FAIL')
+      : 'NOT_CONFIGURED';
   const edgeComponents = sellCallResearch?.edge_components || {};
   const edgeWarnings = [
     sellCallResearch?.put_stress_caution ? 'put_stress' : null,
@@ -7443,10 +7478,12 @@ const formatSellCallConfirmationContext = ({ action, triggerData, ticker, curren
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
   return [
     'Sell-call value confirmation context:',
-    `- Trigger score: ${fmt(triggerScore, 2)} using call score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
-    `- Rule gates: min_edge_score=${fmt(minEdgeScore, 2)}, legacy_min_score=${fmt(Number(criteria.min_score), 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}, market_conditions=${marketConditions}.`,
-    `- Composite edge: edge_score=${fmt(edgeScore, 2)}, recommendation=${sellCallResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={raw_score:${fmt(edgeComponents.raw_score, 2)}, candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, market_spread_pct:${fmt(edgeComponents.market_spread_pct, 2)}, best_put_score:${fmt(edgeComponents.market_best_put_score, 6)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}}.`,
+    `- Raw score: ${fmt(triggerScore, 2)} using raw_score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
+    `- Rule gates: min_edge_score=${fmt(minEdgeScore, 2)}, legacy_min_score=${fmt(legacyMinScore, 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}, market_conditions=${marketConditions}.`,
+    `- Composite edge: edge_score=${fmt(edgeScore, 2)}, recommendation=${sellCallResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={raw_score:${fmt(edgeComponents.raw_score, 2)}, candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, market_spread_pct:${fmt(edgeComponents.market_spread_pct, 2)}, best_put_score:${fmt(edgeComponents.market_best_put_score, 6)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, trend_24h_pct:${fmt(edgeComponents.score_trend_24h_pct, 2)}}.`,
+    `- Typed value gates: edge_gate=${edgeGateStatus}${hasMinEdgeScore ? ` (edge_score=${fmt(edgeScore, 2)} ${edgeGateStatus === 'PASS' ? '>=' : '<'} min_edge_score=${fmt(minEdgeScore, 2)})` : ''}; raw_gate=${rawGateStatus}${!hasMinEdgeScore && hasLegacyMinScore ? ` (raw_score=${fmt(triggerScore, 2)} ${rawGateStatus === 'PASS' ? '>=' : '<'} legacy_min_score=${fmt(legacyMinScore, 2)})` : ''}.`,
     `- Live reference: executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}, planned_score=${fmt(plannedScore, 2)}.`,
+    '- Gate semantics: min_edge_score is compared only with edge_score. legacy_min_score is compared with raw_score only when min_edge_score is not configured. Never describe a passing typed gate as failed. A passing value gate does not force confirmation; reject only for a separate, concrete fresh market, warning, or risk fact and name that fact explicitly.',
     '- Confirm sell_call when the fresh bid, composite edge score, min_bid, delta/DTE, and margin facts satisfy the advisor rule. Raw call score alone is not enough when the composite edge or explicit warnings contradict it. A broad spot floor is not premium value by itself; if fresh market action materially contradicts the rule premise, reject rather than inventing a new thesis.',
   ].join('\n');
 };
@@ -7573,6 +7610,7 @@ const validateRestingSellCallEntryOrder = ({
   marginState = null,
   positions = [],
   spotPrice = 0,
+  scoreTrend24hPct = null,
 }) => {
   const instrumentName = order?.instrument_name;
   if (!instrumentName) return { valid: true, unchecked: true, reason: 'missing instrument name' };
@@ -7609,6 +7647,7 @@ const validateRestingSellCallEntryOrder = ({
     askAmount: ticker?.A,
     impliedVol: getTickerImpliedVol(ticker),
     openInterest: getTickerOpenInterest(ticker),
+    scoreTrend24hPct,
     marketContext: sellCallMarketContext,
   });
   const edgeScore = Number(research?.selection_score || 0);
@@ -8435,6 +8474,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
     const sellCallMarketContext = buildLiveSellCallMarketContext(tickerMap, Date.now(), {
       market_oi_delta_24h_pct: entryMarketOiDelta24hPct,
     });
+    const hasSellCallEntryRule = entryRules.some((rule) => rule?.action === 'sell_call');
+    const entryBestSellCall = hasSellCallEntryRule
+      ? getBestCurrentSellCallCandidate(tickerMap, Date.now(), sellCallMarketContext)
+      : null;
+    const entrySellCallScoreTrend24hPct = loadSellCallScoreTrend24hPct(entryBestSellCall?.score);
     let buyPutOpportunityContext = null;
     const getBuyPutOpportunityContext = () => {
       if (buyPutOpportunityContext) return buyPutOpportunityContext;
@@ -8737,6 +8781,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
                 askAmount,
                 impliedVol: getTickerImpliedVol(ticker),
                 openInterest: getTickerOpenInterest(ticker),
+                scoreTrend24hPct: entrySellCallScoreTrend24hPct,
                 marketContext: sellCallMarketContext,
               })
               : null;
@@ -9513,9 +9558,17 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
   // Entry rules match by criteria, not instrument. Check if any entry rule's action matches the order's direction.
   const activeEntryActions = new Set(activeRules.filter(r => r.rule_type === 'entry').map(r => r.action));
   let openOrderMarginState = null;
-  if (openOrders.some((order) => inferActionFromOpenOrder(order) === 'sell_call')) {
+  const hasOpenSellCall = openOrders.some((order) => inferActionFromOpenOrder(order) === 'sell_call');
+  if (hasOpenSellCall) {
     try { openOrderMarginState = await fetchSubaccount(); } catch { /* ok */ }
   }
+  const openOrderSellCallMarketContext = hasOpenSellCall
+    ? buildLiveSellCallMarketContext(tickerMap)
+    : null;
+  const openOrderBestSellCall = openOrderSellCallMarketContext
+    ? getBestCurrentSellCallCandidate(tickerMap, Date.now(), openOrderSellCallMarketContext)
+    : null;
+  const openOrderSellCallScoreTrend24hPct = loadSellCallScoreTrend24hPct(openOrderBestSellCall?.score);
   let openOrderBuyPutContext = null;
   const hasTrackedRestingBuyPut = openOrders.some((order) => {
     const tracked = trackedResting.find((item) => item.order_id === order.order_id)
@@ -9569,6 +9622,7 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
         marginState: openOrderMarginState,
         positions,
         spotPrice,
+        scoreTrend24hPct: openOrderSellCallScoreTrend24hPct,
       });
       if (!validation.valid) {
         invalidRestingEntryReason = `resting sell_call no longer satisfies active rule: ${validation.reason}`;
