@@ -8159,10 +8159,9 @@ const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, s
   return Math.max((spotPrice || 0) * 0.13, 100);
 };
 
-const getCallMarginContext = (action, marginState, positions, restingOrders, instruments, spotPrice, instrumentName, amount, limitPrice) => {
-  if (action !== 'sell_call') return 'Call margin utilization: not applicable for this action.';
-  if (!marginState) return 'Call margin utilization: unavailable (margin state unavailable).';
-
+const getCallMarginDecision = (action, marginState, positions, restingOrders, instruments, spotPrice, instrumentName, amount, limitPrice) => {
+  if (action !== 'sell_call') return { applicable: false, available: false };
+  if (!marginState) return { applicable: true, available: false };
   const effectiveCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
   const breakoutOverrideActive = effectiveCapPct > CALL_EXPOSURE_CAP_PCT;
   const currentUtilization = estimateDisplayedMarginUtilization(marginState);
@@ -8182,7 +8181,68 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   const entryCapSatisfied = projectedUtilization != null
     && projectedUtilization <= effectiveCapPct + 1e-9;
 
+  return {
+    applicable: true,
+    available: projectedUtilization != null,
+    currentUtilization,
+    projectedUtilization,
+    marginPerUnit,
+    effectiveCapPct,
+    breakoutOverrideActive,
+    capPct,
+    limitPct,
+    baseCapPct,
+    baseLimitPct,
+    entryCapPct,
+    bufferPct,
+    entryCapSatisfied,
+  };
+};
+
+const getCallMarginContext = (action, marginState, positions, restingOrders, instruments, spotPrice, instrumentName, amount, limitPrice) => {
+  const decision = getCallMarginDecision(
+    action,
+    marginState,
+    positions,
+    restingOrders,
+    instruments,
+    spotPrice,
+    instrumentName,
+    amount,
+    limitPrice
+  );
+  if (!decision.applicable) return 'Call margin utilization: not applicable for this action.';
+  if (!decision.available) return 'Call margin utilization: unavailable (margin state unavailable).';
+
+  const {
+    currentUtilization,
+    projectedUtilization,
+    marginPerUnit,
+    breakoutOverrideActive,
+    capPct,
+    limitPct,
+    baseCapPct,
+    baseLimitPct,
+    entryCapPct,
+    bufferPct,
+    entryCapSatisfied,
+  } = decision;
   return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_exact=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(6)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${baseCapPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, active_entry_cap_exact=${capPct.toFixed(6)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${bufferPct.toFixed(1)}pp, base_target_cap=${baseCapPct.toFixed(1)}%, base_buffered_limit=${baseLimitPct.toFixed(1)}%, breakout_override=${breakoutOverrideActive ? 'active' : 'inactive'}, entry_cap_satisfied=${entryCapSatisfied ? 'yes' : 'no'}. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the active entry cap. The ${bufferPct.toFixed(1)} percentage point buffer is last-mile safety for estimate drift, not planned sell-call capacity. Confirm only when projected utilization stays at or below the active entry cap; at-or-below means <= and equality is allowed. Reject call sells that exceed the active entry cap, exceed the buffered limit, lack buying power, or are too small to matter. Use entry_cap_satisfied as the authoritative margin gate; do not reinterpret a rounded ${capPct.toFixed(1)}% display as a failure when entry_cap_satisfied=yes.`;
+};
+
+const isSellCallMarginCapContradiction = (action, vote, callMarginDecision) => {
+  if (
+    action !== 'sell_call'
+    || vote?.confirm !== false
+    || callMarginDecision?.entryCapSatisfied !== true
+  ) {
+    return false;
+  }
+
+  const reasoning = String(vote.reasoning || '');
+  const namesMarginGate = /\b(?:active[\s_-]+)?(?:entry[\s_-]+)?cap\b|\b(?:active[\s_-]+)?limit\b|\bentry_cap_satisfied\b/i.test(reasoning);
+  const claimsGateFailure = /\b(?:exceed(?:s|ed|ing)?|above|over|breach(?:es|ed|ing)?|violate(?:s|d|ing)?|fail(?:s|ed|ing)?|too\s+high|not\s+satisf(?:y|ied|ying))\b/i.test(reasoning);
+  return namesMarginGate && claimsGateFailure;
 };
 
 const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice, instruments, spotPrice }) => {
@@ -10568,6 +10628,17 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         activeTradeLessons
       );
       const recentFailedEntry = getRecentFailedEntry(action.action, action.instrument_name);
+      const callMarginDecision = getCallMarginDecision(
+        action.action,
+        marginState,
+        livePositions,
+        restingOrders,
+        instruments,
+        spotPrice,
+        action.instrument_name,
+        action.amount,
+        currentPrice || action.price
+      );
       const callMarginContext = getCallMarginContext(
         action.action,
         marginState,
@@ -10579,6 +10650,21 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         action.amount,
         currentPrice || action.price
       );
+      if (
+        action.action === 'sell_call'
+        && callMarginDecision.available
+        && !callMarginDecision.entryCapSatisfied
+      ) {
+        const projectedPct = callMarginDecision.projectedUtilization * 100;
+        const capPct = callMarginDecision.effectiveCapPct * 100;
+        const rejectReason = `Auto-rejected before LLM: projected sell-call margin utilization ${projectedPct.toFixed(6)}% exceeds active entry cap ${capPct.toFixed(6)}%`;
+        db.updatePendingAction(action.id, {
+          status: 'rejected',
+          confirmation_reasoning: rejectReason,
+        });
+        console.log(`🚫 Rejected: ${action.action} ${action.instrument_name} — ${rejectReason}`);
+        continue;
+      }
       const ruleReasoningLine = action.action === 'buy_put'
         ? `Standing rule reasoning at advisory creation (historical; may contain stale score/target language, current buy-put trigger context is authoritative): ${action.rule_reasoning || 'N/A'}`
         : action.action === 'sell_call'
@@ -10696,6 +10782,19 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         console.log(`⚠️ OpenAI confirmation failed: ${e.message}`);
       }
 
+      const anthropicMarginContradiction = isSellCallMarginCapContradiction(
+        action.action,
+        anthropicVote,
+        callMarginDecision
+      );
+      const codexMarginContradiction = isSellCallMarginCapContradiction(
+        action.action,
+        codexVote,
+        callMarginDecision
+      );
+      const decisionAnthropicVote = anthropicMarginContradiction ? null : anthropicVote;
+      const decisionCodexVote = codexMarginContradiction ? null : codexVote;
+
       const advisorBuybackRuleSatisfied = action.action === 'buyback_call'
         && buybackConfirmationContext?.satisfied === true
         && Number(liveMarketPrice) > 0;
@@ -10718,7 +10817,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
             : null,
         }
       );
-      const confirmedByAtLeastOneReviewer = Boolean(anthropicVote?.confirm || codexVote?.confirm);
+      const confirmedByAtLeastOneReviewer = Boolean(decisionAnthropicVote?.confirm || decisionCodexVote?.confirm);
       const buyPutPatientMakerOverride = Boolean(
         buyPutPatientMakerContext.satisfied
         && confirmedByAtLeastOneReviewer
@@ -10730,14 +10829,14 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       // Voting logic
       let decision;
       let decisionOverrideReason = null;
-      if (anthropicVote && codexVote) {
+      if (decisionAnthropicVote && decisionCodexVote) {
         // Both voted
-        decision = (anthropicVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
-      } else if (anthropicVote) {
+        decision = (decisionAnthropicVote.confirm && decisionCodexVote.confirm) ? 'confirmed' : 'rejected';
+      } else if (decisionAnthropicVote) {
         // Single advisor fallback
-        decision = anthropicVote.confirm ? 'confirmed' : 'rejected';
-      } else if (codexVote) {
-        decision = codexVote.confirm ? 'confirmed' : 'rejected';
+        decision = decisionAnthropicVote.confirm ? 'confirmed' : 'rejected';
+      } else if (decisionCodexVote) {
+        decision = decisionCodexVote.confirm ? 'confirmed' : 'rejected';
       } else {
         if (deterministicPatientBuyback) {
           decision = 'confirmed';
@@ -10757,9 +10856,9 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       if (
         decision === 'rejected'
         && advisorBuybackRuleSatisfied
-        && anthropicVote
-        && codexVote
-        && (anthropicVote.confirm || codexVote.confirm)
+        && decisionAnthropicVote
+        && decisionCodexVote
+        && (decisionAnthropicVote.confirm || decisionCodexVote.confirm)
       ) {
         decision = 'confirmed';
         const overrideCapture = buybackConfirmationContext.patientSatisfied
@@ -10776,17 +10875,21 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       }
 
       const reasoning = [
-        anthropicVote ? `Sonnet: ${anthropicVote.confirm ? 'CONFIRM' : 'REJECT'} — ${anthropicVote.reasoning || 'no reason'}` : `Sonnet: FAILED — ${anthropicFailure || 'unknown error'}`,
-        codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : `OpenAI: FAILED — ${codexFailure || 'unknown error'}`,
+        anthropicMarginContradiction
+          ? `Sonnet: INVALID REJECT — contradicted authoritative entry_cap_satisfied=yes (${anthropicVote.reasoning || 'no reason'})`
+          : anthropicVote ? `Sonnet: ${anthropicVote.confirm ? 'CONFIRM' : 'REJECT'} — ${anthropicVote.reasoning || 'no reason'}` : `Sonnet: FAILED — ${anthropicFailure || 'unknown error'}`,
+        codexMarginContradiction
+          ? `OpenAI: INVALID REJECT — contradicted authoritative entry_cap_satisfied=yes (${codexVote.reasoning || 'no reason'})`
+          : codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : `OpenAI: FAILED — ${codexFailure || 'unknown error'}`,
         decisionOverrideReason,
       ].filter(Boolean).join(' | ');
 
       // Resolve order type from voter consensus (prefer Anthropic's pick, fallback to OpenAI)
       let confirmedOrderType = (
-        (anthropicVote?.confirm ? anthropicVote.order_type : null)
-        || (codexVote?.confirm ? codexVote.order_type : null)
-        || anthropicVote?.order_type
-        || codexVote?.order_type
+        (decisionAnthropicVote?.confirm ? decisionAnthropicVote.order_type : null)
+        || (decisionCodexVote?.confirm ? decisionCodexVote.order_type : null)
+        || decisionAnthropicVote?.order_type
+        || decisionCodexVote?.order_type
         || advisoryOrderPref
         || 'ioc'
       );
@@ -10869,10 +10972,10 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       // Resolve limit price: voter can override, otherwise use current market price
       // Sanity check: voter price must be within 50% of market price (prevents LLM hallucinating insane prices)
       const voterLimitPrice = (
-        (anthropicVote?.confirm ? anthropicVote.limit_price : null)
-        || (codexVote?.confirm ? codexVote.limit_price : null)
-        || anthropicVote?.limit_price
-        || codexVote?.limit_price
+        (decisionAnthropicVote?.confirm ? decisionAnthropicVote.limit_price : null)
+        || (decisionCodexVote?.confirm ? decisionCodexVote.limit_price : null)
+        || decisionAnthropicVote?.limit_price
+        || decisionCodexVote?.limit_price
       );
       const defaultActionPrice = currentPrice || action.price;
       const marketPrice = action.action === 'buy_put' && advisorEntryLimitPrice != null

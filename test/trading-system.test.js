@@ -5904,6 +5904,21 @@ describe('Confirmation voting logic', () => {
   // Tests the voting matrix: both confirm → execute, both reject → reject,
   // split → reject (conservative), one fails → use the other
 
+  const isSellCallMarginCapContradiction = (action, vote, callMarginDecision) => {
+    if (
+      action !== 'sell_call'
+      || vote?.confirm !== false
+      || callMarginDecision?.entryCapSatisfied !== true
+    ) {
+      return false;
+    }
+
+    const reasoning = String(vote.reasoning || '');
+    const namesMarginGate = /\b(?:active[\s_-]+)?(?:entry[\s_-]+)?cap\b|\b(?:active[\s_-]+)?limit\b|\bentry_cap_satisfied\b/i.test(reasoning);
+    const claimsGateFailure = /\b(?:exceed(?:s|ed|ing)?|above|over|breach(?:es|ed|ing)?|violate(?:s|d|ing)?|fail(?:s|ed|ing)?|too\s+high|not\s+satisf(?:y|ied|ying))\b/i.test(reasoning);
+    return namesMarginGate && claimsGateFailure;
+  };
+
   const resolveVote = (anthropicVote, codexVote) => {
     if (anthropicVote && codexVote) {
       return (anthropicVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
@@ -5913,6 +5928,20 @@ describe('Confirmation voting logic', () => {
       return codexVote.confirm ? 'confirmed' : 'rejected';
     }
     return 'retry'; // Both failed
+  };
+
+  const resolveSellCallVote = (anthropicVote, codexVote, callMarginDecision) => {
+    const decisionAnthropicVote = isSellCallMarginCapContradiction(
+      'sell_call',
+      anthropicVote,
+      callMarginDecision
+    ) ? null : anthropicVote;
+    const decisionCodexVote = isSellCallMarginCapContradiction(
+      'sell_call',
+      codexVote,
+      callMarginDecision
+    ) ? null : codexVote;
+    return resolveVote(decisionAnthropicVote, decisionCodexVote);
   };
 
   test('both confirm → confirmed', () => {
@@ -5953,6 +5982,59 @@ describe('Confirmation voting logic', () => {
   test('both fail → retry', () => {
     const result = resolveVote(null, null);
     assert.strictEqual(result, 'retry');
+  });
+
+  test('passed sell-call cap ignores a reviewer that falsely claims projected utilization exceeds it', () => {
+    const result = resolveSellCallVote(
+      {
+        confirm: true,
+        order_type: 'post_only',
+        reasoning: 'Projected utilization is 44.947%, at or below the active 45% cap.',
+      },
+      {
+        confirm: false,
+        reasoning: 'Selling the call exceeds the active entry cap of 45%, as projected utilization after the trade exceeds this limit.',
+      },
+      {
+        projectedUtilization: 0.44947,
+        effectiveCapPct: 0.45,
+        entryCapSatisfied: true,
+      }
+    );
+    assert.strictEqual(result, 'confirmed');
+  });
+
+  test('passed sell-call cap preserves a reviewer veto for a separate risk concern', () => {
+    const result = resolveSellCallVote(
+      { confirm: true, reasoning: 'Arithmetic gates pass.' },
+      { confirm: false, reasoning: 'Reject because the position is too concentrated to survive a 2-sigma move.' },
+      {
+        projectedUtilization: 0.44947,
+        effectiveCapPct: 0.45,
+        entryCapSatisfied: true,
+      }
+    );
+    assert.strictEqual(result, 'rejected');
+  });
+
+  test('failed sell-call cap never invalidates a reviewer rejection', () => {
+    const result = resolveSellCallVote(
+      { confirm: true, reasoning: 'Confirm.' },
+      { confirm: false, reasoning: 'Projected utilization exceeds the active entry cap.' },
+      {
+        projectedUtilization: 0.45001,
+        effectiveCapPct: 0.45,
+        entryCapSatisfied: false,
+      }
+    );
+    assert.strictEqual(result, 'rejected');
+  });
+
+  test('production confirmation flow applies the authoritative sell-call margin safeguards', () => {
+    assert.ok(SCRIPT_SOURCE.includes('const isSellCallMarginCapContradiction ='));
+    assert.ok(SCRIPT_SOURCE.includes("action.action === 'sell_call'"));
+    assert.ok(SCRIPT_SOURCE.includes('Auto-rejected before LLM: projected sell-call margin utilization'));
+    assert.ok(SCRIPT_SOURCE.includes('const decisionCodexVote = codexMarginContradiction ? null : codexVote;'));
   });
 });
 
