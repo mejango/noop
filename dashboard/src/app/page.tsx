@@ -1848,6 +1848,97 @@ export default function OverviewPage() {
         )}
       </Card>
 
+      {/* P&L */}
+      {pnlChartData.length > 0 && (
+        <Card title="P&L" subtitle={pnlCoverageLabel ?? `${range} trade flow`}>
+          <ResponsiveContainer width="100%" height={320}>
+            <ComposedChart data={pnlChartData} margin={margins} barGap={0} barCategoryGap="25%">
+              <XAxis
+                dataKey="ts"
+                type="number"
+                domain={xDomain}
+                allowDataOverflow
+                tickFormatter={xTickFormatter}
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+              />
+              <YAxis
+                yAxisId="lines"
+                orientation="left"
+                stroke={chartAxis.stroke}
+                tick={chartAxis.tick}
+                width={primaryYAxisWidth}
+                domain={pnlLineDomain}
+                tickFormatter={(v) => `${v < 0 ? '-' : ''}$${Math.round(Math.abs(v))}`}
+              />
+              <YAxis
+                yAxisId="bars"
+                orientation="right"
+                hide
+                domain={pnlBarDomain}
+              />
+              <YAxis
+                yAxisId="portfolio"
+                orientation="right"
+                stroke="rgba(125, 211, 252, 0.55)"
+                tick={chartAxis.tick}
+                width={primaryYAxisWidth}
+                domain={pnlPortfolioDomain}
+                tickFormatter={(v) => `$${Math.round(v)}`}
+              />
+              <Tooltip
+                {...chartTooltip}
+                formatter={(value: number | string | undefined, name: string | undefined) => {
+                  const labels: Record<string, string> = {
+                    cumulativeRevenue: 'Cum Revenue',
+                    cumulativeExpenses: 'Cum Expenses',
+                    cumulativeProfit: 'Cum Profit',
+                    periodRevenue: 'Revenue',
+                    periodExpenses: 'Expenses',
+                    periodCallRevenue: 'Call Premium',
+                    periodPutRevenue: 'Put Exits',
+                    periodPutExpenses: 'Put Buys',
+                    periodCallExpenses: 'Call Buybacks',
+                    portfolioValueUsd: 'Portfolio USD',
+                  };
+                  const numericValue = typeof value === 'number' ? value : Number(value ?? 0);
+                  const key = name ?? '';
+                  return [formatUSD(numericValue), labels[key] ?? key];
+                }}
+                labelFormatter={(label) => new Date(Number(label)).toLocaleString()}
+              />
+              <Legend
+                wrapperStyle={{ fontSize: 11, color: '#9ca3af' }}
+                formatter={(value) => (
+                  <span style={{ color: '#9ca3af' }}>
+                    {value === 'cumulativeRevenue' ? 'revenue' :
+                     value === 'cumulativeExpenses' ? 'expenses' :
+                     value === 'cumulativeProfit' ? 'profit' :
+                     value === 'periodRevenue' ? 'rev bars' :
+                     value === 'periodExpenses' ? 'exp bars' :
+                     value === 'periodCallRevenue' ? 'call rev' :
+                     value === 'periodPutRevenue' ? 'put rev' :
+                     value === 'periodPutExpenses' ? 'put buys' :
+                     value === 'periodCallExpenses' ? 'call buybacks' :
+                     value === 'portfolioValueUsd' ? 'portfolio usd' : value}
+                  </span>
+                )}
+              />
+              <ReferenceLine yAxisId="lines" y={0} stroke="rgba(255,255,255,0.12)" />
+              <ReferenceLine yAxisId="bars" y={0} stroke="rgba(255,255,255,0.08)" />
+              <Bar yAxisId="bars" dataKey="periodCallRevenue" name="periodCallRevenue" stackId="grossFlow" fill="rgba(74, 222, 128, 0.46)" radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="bars" dataKey="periodPutRevenue" name="periodPutRevenue" stackId="grossFlow" fill="rgba(45, 212, 191, 0.38)" radius={[2, 2, 0, 0]} />
+              <Bar yAxisId="bars" dataKey="periodPutExpenses" name="periodPutExpenses" stackId="grossFlow" fill="rgba(248, 113, 113, 0.34)" radius={[0, 0, 2, 2]} />
+              <Bar yAxisId="bars" dataKey="periodCallExpenses" name="periodCallExpenses" stackId="grossFlow" fill="rgba(251, 146, 60, 0.46)" radius={[0, 0, 2, 2]} />
+              <Line yAxisId="lines" type="monotone" dataKey="cumulativeRevenue" name="cumulativeRevenue" stroke="#4ade80" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line yAxisId="lines" type="monotone" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line yAxisId="lines" type="monotone" dataKey="cumulativeProfit" name="cumulativeProfit" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
+              <Line yAxisId="portfolio" type="monotone" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={2} dot={false} strokeDasharray="5 4" isAnimationActive={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </Card>
+      )}
+
       {/* Momentum Bar — two rows: medium (top) + short (bottom) */}
       {momentumData.length > 0 && (() => {
         const MomentumTooltipBar = ({ data }: { data: typeof momentumData }) => {
@@ -2703,97 +2794,6 @@ export default function OverviewPage() {
             </ScatterChart>
           </ResponsiveContainer>
           </div>
-        </Card>
-      )}
-
-      {/* Positions Table */}
-      {pnlChartData.length > 0 && (
-        <Card title="P&L" subtitle={pnlCoverageLabel ?? `${range} trade flow`}>
-          <ResponsiveContainer width="100%" height={320}>
-            <ComposedChart data={pnlChartData} margin={margins} barGap={0} barCategoryGap="25%">
-              <XAxis
-                dataKey="ts"
-                type="number"
-                domain={xDomain}
-                allowDataOverflow
-                tickFormatter={xTickFormatter}
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tick}
-              />
-              <YAxis
-                yAxisId="lines"
-                orientation="left"
-                stroke={chartAxis.stroke}
-                tick={chartAxis.tick}
-                width={primaryYAxisWidth}
-                domain={pnlLineDomain}
-                tickFormatter={(v) => `${v < 0 ? '-' : ''}$${Math.round(Math.abs(v))}`}
-              />
-              <YAxis
-                yAxisId="bars"
-                orientation="right"
-                hide
-                domain={pnlBarDomain}
-              />
-              <YAxis
-                yAxisId="portfolio"
-                orientation="right"
-                stroke="rgba(125, 211, 252, 0.55)"
-                tick={chartAxis.tick}
-                width={primaryYAxisWidth}
-                domain={pnlPortfolioDomain}
-                tickFormatter={(v) => `$${Math.round(v)}`}
-              />
-              <Tooltip
-                {...chartTooltip}
-                formatter={(value: number | string | undefined, name: string | undefined) => {
-                  const labels: Record<string, string> = {
-                    cumulativeRevenue: 'Cum Revenue',
-                    cumulativeExpenses: 'Cum Expenses',
-                    cumulativeProfit: 'Cum Profit',
-                    periodRevenue: 'Revenue',
-                    periodExpenses: 'Expenses',
-                    periodCallRevenue: 'Call Premium',
-                    periodPutRevenue: 'Put Exits',
-                    periodPutExpenses: 'Put Buys',
-                    periodCallExpenses: 'Call Buybacks',
-                    portfolioValueUsd: 'Portfolio USD',
-                  };
-                  const numericValue = typeof value === 'number' ? value : Number(value ?? 0);
-                  const key = name ?? '';
-                  return [formatUSD(numericValue), labels[key] ?? key];
-                }}
-                labelFormatter={(label) => new Date(Number(label)).toLocaleString()}
-              />
-              <Legend
-                wrapperStyle={{ fontSize: 11, color: '#9ca3af' }}
-                formatter={(value) => (
-                  <span style={{ color: '#9ca3af' }}>
-                    {value === 'cumulativeRevenue' ? 'revenue' :
-                     value === 'cumulativeExpenses' ? 'expenses' :
-                     value === 'cumulativeProfit' ? 'profit' :
-                     value === 'periodRevenue' ? 'rev bars' :
-                     value === 'periodExpenses' ? 'exp bars' :
-                     value === 'periodCallRevenue' ? 'call rev' :
-                     value === 'periodPutRevenue' ? 'put rev' :
-                     value === 'periodPutExpenses' ? 'put buys' :
-                     value === 'periodCallExpenses' ? 'call buybacks' :
-                     value === 'portfolioValueUsd' ? 'portfolio usd' : value}
-                  </span>
-                )}
-              />
-              <ReferenceLine yAxisId="lines" y={0} stroke="rgba(255,255,255,0.12)" />
-              <ReferenceLine yAxisId="bars" y={0} stroke="rgba(255,255,255,0.08)" />
-              <Bar yAxisId="bars" dataKey="periodCallRevenue" name="periodCallRevenue" stackId="grossFlow" fill="rgba(74, 222, 128, 0.46)" radius={[2, 2, 0, 0]} />
-              <Bar yAxisId="bars" dataKey="periodPutRevenue" name="periodPutRevenue" stackId="grossFlow" fill="rgba(45, 212, 191, 0.38)" radius={[2, 2, 0, 0]} />
-              <Bar yAxisId="bars" dataKey="periodPutExpenses" name="periodPutExpenses" stackId="grossFlow" fill="rgba(248, 113, 113, 0.34)" radius={[0, 0, 2, 2]} />
-              <Bar yAxisId="bars" dataKey="periodCallExpenses" name="periodCallExpenses" stackId="grossFlow" fill="rgba(251, 146, 60, 0.46)" radius={[0, 0, 2, 2]} />
-              <Line yAxisId="lines" type="monotone" dataKey="cumulativeRevenue" name="cumulativeRevenue" stroke="#4ade80" strokeWidth={2} dot={false} isAnimationActive={false} />
-              <Line yAxisId="lines" type="monotone" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
-              <Line yAxisId="lines" type="monotone" dataKey="cumulativeProfit" name="cumulativeProfit" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
-              <Line yAxisId="portfolio" type="monotone" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={2} dot={false} strokeDasharray="5 4" isAnimationActive={false} />
-            </ComposedChart>
-          </ResponsiveContainer>
         </Card>
       )}
 

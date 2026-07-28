@@ -2776,6 +2776,69 @@ describe('Order result classification (zero-fill detection)', () => {
 });
 
 // ============================================================================
+// 9b. Telegram order lifecycle notifications
+// ============================================================================
+
+const notificationHelpersStart = SCRIPT_SOURCE.indexOf('const ORDER_NOTIFICATION_LABELS');
+const notificationHelpersEnd = SCRIPT_SOURCE.indexOf('// ETH contract addresses', notificationHelpersStart);
+const { formatOrderLifecycleNotification } = new Function(`
+  ${SCRIPT_SOURCE.slice(notificationHelpersStart, notificationHelpersEnd)}
+  return { formatOrderLifecycleNotification };
+`)();
+
+describe('Telegram order lifecycle notifications', () => {
+  const expectedLabels = {
+    buy_put: 'BOUGHT PUT',
+    sell_put: 'SOLD PUT',
+    sell_call: 'SOLD CALL',
+    buyback_call: 'BOUGHT BACK CALL',
+  };
+
+  for (const [action, label] of Object.entries(expectedLabels)) {
+    test(`${action} execution uses a clear human action label`, () => {
+      const message = formatOrderLifecycleNotification({
+        stage: 'executed',
+        action,
+        instrumentName: 'ETH-20261225-2000-P',
+        amount: 1,
+        filledAmount: 1,
+        price: 4.5,
+        totalValue: 4.5,
+        orderType: 'ioc',
+        orderId: 'order-123',
+      });
+      assert.ok(message.includes(`ORDER EXECUTED: ${label}`));
+      assert.ok(message.includes('Filled: 1 / 1 @ $4.5'));
+      assert.ok(message.includes('Total: $4.5'));
+      assert.ok(message.includes('Order: order-123'));
+    });
+  }
+
+  test('resting placement identifies the posted action and order type', () => {
+    const message = formatOrderLifecycleNotification({
+      stage: 'posted',
+      action: 'sell_call',
+      instrumentName: 'ETH-20261225-3000-C',
+      amount: 0.5,
+      price: 6.25,
+      orderType: 'post_only',
+      orderId: 'order-456',
+      status: 'open',
+    });
+    assert.ok(message.includes('ORDER POSTED: SELL CALL'));
+    assert.ok(message.includes('Amount: 0.5 @ $6.25'));
+    assert.ok(message.includes('Type: POST ONLY'));
+    assert.ok(message.includes('Status: open'));
+  });
+
+  test('resting-order reconciliation sends lifecycle notifications', () => {
+    assert.ok(SCRIPT_SOURCE.includes("action: tracked.action"));
+    assert.ok(SCRIPT_SOURCE.includes("filledAmt + 1e-9 < Number(tracked.amount) ? 'partial_fill' : 'executed'"));
+    assert.ok(SCRIPT_SOURCE.includes("stage: 'posted'"));
+  });
+});
+
+// ============================================================================
 // 10. Order type resolution from voter consensus
 // ============================================================================
 

@@ -210,6 +210,66 @@ const sendTelegram = async (message) => {
   }
 };
 
+const ORDER_NOTIFICATION_LABELS = Object.freeze({
+  buy_put: Object.freeze({ order: 'BUY PUT', executed: 'BOUGHT PUT' }),
+  sell_put: Object.freeze({ order: 'SELL PUT', executed: 'SOLD PUT' }),
+  sell_call: Object.freeze({ order: 'SELL CALL', executed: 'SOLD CALL' }),
+  buyback_call: Object.freeze({ order: 'BUYBACK CALL', executed: 'BOUGHT BACK CALL' }),
+});
+
+const formatOrderNotificationNumber = (value, decimals = 4) => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 'N/A';
+  return numeric.toFixed(decimals).replace(/\.?0+$/, '');
+};
+
+const formatOrderLifecycleNotification = ({
+  stage,
+  action,
+  instrumentName,
+  amount,
+  filledAmount = null,
+  price,
+  totalValue = null,
+  orderType = null,
+  orderId = null,
+  status = null,
+}) => {
+  const labels = ORDER_NOTIFICATION_LABELS[action] || {
+    order: String(action || 'ORDER').replace(/_/g, ' ').toUpperCase(),
+    executed: String(action || 'ORDER').replace(/_/g, ' ').toUpperCase(),
+  };
+  const isExecution = stage === 'executed' || stage === 'partial_fill';
+  const stageMeta = {
+    posted: { emoji: '📨', title: 'ORDER POSTED' },
+    executed: { emoji: '✅', title: 'ORDER EXECUTED' },
+    partial_fill: { emoji: '🟡', title: 'ORDER PARTIALLY EXECUTED' },
+    cancelled: { emoji: '🗑️', title: 'ORDER CANCELLED' },
+    expired: { emoji: '⌛', title: 'ORDER EXPIRED' },
+  }[stage] || { emoji: '📋', title: 'ORDER UPDATE' };
+  const lines = [
+    `${stageMeta.emoji} *${stageMeta.title}: ${isExecution ? labels.executed : labels.order}*`,
+    instrumentName,
+  ];
+  const amountText = formatOrderNotificationNumber(amount);
+  const priceText = formatOrderNotificationNumber(price);
+  if (isExecution) {
+    const filledText = formatOrderNotificationNumber(filledAmount);
+    lines.push(`Filled: ${filledText}${amount != null ? ` / ${amountText}` : ''} @ $${priceText}`);
+    if (totalValue != null) lines.push(`Total: $${formatOrderNotificationNumber(totalValue)}`);
+  } else {
+    lines.push(`Amount: ${amountText} @ $${priceText}`);
+  }
+  if (orderType) lines.push(`Type: ${String(orderType).replace(/_/g, ' ').toUpperCase()}`);
+  if (status) lines.push(`Status: ${String(status).replace(/_/g, ' ')}`);
+  if (orderId) lines.push(`Order: ${orderId}`);
+  return lines.join('\n');
+};
+
+const notifyOrderLifecycle = (details) => {
+  sendTelegram(formatOrderLifecycleNotification(details));
+};
+
 // ETH contract addresses for analysis
 const ETH_CONTRACTS = {
   WETH: '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2',
@@ -9602,6 +9662,19 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
           raw_response: finalStatus ? JSON.stringify(finalStatus) : null,
         });
         console.log(`${filledAmt > 0 ? '✅' : '🗑️'} Resting order reconciled: ${tracked.action} ${tracked.instrument_name} — ${status}, filled=${filledAmt} ($${fillValue.toFixed(2)})`);
+        notifyOrderLifecycle({
+          stage: filledAmt > 0
+            ? (filledAmt + 1e-9 < Number(tracked.amount) ? 'partial_fill' : 'executed')
+            : (status === 'expired' ? 'expired' : 'cancelled'),
+          action: tracked.action,
+          instrumentName: tracked.instrument_name,
+          amount: tracked.amount,
+          filledAmount: filledAmt,
+          price: fillPrice,
+          totalValue: filledAmt > 0 ? fillValue : null,
+          orderId: tracked.order_id,
+          status,
+        });
       }
     }
   }
@@ -10419,6 +10492,16 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   // Fill accounting from actual trades
   let filledAmt = 0, avgPx = price, totalValue = 0;
   const orderRecord = extractOrderRecord(order.result || order);
+  notifyOrderLifecycle({
+    stage: 'posted',
+    action,
+    instrumentName,
+    amount,
+    price,
+    orderType,
+    orderId: orderRecord?.order_id || null,
+    status: orderRecord?.order_status || null,
+  });
   const orderTrades = getOrderTrades(order.result || order);
   if (orderTrades.length) {
     let totAmt = 0, totVal = 0;
@@ -10441,6 +10524,16 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       filled_amount: 0, fill_price: null,
       total_value: 0, spot_price: spotPrice,
       raw_response: order,
+    });
+    notifyOrderLifecycle({
+      stage: 'cancelled',
+      action,
+      instrumentName,
+      amount,
+      price,
+      orderType,
+      orderId: orderRecord?.order_id || null,
+      status: 'zero fill',
     });
     return { zeroFill: true, action, instrumentName, amount, price, orderType };
   }
@@ -10486,7 +10579,18 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   }
 
   console.log(`✅ ${action.toUpperCase()}: ${filledAmt} ${instrumentName} @ $${avgPx.toFixed(4)} [${orderType}] | total=$${totalValue.toFixed(4)}`);
-  sendTelegram(`✅ *${action.toUpperCase()}* ${instrumentName}\nAmount: ${filledAmt} @ $${avgPx.toFixed(4)}\nTotal: $${totalValue.toFixed(4)}`);
+  notifyOrderLifecycle({
+    stage: filledAmt + 1e-9 < amount ? 'partial_fill' : 'executed',
+    action,
+    instrumentName,
+    amount,
+    filledAmount: filledAmt,
+    price: avgPx,
+    totalValue,
+    orderType,
+    orderId: orderRecord?.order_id || null,
+    status: orderRecord?.order_status || null,
+  });
   return { filledAmt, avgPx, totalValue, order, orderType };
 };
 
