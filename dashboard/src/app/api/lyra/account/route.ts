@@ -1,18 +1,32 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getPositions, getCollaterals } from '@/lib/lyra';
 import { getOrderTradesSince } from '@/lib/db';
 
 export const dynamic = 'force-dynamic';
+
+const RANGE_MS: Record<string, number> = {
+  '1h': 60 * 60 * 1000,
+  '6h': 6 * 60 * 60 * 1000,
+  '24h': 24 * 60 * 60 * 1000,
+  '3d': 3 * 24 * 60 * 60 * 1000,
+  '6.2d': 6.2 * 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+  '14d': 14 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
+  '90d': 90 * 24 * 60 * 60 * 1000,
+  '365d': 365 * 24 * 60 * 60 * 1000,
+};
 
 function normalizeSpotPrice(value: unknown): number {
   const n = Number(value);
   return Number.isFinite(n) && n >= 100 && n <= 20000 ? n : 0;
 }
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    const since = new Date(thirtyDaysAgo).toISOString();
+    const range = request.nextUrl.searchParams.get('range') || '30d';
+    const rangeMs = RANGE_MS[range] || RANGE_MS['30d'];
+    const since = new Date(Date.now() - rangeMs).toISOString();
 
     const [positions, collaterals] = await Promise.all([
       getPositions(),

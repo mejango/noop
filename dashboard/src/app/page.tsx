@@ -803,7 +803,7 @@ export default function OverviewPage() {
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
   const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart, 90_000);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
-  const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
+  const { data: account } = usePolling<AccountData>(`/api/lyra/account?range=${range}`, emptyAccount, 60_000);
   const pnlWindow = useMemo(() => rangeToWindow(range), [range]);
   const pnlQuery = useMemo(
     () => `/api/pnl-report?range=${encodeURIComponent(range)}&from=${encodeURIComponent(pnlWindow.from)}&to=${encodeURIComponent(pnlWindow.to)}`,
@@ -983,19 +983,6 @@ export default function OverviewPage() {
     const pad = Math.max(25, (max - min) * 0.08);
     return [Math.max(0, min - pad), max + pad];
   }, [pnlChartData]);
-
-  const pnlXDomain = useMemo(() => {
-    const fromTs = pnlReport.meta.from ? new Date(pnlReport.meta.from).getTime() : null;
-    const toTs = pnlReport.meta.to ? new Date(pnlReport.meta.to).getTime() : null;
-    if (fromTs != null && toTs != null && Number.isFinite(fromTs) && Number.isFinite(toTs)) {
-      return [fromTs, toTs] as [number, number];
-    }
-    if (pnlChartData.length > 0) {
-      return [pnlChartData[0].ts, pnlChartData[pnlChartData.length - 1].ts] as [number, number];
-    }
-    const now = Date.now();
-    return [now - 14 * 24 * 60 * 60 * 1000, now] as [number, number];
-  }, [pnlChartData, pnlReport.meta.from, pnlReport.meta.to]);
 
   const pnlCoverageLabel = useMemo(() => {
     if (!pnlReport.meta.from || !pnlReport.meta.to) return null;
@@ -2727,7 +2714,8 @@ export default function OverviewPage() {
               <XAxis
                 dataKey="ts"
                 type="number"
-                domain={pnlXDomain}
+                domain={xDomain}
+                allowDataOverflow
                 tickFormatter={xTickFormatter}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
@@ -2894,7 +2882,7 @@ export default function OverviewPage() {
 
       {/* Recent Trades */}
       {account.trades.length > 0 && (
-        <Card title="Recent Trades" subtitle={`${account.trades.length} trades (30d)`}>
+        <Card title="Recent Trades" subtitle={`${account.trades.length} trades (${range})`}>
           <div className="overflow-auto max-h-[300px]">
             <table className="w-full text-xs md:text-sm">
               <thead className="sticky top-0 bg-[#111] z-10">
