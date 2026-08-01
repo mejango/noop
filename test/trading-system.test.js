@@ -7838,7 +7838,8 @@ describe('Canonical trade learning', () => {
   });
 
   test('review prompts separate pre-expiry payoff evidence from post-expiry context', () => {
-    assert.ok(SCRIPT_SOURCE.includes('Post-expiry prices are context for possible follow-on trades only.'));
+    assert.ok(SCRIPT_SOURCE.includes('Post-expiry prices may be used only as labeled hindsight context for market trajectory, regime judgment, and possible follow-on trades.'));
+    assert.ok(SCRIPT_SOURCE.includes("Post-expiry price is not evidence for an expired option's payoff or hold-to-expiry P&L, but it may support labeled conclusions about market trajectory, regime judgment, and follow-on opportunities."));
     assert.ok(SCRIPT_SOURCE.includes('Spot range after close but before expiry'));
     assert.ok(SCRIPT_SOURCE.includes('review_horizon_crosses_expiry'));
   });

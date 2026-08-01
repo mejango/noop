@@ -4042,7 +4042,7 @@ Your job is not to judge by P&L alone. Use hindsight carefully:
 - Whether ETH moved up or down is second-order evidence. Care about it only insofar as it reveals whether protection was cheap, premium was rich, liquidity was good, or risk was mispriced.
 - Distinguish execution error, sizing error, strike-selection error, and acceptable arithmetic bleed.
 - This is a staged hindsight review. Only use post-close information through the specified horizon, not beyond it.
-- Never use price movement after the contract expired to evaluate what the closed option would have paid. Post-expiry prices are context for possible follow-on trades only.
+- Never use price movement after the contract expired to evaluate what the closed option would have paid or its hold-to-expiry P&L. Post-expiry prices may be used only as labeled hindsight context for market trajectory, regime judgment, and possible follow-on trades.
 - Base factual claims on the supplied values. If data is missing or flagged, state the uncertainty instead of filling it in.
 - Do not turn a single campaign into a universal numeric strike or exit threshold.
 
@@ -4273,7 +4273,7 @@ Requirements:
 2. Write a concise operational rule of 1-3 sentences. State conditional factors instead of inventing a universal percentage from a small sample.
 3. Link every claim to supporting_review_ids. Counts are computed by code; never output an evidence count.
 4. Put genuinely opposing reviews in contradicting_review_ids. Do not silently average incompatible recommendations.
-5. Judge decisions using information available at decision time. Post-expiry price is not evidence for an expired option's payoff.
+5. Judge decisions using information available at decision time. Post-expiry price is not evidence for an expired option's payoff or hold-to-expiry P&L, but it may support labeled conclusions about market trajectory, regime judgment, and follow-on opportunities.
 6. Treat missing or impossible spot data as uncertainty. Never claim spot is below strike when the supplied numbers say otherwise.
 7. Use applicability for short phrases describing when the rule matters, such as "spot below strike", "under 24h DTE", or "risk mandate unchanged".
 8. change_summary must say what the new review evidence changed or confirmed in under 100 characters.
