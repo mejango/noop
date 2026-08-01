@@ -2,27 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { resolveWikiDir } from '@/lib/wiki';
+import { WIKI_PAGES } from '@/lib/wikiCatalog';
 
 export const dynamic = 'force-dynamic';
 
 const WIKI_DIR = resolveWikiDir();
-
-const WIKI_PAGES: { path: string; title: string }[] = [
-  { path: 'regimes/current.md', title: 'Current Regime' },
-  { path: 'regimes/history.md', title: 'Regime History' },
-  { path: 'protection/pricing.md', title: 'Protection Pricing' },
-  { path: 'protection/windows.md', title: 'Protection Windows' },
-  { path: 'protection/convexity.md', title: 'Convexity Map' },
-  { path: 'revenue/pricing.md', title: 'Premium Environment' },
-  { path: 'revenue/windows.md', title: 'Premium Windows' },
-  { path: 'revenue/efficiency.md', title: 'Call Efficiency' },
-  { path: 'indicators/leading.md', title: 'Leading Indicators' },
-  { path: 'indicators/correlations.md', title: 'Correlations' },
-  { path: 'indicators/divergences.md', title: 'Divergences' },
-  { path: 'strategy/lessons.md', title: 'Strategy Lessons' },
-  { path: 'strategy/mistakes.md', title: 'Mistakes & Anti-Patterns' },
-  { path: 'strategy/playbook.md', title: 'Strategy Playbook' },
-];
 
 interface SearchResult {
   path: string;

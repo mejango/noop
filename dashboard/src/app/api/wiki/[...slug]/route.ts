@@ -2,28 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { resolveWikiDir } from '@/lib/wiki';
+import { WIKI_PAGES } from '@/lib/wikiCatalog';
 
 export const dynamic = 'force-dynamic';
 
 const WIKI_DIR = resolveWikiDir();
 const HISTORY_DIR = path.join(WIKI_DIR, '.history');
 
-const WIKI_PAGES = [
-  'regimes/current.md',
-  'regimes/history.md',
-  'protection/pricing.md',
-  'protection/windows.md',
-  'protection/convexity.md',
-  'revenue/pricing.md',
-  'revenue/windows.md',
-  'revenue/efficiency.md',
-  'indicators/leading.md',
-  'indicators/correlations.md',
-  'indicators/divergences.md',
-  'strategy/lessons.md',
-  'strategy/mistakes.md',
-  'strategy/playbook.md',
-];
+const WIKI_PAGE_PATHS = WIKI_PAGES.map((page) => page.path);
 
 export async function GET(
   request: NextRequest,
@@ -38,7 +24,7 @@ export async function GET(
     const lastSegment = slug[slug.length - 1];
     const pagePath = slug.join('/') + (lastSegment.endsWith('.md') ? '' : '.md');
 
-    if (!WIKI_PAGES.includes(pagePath)) {
+    if (!WIKI_PAGE_PATHS.includes(pagePath)) {
       return NextResponse.json({ error: 'Page not found' }, { status: 404 });
     }
 

@@ -7858,6 +7858,48 @@ describe('Canonical trade learning', () => {
   else process.env.DATA_DIR = previousDataDir;
 });
 
+describe('Wiki knowledge discipline', () => {
+  const wikiPagesRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'wiki', 'pages', 'route.ts'), 'utf8');
+  const wikiBrowserSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'components', 'WikiBrowser.tsx'), 'utf8');
+  const wikiCatalogSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'wikiCatalog.ts'), 'utf8');
+
+  test('raw wiki evidence preserves missing numbers as unknown', () => {
+    assert.ok(SCRIPT_SOURCE.includes("if (value == null || (typeof value === 'string' && value.trim() === '')) return 'unknown';"));
+    assert.ok(SCRIPT_SOURCE.includes('spot=${formatWikiNumber(parsed.price'));
+    assert.ok(!SCRIPT_SOURCE.includes('spot=$${Number(parsed.price || 0).toFixed(2)}'));
+  });
+
+  test('trade review windows are grouped into unique wiki campaigns', () => {
+    assert.ok(SCRIPT_SOURCE.includes('const groupTradeReviewsForWiki'));
+    assert.ok(SCRIPT_SOURCE.includes('Campaign ${campaign.instrument_name}'));
+    assert.ok(SCRIPT_SOURCE.includes('[review:#${review.id}]'));
+    assert.ok(SCRIPT_SOURCE.includes('unique campaigns'));
+  });
+
+  test('wiki prompts enforce source markers and canonical Learning ownership', () => {
+    assert.ok(SCRIPT_SOURCE.includes('Every materially new factual claim must cite an exact supplied'));
+    assert.ok(SCRIPT_SOURCE.includes('Strategy pages are Learning-owned views.'));
+    assert.ok(SCRIPT_SOURCE.includes('[lesson:${lesson.lesson_key}]'));
+    assert.ok(SCRIPT_SOURCE.includes('Knowledge warnings: ${wikiSignals.warnings?.length'));
+  });
+
+  test('page review state is page-specific rather than copied from global lint time', () => {
+    assert.ok(wikiPagesRouteSource.includes('stored.last_reviewed_at'));
+    assert.ok(!wikiPagesRouteSource.includes("const lastReviewed = typeof meta.last_lint"));
+    assert.ok(wikiCatalogSource.includes("'needs_attention'"));
+    assert.ok(wikiCatalogSource.includes('freshnessDays'));
+    assert.ok(wikiCatalogSource.includes('reviewedMs < changedMs'));
+  });
+
+  test('wiki UI is briefing-first and exposes ownership and validation state', () => {
+    assert.ok(wikiBrowserSource.includes('Knowledge briefing'));
+    assert.ok(wikiBrowserSource.includes('What changed'));
+    assert.ok(wikiBrowserSource.includes('Needs attention'));
+    assert.ok(wikiBrowserSource.includes('Learning-derived'));
+    assert.ok(wikiBrowserSource.includes('validated {formatRelative(page.lastReviewed)}'));
+  });
+});
+
 // ============================================================================
 // Summary
 // ============================================================================

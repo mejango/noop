@@ -34,6 +34,23 @@ Rules:
 - When higher-priority evidence contradicts existing wiki text, revise transparently
 - If evidence is mixed or thin, state uncertainty instead of over-asserting
 
+## Knowledge Ownership
+
+- **Wiki owns research memory:** regimes, protection pricing, premium environment, indicators, windows, and historical context.
+- **Learning owns execution memory:** trade rules, mistakes, decision standards, contradictions, and revisions.
+- `strategy/lessons.md`, `strategy/mistakes.md`, and `strategy/playbook.md` are readable views of canonical Learning records. They must not invent independent execution rules or present disputed lessons as settled.
+
+## Evidence References
+
+Material claims should retain their supplied source marker:
+
+- `[tick:#ID]` for a structured market snapshot
+- `[order:#ID]` for factual order activity
+- `[review:#ID]` for a staged campaign review
+- `[lesson:key]` for a canonical Learning rule
+
+Never invent a source marker. A date stamp records when prose was added; it is not by itself evidence.
+
 ## Page Types & Required Sections
 
 ### regimes/current.md
@@ -131,6 +148,8 @@ Rules:
 6. **Evidence required** — claims must reference specific data values (IV levels, percentages, dates)
 7. **Falsification criteria** — regime assessments and hypotheses include what would disprove them
 8. **No speculation without evidence** — wiki captures confirmed patterns, not guesses
+9. **Truthful freshness** — distinguish when a page was checked, when new evidence changed it, and when it was validated
+10. **Canonical strategy ownership** — execution guidance must remain traceable to Learning
 
 ## Format Conventions
 

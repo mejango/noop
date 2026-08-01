@@ -2,27 +2,17 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { resolveWikiDir } from '@/lib/wiki';
+import {
+  WIKI_PAGES,
+  countWikiEvidenceReferences,
+  deriveWikiPageStatus,
+  extractWikiTldr,
+  type StoredWikiPageMeta,
+} from '@/lib/wikiCatalog';
 
 export const dynamic = 'force-dynamic';
 
 const WIKI_DIR = resolveWikiDir();
-
-const WIKI_PAGES: { path: string; title: string }[] = [
-  { path: 'regimes/current.md', title: 'Current Regime' },
-  { path: 'regimes/history.md', title: 'Regime History' },
-  { path: 'protection/pricing.md', title: 'Protection Pricing' },
-  { path: 'protection/windows.md', title: 'Protection Windows' },
-  { path: 'protection/convexity.md', title: 'Convexity Map' },
-  { path: 'revenue/pricing.md', title: 'Premium Environment' },
-  { path: 'revenue/windows.md', title: 'Premium Windows' },
-  { path: 'revenue/efficiency.md', title: 'Call Efficiency' },
-  { path: 'indicators/leading.md', title: 'Leading Indicators' },
-  { path: 'indicators/correlations.md', title: 'Correlations' },
-  { path: 'indicators/divergences.md', title: 'Divergences' },
-  { path: 'strategy/lessons.md', title: 'Strategy Lessons' },
-  { path: 'strategy/mistakes.md', title: 'Mistakes & Anti-Patterns' },
-  { path: 'strategy/playbook.md', title: 'Strategy Playbook' },
-];
 
 interface WikiPageMeta {
   path: string;
@@ -31,6 +21,16 @@ interface WikiPageMeta {
   wordCount: number;
   lastModified: string;
   lastReviewed: string | null;
+  lastEvidenceAt: string | null;
+  lastCheckedAt: string | null;
+  summary: string;
+  status: ReturnType<typeof deriveWikiPageStatus>;
+  issues: string[];
+  changeSummary: string | null;
+  evidenceCount: number;
+  freshnessDays: number;
+  owner: 'wiki' | 'learning';
+  briefing: boolean;
 }
 
 export function GET() {
@@ -40,28 +40,81 @@ export function GET() {
       meta = JSON.parse(fs.readFileSync(path.join(WIKI_DIR, '.meta.json'), 'utf-8'));
     } catch { /* no meta yet */ }
 
-    const lastReviewed = typeof meta.last_lint === 'string' ? meta.last_lint : null;
+    const storedPages = meta.pages && typeof meta.pages === 'object'
+      ? meta.pages as Record<string, StoredWikiPageMeta>
+      : {};
 
     const pages: WikiPageMeta[] = WIKI_PAGES.map((page) => {
       const fullPath = path.join(WIKI_DIR, page.path);
       let content = '';
-      let lastModified = new Date().toISOString();
+      let lastModified = new Date(0).toISOString();
+      let exists = false;
 
       try {
         content = fs.readFileSync(fullPath, 'utf-8');
         const stat = fs.statSync(fullPath);
         lastModified = stat.mtime.toISOString();
+        exists = true;
       } catch {
         // File doesn't exist yet
       }
 
       const wordCount = content.split(/\s+/).filter(Boolean).length;
-      const category = page.path.split('/')[0];
+      const stored = storedPages[page.path] || {};
+      const issues = Array.isArray(stored.issues) ? stored.issues.filter((issue): issue is string => typeof issue === 'string') : [];
+      const lastReviewed = typeof stored.last_reviewed_at === 'string' ? stored.last_reviewed_at : null;
+      const lastEvidenceAt = typeof stored.last_evidence_at === 'string' ? stored.last_evidence_at : null;
+      const lastCheckedAt = typeof stored.last_checked_at === 'string' ? stored.last_checked_at : null;
+      const lastChangedAt = typeof stored.last_changed_at === 'string' ? stored.last_changed_at : lastModified;
+      const status = deriveWikiPageStatus({
+        exists,
+        lastModified: lastEvidenceAt || lastChangedAt,
+        lastReviewed,
+        issues,
+        freshnessDays: page.freshnessDays,
+      });
 
-      return { path: page.path, title: page.title, category, wordCount, lastModified, lastReviewed };
+      return {
+        ...page,
+        wordCount,
+        lastModified: lastChangedAt,
+        lastReviewed,
+        lastEvidenceAt,
+        lastCheckedAt,
+        summary: extractWikiTldr(content),
+        status,
+        issues,
+        changeSummary: typeof stored.change_summary === 'string' ? stored.change_summary : null,
+        evidenceCount: countWikiEvidenceReferences(content),
+      };
     });
 
-    return NextResponse.json({ pages, meta });
+    const counts = pages.reduce<Record<string, number>>((acc, page) => {
+      acc[page.status] = (acc[page.status] || 0) + 1;
+      return acc;
+    }, {});
+    const briefing = pages.filter((page) => page.briefing);
+    const attention = pages.filter((page) => page.status !== 'current');
+    const recentChanges = pages
+      .filter((page) => page.changeSummary)
+      .sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime())
+      .slice(0, 6);
+
+    return NextResponse.json({
+      pages,
+      briefing,
+      attention,
+      recentChanges,
+      summary: {
+        current: counts.current || 0,
+        stale: counts.stale || 0,
+        needsAttention: counts.needs_attention || 0,
+        unreviewed: counts.unreviewed || 0,
+        missing: counts.missing || 0,
+        lastLint: typeof meta.last_lint === 'string' ? meta.last_lint : null,
+        lastIngest: typeof meta.last_ingest === 'string' ? meta.last_ingest : null,
+      },
+    });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message, pages: [] }, { status: 500 });

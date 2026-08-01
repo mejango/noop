@@ -4212,7 +4212,8 @@ const formatTradeLessonForPrompt = (lesson) => {
   const support = Number(lesson.supporting_campaign_count ?? lesson.evidence_count ?? 0);
   const contradictions = Number(lesson.contradicting_campaign_count || 0);
   const status = lesson.status || (lesson.lesson_key ? 'candidate' : 'legacy');
-  return `- ${title} [${status}; ${support} supporting campaign(s); ${contradictions} contradiction(s)]: ${lesson.lesson}`;
+  const source = lesson.lesson_key ? `[lesson:${lesson.lesson_key}]` : '[lesson:legacy]';
+  return `- ${source} ${title} [${status}; ${support} supporting campaign(s); ${contradictions} contradiction(s)]: ${lesson.lesson}`;
 };
 
 const formatTradeReviewForLessonSynthesis = (review) => {
@@ -4364,6 +4365,37 @@ const WIKI_KEY_PAGES = [
   'strategy/playbook.md',
 ];
 
+const WIKI_INGEST_BASE_PAGES = [
+  'regimes/current.md',
+  'protection/pricing.md',
+  'protection/windows.md',
+  'revenue/pricing.md',
+  'indicators/leading.md',
+];
+
+const WIKI_STRATEGY_PAGES = new Set([
+  'strategy/lessons.md',
+  'strategy/mistakes.md',
+  'strategy/playbook.md',
+]);
+
+const WIKI_EXPECTED_HEADERS = {
+  'regimes/current.md': ['Classification', 'Evidence'],
+  'regimes/history.md': ['Regime Transitions'],
+  'protection/pricing.md': ['Current IV Environment', 'Cost Assessment'],
+  'protection/windows.md': ['Active Windows', 'Historical Windows'],
+  'protection/convexity.md': ['Current Convexity Map'],
+  'revenue/pricing.md': ['Current Premium Environment', 'Premium Assessment'],
+  'revenue/windows.md': ['Active Windows', 'Historical Windows'],
+  'revenue/efficiency.md': ['Premium Per Unit Risk'],
+  'indicators/leading.md': ['Confirmed Leading Indicators'],
+  'indicators/correlations.md': ['Strong Correlations'],
+  'indicators/divergences.md': ['Active Divergences'],
+  'strategy/lessons.md': ['Active Lessons'],
+  'strategy/mistakes.md': ['Costly Patterns'],
+  'strategy/playbook.md': ['Core Rules'],
+};
+
 const WIKI_ALL_PAGES = [
   'regimes/current.md',
   'regimes/history.md',
@@ -4380,6 +4412,26 @@ const WIKI_ALL_PAGES = [
   'strategy/mistakes.md',
   'strategy/playbook.md',
 ];
+
+const getWikiPageMetaMap = (meta) => {
+  if (!meta.pages || typeof meta.pages !== 'object' || Array.isArray(meta.pages)) meta.pages = {};
+  return meta.pages;
+};
+
+const updateWikiPageMeta = (meta, pagePath, patch) => {
+  const pages = getWikiPageMetaMap(meta);
+  pages[pagePath] = { ...(pages[pagePath] || {}), ...patch };
+  return pages[pagePath];
+};
+
+const summarizeWikiPageChange = (before, after, fallback) => {
+  const priorTldr = getWikiTldr(before);
+  const nextTldr = getWikiTldr(after);
+  if (priorTldr !== nextTldr && nextTldr !== 'Awaiting initial assessment') {
+    return `TLDR updated: ${nextTldr}`.slice(0, 220);
+  }
+  return fallback;
+};
 
 const readWikiPage = (pagePath) => {
   try {
@@ -4425,10 +4477,15 @@ const getWikiTldr = (content = '') => {
   return lines[0] || 'Awaiting initial assessment';
 };
 
-const countDatedEvidencePoints = (content = '') => (String(content).match(/\[\d{4}-\d{2}-\d{2}\]/g) || []).length;
+const countWikiEvidencePoints = (content = '') => {
+  const structured = String(content).match(/\[(?:source:\s*[^\]]+|(?:tick|order|review):#\d+|lesson:[^\]]+)\]/gi) || [];
+  if (structured.length > 0) return new Set(structured.map((value) => value.toLowerCase())).size;
+  return new Set(String(content).match(/\[\d{4}-\d{2}-\d{2}\]/g) || []).size;
+};
 
 const refreshWikiIndex = () => {
   const meta = readWikiMeta();
+  const pageMeta = getWikiPageMetaMap(meta);
   const groupedPages = new Map();
   for (const page of WIKI_ALL_PAGES) {
     const category = page.split('/')[0];
@@ -4438,7 +4495,8 @@ const refreshWikiIndex = () => {
       page,
       summary: getWikiTldr(content),
       placeholder: isPlaceholderWikiPage(content),
-      evidenceCount: countDatedEvidencePoints(content),
+      evidenceCount: countWikiEvidencePoints(content),
+      metadata: pageMeta[page] || {},
     });
   }
 
@@ -4459,7 +4517,9 @@ const refreshWikiIndex = () => {
   for (const [category, pages] of groupedPages.entries()) {
     lines.push(`## ${category}`);
     for (const page of pages) {
-      lines.push(`- [${page.page}](${page.page}) — ${page.summary} ${page.placeholder ? '(placeholder)' : `(evidence marks: ${page.evidenceCount})`}`);
+      const issues = Array.isArray(page.metadata.issues) ? page.metadata.issues.length : 0;
+      const ownership = WIKI_STRATEGY_PAGES.has(page.page) ? 'Learning-owned view' : 'Wiki research';
+      lines.push(`- [${page.page}](${page.page}) — ${page.summary} ${page.placeholder ? '(placeholder)' : `(evidence refs: ${page.evidenceCount}; reviewed: ${page.metadata.last_reviewed_at || 'never'}; issues: ${issues}; ${ownership})`}`);
     }
     lines.push('');
   }
@@ -4486,24 +4546,58 @@ const parseTickSummary = (row) => {
   }
 };
 
+const formatWikiNumber = (value, digits = 2, prefix = '') => {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return 'unknown';
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${prefix}${numeric.toFixed(digits)}` : 'unknown';
+};
+
 const formatTickEvidenceLine = (row) => {
   const parsed = parseTickSummary(row) || {};
   const medium = parsed.medium_momentum?.main || parsed.medium_momentum || 'unknown';
   const short = parsed.short_momentum?.main || parsed.short_momentum || 'unknown';
-  const putScore = Number(parsed.current_best_put || 0).toFixed(4);
-  const callScore = Number(parsed.current_best_call || 0).toFixed(4);
-  return `${row.timestamp} | spot=$${Number(parsed.price || 0).toFixed(2)} | medium=${medium} | short=${short} | put_score=${putScore} | call_score=${callScore}`;
+  const source = row.id != null ? `tick:#${row.id}` : `tick:${row.timestamp}`;
+  return `[${source}] ${row.timestamp} | spot=${formatWikiNumber(parsed.price, 2, '$')} | medium=${medium} | short=${short} | put_score=${formatWikiNumber(parsed.current_best_put, 4)} | call_score=${formatWikiNumber(parsed.current_best_call, 4)}`;
 };
 
 const formatOrderEvidenceLine = (order) => {
   const side = order.success ? 'OK' : 'FAIL';
-  const value = Number(order.total_value || 0).toFixed(2);
   const reason = order.reason ? String(order.reason).replace(/\s+/g, ' ').slice(0, 120) : 'n/a';
-  return `${order.timestamp} | ${side} | ${order.action} ${order.instrument_name || 'portfolio'} | value=$${value} | reason=${reason}`;
+  const source = order.id != null ? `order:#${order.id}` : `order:${order.timestamp}`;
+  return `[${source}] ${order.timestamp} | ${side} | ${order.action} ${order.instrument_name || 'portfolio'} | value=${formatWikiNumber(order.total_value, 2, '$')} | reason=${reason}`;
 };
 
 const formatTradeReviewEvidenceLine = (review) => {
-  return `${review.closed_at} | ${review.instrument_name} [${review.review_status}] [${review.review_window_days}d] | pnl=$${Number(review.pnl_realized || 0).toFixed(2)} | ${String(review.summary || '').replace(/\s+/g, ' ').slice(0, 160)}`;
+  return `[review:#${review.id}] ${review.review_window_days}d [${review.review_status}] | ${String(review.summary || '').replace(/\s+/g, ' ').slice(0, 220)}`;
+};
+
+const groupTradeReviewsForWiki = (reviews = [], maxCampaigns = 8) => {
+  const campaigns = new Map();
+  for (const review of reviews) {
+    const key = `${review.instrument_name}|${review.closed_at}`;
+    if (!campaigns.has(key)) {
+      campaigns.set(key, {
+        instrument_name: review.instrument_name,
+        action_family: review.action_family,
+        closed_at: review.closed_at,
+        pnl_realized: review.pnl_realized,
+        reviews: [],
+      });
+    }
+    campaigns.get(key).reviews.push(review);
+  }
+  return [...campaigns.values()]
+    .map((campaign) => ({
+      ...campaign,
+      reviews: campaign.reviews.sort((a, b) => Number(a.review_window_days || 0) - Number(b.review_window_days || 0)),
+    }))
+    .sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime())
+    .slice(0, maxCampaigns);
+};
+
+const formatTradeReviewCampaignEvidence = (campaign) => {
+  const header = `Campaign ${campaign.instrument_name} | family=${campaign.action_family || 'unknown'} | closed=${campaign.closed_at} | pnl=${formatWikiNumber(campaign.pnl_realized, 2, '$')}`;
+  return `${header}\n${campaign.reviews.map((review) => `  - ${formatTradeReviewEvidenceLine(review)}`).join('\n')}`;
 };
 
 const writeRawEvidencePacket = (journalEntries = []) => {
@@ -4515,7 +4609,8 @@ const writeRawEvidencePacket = (journalEntries = []) => {
   const since7d = new Date(Date.now() - 7 * 86400000).toISOString();
   const recentTicks = db.getRecentTicks(6) || [];
   const recentOrders = db.getRecentOrders(since7d, 20) || [];
-  const recentTradeReviews = db.getRecentTradeReviews(8) || [];
+  const recentTradeReviews = db.getRecentTradeReviews(24) || [];
+  const recentTradeCampaigns = groupTradeReviewsForWiki(recentTradeReviews, 8);
   const entriesText = journalEntries
     .map((entry) => `- [${entry.type || entry.entry_type || 'unknown'}] ${String(entry.content || '').replace(/\s+/g, ' ').slice(0, 260)}`)
     .join('\n');
@@ -4537,7 +4632,7 @@ const writeRawEvidencePacket = (journalEntries = []) => {
     recentOrders.length > 0 ? recentOrders.map(formatOrderEvidenceLine).join('\n') : 'No recent orders.',
     '',
     '## Reviewed Trade Campaigns',
-    recentTradeReviews.length > 0 ? recentTradeReviews.map(formatTradeReviewEvidenceLine).join('\n') : 'No reviewed campaigns.',
+    recentTradeCampaigns.length > 0 ? recentTradeCampaigns.map(formatTradeReviewCampaignEvidence).join('\n\n') : 'No reviewed campaigns.',
     '',
     '## New Journal Entries',
     entriesText || 'No journal entries provided.',
@@ -4547,8 +4642,25 @@ const writeRawEvidencePacket = (journalEntries = []) => {
   return { relativePath, content };
 };
 
+const truncateWikiContextAtBoundary = (content, maxChars) => {
+  if (content.length <= maxChars) return content;
+  const slice = content.slice(0, maxChars);
+  const boundary = Math.max(slice.lastIndexOf('\n'), slice.lastIndexOf('. '));
+  return `${slice.slice(0, boundary > maxChars * 0.6 ? boundary : maxChars).trim()}\n...[truncated]`;
+};
+
+const buildWikiAdvisorExcerpt = (content, maxChars = 1800) => {
+  const chunks = String(content).split(/(?=^##\s+)/m);
+  const preamble = chunks[0] || '';
+  const priority = /##\s*(Classification|Evidence|Confidence|Current|Active|Cost Assessment|Premium Assessment|Core Rules|Falsification)/i;
+  const selected = [preamble, ...chunks.slice(1).filter((chunk) => priority.test(chunk))].join('\n').trim();
+  return truncateWikiContextAtBoundary(selected || content, maxChars);
+};
+
 const queryWikiContext = () => {
   const sections = [];
+  const meta = readWikiMeta();
+  const pageMeta = getWikiPageMetaMap(meta);
   const indexContent = readWikiPage(WIKI_INDEX_PAGE);
   if (indexContent) {
     const truncatedIndex = indexContent.length > 1200 ? indexContent.slice(0, 1200) + '\n...[truncated]' : indexContent;
@@ -4557,9 +4669,15 @@ const queryWikiContext = () => {
   for (const page of WIKI_KEY_PAGES) {
     const content = readWikiPage(page);
     if (!content || content.includes('Awaiting initial assessment')) continue;
-    // Truncate to ~1500 chars to keep total context manageable
-    const truncated = content.length > 1500 ? content.slice(0, 1500) + '\n...[truncated]' : content;
-    sections.push(`--- ${page} ---\n${truncated}`);
+    const stored = pageMeta[page] || {};
+    const freshness = [
+      `changed=${stored.last_changed_at || 'unknown'}`,
+      `evidence=${stored.last_evidence_at || 'unknown'}`,
+      `reviewed=${stored.last_reviewed_at || 'unreviewed'}`,
+      `issues=${Array.isArray(stored.issues) ? stored.issues.length : 0}`,
+      WIKI_STRATEGY_PAGES.has(page) ? 'owner=canonical-learning' : 'owner=wiki-research',
+    ].join(' | ');
+    sections.push(`--- ${page} ---\nMetadata: ${freshness}\n${buildWikiAdvisorExcerpt(content)}`);
   }
   return sections.length > 0 ? sections.join('\n\n') : '';
 };
@@ -4585,7 +4703,7 @@ const getWikiPagesNeedingSeed = () => {
 };
 
 const inferWikiPagesForJournalEntries = (journalEntries = []) => {
-  const selected = new Set(WIKI_KEY_PAGES);
+  const selected = new Set(WIKI_INGEST_BASE_PAGES);
 
   for (const entry of journalEntries) {
     const type = entry?.type || entry?.entry_type || '';
@@ -4647,7 +4765,8 @@ const seedWikiFromHistory = async (incomingEntries = []) => {
   const historicalJournal = db.getRecentJournalEntries(200) || [];
   const reviewedHypotheses = db.getReviewedHypotheses(50) || [];
   const activeLessons = db.getActiveLessons() || [];
-  const recentTradeReviews = db.getRecentTradeReviews(20) || [];
+  const recentTradeReviews = db.getRecentTradeReviews(36) || [];
+  const recentTradeCampaigns = groupTradeReviewsForWiki(recentTradeReviews, 12);
   const activeTradeLessons = db.getActiveTradeLessons() || [];
   const recentTicks = db.getRecentTicks(12) || [];
   const recentOrders = db.getRecentOrders(new Date(Date.now() - 14 * 86400000).toISOString(), 30) || [];
@@ -4708,8 +4827,8 @@ ${hypothesesText}
 ## Active Lessons
 ${lessonsText}
 
-## Reviewed Trade Campaigns (${recentTradeReviews.length})
-${recentTradeReviews.slice(0, 12).map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] ${r.summary}`).join('\n') || 'None'}
+## Reviewed Trade Campaigns (${recentTradeCampaigns.length} unique campaigns)
+${recentTradeCampaigns.map(formatTradeReviewCampaignEvidence).join('\n\n') || 'None'}
 
 ## Active Trade Lessons
 ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPrompt).join('\n') : 'None'}
@@ -4720,7 +4839,9 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 3. Each page MUST start with a bold TLDR line
 4. Follow the required sections from the schema exactly
 5. If journal interpretation conflicts with factual evidence, trust the factual evidence and write uncertainty explicitly
-6. Today's date: ${new Date().toISOString().split('T')[0]}
+6. Cite material claims with the supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker; never invent a source marker
+7. Strategy pages are views of canonical [lesson:key] records. Do not invent independent execution rules or promote disputed lessons as settled rules
+8. Today's date: ${new Date().toISOString().split('T')[0]}
 
 Output each page as:
 <wiki_page path="regimes/current.md">
@@ -4746,6 +4867,7 @@ Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(
   const pageRegex = /<wiki_page\s+path="([^"]+)">([\s\S]*?)<\/wiki_page>/g;
   let match;
   let writeCount = 0;
+  const writtenPages = [];
 
   while ((match = pageRegex.exec(text)) !== null) {
     const pagePath = match[1];
@@ -4753,14 +4875,27 @@ Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(
     if (!pagesNeedingSeed.includes(pagePath) || content.length < 50) continue;
     fs.writeFileSync(path.join(WIKI_DIR, pagePath), content);
     writeCount++;
+    writtenPages.push(pagePath);
     console.log(`📚 Wiki seed: wrote ${pagePath}`);
   }
 
   const meta = readWikiMeta();
-  meta.seeded_at = new Date().toISOString();
+  const seededAt = new Date().toISOString();
+  meta.seeded_at = seededAt;
   meta.seeded_pages = writeCount;
   meta.seeded_targets = pagesNeedingSeed;
   meta.seed_journal_entries_used = sampleEntries.length;
+  for (const pagePath of writtenPages) {
+    updateWikiPageMeta(meta, pagePath, {
+      last_checked_at: seededAt,
+      last_evidence_at: seededAt,
+      last_changed_at: seededAt,
+      last_reviewed_at: null,
+      change_summary: 'Bootstrapped from historical evidence',
+      evidence_packet: null,
+      issues: [],
+    });
+  }
   writeWikiMeta(meta);
   refreshWikiIndex();
   appendWikiLog('seed', 'wiki bootstrap', [
@@ -4791,9 +4926,17 @@ const ingestToWiki = async (journalEntries) => {
     pages[page] = readWikiPage(page);
   }
   const selectedPages = inferWikiPagesForJournalEntries(journalEntries);
-  const pagesContext = buildWikiIngestPagesContext(pages, selectedPages);
-  const recentTradeReviews = db.getRecentTradeReviews(10) || [];
+  const recentTradeReviews = db.getRecentTradeReviews(30) || [];
+  const recentTradeCampaigns = groupTradeReviewsForWiki(recentTradeReviews, 10);
   const activeTradeLessons = db.getActiveTradeLessons() || [];
+  const researchPages = selectedPages.filter((pagePath) => !WIKI_STRATEGY_PAGES.has(pagePath)).slice(0, 7);
+  selectedPages.splice(0, selectedPages.length, ...researchPages);
+  if (activeTradeLessons.some((lesson) => lesson.lesson_key)) {
+    for (const pagePath of WIKI_STRATEGY_PAGES) {
+      if (!selectedPages.includes(pagePath)) selectedPages.push(pagePath);
+    }
+  }
+  const pagesContext = buildWikiIngestPagesContext(pages, selectedPages);
   const rawEvidencePacket = writeRawEvidencePacket(journalEntries);
 
   const entriesText = journalEntries
@@ -4823,7 +4966,7 @@ ${rawEvidencePacket?.content || 'No raw evidence packet available'}
 ${entriesText}
 
 ## Reviewed Trade Campaigns
-${recentTradeReviews.length > 0 ? recentTradeReviews.slice(0, 6).map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] ${r.summary}`).join('\n') : 'None'}
+${recentTradeCampaigns.length > 0 ? recentTradeCampaigns.slice(0, 6).map(formatTradeReviewCampaignEvidence).join('\n\n') : 'None'}
 
 ## Active Trade Lessons
 ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPrompt).join('\n') : 'None'}
@@ -4838,6 +4981,8 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 7. Prefer the smallest set of page updates that captures the new information cleanly
 8. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
 9. If evidence is thin or mixed, say so explicitly instead of over-asserting
+10. Every materially new factual claim must cite an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker; never invent a source marker
+11. Strategy pages are Learning-owned views. They may summarize canonical [lesson:key] records, including status and contradictions, but must not invent independent execution rules or present disputed lessons as settled
 
 Output your updates as XML blocks. Only include pages that need changes:
 
@@ -4865,9 +5010,16 @@ If no pages need updating, output: <no_updates/>`;
 
     if (text.includes('<no_updates/>')) {
       const meta = readWikiMeta();
-      meta.last_ingest = new Date().toISOString();
+      const checkedAt = new Date().toISOString();
+      meta.last_ingest = checkedAt;
       meta.last_ingest_updates = 0;
       meta.last_evidence_packet = rawEvidencePacket?.relativePath || meta.last_evidence_packet || null;
+      for (const pagePath of selectedPages) {
+        updateWikiPageMeta(meta, pagePath, {
+          last_checked_at: checkedAt,
+          evidence_packet: rawEvidencePacket?.relativePath || null,
+        });
+      }
       writeWikiMeta(meta);
       refreshWikiIndex();
       appendWikiLog('ingest', 'no wiki updates needed', [
@@ -4882,13 +5034,14 @@ If no pages need updating, output: <no_updates/>`;
     const updateRegex = /<wiki_update\s+path="([^"]+)">([\s\S]*?)<\/wiki_update>/g;
     let match;
     let updateCount = 0;
+    const updatedPages = [];
 
     while ((match = updateRegex.exec(text)) !== null) {
       const pagePath = match[1];
       const newContent = match[2].trim();
 
       // Validate page path
-      if (!WIKI_ALL_PAGES.includes(pagePath)) {
+      if (!selectedPages.includes(pagePath)) {
         console.log(`📚 Wiki ingest: rejected unknown page "${pagePath}"`);
         continue;
       }
@@ -4907,23 +5060,7 @@ If no pages need updating, output: <no_updates/>`;
       }
 
       // Safety: check expected section headers from schema
-      const expectedHeaders = {
-        'regimes/current.md': ['Classification', 'Evidence'],
-        'regimes/history.md': ['Regime Transitions'],
-        'protection/pricing.md': ['Current IV Environment', 'Cost Assessment'],
-        'protection/windows.md': ['Active Windows', 'Historical Windows'],
-        'protection/convexity.md': ['Current Convexity Map'],
-        'revenue/pricing.md': ['Current Premium Environment', 'Premium Assessment'],
-        'revenue/windows.md': ['Active Windows', 'Historical Windows'],
-        'revenue/efficiency.md': ['Premium Per Unit Risk'],
-        'indicators/leading.md': ['Confirmed Leading Indicators'],
-        'indicators/correlations.md': ['Strong Correlations'],
-        'indicators/divergences.md': ['Active Divergences'],
-        'strategy/lessons.md': ['Active Lessons'],
-        'strategy/mistakes.md': ['Costly Patterns'],
-        'strategy/playbook.md': ['Core Rules'],
-      };
-      const required = expectedHeaders[pagePath] || [];
+      const required = WIKI_EXPECTED_HEADERS[pagePath] || [];
       const missingHeaders = required.filter(h => !newContent.includes(h));
       if (missingHeaders.length > 0) {
         console.log(`📚 Wiki ingest: rejected update for ${pagePath} — missing sections: ${missingHeaders.join(', ')}`);
@@ -4939,14 +5076,33 @@ If no pages need updating, output: <no_updates/>`;
       const fullPath = path.join(WIKI_DIR, pagePath);
       fs.writeFileSync(fullPath, newContent);
       updateCount++;
+      updatedPages.push({ pagePath, existingContent, newContent });
       console.log(`📚 Wiki ingest: updated ${pagePath}`);
     }
 
     // Update meta
     const meta = readWikiMeta();
-    meta.last_ingest = new Date().toISOString();
+    const ingestedAt = new Date().toISOString();
+    meta.last_ingest = ingestedAt;
     meta.last_ingest_updates = updateCount;
     meta.last_evidence_packet = rawEvidencePacket?.relativePath || meta.last_evidence_packet || null;
+    for (const pagePath of selectedPages) {
+      updateWikiPageMeta(meta, pagePath, {
+        last_checked_at: ingestedAt,
+        evidence_packet: rawEvidencePacket?.relativePath || null,
+      });
+    }
+    for (const update of updatedPages) {
+      updateWikiPageMeta(meta, update.pagePath, {
+        last_evidence_at: ingestedAt,
+        last_changed_at: ingestedAt,
+        change_summary: summarizeWikiPageChange(
+          update.existingContent,
+          update.newContent,
+          'Updated from the latest evidence packet',
+        ),
+      });
+    }
     writeWikiMeta(meta);
     refreshWikiIndex();
     appendWikiLog('ingest', 'wiki ingest applied', [
@@ -4962,6 +5118,18 @@ If no pages need updating, output: <no_updates/>`;
   }
 };
 
+const getWikiSectionText = (content, heading) => {
+  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = String(content).match(new RegExp(`##\\s*${escaped}\\s*\\n([\\s\\S]*?)(?=\\n##|$)`, 'i'));
+  return match ? match[1].trim() : '';
+};
+
+const getWikiAssessmentValue = (content, heading, allowed) => {
+  const section = getWikiSectionText(content, heading).replace(/[*_`#:\-]/g, ' ');
+  const match = section.match(new RegExp(`\\b(${allowed.join('|')})\\b`, 'i'));
+  return match ? match[1].toLowerCase() : null;
+};
+
 const getWikiSignalContext = () => {
   try {
     const regimePage = readWikiPage('regimes/current.md');
@@ -4971,43 +5139,61 @@ const getWikiSignalContext = () => {
       return null;
     }
 
-    // Parse regime classification
-    const classMatch = regimePage.match(/##\s*Classification\s*\n+\s*(\w+)/i);
-    const regime = classMatch ? classMatch[1].toLowerCase() : null;
-
-    // Parse confidence
-    const confMatch = regimePage.match(/##\s*Confidence\s*\n+\s*(\w+)/i);
-    const regimeConfidence = confMatch ? confMatch[1].toLowerCase() : null;
+    const regime = getWikiAssessmentValue(regimePage, 'Classification', ['complacency', 'fear', 'transition', 'recovery']);
+    const regimeConfidence = getWikiAssessmentValue(regimePage, 'Confidence', ['high', 'medium', 'low']);
 
     // Parse protection cost assessment from pricing page
     const pricingPage = readWikiPage('protection/pricing.md');
-    let protectionAssessment = null;
-    if (pricingPage) {
-      const costMatch = pricingPage.match(/##\s*Cost Assessment\s*\n+\s*(\w+)/i);
-      protectionAssessment = costMatch ? costMatch[1].toLowerCase() : null;
-    }
+    const protectionAssessment = pricingPage
+      ? getWikiAssessmentValue(pricingPage, 'Cost Assessment', ['cheap', 'fair', 'expensive'])
+      : null;
 
     // Parse revenue/call premium assessment
     const revenuePage = readWikiPage('revenue/pricing.md');
-    let revenueAssessment = null;
-    if (revenuePage && !revenuePage.includes('Awaiting initial assessment')) {
-      const premMatch = revenuePage.match(/##\s*Premium Assessment\s*\n+\s*(\w+)/i);
-      revenueAssessment = premMatch ? premMatch[1].toLowerCase() : null;
-    }
+    const revenueAssessment = revenuePage && !revenuePage.includes('Awaiting initial assessment')
+      ? getWikiAssessmentValue(revenuePage, 'Premium Assessment', ['cheap', 'fair', 'rich'])
+      : null;
 
     // Parse playbook rules (first 5 bullet points from Core Rules)
     const playbookRules = [];
     if (playbookPage) {
-      const rulesMatch = playbookPage.match(/##\s*Core Rules\s*\n([\s\S]*?)(?=\n##|$)/i);
-      if (rulesMatch) {
-        const bullets = rulesMatch[1].match(/^[-*]\s+.+/gm);
+      const rulesSection = getWikiSectionText(playbookPage, 'Core Rules');
+      if (rulesSection) {
+        const bullets = rulesSection.match(/^[-*]\s+.+/gm);
         if (bullets) {
           playbookRules.push(...bullets.slice(0, 5).map(b => b.replace(/^[-*]\s+/, '')));
         }
       }
     }
 
-    return { regime, regimeConfidence, protectionAssessment, revenueAssessment, playbookRules };
+    const meta = readWikiMeta();
+    const pageMeta = getWikiPageMetaMap(meta);
+    const signalPages = {
+      regime: 'regimes/current.md',
+      protection: 'protection/pricing.md',
+      revenue: 'revenue/pricing.md',
+      playbook: 'strategy/playbook.md',
+    };
+    const warnings = [];
+    for (const [label, pagePath] of Object.entries(signalPages)) {
+      const stored = pageMeta[pagePath] || {};
+      if (!stored.last_reviewed_at) warnings.push(`${label} page is not page-level validated`);
+      if (Array.isArray(stored.issues) && stored.issues.length > 0) warnings.push(`${label} page has ${stored.issues.length} validation issue(s)`);
+    }
+    return {
+      regime,
+      regimeConfidence,
+      protectionAssessment,
+      revenueAssessment,
+      playbookRules,
+      freshness: {
+        regime: pageMeta['regimes/current.md'] || null,
+        protection: pageMeta['protection/pricing.md'] || null,
+        revenue: pageMeta['revenue/pricing.md'] || null,
+        playbook: pageMeta['strategy/playbook.md'] || null,
+      },
+      warnings,
+    };
   } catch {
     return null;
   }
@@ -5058,10 +5244,12 @@ ${pagesContext}
 
 ## Audit Checklist
 1. **Contradictions**: Do any pages contradict each other?
-2. **Staleness**: Are any observations older than 7 days without recent updates?
+2. **Staleness**: Are time-sensitive current-state claims old enough to mislead? Do not call stable historical or structural knowledge stale merely because it is old.
 3. **Redundancy**: Is the same information repeated across pages?
 4. **Missing links**: Do pages reference concepts that should be in another page but aren't?
 5. **Quality**: Are TLDRs accurate? Are evidence values specific?
+6. **Provenance**: Are material claims linked to supplied source, review, or canonical lesson markers where available?
+7. **Ownership**: Do strategy pages faithfully summarize canonical [lesson:key] records without inventing a competing playbook?
 
 ## Instructions
 Return a JSON object with:
@@ -5070,7 +5258,7 @@ Return a JSON object with:
   "updates": [{"page": "path", "content": "full updated page content"}]
 }
 
-Only include updates for pages that genuinely need fixing. If no issues found, return {"issues":[],"updates":[]}.
+Only include updates for pages that genuinely need fixing. Do not introduce new market claims during lint, do not remove valid source markers, and do not manufacture evidence to freshen an old page. If no issues found, return {"issues":[],"updates":[]}.
 Wrap your JSON in a <lint_result> tag.`;
 
   try {
@@ -5091,7 +5279,8 @@ Wrap your JSON in a <lint_result> tag.`;
     const lintMatch = text.match(/<lint_result>([\s\S]*?)<\/lint_result>/);
     if (!lintMatch) {
       console.log('📚 Wiki lint: no structured result returned');
-      meta.last_lint = new Date().toISOString();
+      meta.last_lint_attempt = new Date().toISOString();
+      meta.last_lint_error = 'unstructured result';
       writeWikiMeta(meta);
       refreshWikiIndex();
       appendWikiLog('lint', 'no structured lint result', ['result parsing failed or model returned unstructured output']);
@@ -5104,7 +5293,8 @@ Wrap your JSON in a <lint_result> tag.`;
       result = JSON.parse(lintMatch[1].trim());
     } catch (parseErr) {
       console.log('📚 Wiki lint: malformed JSON in lint_result:', parseErr.message);
-      meta.last_lint = new Date().toISOString();
+      meta.last_lint_attempt = new Date().toISOString();
+      meta.last_lint_error = `malformed result: ${parseErr.message}`;
       writeWikiMeta(meta);
       refreshWikiIndex();
       appendWikiLog('lint', 'malformed lint result', [`parse error: ${parseErr.message}`]);
@@ -5123,6 +5313,7 @@ Wrap your JSON in a <lint_result> tag.`;
 
     // Apply updates with same safety guards as ingest
     let updateCount = 0;
+    const lintUpdatedPages = [];
     for (const update of (result.updates || [])) {
       const pagePath = update.page;
       const newContent = update.content?.trim();
@@ -5132,6 +5323,8 @@ Wrap your JSON in a <lint_result> tag.`;
 
       const existingContent = pages[pagePath] || '';
       if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) continue;
+      const required = WIKI_EXPECTED_HEADERS[pagePath] || [];
+      if (required.some((header) => !newContent.includes(header))) continue;
 
       if (existingContent && !existingContent.includes('Awaiting initial assessment')) {
         saveWikiHistory(pagePath, existingContent);
@@ -5139,6 +5332,7 @@ Wrap your JSON in a <lint_result> tag.`;
 
       fs.writeFileSync(path.join(WIKI_DIR, pagePath), newContent);
       updateCount++;
+      lintUpdatedPages.push({ pagePath, existingContent, newContent });
       console.log(`📚 Wiki lint: updated ${pagePath}`);
     }
 
@@ -5162,13 +5356,40 @@ Wrap your JSON in a <lint_result> tag.`;
       console.log('📚 Wiki history prune failed:', e.message);
     }
 
-    meta.last_lint = new Date().toISOString();
-    meta.last_lint_issues = result.issues?.length || 0;
+    const reviewedAt = new Date().toISOString();
+    const validIssues = (Array.isArray(result.issues) ? result.issues : []).filter((issue) => (
+      issue && WIKI_ALL_PAGES.includes(issue.page) && typeof issue.description === 'string'
+    ));
+    const issuesByPage = new Map();
+    for (const issue of validIssues) {
+      if (!issuesByPage.has(issue.page)) issuesByPage.set(issue.page, []);
+      issuesByPage.get(issue.page).push(`[${issue.type || 'quality'}] ${issue.description}`);
+    }
+    for (const pagePath of WIKI_ALL_PAGES) {
+      updateWikiPageMeta(meta, pagePath, {
+        last_reviewed_at: reviewedAt,
+        issues: issuesByPage.get(pagePath) || [],
+      });
+    }
+    for (const update of lintUpdatedPages) {
+      updateWikiPageMeta(meta, update.pagePath, {
+        last_changed_at: reviewedAt,
+        change_summary: summarizeWikiPageChange(
+          update.existingContent,
+          update.newContent,
+          'Wiki lint repaired structure or consistency',
+        ),
+      });
+    }
+    meta.last_lint = reviewedAt;
+    meta.last_lint_attempt = reviewedAt;
+    meta.last_lint_error = null;
+    meta.last_lint_issues = validIssues.length;
     meta.last_lint_updates = updateCount;
     writeWikiMeta(meta);
     refreshWikiIndex();
     appendWikiLog('lint', 'wiki lint complete', [
-      `issues: ${result.issues?.length || 0}`,
+      `issues: ${validIssues.length}`,
       `updates: ${updateCount}`,
     ]);
     logWikiMetaSummary('📚 Wiki lint: wrote completion meta', meta);
@@ -11957,6 +12178,7 @@ ${wikiSignals ? `\n=== WIKI SIGNALS (parsed from knowledge base) ===
 Regime: ${wikiSignals.regime || 'unknown'} (confidence: ${wikiSignals.regimeConfidence || 'unknown'})
 Protection cost: ${wikiSignals.protectionAssessment || 'unknown'}
 Call premium: ${wikiSignals.revenueAssessment || 'unknown'}
+Knowledge warnings: ${wikiSignals.warnings?.length ? wikiSignals.warnings.join('; ') : 'none'}
 ${wikiSignals.playbookRules.length > 0 ? `Playbook rules:\n${wikiSignals.playbookRules.map(r => `- ${r}`).join('\n')}` : ''}` : ''}
 === MANDELBROT MARKET STRUCTURE ARCHIVE ===
 ${buildMandelbrotContextBlock(mandelbrotContext)}
