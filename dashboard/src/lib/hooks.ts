@@ -2,34 +2,66 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 
-export function usePolling<T>(url: string, initialData: T, interval = 60_000): { data: T; loading: boolean; error: string | null; refetch: () => void; fetchTick: number } {
+type PollingResult<T> = {
+  data: T;
+  loading: boolean;
+  error: string | null;
+  refetch: () => void;
+  fetchTick: number;
+  /** URL that produced the data currently on screen. */
+  dataUrl: string | null;
+  /** Most recent URL whose request completed, successfully or otherwise. */
+  settledUrl: string | null;
+};
+
+export function usePolling<T>(url: string, initialData: T, interval = 60_000): PollingResult<T> {
   const [data, setData] = useState<T>(initialData);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [fetchTick, setFetchTick] = useState(0);
+  const [dataUrl, setDataUrl] = useState<string | null>(null);
+  const [settledUrl, setSettledUrl] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
 
   const fetchData = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoading(true);
+
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: controller.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
+      if (requestId !== requestIdRef.current) return;
       setData(json);
+      setDataUrl(url);
       setError(null);
       setFetchTick(t => t + 1);
     } catch (e: unknown) {
+      if (controller.signal.aborted || requestId !== requestIdRef.current) return;
       setError(e instanceof Error ? e.message : 'Fetch failed');
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setSettledUrl(url);
+        setLoading(false);
+      }
     }
   }, [url]);
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
     const id = setInterval(fetchData, interval);
-    return () => clearInterval(id);
+    return () => {
+      clearInterval(id);
+      requestIdRef.current += 1;
+      abortRef.current?.abort();
+    };
   }, [fetchData, interval]);
 
-  return { data, loading, error, refetch: fetchData, fetchTick };
+  return { data, loading, error, refetch: fetchData, fetchTick, dataUrl, settledUrl };
 }
 
 /** Live-ticking "Xs ago" / "Xm ago" string that updates every second. */

@@ -794,6 +794,15 @@ function rangeToWindow(range: string) {
   };
 }
 
+function rangeFromRequestUrl(url: string | null, fallback: string): string {
+  if (!url) return fallback;
+  try {
+    return new URL(url, 'http://dashboard.local').searchParams.get('range') || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('14d');
   const [posSort, setPosSort] = useState<{ key: string; asc: boolean }>({ key: 'instrument_name', asc: true });
@@ -801,15 +810,41 @@ export default function OverviewPage() {
   const margins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
   const primaryYAxisWidth = mobile ? 45 : 70;
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
-  const { data: chart, loading } = usePolling<ChartData>(`/api/chart?range=${range}`, emptyChart, 90_000);
+  const chartUrl = `/api/chart?range=${encodeURIComponent(range)}`;
+  const {
+    data: chart,
+    loading: chartLoading,
+    error: chartError,
+    dataUrl: chartDataUrl,
+    settledUrl: chartSettledUrl,
+  } = usePolling<ChartData>(chartUrl, emptyChart, 90_000);
   const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
-  const { data: account } = usePolling<AccountData>(`/api/lyra/account?range=${range}`, emptyAccount, 60_000);
+  const accountUrl = `/api/lyra/account?range=${encodeURIComponent(range)}`;
+  const {
+    data: account,
+    error: accountError,
+    dataUrl: accountDataUrl,
+    settledUrl: accountSettledUrl,
+  } = usePolling<AccountData>(accountUrl, emptyAccount, 60_000);
   const pnlWindow = useMemo(() => rangeToWindow(range), [range]);
   const pnlQuery = useMemo(
     () => `/api/pnl-report?range=${encodeURIComponent(range)}&from=${encodeURIComponent(pnlWindow.from)}&to=${encodeURIComponent(pnlWindow.to)}`,
     [pnlWindow.from, pnlWindow.to, range]
   );
-  const { data: pnlReport } = usePolling<PnlReportData>(pnlQuery, emptyPnlReport, 90_000);
+  const {
+    data: pnlReport,
+    error: pnlError,
+    settledUrl: pnlSettledUrl,
+  } = usePolling<PnlReportData>(pnlQuery, emptyPnlReport, 90_000);
+  const chartRange = rangeFromRequestUrl(chartDataUrl, range);
+  const accountRange = rangeFromRequestUrl(accountDataUrl, range);
+  const chartRangeLoading = chartSettledUrl !== chartUrl;
+  const rangeLoading = chartRangeLoading || accountSettledUrl !== accountUrl || pnlSettledUrl !== pnlQuery;
+  const rangeLoadError = (
+    (chartSettledUrl === chartUrl && chartError)
+    || (accountSettledUrl === accountUrl && accountError)
+    || (pnlSettledUrl === pnlQuery && pnlError)
+  );
   const pinPrice = usePinnableTooltip();
   const pinLiquidity = usePinnableTooltip();
   const pinPut = usePinnableTooltip();
@@ -994,10 +1029,10 @@ export default function OverviewPage() {
   // Shared X-axis tick formatter
   const xTickFormatter = useCallback((ts: number) => {
     const d = new Date(ts);
-    return range === '1h' || range === '6h'
+    return chartRange === '1h' || chartRange === '6h'
       ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-  }, [range]);
+  }, [chartRange]);
 
   // Merge all data series by snapping to nearest price point via binary search
   const merged = useMemo(() => {
@@ -1006,7 +1041,7 @@ export default function OverviewPage() {
       ...chart.options.map((point) => Number(point.lyra_spot)),
       Number(stats.last_price),
       Number(stats.lyra_spot),
-    ], range);
+    ], chartRange);
 
     type OptionDetail = {
       delta: number | null;
@@ -1157,7 +1192,7 @@ export default function OverviewPage() {
     }
 
     return rows;
-  }, [chart, latestTick, range, stats]);
+  }, [chart, chartRange, latestTick, stats]);
 
   // Data for momentum bar (only points with momentum data)
   const momentumData = useMemo(() =>
@@ -1317,10 +1352,10 @@ export default function OverviewPage() {
     normalizeGlobal(puts);
 
     return {
-      callHeatmap: quantizeScatterDots(calls, range),
-      putHeatmap: quantizeScatterDots(puts, range),
+      callHeatmap: quantizeScatterDots(calls, chartRange),
+      putHeatmap: quantizeScatterDots(puts, chartRange),
     };
-  }, [chart.optionsHeatmap, merged, range]);
+  }, [chart.optionsHeatmap, chartRange, merged]);
 
   // Market quality dots: filter heatmap dots to bot's delta range and normalize spread/depth
   const { putMQ, callMQ } = useMemo(() => {
@@ -1349,11 +1384,11 @@ export default function OverviewPage() {
           spreadIntensity: 1 - ((d.spreadPct! - minSpread) / spreadRange), // invert: tight=1
           depthIntensity: d.depth != null ? (d.depth - minDepth) / depthRange : 0.3,
         })),
-        range
+        chartRange
       );
     };
     return { putMQ: buildMQ(putHeatmap), callMQ: buildMQ(callHeatmap) };
-  }, [putHeatmap, callHeatmap, range]);
+  }, [callHeatmap, chartRange, putHeatmap]);
 
   // Shared X-axis domain from main chart's time range
   const xDomain = useMemo(() =>
@@ -1635,20 +1670,30 @@ export default function OverviewPage() {
 
       {/* Time Range Selector */}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex gap-1 overflow-x-auto hide-scrollbar">
-          {ranges.map(r => (
-            <button
-              key={r}
-              onClick={() => setRange(r)}
-              className={`px-2 md:px-3 py-1 rounded text-xs md:text-sm shrink-0 ${
-                range === r
-                  ? 'bg-white/10 text-white border border-white/20'
-                  : 'text-gray-400 hover:bg-white/10 hover:text-white'
-              }`}
-            >
-              {r}
-            </button>
-          ))}
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="flex gap-1 overflow-x-auto hide-scrollbar">
+            {ranges.map(r => (
+              <button
+                key={r}
+                onClick={() => setRange(r)}
+                aria-pressed={range === r}
+                aria-busy={range === r && rangeLoading}
+                className={`inline-flex items-center justify-center gap-1.5 px-2 md:px-3 py-1 rounded text-xs md:text-sm shrink-0 transition-colors ${
+                  range === r
+                    ? 'bg-white/10 text-white border border-white/20'
+                    : 'text-gray-400 hover:bg-white/10 hover:text-white'
+                }`}
+              >
+                {range === r && rangeLoading && (
+                  <span className="h-3 w-3 rounded-full border border-white/30 border-t-white animate-spin" aria-hidden="true" />
+                )}
+                {r}
+              </button>
+            ))}
+          </div>
+          {!rangeLoading && rangeLoadError && (
+            <span className="shrink-0 text-[11px] text-amber-300">Some data couldn’t refresh</span>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH CG</span>
@@ -1672,11 +1717,34 @@ export default function OverviewPage() {
           })}
         </div>
       </div>
+      <div className="sr-only" role="status" aria-live="polite">
+        {rangeLoading
+          ? `Loading ${range} dashboard data`
+          : rangeLoadError
+            ? `Some ${range} dashboard data could not be refreshed`
+            : `${range} dashboard data loaded`}
+      </div>
 
       {/* Big Combined Chart */}
-      <Card className="overflow-hidden min-w-0">
-        {loading && merged.length === 0 ? (
-          <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">Loading...</div>
+      <Card className="relative overflow-hidden min-w-0">
+        {chartRangeLoading && merged.length > 0 && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-[#111]/35 backdrop-blur-[1px] pointer-events-none">
+            <div className="flex items-center gap-2 rounded border border-white/15 bg-[#171717]/95 px-3 py-2 text-xs text-gray-200 shadow-lg">
+              <span className="h-3.5 w-3.5 rounded-full border border-white/30 border-t-white animate-spin" aria-hidden="true" />
+              Loading {range} data…
+            </div>
+          </div>
+        )}
+        {!rangeLoading && rangeLoadError && chartDataUrl !== chartUrl && merged.length > 0 && (
+          <div className="absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded border border-amber-400/25 bg-[#171717]/95 px-3 py-2 text-xs text-amber-300 shadow-lg">
+            Couldn’t load the {range} chart. Still showing {chartRange}.
+          </div>
+        )}
+        {chartLoading && merged.length === 0 ? (
+          <div className="h-[300px] md:h-[500px] flex items-center justify-center gap-2 text-gray-500">
+            <span className="h-4 w-4 rounded-full border border-gray-600 border-t-gray-300 animate-spin" aria-hidden="true" />
+            Loading {range} data…
+          </div>
         ) : merged.length === 0 ? (
           <div className="h-[300px] md:h-[500px] flex items-center justify-center text-gray-500">No data yet — bot is collecting</div>
         ) : (
@@ -2882,7 +2950,7 @@ export default function OverviewPage() {
 
       {/* Recent Trades */}
       {account.trades.length > 0 && (
-        <Card title="Recent Trades" subtitle={`${account.trades.length} trades (${range})`}>
+        <Card title="Recent Trades" subtitle={`${account.trades.length} trades (${accountRange})`}>
           <div className="overflow-auto max-h-[300px]">
             <table className="w-full text-xs md:text-sm">
               <thead className="sticky top-0 bg-[#111] z-10">

@@ -7900,6 +7900,25 @@ describe('Wiki knowledge discipline', () => {
   });
 });
 
+describe('Dashboard range loading UX', () => {
+  const overviewSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'page.tsx'), 'utf8');
+  const pollingHookSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'hooks.ts'), 'utf8');
+
+  test('range changes keep stale data visible with explicit progress feedback', () => {
+    assert.ok(overviewSource.includes('chartRangeLoading && merged.length > 0'));
+    assert.ok(overviewSource.includes('Loading {range} data…'));
+    assert.ok(overviewSource.includes('aria-busy={range === r && rangeLoading}'));
+    assert.ok(overviewSource.includes('rangeFromRequestUrl(chartDataUrl, range)'));
+  });
+
+  test('polling cancels superseded requests and rejects stale responses', () => {
+    assert.ok(pollingHookSource.includes('new AbortController()'));
+    assert.ok(pollingHookSource.includes('requestId !== requestIdRef.current'));
+    assert.ok(pollingHookSource.includes('setDataUrl(url)'));
+    assert.ok(pollingHookSource.includes('setSettledUrl(url)'));
+  });
+});
+
 // ============================================================================
 // Summary
 // ============================================================================
