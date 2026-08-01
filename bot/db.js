@@ -423,6 +423,30 @@ db.exec(`
     is_active INTEGER NOT NULL DEFAULT 1
   );
 
+  CREATE TABLE IF NOT EXISTS trade_lesson_evidence (
+    lesson_id INTEGER NOT NULL REFERENCES trade_lessons(id),
+    review_id INTEGER NOT NULL REFERENCES trade_reviews(id),
+    stance TEXT NOT NULL CHECK (stance IN ('supporting', 'contradicting', 'context')),
+    linked_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (lesson_id, review_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_trade_lesson_evidence_lesson
+    ON trade_lesson_evidence(lesson_id, stance);
+  CREATE INDEX IF NOT EXISTS idx_trade_lesson_evidence_review
+    ON trade_lesson_evidence(review_id);
+
+  CREATE TABLE IF NOT EXISTS trade_lesson_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lesson_id INTEGER NOT NULL REFERENCES trade_lessons(id),
+    revision INTEGER NOT NULL,
+    lesson TEXT NOT NULL,
+    applicability TEXT,
+    status TEXT NOT NULL,
+    change_summary TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(lesson_id, revision)
+  );
+
   CREATE TABLE IF NOT EXISTS candidate_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     observed_at TEXT NOT NULL,
@@ -555,6 +579,19 @@ try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_put_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_call_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE trade_reviews ADD COLUMN review_window_days INTEGER NOT NULL DEFAULT 1'); } catch {}
 try { db.exec('ALTER TABLE trade_reviews ADD COLUMN horizon_end_at TEXT'); } catch {}
+try { db.exec('ALTER TABLE trade_lessons ADD COLUMN lesson_key TEXT'); } catch {}
+try { db.exec('ALTER TABLE trade_lessons ADD COLUMN title TEXT'); } catch {}
+try { db.exec('ALTER TABLE trade_lessons ADD COLUMN category TEXT'); } catch {}
+try { db.exec('ALTER TABLE trade_lessons ADD COLUMN action_family TEXT'); } catch {}
+try { db.exec('ALTER TABLE trade_lessons ADD COLUMN applicability TEXT'); } catch {}
+try { db.exec("ALTER TABLE trade_lessons ADD COLUMN status TEXT NOT NULL DEFAULT 'active'"); } catch {}
+try { db.exec('ALTER TABLE trade_lessons ADD COLUMN revision INTEGER NOT NULL DEFAULT 1'); } catch {}
+try { db.exec('ALTER TABLE trade_lessons ADD COLUMN change_summary TEXT'); } catch {}
+try { db.exec('ALTER TABLE trade_lessons ADD COLUMN updated_at TEXT'); } catch {}
+try {
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_lessons_key
+    ON trade_lessons(lesson_key) WHERE lesson_key IS NOT NULL`);
+} catch {}
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
 
@@ -987,11 +1024,120 @@ const stmts = {
     VALUES (@lesson, @evidence_count)
   `),
 
-  getActiveTradeLessons: db.prepare(`
+  getCanonicalTradeLessons: db.prepare(`
+    SELECT tl.id, tl.lesson_key, tl.title, tl.lesson, tl.category, tl.action_family,
+      tl.applicability, tl.status, tl.revision, tl.change_summary,
+      tl.evidence_count, tl.created_at, COALESCE(tl.updated_at, tl.created_at) AS updated_at,
+      (SELECT COUNT(*) FROM trade_lesson_evidence tle
+        WHERE tle.lesson_id = tl.id AND tle.stance = 'supporting') AS supporting_review_count,
+      (SELECT COUNT(DISTINCT tr.instrument_name || '|' || tr.closed_at)
+        FROM trade_lesson_evidence tle
+        JOIN trade_reviews tr ON tr.id = tle.review_id
+        WHERE tle.lesson_id = tl.id AND tle.stance = 'supporting') AS supporting_campaign_count,
+      (SELECT COUNT(*) FROM trade_lesson_evidence tle
+        WHERE tle.lesson_id = tl.id AND tle.stance = 'contradicting') AS contradicting_review_count,
+      (SELECT COUNT(DISTINCT tr.instrument_name || '|' || tr.closed_at)
+        FROM trade_lesson_evidence tle
+        JOIN trade_reviews tr ON tr.id = tle.review_id
+        WHERE tle.lesson_id = tl.id AND tle.stance = 'contradicting') AS contradicting_campaign_count
+    FROM trade_lessons tl
+    WHERE tl.is_active = 1
+      AND tl.lesson_key IS NOT NULL
+      AND tl.status != 'retired'
+    ORDER BY
+      CASE tl.status WHEN 'disputed' THEN 0 WHEN 'active' THEN 1 ELSE 2 END,
+      supporting_campaign_count DESC,
+      COALESCE(tl.updated_at, tl.created_at) DESC
+  `),
+
+  getLegacyTradeLessons: db.prepare(`
     SELECT id, lesson, evidence_count, created_at
     FROM trade_lessons
-    WHERE is_active = 1
-    ORDER BY created_at DESC
+    WHERE is_active = 1 AND lesson_key IS NULL
+    ORDER BY created_at DESC, id DESC
+  `),
+
+  getCanonicalTradeLessonByKey: db.prepare(`
+    SELECT id, lesson_key, title, lesson, category, action_family, applicability,
+      status, revision, change_summary, evidence_count, created_at, updated_at
+    FROM trade_lessons
+    WHERE lesson_key = @lesson_key
+    LIMIT 1
+  `),
+
+  insertCanonicalTradeLesson: db.prepare(`
+    INSERT INTO trade_lessons (
+      lesson_key, title, lesson, category, action_family, applicability,
+      status, revision, change_summary, evidence_count, updated_at
+    ) VALUES (
+      @lesson_key, @title, @lesson, @category, @action_family, @applicability,
+      @status, 1, @change_summary, 0, datetime('now')
+    )
+  `),
+
+  updateCanonicalTradeLesson: db.prepare(`
+    UPDATE trade_lessons
+    SET title = @title,
+      lesson = @lesson,
+      category = @category,
+      action_family = @action_family,
+      applicability = @applicability,
+      status = @status,
+      revision = @revision,
+      change_summary = @change_summary,
+      updated_at = datetime('now'),
+      is_active = 1,
+      archived_at = NULL
+    WHERE id = @id
+  `),
+
+  insertTradeLessonRevision: db.prepare(`
+    INSERT OR IGNORE INTO trade_lesson_revisions (
+      lesson_id, revision, lesson, applicability, status, change_summary
+    ) VALUES (
+      @lesson_id, @revision, @lesson, @applicability, @status, @change_summary
+    )
+  `),
+
+  getTradeReviewById: db.prepare(`
+    SELECT id FROM trade_reviews WHERE id = @id AND is_active = 1 LIMIT 1
+  `),
+
+  linkTradeLessonEvidence: db.prepare(`
+    INSERT INTO trade_lesson_evidence (lesson_id, review_id, stance)
+    VALUES (@lesson_id, @review_id, @stance)
+    ON CONFLICT(lesson_id, review_id) DO UPDATE SET
+      stance = excluded.stance,
+      linked_at = datetime('now')
+  `),
+
+  refreshTradeLessonEvidenceCount: db.prepare(`
+    UPDATE trade_lessons
+    SET evidence_count = (
+      SELECT COUNT(*)
+      FROM trade_lesson_evidence
+      WHERE lesson_id = @lesson_id AND stance = 'supporting'
+    )
+    WHERE id = @lesson_id
+  `),
+
+  syncTradeLessonEvidenceStatus: db.prepare(`
+    UPDATE trade_lessons
+    SET status = CASE
+      WHEN status = 'retired' THEN 'retired'
+      WHEN EXISTS (
+        SELECT 1 FROM trade_lesson_evidence
+        WHERE lesson_id = @lesson_id AND stance = 'contradicting'
+      ) THEN 'disputed'
+      WHEN (
+        SELECT COUNT(DISTINCT tr.instrument_name || '|' || tr.closed_at)
+        FROM trade_lesson_evidence tle
+        JOIN trade_reviews tr ON tr.id = tle.review_id
+        WHERE tle.lesson_id = @lesson_id AND tle.stance = 'supporting'
+      ) >= 2 THEN 'active'
+      ELSE 'candidate'
+    END
+    WHERE id = @lesson_id
   `),
 
   archiveTradeLesson: db.prepare(`
@@ -2299,8 +2445,98 @@ const insertTradeLesson = (lesson, evidenceCount) => {
   stmts.insertTradeLesson.run({ lesson, evidence_count: evidenceCount });
 };
 
+const getCanonicalTradeLessons = () => {
+  return stmts.getCanonicalTradeLessons.all();
+};
+
+const getLegacyTradeLessons = () => {
+  return stmts.getLegacyTradeLessons.all();
+};
+
 const getActiveTradeLessons = () => {
-  return stmts.getActiveTradeLessons.all();
+  const canonical = getCanonicalTradeLessons();
+  return canonical.length > 0 ? canonical : getLegacyTradeLessons();
+};
+
+const upsertCanonicalTradeLesson = (lesson, allowedReviewIds = null) => {
+  const upsert = db.transaction((input, allowedIds) => {
+    const lessonKey = String(input.lesson_key || '').trim();
+    const title = String(input.title || '').trim();
+    const lessonText = String(input.lesson || '').trim();
+    if (!lessonKey || !title || lessonText.length < 20) return null;
+
+    const allowedStatuses = new Set(['active', 'candidate', 'disputed', 'retired']);
+    const requestedStatus = allowedStatuses.has(input.status) ? input.status : 'candidate';
+    const applicability = JSON.stringify(Array.isArray(input.applicability) ? input.applicability : []);
+    const values = {
+      lesson_key: lessonKey,
+      title,
+      lesson: lessonText,
+      category: String(input.category || 'process'),
+      action_family: input.action_family ? String(input.action_family) : null,
+      applicability,
+      status: requestedStatus,
+      change_summary: String(input.change_summary || '').trim() || null,
+    };
+
+    let existing = stmts.getCanonicalTradeLessonByKey.get({ lesson_key: lessonKey });
+    if (!existing) {
+      const result = stmts.insertCanonicalTradeLesson.run(values);
+      existing = stmts.getCanonicalTradeLessonByKey.get({ lesson_key: lessonKey });
+      if (!existing) return null;
+      stmts.insertTradeLessonRevision.run({
+        lesson_id: Number(result.lastInsertRowid),
+        revision: 1,
+        lesson: lessonText,
+        applicability,
+        status: values.status,
+        change_summary: values.change_summary || 'Canonical lesson created',
+      });
+    } else {
+      // Active/disputed/candidate is evidence-derived. Preserve it across prose
+      // refreshes so a caller's default cannot manufacture noisy revisions.
+      if (requestedStatus !== 'retired') values.status = existing.status || 'candidate';
+      const materiallyChanged = existing.title !== title
+        || existing.lesson !== lessonText
+        || existing.category !== values.category
+        || existing.action_family !== values.action_family
+        || existing.applicability !== applicability
+        || existing.status !== values.status;
+      if (materiallyChanged) {
+        const revision = Number(existing.revision || 1) + 1;
+        stmts.updateCanonicalTradeLesson.run({ ...values, id: existing.id, revision });
+        stmts.insertTradeLessonRevision.run({
+          lesson_id: existing.id,
+          revision,
+          lesson: lessonText,
+          applicability,
+          status: values.status,
+          change_summary: values.change_summary || 'Lesson revised from new campaign evidence',
+        });
+      }
+    }
+
+    const lessonId = Number(existing.id);
+    const allowed = allowedIds ? new Set(Array.from(allowedIds, Number)) : null;
+    const evidence = new Map();
+    for (const reviewId of Array.isArray(input.supporting_review_ids) ? input.supporting_review_ids : []) {
+      const id = Number(reviewId);
+      if (Number.isInteger(id) && (!allowed || allowed.has(id))) evidence.set(id, 'supporting');
+    }
+    for (const reviewId of Array.isArray(input.contradicting_review_ids) ? input.contradicting_review_ids : []) {
+      const id = Number(reviewId);
+      if (Number.isInteger(id) && (!allowed || allowed.has(id))) evidence.set(id, 'contradicting');
+    }
+    for (const [reviewId, stance] of evidence) {
+      if (!stmts.getTradeReviewById.get({ id: reviewId })) continue;
+      stmts.linkTradeLessonEvidence.run({ lesson_id: lessonId, review_id: reviewId, stance });
+    }
+    stmts.refreshTradeLessonEvidenceCount.run({ lesson_id: lessonId });
+    stmts.syncTradeLessonEvidenceStatus.run({ lesson_id: lessonId });
+    return stmts.getCanonicalTradeLessonByKey.get({ lesson_key: lessonKey });
+  });
+
+  return upsert(lesson, allowedReviewIds);
 };
 
 const archiveTradeLesson = (id) => {
@@ -2542,7 +2778,10 @@ module.exports = {
   getTradeReviewsSinceId,
   countReviewedSinceLastTradeLesson,
   insertTradeLesson,
+  upsertCanonicalTradeLesson,
   getActiveTradeLessons,
+  getCanonicalTradeLessons,
+  getLegacyTradeLessons,
   archiveTradeLesson,
   saveBotState,
   loadBotState,

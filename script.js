@@ -3727,6 +3727,44 @@ const getSpotAtOrBefore = (rows, timestamp) => {
   return best;
 };
 
+const buildTradeReviewEvidenceWindow = (campaign, priceWindow) => {
+  const closedAtMs = new Date(campaign.closed_at).getTime();
+  const requestedHorizonMs = new Date(campaign.horizon_end_at).getTime();
+  const expiryMs = getExpiryTimestampFromInstrument(campaign.instrument_name);
+  const economicHorizonMs = expiryMs == null
+    ? requestedHorizonMs
+    : Math.min(requestedHorizonMs, expiryMs);
+  const whileOpen = priceWindow.filter((point) => (
+    point.timestamp >= campaign.opened_at && point.timestamp <= campaign.closed_at
+  ));
+  const afterCloseBeforeExpiry = priceWindow.filter((point) => {
+    const pointMs = new Date(point.timestamp).getTime();
+    return pointMs > closedAtMs && pointMs <= economicHorizonMs;
+  });
+  const postExpiryContext = expiryMs != null && requestedHorizonMs > expiryMs
+    ? priceWindow.filter((point) => {
+        const pointMs = new Date(point.timestamp).getTime();
+        return pointMs > expiryMs && pointMs <= requestedHorizonMs;
+      })
+    : [];
+  const qualityFlags = [];
+  if (!parseTradeInstrumentParts(campaign.instrument_name) || expiryMs == null) qualityFlags.push('invalid_instrument');
+  if (campaign.spot_open == null) qualityFlags.push('missing_open_spot');
+  if (whileOpen.length === 0) qualityFlags.push('missing_open_window');
+  if ((campaign.orders || []).some((order) => !(Number(order.spot_price) > 0))) qualityFlags.push('orders_missing_spot');
+  if (expiryMs != null && new Date(campaign.opened_at).getTime() > expiryMs) qualityFlags.push('campaign_opens_after_expiry');
+  if (expiryMs != null && closedAtMs > expiryMs) qualityFlags.push('campaign_closes_after_expiry');
+  if (expiryMs != null && requestedHorizonMs > expiryMs) qualityFlags.push('review_horizon_crosses_expiry');
+
+  return {
+    whileOpen,
+    afterCloseBeforeExpiry,
+    postExpiryContext,
+    economicHorizonAt: Number.isFinite(economicHorizonMs) ? new Date(economicHorizonMs).toISOString() : campaign.horizon_end_at,
+    qualityFlags,
+  };
+};
+
 const getExpirySettlementValue = (campaign, spotClose) => {
   const expiryClose = campaign?.close_orders?.find((order) => order?._source === 'synthetic_expiry');
   if (!expiryClose || !Number.isFinite(spotClose)) return null;
@@ -3983,8 +4021,8 @@ const reviewClosedTrades = async () => {
     for (const campaign of pendingReviews.slice(0, 4)) {
       try {
         const priceWindow = db.getRecentSpotPrices(campaign.opened_at) || [];
-        const whileOpen = priceWindow.filter(p => p.timestamp >= campaign.opened_at && p.timestamp <= campaign.closed_at);
-        const afterClose = priceWindow.filter(p => p.timestamp > campaign.closed_at && p.timestamp <= campaign.horizon_end_at);
+        const evidenceWindow = buildTradeReviewEvidenceWindow(campaign, priceWindow);
+        const { whileOpen, afterCloseBeforeExpiry, postExpiryContext, economicHorizonAt, qualityFlags } = evidenceWindow;
         const spotAtClose = campaign.spot_close ?? getSpotAtOrBefore(whileOpen, campaign.closed_at);
         const expirySettlementValue = getExpirySettlementValue(campaign, spotAtClose);
         const expirySettlementCashflow = expirySettlementValue == null
@@ -4004,6 +4042,9 @@ Your job is not to judge by P&L alone. Use hindsight carefully:
 - Whether ETH moved up or down is second-order evidence. Care about it only insofar as it reveals whether protection was cheap, premium was rich, liquidity was good, or risk was mispriced.
 - Distinguish execution error, sizing error, strike-selection error, and acceptable arithmetic bleed.
 - This is a staged hindsight review. Only use post-close information through the specified horizon, not beyond it.
+- Never use price movement after the contract expired to evaluate what the closed option would have paid. Post-expiry prices are context for possible follow-on trades only.
+- Base factual claims on the supplied values. If data is missing or flagged, state the uncertainty instead of filling it in.
+- Do not turn a single campaign into a universal numeric strike or exit threshold.
 
 Short-call review discipline:
 - Separate mark-to-market stress from expiry economics. A short call seller receives premium upfront and keeps it unless it is paid back later.
@@ -4011,7 +4052,7 @@ Short-call review discipline:
 - Do not describe a short call as a bad trade merely because its mark expanded near a local high. That can be temporary gamma/IV pain rather than a bad final payoff.
 - Treat a call buyback below strike as an insurance purchase: it may be rational to pay to remove tail risk of continuation, but it converts uncertain future upside risk into certain realized cost.
 - When comparing a closer strike versus a farther OTM strike, explicitly note the tradeoff: farther OTM reduces forced-intervention risk but also materially reduces premium income. Do not imply that safety is free.
-- If post-close spot later remains below strike through the review horizon, say clearly that holding would likely have preserved more premium unless there was strong evidence at the time of a continued upside breakout.
+- If post-close spot remains below strike through the economically relevant pre-expiry window, say that holding may have preserved more premium while still weighing the breakout risk visible at the decision time.
 - On upside breakouts when short calls were already on, explicitly consider whether selling more calls into emotionally rich bullish premium would have been superior to buying back for insurance, provided the account still had room under the active margin cap.
 
 Campaign:
@@ -4021,6 +4062,7 @@ Campaign:
 - Closed: ${campaign.closed_at}
 - Close reason: ${closeReason}
 - Review horizon: ${campaign.review_window_days} day(s) after close, through ${campaign.horizon_end_at}
+- Economically relevant counterfactual window ends: ${economicHorizonAt}
 - Realized campaign cashflow: $${effectivePnlRealized.toFixed(4)}
 - Premium opened: $${campaign.premium_opened.toFixed(4)}
 - Premium closed: $${effectivePremiumClosed.toFixed(4)}
@@ -4028,10 +4070,12 @@ Campaign:
 - Spot at close: ${spotAtClose != null ? `$${spotAtClose}` : 'N/A'}
 - Expiry settlement value: ${expirySettlementValue != null ? `$${expirySettlementValue.toFixed(4)}` : 'N/A'}
 - Spot range while open: ${whileOpen.length > 0 ? `$${Math.min(...whileOpen.map(p => p.price)).toFixed(2)} -> $${Math.max(...whileOpen.map(p => p.price)).toFixed(2)}` : 'N/A'}
-- Spot range after close through horizon: ${afterClose.length > 0 ? `$${Math.min(...afterClose.map(p => p.price)).toFixed(2)} -> $${Math.max(...afterClose.map(p => p.price)).toFixed(2)}` : 'N/A'}
+- Spot range after close but before expiry: ${afterCloseBeforeExpiry.length > 0 ? `$${Math.min(...afterCloseBeforeExpiry.map(p => p.price)).toFixed(2)} -> $${Math.max(...afterCloseBeforeExpiry.map(p => p.price)).toFixed(2)}` : 'N/A'}
+- Post-expiry spot context (not valid for option payoff evaluation): ${postExpiryContext.length > 0 ? `$${Math.min(...postExpiryContext.map(p => p.price)).toFixed(2)} -> $${Math.max(...postExpiryContext.map(p => p.price)).toFixed(2)}` : 'N/A'}
+- Data quality flags: ${qualityFlags.length > 0 ? qualityFlags.join(', ') : 'none'}
 
 Orders:
-${campaign.orders.map(o => `${o.timestamp} | ${o.action} ${o.instrument_name} | qty=${o.filled_amount || o.intended_amount} | fill=$${o.fill_price || o.price || 0} | total=$${o.total_value || 0} | spot=$${o.spot_price || 0}`).join('\n')}
+${campaign.orders.map(o => `${o.timestamp} | ${o.action} ${o.instrument_name} | qty=${o.filled_amount || o.intended_amount} | fill=$${o.fill_price || o.price || 0} | total=$${o.total_value || 0} | spot=${Number(o.spot_price) > 0 ? `$${o.spot_price}` : 'N/A'}`).join('\n')}
 
 Review categories:
 - disciplined_win: good decision and good execution
@@ -4042,7 +4086,6 @@ Review categories:
 Output JSON only:
 {
   "status":"disciplined_win|disciplined_loss|execution_mistake|risk_mistake",
-  "confidence":0.0,
   "summary":"2-4 sentence review that explicitly says whether the decision was right at the time",
   "lessons":["short durable lesson 1","short durable lesson 2"]
 }`;
@@ -4076,7 +4119,7 @@ Output JSON only:
           horizon_end_at: campaign.horizon_end_at,
           order_ids: campaign.order_ids,
           review_status: result.status,
-          review_confidence: result.confidence || null,
+          review_confidence: null,
           summary: result.summary,
           lessons: Array.isArray(result.lessons) ? result.lessons.slice(0, 3) : [],
           pnl_realized: effectivePnlRealized,
@@ -4086,8 +4129,8 @@ Output JSON only:
           spot_close: spotAtClose,
           spot_min_while_open: whileOpen.length > 0 ? Math.min(...whileOpen.map(p => p.price)) : null,
           spot_max_while_open: whileOpen.length > 0 ? Math.max(...whileOpen.map(p => p.price)) : null,
-          spot_min_after_close: afterClose.length > 0 ? Math.min(...afterClose.map(p => p.price)) : null,
-          spot_max_after_close: afterClose.length > 0 ? Math.max(...afterClose.map(p => p.price)) : null,
+          spot_min_after_close: afterCloseBeforeExpiry.length > 0 ? Math.min(...afterCloseBeforeExpiry.map(p => p.price)) : null,
+          spot_max_after_close: afterCloseBeforeExpiry.length > 0 ? Math.max(...afterCloseBeforeExpiry.map(p => p.price)) : null,
         });
         console.log(`🧾 Trade review stored for ${campaign.instrument_name} [${campaign.review_window_days}d]: ${result.status}`);
         storedCount += 1;
@@ -4109,46 +4152,140 @@ Output JSON only:
   }
 };
 
+const TRADE_LESSON_TAXONOMY = Object.freeze([
+  Object.freeze({
+    lesson_key: 'short_call.exit_insurance',
+    title: 'Short-call exit insurance',
+    category: 'exit_timing',
+    action_family: 'short_call_campaign',
+    purpose: 'When a buyback is worth its certain cost given DTE, strike distance, momentum, and portfolio risk.',
+  }),
+  Object.freeze({
+    lesson_key: 'short_call.strike_and_sizing',
+    title: 'Short-call strike and sizing',
+    category: 'strike_selection',
+    action_family: 'short_call_campaign',
+    purpose: 'The joint tradeoff among premium income, OTM buffer, volatility, size, margin, and intervention pressure.',
+  }),
+  Object.freeze({
+    lesson_key: 'tail_put.strike_and_cost',
+    title: 'Tail-put strike and insurance cost',
+    category: 'strike_selection',
+    action_family: 'long_put_campaign',
+    purpose: 'Whether protection was affordable, sufficiently convex, and sized so normal premium bleed is tolerable.',
+  }),
+  Object.freeze({
+    lesson_key: 'tail_put.lifecycle',
+    title: 'Tail-put lifecycle',
+    category: 'exit_timing',
+    action_family: 'long_put_campaign',
+    purpose: 'When protection should remain in force, be monetized, be rolled, or be retired as the insured risk changes.',
+  }),
+  Object.freeze({
+    lesson_key: 'process.decision_quality',
+    title: 'Decision quality versus outcome',
+    category: 'process',
+    action_family: null,
+    purpose: 'Whether a decision was sound using information available at the time, independently of realized P&L.',
+  }),
+  Object.freeze({
+    lesson_key: 'execution.order_hygiene',
+    title: 'Execution and order hygiene',
+    category: 'execution',
+    action_family: null,
+    purpose: 'Tranche timing, micro-fills, rapid exit/re-entry cycles, liquidity, and other implementation quality.',
+  }),
+]);
+
+const parseStoredStringArray = (value) => {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const formatTradeLessonForPrompt = (lesson) => {
+  const title = lesson.title || lesson.lesson_key || 'Legacy lesson';
+  const support = Number(lesson.supporting_campaign_count ?? lesson.evidence_count ?? 0);
+  const contradictions = Number(lesson.contradicting_campaign_count || 0);
+  const status = lesson.status || (lesson.lesson_key ? 'candidate' : 'legacy');
+  return `- ${title} [${status}; ${support} supporting campaign(s); ${contradictions} contradiction(s)]: ${lesson.lesson}`;
+};
+
+const formatTradeReviewForLessonSynthesis = (review) => {
+  const parsed = parseTradeInstrumentParts(review.instrument_name);
+  const lessons = parseStoredStringArray(review.lessons);
+  return [
+    `#${review.id}`,
+    review.instrument_name,
+    `[${review.review_status}]`,
+    `[${review.review_window_days}d]`,
+    `family=${review.action_family || 'unknown'}`,
+    `strike=${parsed?.strike ?? 'N/A'}`,
+    `spot_open=${review.spot_open ?? 'N/A'}`,
+    `spot_close=${review.spot_close ?? 'N/A'}`,
+    `open_range=${review.spot_min_while_open ?? 'N/A'}..${review.spot_max_while_open ?? 'N/A'}`,
+    `post_close_pre_expiry_range=${review.spot_min_after_close ?? 'N/A'}..${review.spot_max_after_close ?? 'N/A'}`,
+    `pnl=$${Number(review.pnl_realized || 0).toFixed(2)}`,
+    `summary=${String(review.summary || '').replace(/\s+/g, ' ').slice(0, 280)}`,
+    `observations=${lessons.join(' | ').slice(0, 280) || 'none'}`,
+  ].join(' ');
+};
+
 const extractTradeLessons = async () => {
-  if (!process.env.ANTHROPIC_API_KEY || !db) return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
-  const reviews = db.getTradeReviewsSinceId
-    ? (db.getTradeReviewsSinceId(botData.lastTradeLessonReviewId || 0, 8) || [])
-    : (db.getRecentTradeReviews(8) || []);
+  if (!process.env.ANTHROPIC_API_KEY || !db?.upsertCanonicalTradeLesson) {
+    return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
+  }
+
+  const canonicalLessons = db.getCanonicalTradeLessons?.() || [];
+  const legacyLessons = db.getLegacyTradeLessons?.() || [];
+  const isBootstrap = canonicalLessons.length === 0;
+  const reviews = isBootstrap
+    ? (db.getRecentTradeReviews(48) || [])
+    : (db.getTradeReviewsSinceId?.(botData.lastTradeLessonReviewId || 0, 12) || []);
   if (reviews.length < 2) return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
 
-  console.log(`🧠 Extracting trade lessons from ${reviews.length} trade review(s) (after id ${botData.lastTradeLessonReviewId || 0})...`);
+  console.log(`🧠 ${isBootstrap ? 'Bootstrapping' : 'Updating'} canonical trade lessons from ${reviews.length} linked review(s)...`);
+  const taxonomyText = TRADE_LESSON_TAXONOMY
+    .map((definition) => `- ${definition.lesson_key}: ${definition.title} — ${definition.purpose}`)
+    .join('\n');
+  const prompt = `You maintain the canonical trade playbook for a Spitznagel-style ETH options bot.
 
-  const currentTradeLessons = (db.getActiveTradeLessons() || []).slice(0, 8);
+Your output updates a small fixed taxonomy. It must consolidate evidence, surface disagreement, and remain useful to an advisor making a decision now. Do not create a chronological diary.
 
-  const prompt = `You are extracting reusable lessons from reviewed trade campaigns for a Spitznagel-style ETH options bot.
+Canonical lesson keys:
+${taxonomyText}
 
-Recent trade reviews:
-${reviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] pnl=$${Number(r.pnl_realized || 0).toFixed(2)} summary=${String(r.summary || '').replace(/\s+/g, ' ').slice(0, 180)}`).join('\n')}
+Current canonical lessons:
+${canonicalLessons.length > 0 ? canonicalLessons.map(formatTradeLessonForPrompt).join('\n') : 'None — this is the first canonical synthesis.'}
 
-Current active trade lessons:
-${currentTradeLessons.length > 0 ? currentTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
+Legacy generated lessons (unlinked observations; use only as hypotheses, never as evidence counts):
+${legacyLessons.length > 0 ? legacyLessons.slice(0, 30).map((lesson) => `- ${String(lesson.lesson || '').replace(/\s+/g, ' ').slice(0, 320)}`).join('\n') : 'None'}
 
-Extract at most 3 durable lessons about:
-- strike selection
-- exit timing
-- execution quality
-- when a losing trade was still the right decision
+Reviewed campaigns (the #ID is the only valid evidence identifier):
+${reviews.map(formatTradeReviewForLessonSynthesis).join('\n')}
 
-Trade-lesson discipline for short calls:
-- Preserve the distinction between mark pain and expiry payoff. A short call can look bad intraday and still expire profitably if spot stays at or below strike.
-- Treat buybacks below strike as costly upside insurance decisions, not automatic proof that the original trade was wrong.
-- When discussing farther OTM calls, explicitly acknowledge the cost: less premium income. Lessons must frame the tradeoff as income vs forced-intervention risk, not "safer is always better."
-- Preserve the possibility that upside breakouts can justify selling richer additional call premium rather than buying back, when short calls are already open and margin remains tolerable.
+Requirements:
+1. Use only the exact lesson keys listed above. Return one update per relevant key and no duplicate keys.
+2. Write a concise operational rule of 1-3 sentences. State conditional factors instead of inventing a universal percentage from a small sample.
+3. Link every claim to supporting_review_ids. Counts are computed by code; never output an evidence count.
+4. Put genuinely opposing reviews in contradicting_review_ids. Do not silently average incompatible recommendations.
+5. Judge decisions using information available at decision time. Post-expiry price is not evidence for an expired option's payoff.
+6. Treat missing or impossible spot data as uncertainty. Never claim spot is below strike when the supplied numbers say otherwise.
+7. Use applicability for short phrases describing when the rule matters, such as "spot below strike", "under 24h DTE", or "risk mandate unchanged".
+8. change_summary must say what the new review evidence changed or confirmed in under 100 characters.
+${isBootstrap ? '9. This is a bootstrap. Cover at least four relevant keys so the legacy list can be replaced safely.' : ''}
 
-Archive current lessons that no longer hold.
-
-Output JSON:
-{"new_lessons":[{"lesson":"<text>","evidence_count":<number>}],"archive_ids":[<ids>]}`;
+Output JSON only:
+{"lesson_updates":[{"lesson_key":"short_call.exit_insurance","lesson":"<canonical operational rule>","applicability":["<condition>"],"supporting_review_ids":[1,2],"contradicting_review_ids":[3],"change_summary":"<what changed>"}]}`;
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
-      max_tokens: 600,
+      max_tokens: 1800,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -4156,26 +4293,47 @@ Output JSON:
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 20000,
+      timeout: 30000,
     });
 
     const text = response.data?.content?.[0]?.text || '';
     const result = extractJSON(text);
-    if (!result) return;
+    const definitions = new Map(TRADE_LESSON_TAXONOMY.map((definition) => [definition.lesson_key, definition]));
+    const seenKeys = new Set();
+    const updates = (Array.isArray(result?.lesson_updates) ? result.lesson_updates : [])
+      .filter((update) => {
+        const key = String(update?.lesson_key || '');
+        if (!definitions.has(key) || seenKeys.has(key) || String(update?.lesson || '').trim().length < 20) return false;
+        seenKeys.add(key);
+        return true;
+      });
+    if (updates.length === 0 || (isBootstrap && updates.length < 4)) {
+      console.log(`🧠 Canonical trade lesson synthesis rejected: ${updates.length} valid update(s)`);
+      return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
+    }
 
-    for (const lesson of (result.new_lessons || [])) {
-      if (lesson?.lesson) db.insertTradeLesson(lesson.lesson, lesson.evidence_count || 0);
+    const reviewIds = new Set(reviews.map((review) => Number(review.id)).filter(Number.isInteger));
+    let storedCount = 0;
+    for (const update of updates) {
+      const definition = definitions.get(update.lesson_key);
+      const stored = db.upsertCanonicalTradeLesson({
+        ...update,
+        title: definition.title,
+        category: definition.category,
+        action_family: definition.action_family,
+        status: 'candidate',
+      }, reviewIds);
+      if (stored) storedCount += 1;
     }
-    for (const id of (result.archive_ids || [])) {
-      db.archiveTradeLesson(id);
-    }
-    const advancedToId = reviews[reviews.length - 1]?.id || botData.lastTradeLessonReviewId || 0;
-    botData.lastTradeLessonReviewId = advancedToId;
+    if (storedCount === 0) return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
+
+    const highestReviewId = Math.max(...Array.from(reviewIds), botData.lastTradeLessonReviewId || 0);
+    botData.lastTradeLessonReviewId = highestReviewId;
     persistCycleState();
-    console.log(`🧠 Trade lessons extracted: ${result.new_lessons?.length || 0} new, ${result.archive_ids?.length || 0} archived`);
-    return { processed: reviews.length, advancedToId };
+    console.log(`🧠 Canonical trade lessons: ${storedCount} updated from ${reviews.length} linked review(s)`);
+    return { processed: reviews.length, advancedToId: highestReviewId };
   } catch (e) {
-    console.log('🧠 Trade lesson extraction failed:', e.message);
+    console.log('🧠 Canonical trade lesson extraction failed:', e.message);
   }
   return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
 };
@@ -4554,7 +4712,7 @@ ${lessonsText}
 ${recentTradeReviews.slice(0, 12).map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] ${r.summary}`).join('\n') || 'None'}
 
 ## Active Trade Lessons
-${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
+${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPrompt).join('\n') : 'None'}
 
 ## Instructions
 1. Generate ONLY the missing or placeholder wiki pages listed below
@@ -4668,7 +4826,7 @@ ${entriesText}
 ${recentTradeReviews.length > 0 ? recentTradeReviews.slice(0, 6).map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d] ${r.summary}`).join('\n') : 'None'}
 
 ## Active Trade Lessons
-${activeTradeLessons.length > 0 ? activeTradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
+${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPrompt).join('\n') : 'None'}
 
 ## Instructions
 1. Analyze which ALLOWED wiki pages need updating based primarily on the raw evidence packet
@@ -5290,7 +5448,7 @@ Recent trade reviews:
 ${recentTradeReviews.length > 0 ? recentTradeReviews.map(r => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n') : 'None'}
 
 Active trade lessons:
-${tradeLessons.length > 0 ? tradeLessons.map(l => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n') : 'None'}
+${tradeLessons.length > 0 ? tradeLessons.map(formatTradeLessonForPrompt).join('\n') : 'None'}
 
 Use these trade lessons to improve strike selection, execution, and exit timing. Judge whether past losing trades were still correct at the time, and whether profitable trades were actually disciplined.`;
       }
@@ -10078,7 +10236,11 @@ const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, jud
 const normalizeLearningText = (value) => String(value || '').toLowerCase();
 
 const confirmationLessonMatches = (lesson, includeKeywords = [], excludeKeywords = []) => {
-  const text = normalizeLearningText(lesson?.lesson || lesson?.summary || '');
+  const text = normalizeLearningText([
+    lesson?.lesson_key,
+    lesson?.title,
+    lesson?.lesson || lesson?.summary,
+  ].filter(Boolean).join(' '));
   if (!text) return false;
   if (excludeKeywords.some((keyword) => text.includes(keyword))) return false;
   return includeKeywords.some((keyword) => text.includes(keyword));
@@ -10145,7 +10307,7 @@ const formatConfirmationLearningContext = (action, recentTradeReviews = [], acti
       ? `Relevant recent trade reviews:\n${relevantReviews.map((r) => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}`
       : '- Relevant recent trade reviews: none for this action scope.',
     relevantLessons.length > 0
-      ? `Relevant active trade lessons:\n${relevantLessons.map((l) => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}`
+      ? `Relevant active trade lessons:\n${relevantLessons.map(formatTradeLessonForPrompt).join('\n')}`
       : '- Relevant active trade lessons: none for this action scope.',
   ].join('\n');
 };

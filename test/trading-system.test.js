@@ -5731,7 +5731,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
 
   // Insert an exit rule: sell put when DTE <= 25 (roll window)
   exitStmts.insertRule.run({
-    rule_type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260626-1500-P',
+    rule_type: 'exit', action: 'sell_put', instrument_name: 'ETH-20991226-1500-P',
     criteria: JSON.stringify({
       put_exit_intent: 'roll_protection',
       requires_longer_dated_protection: true,
@@ -5743,7 +5743,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
 
   test('position outside roll window → no trigger', () => {
     // DTE = 40 days — not in the roll window yet
-    const position = { instrument_name: 'ETH-20260626-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
+    const position = { instrument_name: 'ETH-20991226-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
     const ticker = { M: '6.00', b: '5.50', option_pricing: { d: '-0.04', i: '0.60', t: '-0.02' } };
     const spotPrice = 1800;
 
@@ -5784,8 +5784,8 @@ describe('Full schema: exit monitoring for put rolling', () => {
   });
 
   test('position enters roll window → triggers pending action', () => {
-    const position = { instrument_name: 'ETH-20260626-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
-    const longerPut = { instrument_name: 'ETH-20260731-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 7.00 };
+    const position = { instrument_name: 'ETH-20991226-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
+    const longerPut = { instrument_name: 'ETH-20991231-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 7.00 };
     const ticker = { M: '4.00', b: '3.50', option_pricing: { d: '-0.03', i: '0.55', t: '-0.04' } };
     const spotPrice = 1800;
 
@@ -5816,12 +5816,12 @@ describe('Full schema: exit monitoring for put rolling', () => {
     const pending = exitStmts.getPending.all();
     assert.strictEqual(pending.length, 1, 'Should have 1 pending action');
     assert.strictEqual(pending[0].action, 'sell_put');
-    assert.strictEqual(pending[0].instrument_name, 'ETH-20260626-1500-P');
+    assert.strictEqual(pending[0].instrument_name, 'ETH-20991226-1500-P');
     assert.strictEqual(pending[0].amount, 1.0);
   });
 
   test('roll window is blocked without longer-dated protection in the book', () => {
-    const position = { instrument_name: 'ETH-20260626-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
+    const position = { instrument_name: 'ETH-20991226-1500-P', amount: 1.0, direction: 'long', avg_entry_price: 5.00 };
     const gate = getSellPutProtectionGate(
       { action: 'sell_put' },
       { dte: 22, unrealized_pnl_pct: -20 },
@@ -5832,8 +5832,8 @@ describe('Full schema: exit monitoring for put rolling', () => {
   });
 
   test('roll_protection can fully close an underwater aging put when longer protection remains', () => {
-    const position = { instrument_name: 'ETH-20260626-1000-P', amount: 10.0, direction: 'long', avg_entry_price: 10.00 };
-    const longerPut = { instrument_name: 'ETH-20260731-1500-P', amount: 7.1, direction: 'long', avg_entry_price: 26.81 };
+    const position = { instrument_name: 'ETH-20991226-1000-P', amount: 10.0, direction: 'long', avg_entry_price: 10.00 };
+    const longerPut = { instrument_name: 'ETH-20991231-1500-P', amount: 7.1, direction: 'long', avg_entry_price: 26.81 };
     const criteria = { put_exit_intent: 'roll_protection' };
     const values = { dte: 19.22, unrealized_pnl_pct: -84.16, execution_price: 2.10 };
     const amount = getSellPutExitAmount(position, values, criteria);
@@ -7381,7 +7381,7 @@ describe('confirmation prompt margin context', () => {
     const context = formatSellPutConfirmationContext({
       action: {
         action: 'sell_put',
-        instrument_name: 'ETH-20260626-1000-P',
+        instrument_name: 'ETH-20991226-1000-P',
         amount: 10,
         price: 2.1,
         rule_criteria: {
@@ -7400,8 +7400,8 @@ describe('confirmation prompt margin context', () => {
         },
       },
       livePositions: [
-        { instrument_name: 'ETH-20260626-1000-P', direction: 'long', amount: 10 },
-        { instrument_name: 'ETH-20260731-1500-P', direction: 'long', amount: 7.1 },
+        { instrument_name: 'ETH-20991226-1000-P', direction: 'long', amount: 10 },
+        { instrument_name: 'ETH-20991231-1500-P', direction: 'long', amount: 7.1 },
       ],
       currentPrice: 2.1,
     });
@@ -7735,6 +7735,126 @@ describe('Call exposure cap discipline', () => {
     assert.strictEqual(large, 4.5);
     assert.ok(large > small, 'More ETH = bigger cap');
   });
+});
+
+// ============================================================================
+// 47. Canonical trade learning
+// ============================================================================
+
+describe('Canonical trade learning', () => {
+  const os = require('os');
+  const learningDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'noop-learning-test-'));
+  const previousDataDir = process.env.DATA_DIR;
+  process.env.DATA_DIR = learningDataDir;
+  const learningDb = require('../bot/db');
+  const now = new Date().toISOString();
+
+  const insertReview = (instrumentName, windowDays, status = 'disciplined_win') => {
+    learningDb.insertTradeReview({
+      instrument_name: instrumentName,
+      action_family: instrumentName.endsWith('-C') ? 'short_call_campaign' : 'long_put_campaign',
+      opened_at: now,
+      closed_at: now,
+      review_window_days: windowDays,
+      horizon_end_at: now,
+      order_ids: [instrumentName, windowDays],
+      review_status: status,
+      review_confidence: null,
+      summary: `${instrumentName} review`,
+      lessons: [],
+      pnl_realized: 8,
+      premium_opened: 10,
+      premium_closed: 2,
+      spot_open: 1900,
+      spot_close: 1880,
+      spot_min_while_open: 1850,
+      spot_max_while_open: 1975,
+      spot_min_after_close: 1840,
+      spot_max_after_close: 1930,
+    });
+    return learningDb.getRecentTradeReviews(20).find((review) => (
+      review.instrument_name === instrumentName && review.review_window_days === windowDays
+    )).id;
+  };
+
+  const firstReviewId = insertReview('ETH-20260807-2200-C', 1);
+  const secondReviewId = insertReview('ETH-20260814-2300-C', 1);
+  const contradictingReviewId = insertReview('ETH-20260821-2100-C', 1, 'execution_mistake');
+
+  test('legacy lessons remain available until canonical synthesis succeeds', () => {
+    learningDb.insertTradeLesson('Legacy exit timing observation retained for safe migration.', 1428);
+    const lessons = learningDb.getActiveTradeLessons();
+    assert.strictEqual(lessons.length, 1);
+    assert.strictEqual(lessons[0].evidence_count, 1428);
+    assert.strictEqual(lessons[0].lesson_key, undefined);
+  });
+
+  test('evidence counts are derived from linked reviews and unique campaigns', () => {
+    learningDb.upsertCanonicalTradeLesson({
+      lesson_key: 'short_call.exit_insurance',
+      title: 'Short-call exit insurance',
+      lesson: 'Treat a below-strike buyback as an explicit insurance purchase and compare its certain cost with remaining pre-expiry risk.',
+      category: 'exit_timing',
+      action_family: 'short_call_campaign',
+      applicability: ['spot below strike'],
+      status: 'candidate',
+      supporting_review_ids: [firstReviewId, secondReviewId, 999999],
+      contradicting_review_ids: [],
+      change_summary: 'Initial linked synthesis',
+    }, new Set([firstReviewId, secondReviewId]));
+
+    const lessons = learningDb.getActiveTradeLessons();
+    assert.strictEqual(lessons.length, 1, 'canonical lessons should replace the legacy feed without deleting it');
+    assert.strictEqual(lessons[0].evidence_count, 2, 'the model cannot supply an arbitrary evidence total');
+    assert.strictEqual(lessons[0].supporting_review_count, 2);
+    assert.strictEqual(lessons[0].supporting_campaign_count, 2);
+    assert.strictEqual(lessons[0].status, 'active');
+  });
+
+  test('contradicting linked evidence makes a lesson visibly disputed', () => {
+    const disputedUpdate = {
+      lesson_key: 'short_call.exit_insurance',
+      title: 'Short-call exit insurance',
+      lesson: 'Treat a below-strike buyback as explicit insurance, while escalating when pre-expiry breakout risk is supported by current market evidence.',
+      category: 'exit_timing',
+      action_family: 'short_call_campaign',
+      applicability: ['spot below strike', 'breakout risk live'],
+      status: 'candidate',
+      supporting_review_ids: [],
+      contradicting_review_ids: [contradictingReviewId],
+      change_summary: 'Added opposing execution evidence',
+    };
+    learningDb.upsertCanonicalTradeLesson(disputedUpdate, new Set([contradictingReviewId]));
+
+    let lesson = learningDb.getCanonicalTradeLessons()[0];
+    assert.strictEqual(lesson.status, 'disputed');
+    assert.strictEqual(lesson.contradicting_review_count, 1);
+    assert.strictEqual(lesson.revision, 2);
+    assert.strictEqual(learningDb.db.prepare('SELECT COUNT(*) AS count FROM trade_lesson_revisions WHERE lesson_id = ?').get(lesson.id).count, 2);
+
+    learningDb.upsertCanonicalTradeLesson(disputedUpdate, new Set([contradictingReviewId]));
+    lesson = learningDb.getCanonicalTradeLessons()[0];
+    assert.strictEqual(lesson.revision, 2, 'evidence-derived disputed status must not create a revision loop');
+  });
+
+  test('review prompts separate pre-expiry payoff evidence from post-expiry context', () => {
+    assert.ok(SCRIPT_SOURCE.includes('Post-expiry prices are context for possible follow-on trades only.'));
+    assert.ok(SCRIPT_SOURCE.includes('Spot range after close but before expiry'));
+    assert.ok(SCRIPT_SOURCE.includes('review_horizon_crosses_expiry'));
+  });
+
+  test('canonical synthesis requires review ids and never requests an evidence count', () => {
+    const canonicalPromptStart = SCRIPT_SOURCE.indexOf('You maintain the canonical trade playbook');
+    const canonicalPromptEnd = SCRIPT_SOURCE.indexOf('const response = await axios.post', canonicalPromptStart);
+    const canonicalPrompt = SCRIPT_SOURCE.slice(canonicalPromptStart, canonicalPromptEnd);
+    assert.ok(canonicalPrompt.includes('supporting_review_ids'));
+    assert.ok(canonicalPrompt.includes('contradicting_review_ids'));
+    assert.ok(!canonicalPrompt.includes('"evidence_count"'));
+  });
+
+  learningDb.close();
+  if (previousDataDir == null) delete process.env.DATA_DIR;
+  else process.env.DATA_DIR = previousDataDir;
 });
 
 // ============================================================================

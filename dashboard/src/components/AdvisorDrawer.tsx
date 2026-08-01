@@ -458,11 +458,63 @@ interface OpsData {
   schedulerState?: SchedulerState | null;
 }
 
+interface TradeLessonEvidence {
+  lesson_id: number;
+  stance: 'supporting' | 'contradicting' | 'context';
+  review_id: number;
+  instrument_name: string;
+  action_family: string | null;
+  closed_at: string;
+  review_window_days: number;
+  review_status: string;
+  summary: string;
+  pnl_realized: number | null;
+}
+
 interface TradeLesson {
   id: number;
+  lesson_key: string;
+  title: string;
   lesson: string;
-  evidence_count: number;
+  category: string;
+  action_family: string | null;
+  applicability: string[];
+  status: 'active' | 'candidate' | 'disputed' | 'retired';
+  revision: number;
+  change_summary: string | null;
+  supporting_review_count: number;
+  supporting_campaign_count: number;
+  contradicting_review_count: number;
+  contradicting_campaign_count: number;
+  evidence: {
+    supporting: TradeLessonEvidence[];
+    contradicting: TradeLessonEvidence[];
+  };
+  revisions: Array<{
+    lesson_id: number;
+    revision: number;
+    lesson: string;
+    applicability: string[];
+    status: string;
+    change_summary: string | null;
+    created_at: string;
+  }>;
+  is_legacy: boolean;
+  legacy_evidence_claim?: number;
+  legacy_observation_count?: number;
   created_at: string;
+  updated_at: string;
+}
+
+interface TradeReviewFacts {
+  strike: number | null;
+  option_type: 'call' | 'put' | null;
+  expiry_at: string | null;
+  otm_at_open_pct: number | null;
+  otm_at_close_pct: number | null;
+  strike_breached_while_open: boolean | null;
+  premium_capture_pct: number | null;
+  quality_flags: string[];
 }
 
 interface TradeReview {
@@ -488,6 +540,23 @@ interface TradeReview {
   spot_min_after_close: number | null;
   spot_max_after_close: number | null;
   created_at: string;
+  facts: TradeReviewFacts;
+}
+
+interface TradeReviewCampaign {
+  id: string;
+  instrument_name: string;
+  action_family: string | null;
+  opened_at: string | null;
+  closed_at: string;
+  pnl_realized: number | null;
+  premium_opened: number | null;
+  premium_closed: number | null;
+  spot_open: number | null;
+  spot_close: number | null;
+  facts: TradeReviewFacts;
+  reviews: TradeReview[];
+  latest_review: TradeReview;
 }
 
 interface PendingTradeCampaign {
@@ -526,6 +595,20 @@ interface LearningStatus {
     closed_count: number;
     ready_count: number;
   };
+  learningSummary?: {
+    canonical_mode: boolean;
+    canonical_count: number;
+    active_count: number;
+    disputed_count: number;
+    candidate_count: number;
+    linked_evidence_count: number;
+    campaign_count: number;
+    legacy_lesson_count: number;
+  };
+  dataSources?: {
+    trade_history_recovery: 'available' | 'degraded';
+    trade_history_error: string | null;
+  };
   tradeReviewJob?: {
     last_run_at: string | null;
     last_success_at: string | null;
@@ -539,6 +622,223 @@ interface LearningStatus {
     }>;
     next_due_at: string | null;
   };
+}
+
+const LEARNING_STATUS_STYLES: Record<string, { label: string; color: string }> = {
+  active: { label: 'Active', color: 'text-green-300 bg-green-500/10 border-green-500/20' },
+  candidate: { label: 'Forming', color: 'text-blue-300 bg-blue-500/10 border-blue-500/20' },
+  disputed: { label: 'Needs resolution', color: 'text-amber-300 bg-amber-500/10 border-amber-500/20' },
+  retired: { label: 'Retired', color: 'text-gray-500 bg-white/5 border-white/10' },
+};
+
+const REVIEW_STATUS_STYLES: Record<string, { label: string; color: string }> = {
+  disciplined_win: { label: 'Disciplined win', color: 'text-green-300 bg-green-500/10 border-green-500/20' },
+  disciplined_loss: { label: 'Disciplined loss', color: 'text-blue-300 bg-blue-500/10 border-blue-500/20' },
+  execution_mistake: { label: 'Execution mistake', color: 'text-amber-300 bg-amber-500/10 border-amber-500/20' },
+  risk_mistake: { label: 'Risk mistake', color: 'text-red-300 bg-red-500/10 border-red-500/20' },
+};
+
+function formatLessonCategory(category: string) {
+  return ({
+    strike_selection: 'Strike selection',
+    exit_timing: 'Exit timing',
+    execution: 'Execution',
+    process: 'Decision process',
+  } as Record<string, string>)[category] || category.replace(/_/g, ' ');
+}
+
+function formatLearningPercent(value: number | null) {
+  if (value == null || !Number.isFinite(value)) return 'n/a';
+  return `${value.toFixed(1)}%`;
+}
+
+function TradeLessonCard({ lesson }: { lesson: TradeLesson }) {
+  const status = LEARNING_STATUS_STYLES[lesson.status] || LEARNING_STATUS_STYLES.candidate;
+  const evidenceRows = [...lesson.evidence.contradicting, ...lesson.evidence.supporting];
+  return (
+    <article className={`border px-3 py-3 space-y-2.5 ${lesson.status === 'disputed' ? 'border-amber-500/25 bg-amber-500/[0.03]' : 'border-white/10 bg-white/[0.02]'}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[10px] text-gray-500 uppercase tracking-wider">{formatLessonCategory(lesson.category)}</p>
+          <h3 className="text-[13px] leading-snug text-white mt-0.5">{lesson.title}</h3>
+        </div>
+        <span className={`shrink-0 text-[9px] uppercase tracking-wide px-1.5 py-0.5 border ${status.color}`}>
+          {status.label}
+        </span>
+      </div>
+
+      <p className="text-[12px] leading-relaxed text-gray-300">{lesson.lesson}</p>
+
+      {lesson.applicability.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {lesson.applicability.map((condition) => (
+            <span key={condition} className="text-[9px] text-gray-400 border border-white/10 bg-white/[0.03] px-1.5 py-0.5">
+              {condition}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-gray-500">
+        {lesson.is_legacy ? (
+          <>
+            <span>{lesson.legacy_observation_count || 1} legacy observation{(lesson.legacy_observation_count || 1) === 1 ? '' : 's'}</span>
+            <span className="text-amber-400/80">evidence links rebuilding</span>
+          </>
+        ) : (
+          <>
+            <span className="text-gray-300">{lesson.supporting_campaign_count} supporting campaign{lesson.supporting_campaign_count === 1 ? '' : 's'}</span>
+            <span>{lesson.supporting_review_count} review window{lesson.supporting_review_count === 1 ? '' : 's'}</span>
+            {lesson.contradicting_campaign_count > 0 && (
+              <span className="text-amber-300">{lesson.contradicting_campaign_count} contradiction{lesson.contradicting_campaign_count === 1 ? '' : 's'}</span>
+            )}
+            <span>v{lesson.revision}</span>
+          </>
+        )}
+        <span className="ml-auto">updated {timeAgo(lesson.updated_at)}</span>
+      </div>
+
+      {lesson.change_summary && (
+        <p className="text-[10px] text-blue-300/80 border-l border-blue-400/30 pl-2">Latest change: {lesson.change_summary}</p>
+      )}
+
+      {evidenceRows.length > 0 && (
+        <details className="group border-t border-white/5 pt-2">
+          <summary className="cursor-pointer list-none text-[10px] text-gray-400 hover:text-white transition-colors flex items-center">
+            <span>Evidence ledger</span>
+            <span className="ml-auto text-gray-600 group-open:hidden">show</span>
+            <span className="ml-auto text-gray-600 hidden group-open:inline">hide</span>
+          </summary>
+          <div className="mt-2 space-y-2">
+            {evidenceRows.slice(0, 10).map((evidence) => (
+              <div key={`${evidence.review_id}-${evidence.stance}`} className="border-l border-white/10 pl-2 space-y-0.5">
+                <div className="flex items-center gap-2 text-[9px]">
+                  <span className={evidence.stance === 'contradicting' ? 'text-amber-300' : 'text-green-300'}>
+                    {evidence.stance === 'contradicting' ? 'CONTRADICTS' : 'SUPPORTS'}
+                  </span>
+                  <span className="text-gray-400 truncate">{evidence.instrument_name}</span>
+                  <span className="text-gray-600 ml-auto shrink-0">{evidence.review_window_days}d</span>
+                </div>
+                <p className="text-[10px] leading-relaxed text-gray-500 line-clamp-3">{evidence.summary}</p>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+
+      {lesson.revisions.length > 1 && (
+        <details className="group border-t border-white/5 pt-2">
+          <summary className="cursor-pointer list-none text-[10px] text-gray-500 hover:text-gray-300 transition-colors flex items-center">
+            <span>Revision history</span>
+            <span className="ml-auto text-gray-600">{lesson.revisions.length} versions</span>
+          </summary>
+          <div className="mt-2 space-y-2">
+            {lesson.revisions.slice(1, 6).map((revision) => (
+              <div key={revision.revision} className="border-l border-white/10 pl-2">
+                <p className="text-[9px] text-gray-600">v{revision.revision} · {timeAgo(revision.created_at)}{revision.change_summary ? ` · ${revision.change_summary}` : ''}</p>
+                <p className="text-[10px] text-gray-500 leading-relaxed mt-0.5 line-clamp-2">{revision.lesson}</p>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </article>
+  );
+}
+
+function TradeCampaignCard({ campaign }: { campaign: TradeReviewCampaign }) {
+  const [selectedWindow, setSelectedWindow] = useState(campaign.latest_review.review_window_days);
+  const review = campaign.reviews.find((item) => item.review_window_days === selectedWindow) || campaign.latest_review;
+  const status = REVIEW_STATUS_STYLES[review.review_status] || {
+    label: review.review_status.replace(/_/g, ' '),
+    color: 'text-gray-300 bg-white/5 border-white/10',
+  };
+
+  return (
+    <article className="border border-white/10 bg-white/[0.02] px-3 py-3 space-y-2.5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-[13px] text-white truncate">{campaign.instrument_name}</h3>
+          <p className="text-[10px] text-gray-500 mt-0.5">
+            {campaign.action_family === 'short_call_campaign' ? 'short call' : campaign.action_family === 'long_put_campaign' ? 'tail put' : 'campaign'}
+            {' · '}closed {timeAgo(campaign.closed_at)}
+          </p>
+        </div>
+        <span className={`shrink-0 text-[9px] px-1.5 py-0.5 border ${status.color}`}>{status.label}</span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[10px]">
+        {campaign.pnl_realized != null && (
+          <span className={campaign.pnl_realized >= 0 ? 'text-green-400' : 'text-red-400'}>
+            pnl {campaign.pnl_realized >= 0 ? '+' : ''}{campaign.pnl_realized.toFixed(2)}
+          </span>
+        )}
+        {review.facts.premium_capture_pct != null && (
+          <span className="text-gray-300">premium kept {review.facts.premium_capture_pct.toFixed(0)}%</span>
+        )}
+        <span className="text-gray-500">open OTM {formatLearningPercent(review.facts.otm_at_open_pct)}</span>
+        <span className={review.facts.strike_breached_while_open ? 'text-amber-300' : 'text-gray-500'}>
+          strike {review.facts.strike_breached_while_open == null ? 'test unknown' : review.facts.strike_breached_while_open ? 'breached' : 'not breached'}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-1 border-y border-white/5 py-1.5">
+        <span className="text-[9px] text-gray-600 uppercase tracking-wide mr-1">Horizon</span>
+        {campaign.reviews.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => setSelectedWindow(item.review_window_days)}
+            className={`text-[10px] px-2 py-0.5 border transition-colors ${
+              selectedWindow === item.review_window_days
+                ? 'text-white border-white/20 bg-white/10'
+                : 'text-gray-500 border-transparent hover:text-gray-300'
+            }`}
+          >
+            {item.review_window_days}d
+          </button>
+        ))}
+        {review.facts.expiry_at && (
+          <span className="text-[9px] text-gray-600 ml-auto">
+            expiry {new Date(review.facts.expiry_at).getTime() > Date.now() ? timeUntil(review.facts.expiry_at) : timeAgo(review.facts.expiry_at)}
+          </span>
+        )}
+      </div>
+
+      <p className="text-[12px] leading-relaxed text-gray-300">{review.summary}</p>
+
+      {review.facts.quality_flags.length > 0 && (
+        <div className="border border-amber-500/15 bg-amber-500/[0.04] px-2 py-1.5 text-[9px] text-amber-300/80">
+          Evidence caution: {review.facts.quality_flags.join(' · ')}
+        </div>
+      )}
+
+      <details className="group">
+        <summary className="cursor-pointer list-none text-[10px] text-gray-500 hover:text-gray-300 flex items-center">
+          <span>Decision evidence</span>
+          <span className="ml-auto group-open:hidden">show</span>
+          <span className="ml-auto hidden group-open:inline">hide</span>
+        </summary>
+        <div className="mt-2 space-y-2 text-[10px] text-gray-500">
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {review.facts.strike != null && <span>strike ${review.facts.strike.toFixed(0)}</span>}
+            {review.spot_open != null && review.spot_close != null && <span>spot ${review.spot_open.toFixed(0)} → ${review.spot_close.toFixed(0)}</span>}
+            {review.spot_min_while_open != null && review.spot_max_while_open != null && (
+              <span>open range ${review.spot_min_while_open.toFixed(0)}–${review.spot_max_while_open.toFixed(0)}</span>
+            )}
+            {review.spot_min_after_close != null && review.spot_max_after_close != null && (
+              <span>pre-expiry counterfactual ${review.spot_min_after_close.toFixed(0)}–${review.spot_max_after_close.toFixed(0)}</span>
+            )}
+          </div>
+          {review.lessons.length > 0 && (
+            <ul className="space-y-1 border-l border-white/10 pl-2">
+              {review.lessons.map((lesson, index) => <li key={`${review.id}-${index}`}>{lesson}</li>)}
+            </ul>
+          )}
+        </div>
+      </details>
+    </article>
+  );
 }
 
 const ACTION_STYLES: Record<string, { label: string; color: string }> = {
@@ -578,8 +878,10 @@ export default function AdvisorDrawer() {
   const [journalFilter, setJournalFilter] = useState<string | null>(null);
   const [opsData, setOpsData] = useState<OpsData>({ stats: null, rules: [], actions: [], orders: [], assessment: null, advisoryArtifacts: null, schedulerState: null });
   const [opsLoading, setOpsLoading] = useState(false);
-  const [learningData, setLearningData] = useState<{ lessons: TradeLesson[]; reviews: TradeReview[]; pendingCampaigns: PendingTradeCampaign[]; status: LearningStatus | null; error?: string | null }>({ lessons: [], reviews: [], pendingCampaigns: [], status: null, error: null });
+  const [learningData, setLearningData] = useState<{ lessons: TradeLesson[]; campaigns: TradeReviewCampaign[]; pendingCampaigns: PendingTradeCampaign[]; status: LearningStatus | null; error?: string | null }>({ lessons: [], campaigns: [], pendingCampaigns: [], status: null, error: null });
   const [learningLoading, setLearningLoading] = useState(false);
+  const [learningView, setLearningView] = useState<'overview' | 'campaigns' | 'queue' | 'diagnostics'>('overview');
+  const [learningFilter, setLearningFilter] = useState<'all' | 'short_call_campaign' | 'long_put_campaign' | 'process'>('all');
   const [hypStats, setHypStats] = useState<{
     total: number; reviewed: number; pending: number;
     confirmed_convex: number; confirmed_linear: number;
@@ -726,7 +1028,7 @@ export default function AdvisorDrawer() {
         const data = await res.json();
         setLearningData({
           lessons: data.lessons || [],
-          reviews: data.reviews || [],
+          campaigns: data.campaigns || [],
           pendingCampaigns: data.pendingCampaigns || [],
           status: data.status || null,
           error: data.error || null,
@@ -874,6 +1176,13 @@ export default function AdvisorDrawer() {
       sendMessage(input);
     }
   };
+
+  const matchesLearningFilter = (actionFamily: string | null) => (
+    learningFilter === 'all'
+    || (learningFilter === 'process' ? actionFamily == null : actionFamily === learningFilter)
+  );
+  const filteredLearningLessons = learningData.lessons.filter((lesson) => matchesLearningFilter(lesson.action_family));
+  const filteredLearningCampaigns = learningData.campaigns.filter((campaign) => matchesLearningFilter(campaign.action_family));
 
   return (
     <>
@@ -1245,161 +1554,243 @@ export default function AdvisorDrawer() {
         )}
 
         {tab === 'learning' && (
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-            <div className="flex items-center border-b border-white/5 pb-2">
-              <span className="text-[10px] text-gray-500 uppercase tracking-wider">Trade Learning</span>
-              <button
-                onClick={fetchLearning}
-                className="text-[11px] px-2.5 py-1 text-gray-600 hover:text-gray-300 transition-colors ml-auto"
-              >
-                refresh
-              </button>
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 pb-4">
+            <div className="sticky top-0 z-10 bg-[#111] pt-3 pb-2 border-b border-white/10 space-y-2">
+              <div className="flex items-center">
+                <div>
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider">Learning system</p>
+                  <p className="text-[10px] text-gray-700 mt-0.5">playbook · evidence · review queue</p>
+                </div>
+                <button
+                  onClick={fetchLearning}
+                  disabled={learningLoading}
+                  className="text-[10px] px-2.5 py-1 text-gray-500 hover:text-gray-200 disabled:text-gray-700 transition-colors ml-auto"
+                >
+                  {learningLoading ? 'refreshing…' : 'refresh'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-4 gap-1">
+                {([
+                  ['overview', 'Overview', learningData.lessons.length],
+                  ['campaigns', 'Campaigns', learningData.campaigns.length],
+                  ['queue', 'Queue', learningData.pendingCampaigns.length],
+                  ['diagnostics', 'System', null],
+                ] as const).map(([view, label, count]) => (
+                  <button
+                    key={view}
+                    type="button"
+                    onClick={() => setLearningView(view)}
+                    className={`text-[10px] py-1.5 border transition-colors ${
+                      learningView === view
+                        ? 'text-white bg-white/10 border-white/15'
+                        : 'text-gray-500 border-transparent hover:text-gray-300 hover:border-white/10'
+                    }`}
+                  >
+                    {label}{count != null ? ` ${count}` : ''}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {learningLoading && learningData.lessons.length === 0 && learningData.reviews.length === 0 && learningData.pendingCampaigns.length === 0 && (
-              <p className="text-gray-500 text-xs">Loading trade learning...</p>
-            )}
+            <div className="pt-3 space-y-3">
+              {learningLoading && learningData.lessons.length === 0 && learningData.campaigns.length === 0 && learningData.pendingCampaigns.length === 0 && (
+                <p className="text-gray-500 text-xs">Loading trade learning…</p>
+              )}
 
-            {learningData.status && (
-              <div className="border border-white/10 bg-white/5 px-3 py-2 space-y-1">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Pipeline Status</p>
-                <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-400">
-                  <p>reviews table: <span className={learningData.status.hasTradeReviewsTable ? 'text-green-400' : 'text-red-400'}>{learningData.status.hasTradeReviewsTable ? 'present' : 'missing'}</span></p>
-                  <p>lessons table: <span className={learningData.status.hasTradeLessonsTable ? 'text-green-400' : 'text-red-400'}>{learningData.status.hasTradeLessonsTable ? 'present' : 'missing'}</span></p>
-                  <p>recent trade orders: <span className="text-gray-300">{learningData.status.recentOrderStats.total_orders}</span></p>
-                  <p>recent instruments: <span className="text-gray-300">{learningData.status.recentOrderStats.instrument_count}</span></p>
-                  <p>stored reviews: <span className="text-gray-300">{learningData.status.reviewSummary.review_count}</span></p>
-                  <p>reviewed instruments: <span className="text-gray-300">{learningData.status.reviewSummary.instrument_count}</span></p>
-                  <p>closed campaigns: <span className="text-gray-300">{learningData.status.pendingCampaignSummary?.closed_count ?? 0}</span></p>
-                  <p>review ready: <span className="text-gray-300">{learningData.status.pendingCampaignSummary?.ready_count ?? 0}</span></p>
-                  <p>ready at last run: <span className="text-gray-300">{learningData.status.tradeReviewJob?.ready_count_at_last_run ?? 0}</span></p>
+              {learningData.error && (
+                <div className="border border-red-500/20 bg-red-500/5 px-3 py-2">
+                  <p className="text-xs text-red-400">{learningData.error}</p>
                 </div>
-                <div className="flex flex-wrap gap-3 text-[10px] text-gray-600">
-                  <span>recent order window: {learningData.status.recentOrderStats.first_timestamp ? `${timeAgo(learningData.status.recentOrderStats.first_timestamp)} → ${timeAgo(learningData.status.recentOrderStats.last_timestamp || learningData.status.recentOrderStats.first_timestamp)}` : 'none'}</span>
-                  <span>last review: {learningData.status.reviewSummary.last_created_at ? timeAgo(learningData.status.reviewSummary.last_created_at) : 'none'}</span>
-                  <span>review job: {learningData.status.tradeReviewJob?.last_run_at ? timeAgo(learningData.status.tradeReviewJob.last_run_at) : 'never'}</span>
-                  <span>next due: {learningData.status.tradeReviewJob?.next_due_at ? timeUntil(learningData.status.tradeReviewJob.next_due_at) : 'n/a'}</span>
+              )}
+
+              {(learningView === 'overview' || learningView === 'campaigns') && (
+                <div className="flex gap-1 overflow-x-auto scrollbar-none">
+                  {([
+                    ['all', 'All'],
+                    ['short_call_campaign', 'Short calls'],
+                    ['long_put_campaign', 'Tail puts'],
+                    ['process', 'Process'],
+                  ] as const).map(([filter, label]) => (
+                    <button
+                      key={filter}
+                      type="button"
+                      onClick={() => setLearningFilter(filter)}
+                      className={`shrink-0 text-[10px] px-2 py-1 border transition-colors ${
+                        learningFilter === filter
+                          ? 'text-juice-orange border-juice-orange/30 bg-juice-orange/10'
+                          : 'text-gray-500 border-white/5 hover:text-gray-300'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
-                {learningData.status.tradeReviewJob?.last_error && (
-                  <div className="text-[10px] text-red-400">
-                    trade review error: {learningData.status.tradeReviewJob.last_error}
-                  </div>
-                )}
-                {learningData.status.tradeReviewJob?.targets_at_last_run && learningData.status.tradeReviewJob.targets_at_last_run.length > 0 && (
-                  <div className="text-[10px] text-gray-500">
-                    last targets: {learningData.status.tradeReviewJob.targets_at_last_run.map((target) => `${target.instrument_name} [${target.review_window_days}d]`).join(', ')}
-                  </div>
-                )}
-              </div>
-            )}
+              )}
 
-            {learningData.error && (
-              <div className="border border-red-500/20 bg-red-500/5 px-3 py-2">
-                <p className="text-xs text-red-400">{learningData.error}</p>
-              </div>
-            )}
-
-            {learningData.pendingCampaigns.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Closed Campaigns Awaiting Learning</p>
-                {learningData.pendingCampaigns.map((campaign) => (
-                  <div key={campaign.id} className="border border-white/5 px-3 py-2.5 space-y-1.5">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-xs text-white font-medium truncate">{campaign.instrument_name}</p>
-                        <p className="text-[10px] text-gray-600">
-                          {campaign.action_family} &middot; closed {timeAgo(campaign.closed_at)} &middot; {campaign.order_ids.length} fills
-                        </p>
+              {learningView === 'overview' && (
+                <>
+                  {learningData.status?.learningSummary && (
+                    <div className="grid grid-cols-4 border border-white/10 divide-x divide-white/10 bg-white/[0.025]">
+                      <div className="px-2 py-2 text-center">
+                        <p className="text-sm text-white">{learningData.status.learningSummary.active_count}</p>
+                        <p className="text-[8px] text-gray-600 uppercase">active</p>
                       </div>
-                      <div className="text-right shrink-0">
-                        <p className={`text-[10px] ${campaign.review_state === 'ready_for_review' ? 'text-amber-300' : 'text-blue-300'}`}>
-                          {formatCampaignReviewProgress(campaign)}
-                        </p>
-                        {campaign.next_review_at && (
-                          <p className="text-[10px] text-gray-600">
-                            {campaign.review_state === 'ready_for_review' ? `since ${timeAgo(campaign.next_review_at)}` : timeUntil(campaign.next_review_at)}
+                      <div className="px-2 py-2 text-center">
+                        <p className={learningData.status.learningSummary.disputed_count > 0 ? 'text-sm text-amber-300' : 'text-sm text-white'}>{learningData.status.learningSummary.disputed_count}</p>
+                        <p className="text-[8px] text-gray-600 uppercase">disputed</p>
+                      </div>
+                      <div className="px-2 py-2 text-center">
+                        <p className="text-sm text-white">{learningData.status.learningSummary.linked_evidence_count}</p>
+                        <p className="text-[8px] text-gray-600 uppercase">links</p>
+                      </div>
+                      <button type="button" onClick={() => setLearningView('queue')} className="px-2 py-2 text-center hover:bg-white/5">
+                        <p className={(learningData.status.pendingCampaignSummary?.ready_count || 0) > 0 ? 'text-sm text-amber-300' : 'text-sm text-white'}>{learningData.status.pendingCampaignSummary?.ready_count || 0}</p>
+                        <p className="text-[8px] text-gray-600 uppercase">review ready</p>
+                      </button>
+                    </div>
+                  )}
+
+                  {learningData.lessons.some((lesson) => lesson.is_legacy) && (
+                    <div className="border border-blue-500/20 bg-blue-500/[0.04] px-3 py-2 text-[10px] leading-relaxed text-blue-200/80">
+                      Legacy observations are grouped into a compact provisional playbook. The next learning run will relink them to actual campaign reviews and replace claimed evidence totals.
+                    </div>
+                  )}
+
+                  {filteredLearningLessons.some((lesson) => lesson.status === 'disputed') && (
+                    <section className="space-y-2">
+                      <div className="flex items-center">
+                        <p className="text-[10px] text-amber-300 uppercase tracking-wider">Needs resolution</p>
+                        <span className="text-[9px] text-gray-600 ml-auto">opposing campaign evidence</span>
+                      </div>
+                      {filteredLearningLessons.filter((lesson) => lesson.status === 'disputed').map((lesson) => (
+                        <TradeLessonCard key={lesson.id} lesson={lesson} />
+                      ))}
+                    </section>
+                  )}
+
+                  {filteredLearningLessons.some((lesson) => lesson.status !== 'disputed') && (
+                    <section className="space-y-2">
+                      <div className="flex items-center">
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wider">Current playbook</p>
+                        <span className="text-[9px] text-gray-600 ml-auto">{filteredLearningLessons.filter((lesson) => lesson.status !== 'disputed').length} rules</span>
+                      </div>
+                      {filteredLearningLessons.filter((lesson) => lesson.status !== 'disputed').map((lesson) => (
+                        <TradeLessonCard key={lesson.id} lesson={lesson} />
+                      ))}
+                    </section>
+                  )}
+
+                  {!learningLoading && filteredLearningLessons.length === 0 && (
+                    <p className="text-gray-500 text-xs border border-white/5 px-3 py-3">No playbook lessons match this filter.</p>
+                  )}
+                </>
+              )}
+
+              {learningView === 'campaigns' && (
+                <section className="space-y-2">
+                  <div className="flex items-center">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider">Reviewed campaigns</p>
+                    <span className="text-[9px] text-gray-600 ml-auto">1d · 3d · 7d horizons</span>
+                  </div>
+                  {filteredLearningCampaigns.map((campaign) => <TradeCampaignCard key={campaign.id} campaign={campaign} />)}
+                  {!learningLoading && filteredLearningCampaigns.length === 0 && (
+                    <p className="text-gray-500 text-xs border border-white/5 px-3 py-3">No reviewed campaigns match this filter.</p>
+                  )}
+                </section>
+              )}
+
+              {learningView === 'queue' && (
+                <section className="space-y-2">
+                  <div className="flex items-center">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider">Closed campaigns awaiting learning</p>
+                    <span className="text-[9px] text-gray-600 ml-auto">automatic horizons</span>
+                  </div>
+                  {learningData.pendingCampaigns.map((campaign) => (
+                    <article key={campaign.id} className="border border-white/10 bg-white/[0.02] px-3 py-3 space-y-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-[13px] text-white truncate">{campaign.instrument_name}</p>
+                          <p className="text-[10px] text-gray-500 mt-0.5">
+                            {campaign.action_family === 'short_call_campaign' ? 'short call' : 'tail put'} · closed {timeAgo(campaign.closed_at)} · {campaign.order_ids.length} fills
                           </p>
-                        )}
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className={`text-[10px] ${campaign.review_state === 'ready_for_review' ? 'text-amber-300' : 'text-blue-300'}`}>
+                            {formatCampaignReviewProgress(campaign)}
+                          </p>
+                          {campaign.next_review_at && (
+                            <p className="text-[9px] text-gray-600 mt-0.5">
+                              {campaign.review_state === 'ready_for_review' ? `due ${timeAgo(campaign.next_review_at)}` : timeUntil(campaign.next_review_at)}
+                            </p>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex flex-wrap gap-3 text-[10px] text-gray-500">
-                      <span className={campaign.pnl_realized >= 0 ? 'text-green-400' : 'text-red-400'}>
-                        pnl {campaign.pnl_realized >= 0 ? '+' : ''}{campaign.pnl_realized.toFixed(2)}
-                      </span>
-                      <span>open ${campaign.premium_opened.toFixed(2)}</span>
-                      <span>close ${campaign.premium_closed.toFixed(2)}</span>
-                      {campaign.spot_open != null && campaign.spot_close != null && (
-                        <span>spot ${campaign.spot_open.toFixed(0)} → ${campaign.spot_close.toFixed(0)}</span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {learningData.lessons.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Active Trade Lessons</p>
-                {learningData.lessons.map((lesson) => (
-                  <div key={lesson.id} className="border border-white/5 px-3 py-2">
-                    <p className="text-xs text-gray-300">{lesson.lesson}</p>
-                    <p className="text-[10px] text-gray-600 mt-1">
-                      {lesson.evidence_count} evidence point{lesson.evidence_count !== 1 ? 's' : ''} &middot; {timeAgo(lesson.created_at)}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {learningData.reviews.length > 0 && (
-              <div className="space-y-2">
-                <p className="text-[10px] text-gray-500 uppercase tracking-wider">Recent Trade Reviews</p>
-                {learningData.reviews.map((review) => (
-                  <div key={review.id} className="border border-white/5 px-3 py-2.5 space-y-1.5">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-xs text-white font-medium truncate">{review.instrument_name}</p>
-                        <p className="text-[10px] text-gray-600">
-                          {review.action_family || 'campaign'} &middot; {review.review_window_days}d review &middot; closed {timeAgo(review.closed_at)}
-                        </p>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <p className="text-[10px] text-gray-500">{review.review_status}</p>
-                        {review.review_confidence != null && (
-                          <p className="text-[10px] text-gray-600">{(review.review_confidence * 100).toFixed(0)}%</p>
-                        )}
-                      </div>
-                    </div>
-                    <p className="text-xs text-gray-300 leading-relaxed">{review.summary}</p>
-                    <div className="flex flex-wrap gap-3 text-[10px] text-gray-500">
-                      {review.pnl_realized != null && (
-                        <span className={review.pnl_realized >= 0 ? 'text-green-400' : 'text-red-400'}>
-                          pnl {review.pnl_realized >= 0 ? '+' : ''}{review.pnl_realized.toFixed(2)}
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-gray-500">
+                        <span className={campaign.pnl_realized >= 0 ? 'text-green-400' : 'text-red-400'}>
+                          pnl {campaign.pnl_realized >= 0 ? '+' : ''}{campaign.pnl_realized.toFixed(2)}
                         </span>
+                        <span>open ${campaign.premium_opened.toFixed(2)}</span>
+                        <span>close ${campaign.premium_closed.toFixed(2)}</span>
+                        {campaign.spot_open != null && campaign.spot_close != null && <span>spot ${campaign.spot_open.toFixed(0)} → ${campaign.spot_close.toFixed(0)}</span>}
+                      </div>
+                    </article>
+                  ))}
+                  {!learningLoading && learningData.pendingCampaigns.length === 0 && (
+                    <div className="border border-green-500/15 bg-green-500/[0.03] px-3 py-3">
+                      <p className="text-xs text-green-300">Review queue is clear.</p>
+                      <p className="text-[10px] text-gray-600 mt-1">New closed campaigns will appear here as their 1d, 3d, and 7d horizons mature.</p>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {learningView === 'diagnostics' && (
+                <section className="space-y-2">
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wider">Learning pipeline</p>
+                  {learningData.status ? (
+                    <div className="border border-white/10 bg-white/[0.02] px-3 py-3 space-y-3">
+                      <div className="grid grid-cols-2 gap-x-3 gap-y-2 text-[10px] text-gray-500">
+                        <p>reviews table <span className={learningData.status.hasTradeReviewsTable ? 'text-green-400' : 'text-red-400'}>{learningData.status.hasTradeReviewsTable ? 'present' : 'missing'}</span></p>
+                        <p>lessons table <span className={learningData.status.hasTradeLessonsTable ? 'text-green-400' : 'text-red-400'}>{learningData.status.hasTradeLessonsTable ? 'present' : 'missing'}</span></p>
+                        <p>recent orders <span className="text-gray-300">{learningData.status.recentOrderStats.total_orders}</span></p>
+                        <p>instruments <span className="text-gray-300">{learningData.status.recentOrderStats.instrument_count}</span></p>
+                        <p>stored reviews <span className="text-gray-300">{learningData.status.reviewSummary.review_count}</span></p>
+                        <p>reviewed instruments <span className="text-gray-300">{learningData.status.reviewSummary.instrument_count}</span></p>
+                        <p>canonical mode <span className={learningData.status.learningSummary?.canonical_mode ? 'text-green-400' : 'text-blue-300'}>{learningData.status.learningSummary?.canonical_mode ? 'active' : 'bootstrapping'}</span></p>
+                        <p>linked evidence <span className="text-gray-300">{learningData.status.learningSummary?.linked_evidence_count || 0}</span></p>
+                        <p>trade recovery <span className={learningData.status.dataSources?.trade_history_recovery === 'degraded' ? 'text-amber-300' : 'text-green-400'}>{learningData.status.dataSources?.trade_history_recovery || 'unknown'}</span></p>
+                      </div>
+                      <div className="border-t border-white/5 pt-2 space-y-1 text-[10px] text-gray-600">
+                        <p>recent order window: {learningData.status.recentOrderStats.first_timestamp ? `${timeAgo(learningData.status.recentOrderStats.first_timestamp)} → ${timeAgo(learningData.status.recentOrderStats.last_timestamp || learningData.status.recentOrderStats.first_timestamp)}` : 'none'}</p>
+                        <p>last review: {learningData.status.reviewSummary.last_created_at ? timeAgo(learningData.status.reviewSummary.last_created_at) : 'none'}</p>
+                        <p>review job: {learningData.status.tradeReviewJob?.last_run_at ? timeAgo(learningData.status.tradeReviewJob.last_run_at) : 'never'}</p>
+                        <p>next due: {learningData.status.tradeReviewJob?.next_due_at ? timeUntil(learningData.status.tradeReviewJob.next_due_at) : 'n/a'}</p>
+                      </div>
+                      {learningData.status.tradeReviewJob?.last_error && (
+                        <div className="border border-red-500/20 bg-red-500/[0.04] px-2 py-1.5 text-[10px] text-red-400">
+                          {learningData.status.tradeReviewJob.last_error}
+                        </div>
                       )}
-                      {review.premium_opened != null && <span>open ${review.premium_opened.toFixed(2)}</span>}
-                      {review.premium_closed != null && <span>close ${review.premium_closed.toFixed(2)}</span>}
-                      {review.spot_open != null && review.spot_close != null && (
-                        <span>spot ${review.spot_open.toFixed(0)} → ${review.spot_close.toFixed(0)}</span>
+                      {learningData.status.dataSources?.trade_history_error && (
+                        <div className="border border-amber-500/20 bg-amber-500/[0.04] px-2 py-1.5 text-[10px] text-amber-300">
+                          Stored learning is available; live trade recovery is degraded: {learningData.status.dataSources.trade_history_error}
+                        </div>
+                      )}
+                      {learningData.status.tradeReviewJob?.targets_at_last_run && learningData.status.tradeReviewJob.targets_at_last_run.length > 0 && (
+                        <div className="text-[10px] text-gray-500">
+                          Last targets: {learningData.status.tradeReviewJob.targets_at_last_run.map((target) => `${target.instrument_name} [${target.review_window_days}d]`).join(', ')}
+                        </div>
                       )}
                     </div>
-                    {review.lessons.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {review.lessons.map((lesson, idx) => (
-                          <span key={`${review.id}-${idx}`} className="text-[10px] text-juice-orange bg-white/5 px-1.5 py-0.5">
-                            {lesson}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
+                  ) : !learningLoading && <p className="text-xs text-gray-500">Pipeline status unavailable.</p>}
+                </section>
+              )}
 
-            {!learningLoading && learningData.lessons.length === 0 && learningData.reviews.length === 0 && learningData.pendingCampaigns.length === 0 && (
-              <p className="text-gray-500 text-xs">No trade reviews or lessons yet.</p>
-            )}
+              {!learningLoading && learningData.lessons.length === 0 && learningData.campaigns.length === 0 && learningData.pendingCampaigns.length === 0 && (
+                <p className="text-gray-500 text-xs">No trade reviews or lessons yet.</p>
+              )}
+            </div>
           </div>
         )}
 

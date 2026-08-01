@@ -533,7 +533,7 @@ function prepareAll(d: Database.Database) {
       SELECT id, lesson, evidence_count, created_at
       FROM trade_lessons
       WHERE is_active = 1
-      ORDER BY created_at DESC
+      ORDER BY created_at DESC, id DESC
     `),
 
     getTableExists: d.prepare(`
@@ -1423,6 +1423,106 @@ export function getActiveTradeLessons() {
       evidence_count: number;
       created_at: string;
     }[];
+  } catch { return []; }
+}
+
+export function getCanonicalTradeLessons() {
+  try {
+    return getDb().prepare(`
+      SELECT tl.id, tl.lesson_key, tl.title, tl.lesson, tl.category, tl.action_family,
+        tl.applicability, tl.status, tl.revision, tl.change_summary,
+        tl.created_at, COALESCE(tl.updated_at, tl.created_at) AS updated_at,
+        (SELECT COUNT(*) FROM trade_lesson_evidence tle
+          WHERE tle.lesson_id = tl.id AND tle.stance = 'supporting') AS supporting_review_count,
+        (SELECT COUNT(DISTINCT tr.instrument_name || '|' || tr.closed_at)
+          FROM trade_lesson_evidence tle
+          JOIN trade_reviews tr ON tr.id = tle.review_id
+          WHERE tle.lesson_id = tl.id AND tle.stance = 'supporting') AS supporting_campaign_count,
+        (SELECT COUNT(*) FROM trade_lesson_evidence tle
+          WHERE tle.lesson_id = tl.id AND tle.stance = 'contradicting') AS contradicting_review_count,
+        (SELECT COUNT(DISTINCT tr.instrument_name || '|' || tr.closed_at)
+          FROM trade_lesson_evidence tle
+          JOIN trade_reviews tr ON tr.id = tle.review_id
+          WHERE tle.lesson_id = tl.id AND tle.stance = 'contradicting') AS contradicting_campaign_count
+      FROM trade_lessons tl
+      WHERE tl.is_active = 1
+        AND tl.lesson_key IS NOT NULL
+        AND tl.status != 'retired'
+      ORDER BY
+        CASE tl.status WHEN 'disputed' THEN 0 WHEN 'active' THEN 1 ELSE 2 END,
+        supporting_campaign_count DESC,
+        COALESCE(tl.updated_at, tl.created_at) DESC
+    `).all() as Array<{
+      id: number;
+      lesson_key: string;
+      title: string;
+      lesson: string;
+      category: string;
+      action_family: string | null;
+      applicability: string | null;
+      status: string;
+      revision: number;
+      change_summary: string | null;
+      created_at: string;
+      updated_at: string;
+      supporting_review_count: number;
+      supporting_campaign_count: number;
+      contradicting_review_count: number;
+      contradicting_campaign_count: number;
+    }>;
+  } catch { return []; }
+}
+
+export function getTradeLessonEvidence() {
+  try {
+    return getDb().prepare(`
+      SELECT tle.lesson_id, tle.stance, tle.linked_at,
+        tr.id AS review_id, tr.instrument_name, tr.action_family, tr.closed_at,
+        tr.review_window_days, tr.review_status, tr.summary, tr.pnl_realized
+      FROM trade_lesson_evidence tle
+      JOIN trade_lessons tl ON tl.id = tle.lesson_id
+      JOIN trade_reviews tr ON tr.id = tle.review_id
+      WHERE tl.is_active = 1 AND tl.lesson_key IS NOT NULL AND tr.is_active = 1
+      ORDER BY tle.lesson_id ASC,
+        CASE tle.stance WHEN 'contradicting' THEN 0 ELSE 1 END,
+        tr.closed_at DESC,
+        tr.review_window_days DESC
+      LIMIT 300
+    `).all() as Array<{
+      lesson_id: number;
+      stance: 'supporting' | 'contradicting' | 'context';
+      linked_at: string;
+      review_id: number;
+      instrument_name: string;
+      action_family: string | null;
+      closed_at: string;
+      review_window_days: number;
+      review_status: string;
+      summary: string;
+      pnl_realized: number | null;
+    }>;
+  } catch { return []; }
+}
+
+export function getTradeLessonRevisions() {
+  try {
+    return getDb().prepare(`
+      SELECT tlr.lesson_id, tlr.revision, tlr.lesson, tlr.applicability,
+        tlr.status, tlr.change_summary, tlr.created_at
+      FROM trade_lesson_revisions tlr
+      JOIN trade_lessons tl ON tl.id = tlr.lesson_id
+      WHERE tl.is_active = 1 AND tl.lesson_key IS NOT NULL
+      ORDER BY tlr.lesson_id ASC, tlr.revision DESC
+      LIMIT 100
+    `).all() as Array<{
+      lesson_id: number;
+      revision: number;
+      lesson: string;
+      applicability: string | null;
+      status: string;
+      change_summary: string | null;
+      created_at: string;
+    }>;
   } catch { return []; }
 }
 
