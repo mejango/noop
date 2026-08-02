@@ -7844,6 +7844,26 @@ describe('Canonical trade learning', () => {
     assert.ok(SCRIPT_SOURCE.includes('review_horizon_crosses_expiry'));
   });
 
+  test('canonical synthesis has bounded bootstrap input, a resilient timeout, and prompt retry', () => {
+    assert.ok(SCRIPT_SOURCE.includes('const TRADE_LESSON_SYNTHESIS_TIMEOUT_MS = 90 * 1000'));
+    assert.ok(SCRIPT_SOURCE.includes('getRecentTradeReviews(TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT)'));
+    assert.ok(SCRIPT_SOURCE.includes('legacyLessons.slice(0, 12)'));
+    assert.ok(SCRIPT_SOURCE.includes('const TRADE_LESSON_RETRY_INTERVAL_MS = 30 * 60 * 1000'));
+    assert.ok(SCRIPT_SOURCE.includes('Date.now() - botData.lastTradeLessonRun >= tradeLessonDelay'));
+  });
+
+  test('canonical synthesis diagnostics survive bot restarts', () => {
+    learningDb.saveBotState({
+      lastTradeLessonRun: 101,
+      lastTradeLessonSuccess: 99,
+      lastTradeLessonError: 'timeout',
+    });
+    const state = learningDb.loadBotState();
+    assert.strictEqual(state.last_trade_lesson_run, 101);
+    assert.strictEqual(state.last_trade_lesson_success, 99);
+    assert.strictEqual(state.last_trade_lesson_error, 'timeout');
+  });
+
   test('canonical synthesis requires review ids and never requests an evidence count', () => {
     const canonicalPromptStart = SCRIPT_SOURCE.indexOf('You maintain the canonical trade playbook');
     const canonicalPromptEnd = SCRIPT_SOURCE.indexOf('const response = await axios.post', canonicalPromptStart);
@@ -7897,6 +7917,18 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiBrowserSource.includes('Needs attention'));
     assert.ok(wikiBrowserSource.includes('Learning-derived'));
     assert.ok(wikiBrowserSource.includes('validated {formatRelative(page.lastReviewed)}'));
+  });
+});
+
+describe('Learning bootstrap diagnostics', () => {
+  const learningRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'learning', 'route.ts'), 'utf8');
+  const advisorDrawerSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'components', 'AdvisorDrawer.tsx'), 'utf8');
+
+  test('failed canonical bootstrap is explicit in the API and interface', () => {
+    assert.ok(learningRouteSource.includes('tradeLessonJob:'));
+    assert.ok(learningRouteSource.includes('last_trade_lesson_error ? 30 * 60 * 1000'));
+    assert.ok(advisorDrawerSource.includes('Canonical evidence bootstrap failed:'));
+    assert.ok(advisorDrawerSource.includes('evidence bootstrap retrying'));
   });
 });
 

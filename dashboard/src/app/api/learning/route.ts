@@ -545,6 +545,9 @@ export async function GET() {
       last_trade_review_ready_count: 0,
       last_trade_review_error: null,
       last_trade_review_targets: null,
+      last_trade_lesson_run: 0,
+      last_trade_lesson_success: 0,
+      last_trade_lesson_error: null,
     };
     const canonicalLessonRows = hasTradeLessonsTable ? getCanonicalTradeLessons() : [];
     const legacyLessonRows = hasTradeLessonsTable && canonicalLessonRows.length === 0 ? getActiveTradeLessons() : [];
@@ -708,6 +711,21 @@ export async function GET() {
           next_due_at: tradeReviewState.last_trade_review_run
             ? new Date(tradeReviewState.last_trade_review_run + 8 * 60 * 60 * 1000).toISOString()
             : null,
+        },
+        tradeLessonJob: {
+          last_run_at: tradeReviewState.last_trade_lesson_run
+            ? new Date(tradeReviewState.last_trade_lesson_run).toISOString()
+            : null,
+          last_success_at: tradeReviewState.last_trade_lesson_success
+            ? new Date(tradeReviewState.last_trade_lesson_success).toISOString()
+            : null,
+          last_error: tradeReviewState.last_trade_lesson_error ?? null,
+          next_due_at: tradeReviewState.last_trade_lesson_run
+            ? new Date(
+                tradeReviewState.last_trade_lesson_run
+                + (tradeReviewState.last_trade_lesson_error ? 30 * 60 * 1000 : 8 * 60 * 60 * 1000)
+              ).toISOString()
+            : new Date().toISOString(),
         },
       },
     });

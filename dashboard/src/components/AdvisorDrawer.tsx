@@ -622,6 +622,12 @@ interface LearningStatus {
     }>;
     next_due_at: string | null;
   };
+  tradeLessonJob?: {
+    last_run_at: string | null;
+    last_success_at: string | null;
+    last_error: string | null;
+    next_due_at: string | null;
+  };
 }
 
 const LEARNING_STATUS_STYLES: Record<string, { label: string; color: string }> = {
@@ -652,7 +658,7 @@ function formatLearningPercent(value: number | null) {
   return `${value.toFixed(1)}%`;
 }
 
-function TradeLessonCard({ lesson }: { lesson: TradeLesson }) {
+function TradeLessonCard({ lesson, legacyBootstrapFailed = false }: { lesson: TradeLesson; legacyBootstrapFailed?: boolean }) {
   const status = LEARNING_STATUS_STYLES[lesson.status] || LEARNING_STATUS_STYLES.candidate;
   const evidenceRows = [...lesson.evidence.contradicting, ...lesson.evidence.supporting];
   return (
@@ -683,7 +689,9 @@ function TradeLessonCard({ lesson }: { lesson: TradeLesson }) {
         {lesson.is_legacy ? (
           <>
             <span>{lesson.legacy_observation_count || 1} legacy observation{(lesson.legacy_observation_count || 1) === 1 ? '' : 's'}</span>
-            <span className="text-amber-400/80">evidence links rebuilding</span>
+            <span className={legacyBootstrapFailed ? 'text-red-300' : 'text-amber-400/80'}>
+              {legacyBootstrapFailed ? 'evidence bootstrap retrying' : 'evidence links rebuilding'}
+            </span>
           </>
         ) : (
           <>
@@ -1183,6 +1191,7 @@ export default function AdvisorDrawer() {
   );
   const filteredLearningLessons = learningData.lessons.filter((lesson) => matchesLearningFilter(lesson.action_family));
   const filteredLearningCampaigns = learningData.campaigns.filter((campaign) => matchesLearningFilter(campaign.action_family));
+  const legacyBootstrapError = learningData.status?.tradeLessonJob?.last_error || null;
 
   return (
     <>
@@ -1652,8 +1661,15 @@ export default function AdvisorDrawer() {
                   )}
 
                   {learningData.lessons.some((lesson) => lesson.is_legacy) && (
-                    <div className="border border-blue-500/20 bg-blue-500/[0.04] px-3 py-2 text-[10px] leading-relaxed text-blue-200/80">
-                      Legacy observations are grouped into a compact provisional playbook. The next learning run will relink them to actual campaign reviews and replace claimed evidence totals.
+                    <div className={`border px-3 py-2 text-[10px] leading-relaxed ${legacyBootstrapError ? 'border-red-500/25 bg-red-500/[0.05] text-red-200/90' : 'border-blue-500/20 bg-blue-500/[0.04] text-blue-200/80'}`}>
+                      {legacyBootstrapError ? (
+                        <>
+                          Canonical evidence bootstrap failed: {legacyBootstrapError}. Legacy rules remain available while the bot retries
+                          {learningData.status?.tradeLessonJob?.next_due_at ? ` ${timeUntil(learningData.status.tradeLessonJob.next_due_at)}` : ' automatically'}.
+                        </>
+                      ) : (
+                        <>Legacy observations are grouped into a compact provisional playbook. Canonical evidence linking is scheduled and will replace claimed evidence totals.</>
+                      )}
                     </div>
                   )}
 
@@ -1664,7 +1680,7 @@ export default function AdvisorDrawer() {
                         <span className="text-[9px] text-gray-600 ml-auto">opposing campaign evidence</span>
                       </div>
                       {filteredLearningLessons.filter((lesson) => lesson.status === 'disputed').map((lesson) => (
-                        <TradeLessonCard key={lesson.id} lesson={lesson} />
+                        <TradeLessonCard key={lesson.id} lesson={lesson} legacyBootstrapFailed={Boolean(legacyBootstrapError)} />
                       ))}
                     </section>
                   )}
@@ -1676,7 +1692,7 @@ export default function AdvisorDrawer() {
                         <span className="text-[9px] text-gray-600 ml-auto">{filteredLearningLessons.filter((lesson) => lesson.status !== 'disputed').length} rules</span>
                       </div>
                       {filteredLearningLessons.filter((lesson) => lesson.status !== 'disputed').map((lesson) => (
-                        <TradeLessonCard key={lesson.id} lesson={lesson} />
+                        <TradeLessonCard key={lesson.id} lesson={lesson} legacyBootstrapFailed={Boolean(legacyBootstrapError)} />
                       ))}
                     </section>
                   )}
@@ -1766,10 +1782,17 @@ export default function AdvisorDrawer() {
                         <p>last review: {learningData.status.reviewSummary.last_created_at ? timeAgo(learningData.status.reviewSummary.last_created_at) : 'none'}</p>
                         <p>review job: {learningData.status.tradeReviewJob?.last_run_at ? timeAgo(learningData.status.tradeReviewJob.last_run_at) : 'never'}</p>
                         <p>next due: {learningData.status.tradeReviewJob?.next_due_at ? timeUntil(learningData.status.tradeReviewJob.next_due_at) : 'n/a'}</p>
+                        <p>lesson synthesis: {learningData.status.tradeLessonJob?.last_run_at ? timeAgo(learningData.status.tradeLessonJob.last_run_at) : 'never'}</p>
+                        <p>lesson retry: {learningData.status.tradeLessonJob?.next_due_at ? timeUntil(learningData.status.tradeLessonJob.next_due_at) : 'n/a'}</p>
                       </div>
                       {learningData.status.tradeReviewJob?.last_error && (
                         <div className="border border-red-500/20 bg-red-500/[0.04] px-2 py-1.5 text-[10px] text-red-400">
                           {learningData.status.tradeReviewJob.last_error}
+                        </div>
+                      )}
+                      {learningData.status.tradeLessonJob?.last_error && (
+                        <div className="border border-red-500/20 bg-red-500/[0.04] px-2 py-1.5 text-[10px] text-red-400">
+                          Canonical lesson synthesis: {learningData.status.tradeLessonJob.last_error}
                         </div>
                       )}
                       {learningData.status.dataSources?.trade_history_error && (

@@ -494,14 +494,9 @@ function prepareAll(d: Database.Database) {
         (SELECT created_at FROM trading_rules WHERE is_active = 1 ORDER BY id ASC LIMIT 1) as advisory_created_at
     `),
 
-    getBudgetCycleState: d.prepare(`
-      SELECT put_cycle_start, put_net_bought, put_unspent_buy_limit,
-        put_budget_for_cycle, last_advisory_spot_price, last_advisory_timestamp,
-        last_trade_review_run, last_trade_review_success, last_trade_review_ready_count, last_trade_review_error,
-        last_trade_review_targets, last_advisory_run, last_advisory_success, last_advisory_error,
-        advisory_retry_count, next_advisory_retry_at
-      FROM bot_state WHERE id = 1
-    `),
+    // SELECT * keeps the read-only dashboard compatible while the bot applies
+    // additive bot_state migrations during a rolling deploy.
+    getBudgetCycleState: d.prepare('SELECT * FROM bot_state WHERE id = 1'),
 
     getLatestAdvisoryAssessment: d.prepare(`
       SELECT content, timestamp FROM ai_journal
@@ -1377,6 +1372,9 @@ export function getBudgetCycleState() {
       last_trade_review_ready_count: number;
       last_trade_review_error: string | null;
       last_trade_review_targets: string | null;
+      last_trade_lesson_run: number;
+      last_trade_lesson_success: number;
+      last_trade_lesson_error: string | null;
       last_advisory_run: number;
       last_advisory_success: number;
       last_advisory_error: string | null;

@@ -371,6 +371,10 @@ const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Harvest short calls once at least t
 // Journal auto-generation
 const JOURNAL_INTERVAL_MS = 8 * 60 * 60 * 1000; // Every 8 hours
 const TRADE_REVIEW_INTERVAL_MS = 8 * 60 * 60 * 1000; // Every 8 hours
+const TRADE_LESSON_INTERVAL_MS = 8 * 60 * 60 * 1000; // Normal canonical synthesis cadence
+const TRADE_LESSON_RETRY_INTERVAL_MS = 30 * 60 * 1000; // Retry failed synthesis promptly
+const TRADE_LESSON_SYNTHESIS_TIMEOUT_MS = 90 * 1000;
+const TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT = 30;
 const WIKI_LINT_INTERVAL_MS = 24 * 60 * 60 * 1000; // Every 24 hours
 
 // Common bot state structure
@@ -401,6 +405,9 @@ let botData = {
     lastTradeReviewTargets: [],
     lastHypothesisLessonReviewId: 0,
     lastTradeLessonReviewId: 0,
+    lastTradeLessonRun: 0,
+    lastTradeLessonSuccess: 0,
+    lastTradeLessonError: null,
 
     // Advisory tracking
     lastAdvisoryRun: 0,
@@ -658,6 +665,9 @@ const loadData = () => {
       try { botData.lastTradeReviewTargets = state.last_trade_review_targets ? JSON.parse(state.last_trade_review_targets) : []; } catch { botData.lastTradeReviewTargets = []; }
       botData.lastHypothesisLessonReviewId = state.last_hypothesis_lesson_review_id || 0;
       botData.lastTradeLessonReviewId = state.last_trade_lesson_review_id || 0;
+      botData.lastTradeLessonRun = state.last_trade_lesson_run || 0;
+      botData.lastTradeLessonSuccess = state.last_trade_lesson_success || 0;
+      botData.lastTradeLessonError = state.last_trade_lesson_error || null;
       botData.lastAdvisoryRun = state.last_advisory_run || 0;
       botData.lastAdvisorySuccess = state.last_advisory_success || 0;
       botData.lastAdvisoryError = state.last_advisory_error || null;
@@ -4231,29 +4241,40 @@ const formatTradeReviewForLessonSynthesis = (review) => {
     `open_range=${review.spot_min_while_open ?? 'N/A'}..${review.spot_max_while_open ?? 'N/A'}`,
     `post_close_pre_expiry_range=${review.spot_min_after_close ?? 'N/A'}..${review.spot_max_after_close ?? 'N/A'}`,
     `pnl=$${Number(review.pnl_realized || 0).toFixed(2)}`,
-    `summary=${String(review.summary || '').replace(/\s+/g, ' ').slice(0, 280)}`,
-    `observations=${lessons.join(' | ').slice(0, 280) || 'none'}`,
+    `summary=${String(review.summary || '').replace(/\s+/g, ' ').slice(0, 220)}`,
+    `observations=${lessons.join(' | ').slice(0, 180) || 'none'}`,
   ].join(' ');
 };
 
+let _tradeLessonInFlight = false;
 const extractTradeLessons = async () => {
-  if (!process.env.ANTHROPIC_API_KEY || !db?.upsertCanonicalTradeLesson) {
-    return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
+  if (_tradeLessonInFlight || !process.env.ANTHROPIC_API_KEY || !db?.upsertCanonicalTradeLesson) {
+    return { attempted: false, processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0, error: null };
   }
 
-  const canonicalLessons = db.getCanonicalTradeLessons?.() || [];
-  const legacyLessons = db.getLegacyTradeLessons?.() || [];
-  const isBootstrap = canonicalLessons.length === 0;
-  const reviews = isBootstrap
-    ? (db.getRecentTradeReviews(48) || [])
-    : (db.getTradeReviewsSinceId?.(botData.lastTradeLessonReviewId || 0, 12) || []);
-  if (reviews.length < 2) return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
+  _tradeLessonInFlight = true;
+  botData.lastTradeLessonRun = Date.now();
+  botData.lastTradeLessonError = null;
+  persistCycleState();
 
-  console.log(`🧠 ${isBootstrap ? 'Bootstrapping' : 'Updating'} canonical trade lessons from ${reviews.length} linked review(s)...`);
-  const taxonomyText = TRADE_LESSON_TAXONOMY
-    .map((definition) => `- ${definition.lesson_key}: ${definition.title} — ${definition.purpose}`)
-    .join('\n');
-  const prompt = `You maintain the canonical trade playbook for a Spitznagel-style ETH options bot.
+  try {
+    const canonicalLessons = db.getCanonicalTradeLessons?.() || [];
+    const legacyLessons = db.getLegacyTradeLessons?.() || [];
+    const isBootstrap = canonicalLessons.length === 0;
+    const reviews = isBootstrap
+      ? (db.getRecentTradeReviews(TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT) || [])
+      : (db.getTradeReviewsSinceId?.(botData.lastTradeLessonReviewId || 0, 12) || []);
+    if (reviews.length < 2) {
+      botData.lastTradeLessonSuccess = Date.now();
+      persistCycleState();
+      return { attempted: true, processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0, error: null };
+    }
+
+    console.log(`🧠 ${isBootstrap ? 'Bootstrapping' : 'Updating'} canonical trade lessons from ${reviews.length} linked review(s)...`);
+    const taxonomyText = TRADE_LESSON_TAXONOMY
+      .map((definition) => `- ${definition.lesson_key}: ${definition.title} — ${definition.purpose}`)
+      .join('\n');
+    const prompt = `You maintain the canonical trade playbook for a Spitznagel-style ETH options bot.
 
 Your output updates a small fixed taxonomy. It must consolidate evidence, surface disagreement, and remain useful to an advisor making a decision now. Do not create a chronological diary.
 
@@ -4264,7 +4285,7 @@ Current canonical lessons:
 ${canonicalLessons.length > 0 ? canonicalLessons.map(formatTradeLessonForPrompt).join('\n') : 'None — this is the first canonical synthesis.'}
 
 Legacy generated lessons (unlinked observations; use only as hypotheses, never as evidence counts):
-${legacyLessons.length > 0 ? legacyLessons.slice(0, 30).map((lesson) => `- ${String(lesson.lesson || '').replace(/\s+/g, ' ').slice(0, 320)}`).join('\n') : 'None'}
+${legacyLessons.length > 0 ? legacyLessons.slice(0, 12).map((lesson) => `- ${String(lesson.lesson || '').replace(/\s+/g, ' ').slice(0, 220)}`).join('\n') : 'None'}
 
 Reviewed campaigns (the #ID is the only valid evidence identifier):
 ${reviews.map(formatTradeReviewForLessonSynthesis).join('\n')}
@@ -4283,7 +4304,6 @@ ${isBootstrap ? '9. This is a bootstrap. Cover at least four relevant keys so th
 Output JSON only:
 {"lesson_updates":[{"lesson_key":"short_call.exit_insurance","lesson":"<canonical operational rule>","applicability":["<condition>"],"supporting_review_ids":[1,2],"contradicting_review_ids":[3],"change_summary":"<what changed>"}]}`;
 
-  try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
       max_tokens: 1800,
@@ -4294,7 +4314,7 @@ Output JSON only:
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 30000,
+      timeout: TRADE_LESSON_SYNTHESIS_TIMEOUT_MS,
     });
 
     const text = response.data?.content?.[0]?.text || '';
@@ -4309,8 +4329,11 @@ Output JSON only:
         return true;
       });
     if (updates.length === 0 || (isBootstrap && updates.length < 4)) {
-      console.log(`🧠 Canonical trade lesson synthesis rejected: ${updates.length} valid update(s)`);
-      return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
+      const message = `Canonical synthesis returned ${updates.length} valid update(s); ${isBootstrap ? 'at least 4 required' : 'at least 1 required'}`;
+      botData.lastTradeLessonError = message;
+      persistCycleState();
+      console.log(`🧠 ${message}`);
+      return { attempted: true, processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0, error: message };
     }
 
     const reviewIds = new Set(reviews.map((review) => Number(review.id)).filter(Number.isInteger));
@@ -4326,17 +4349,30 @@ Output JSON only:
       }, reviewIds);
       if (stored) storedCount += 1;
     }
-    if (storedCount === 0) return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
+    if (storedCount === 0) {
+      const message = 'Canonical synthesis produced no storable lesson updates';
+      botData.lastTradeLessonError = message;
+      persistCycleState();
+      console.log(`🧠 ${message}`);
+      return { attempted: true, processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0, error: message };
+    }
 
     const highestReviewId = Math.max(...Array.from(reviewIds), botData.lastTradeLessonReviewId || 0);
     botData.lastTradeLessonReviewId = highestReviewId;
+    botData.lastTradeLessonSuccess = Date.now();
+    botData.lastTradeLessonError = null;
     persistCycleState();
     console.log(`🧠 Canonical trade lessons: ${storedCount} updated from ${reviews.length} linked review(s)`);
-    return { processed: reviews.length, advancedToId: highestReviewId };
+    return { attempted: true, processed: reviews.length, advancedToId: highestReviewId, error: null };
   } catch (e) {
-    console.log('🧠 Canonical trade lesson extraction failed:', e.message);
+    const message = e instanceof Error ? e.message : String(e);
+    botData.lastTradeLessonError = message;
+    persistCycleState();
+    console.log('🧠 Canonical trade lesson extraction failed:', message);
+    return { attempted: true, processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0, error: message };
+  } finally {
+    _tradeLessonInFlight = false;
   }
-  return { processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0 };
 };
 
 // ─── Wiki Knowledge System ──────────────────────────────────────────────────
@@ -13335,6 +13371,25 @@ const runBot = async () => {
           botData.lastTradeReviewError = e.message;
           persistCycleState();
           console.log('🧾 Trade review cycle failed (will retry next tick):', e.message);
+        });
+      }
+
+      // Canonical lesson synthesis has its own retry clock. This lets a failed
+      // bootstrap recover promptly instead of waiting for another trade review.
+      const tradeLessonDelay = botData.lastTradeLessonError
+        ? TRADE_LESSON_RETRY_INTERVAL_MS
+        : TRADE_LESSON_INTERVAL_MS;
+      if (
+        process.env.ANTHROPIC_API_KEY
+        && !_tradeLessonInFlight
+        && (Date.now() - botData.lastTradeLessonRun >= tradeLessonDelay)
+      ) {
+        extractTradeLessons().then((result) => {
+          if (result?.attempted) {
+            console.log(`🧠 Canonical lesson cycle finished: processed=${result.processed} error=${result.error || 'none'}`);
+          }
+        }).catch((e) => {
+          console.log(`🧠 Canonical lesson scheduler failed (non-fatal): ${e.message}`);
         });
       }
 
