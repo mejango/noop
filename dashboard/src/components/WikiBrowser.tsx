@@ -50,6 +50,9 @@ interface WikiSummary {
   lastLintAttempt: string | null;
   lastLintError: string | null;
   nextLintAt: string | null;
+  remediationPending: number;
+  lastRemediationAt: string | null;
+  lastRemediationError: string | null;
   lastIngest: string | null;
 }
 
@@ -63,6 +66,9 @@ const EMPTY_SUMMARY: WikiSummary = {
   lastLintAttempt: null,
   lastLintError: null,
   nextLintAt: null,
+  remediationPending: 0,
+  lastRemediationAt: null,
+  lastRemediationError: null,
   lastIngest: null,
 };
 
@@ -350,6 +356,12 @@ export default function WikiBrowser() {
               {!summary.lastLintError && summary.unreviewed > 0 && (
                 <div className="mt-2 border border-blue-500/15 bg-blue-500/5 px-3 py-2 text-[10px] leading-relaxed text-blue-200/70">
                   {summary.unreviewed} page{summary.unreviewed === 1 ? '' : 's'} awaiting page-level validation. Next review {timeUntil(summary.nextLintAt)}.
+                </div>
+              )}
+              {summary.remediationPending > 0 && (
+                <div className="mt-2 border border-amber-500/15 bg-amber-500/5 px-3 py-2 text-[10px] leading-relaxed text-amber-100/70">
+                  Automated remediation queue: {summary.remediationPending} page{summary.remediationPending === 1 ? '' : 's'} need attention; up to two are repaired per cycle and then re-reviewed.
+                  {summary.lastRemediationError ? <span className="mt-1 block text-red-300/80">Last repair error: {summary.lastRemediationError}</span> : null}
                 </div>
               )}
             </section>

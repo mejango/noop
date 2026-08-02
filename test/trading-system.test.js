@@ -7930,6 +7930,23 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiBrowserSource.includes('awaiting page-level validation'));
   });
 
+  test('wiki audit findings feed a bounded evidence-safe remediation queue', () => {
+    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_BATCH_SIZE = 2'));
+    assert.ok(SCRIPT_SOURCE.includes('const getWikiRepairSchedule'));
+    assert.ok(SCRIPT_SOURCE.includes('WIKI_REPAIR_PRIORITY'));
+    assert.ok(SCRIPT_SOURCE.includes('repairing exactly one audited page'));
+    assert.ok(SCRIPT_SOURCE.includes('replacement invented source marker(s)'));
+    assert.ok(SCRIPT_SOURCE.includes('replacement removed all structured source markers'));
+    assert.ok(SCRIPT_SOURCE.includes('page changed while repair was running'));
+    assert.ok(SCRIPT_SOURCE.includes('last_reviewed_at: null'));
+    assert.ok(SCRIPT_SOURCE.includes('repairWikiIssues(wikiRepairSchedule)'));
+    assert.ok(SCRIPT_SOURCE.includes('!_wikiLintInFlight && !_wikiRepairInFlight && wikiLintSchedule.due'));
+    assert.ok(wikiPagesRouteSource.includes('remediationPending'));
+    assert.ok(wikiPagesRouteSource.includes('lastRemediationError'));
+    assert.ok(wikiBrowserSource.includes('Automated remediation queue:'));
+    assert.ok(wikiBrowserSource.includes('up to two are repaired per cycle and then re-reviewed'));
+  });
+
   test('wiki UI is briefing-first and exposes ownership and validation state', () => {
     assert.ok(wikiBrowserSource.includes('Knowledge briefing'));
     assert.ok(wikiBrowserSource.includes('What changed'));
