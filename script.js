@@ -380,7 +380,7 @@ const WIKI_LINT_RETRY_INTERVAL_MS = 30 * 60 * 1000; // Retry failed validation p
 const WIKI_REPAIR_RETRY_INTERVAL_MS = 30 * 60 * 1000;
 const WIKI_REPAIR_COOLDOWN_MS = 8 * 60 * 60 * 1000;
 const WIKI_REPAIR_BATCH_SIZE = 2;
-const WIKI_REPAIR_FORMAT_VERSION = 2;
+const WIKI_REPAIR_FORMAT_VERSION = 3;
 
 // Common bot state structure
 const createBotData = () => {
@@ -5358,7 +5358,7 @@ ${learningContext || 'No canonical Learning rules supplied.'}
 ## Repair Rules
 1. Resolve only the supplied findings while preserving accurate material and every required section.
 2. Keep the page under 2000 words. It may start with one H1 title; place one bold TLDR line immediately after that optional title.
-3. Never invent facts or source markers. Material claims must retain an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker.
+3. Never invent facts or source markers. Material claims must retain an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker. If the target page has no exact supporting marker, state uncertainty instead of importing an unrelated marker.
 4. If fresh evidence cannot support an old active claim, label current status unknown and move the dated observation to the appropriate historical section instead of pretending it is current.
 5. Use “Previously: X. Updated [${new Date().toISOString().split('T')[0]}]: Y” when evidence directly revises a prior claim.
 6. Strategy pages are Learning-owned views: remove redundancy and improve readability without creating rules beyond the supplied canonical lessons.
@@ -5416,9 +5416,10 @@ ${learningContext || 'No canonical Learning rules supplied.'}
 
     const allowedMarkerText = `${Object.values(pages).join('\n')}\n${rawEvidence}\n${learningContext}`;
     const allowedMarkers = getStructuredWikiMarkers(allowedMarkerText);
+    const existingMarkers = getStructuredWikiMarkers(existingContent);
     const outputMarkers = getStructuredWikiMarkers(newContent);
-    if (allowedMarkers.size > 0 && outputMarkers.size === 0) {
-      return recordWikiPageRepairFailure(candidate, 'replacement removed all structured source markers');
+    if (existingMarkers.size > 0 && outputMarkers.size === 0) {
+      return recordWikiPageRepairFailure(candidate, 'replacement removed all structured source markers from the target page');
     }
     const unknownMarkers = Array.from(outputMarkers).filter((marker) => !allowedMarkers.has(marker));
     if (unknownMarkers.length > 0) {
@@ -5582,7 +5583,17 @@ const lintWiki = async () => {
     return { attempted: false, success: true, error: null, nextDueAt: schedule.nextDueAt };
   }
 
-  console.log('📚 Wiki lint: auditing wiki pages...');
+  const storedPageMeta = meta?.pages && typeof meta.pages === 'object' && !Array.isArray(meta.pages)
+    ? meta.pages
+    : {};
+  const unreviewedPages = WIKI_ALL_PAGES.filter((pagePath) => !storedPageMeta[pagePath]?.last_reviewed_at);
+  const pagesToReview = schedule.needsInitialReview && unreviewedPages.length > 0
+    ? unreviewedPages
+    : WIKI_ALL_PAGES;
+  const isFullReview = pagesToReview.length === WIKI_ALL_PAGES.length;
+  console.log(isFullReview
+    ? '📚 Wiki lint: auditing all wiki pages...'
+    : `📚 Wiki lint: revalidating ${pagesToReview.length} repaired/unreviewed page(s) with full wiki context...`);
 
   // Read all pages
   const pages = {};
@@ -5613,6 +5624,10 @@ ${schema}
 ## Current Wiki Pages
 ${pagesContext}
 
+## Audit Scope
+Use every page above as cross-page context, but report issues only for these target pages:
+${pagesToReview.map((pagePath) => `- ${pagePath}`).join('\n')}
+
 ## Audit Checklist
 1. **Contradictions**: Do any pages contradict each other?
 2. **Staleness**: Are time-sensitive current-state claims old enough to mislead? Do not call stable historical or structural knowledge stale merely because it is old.
@@ -5626,7 +5641,7 @@ ${pagesContext}
 Return one compact audit object and do not rewrite page content during validation:
 <lint_result>{"issues":[{"page":"path","type":"contradiction|stale|redundant|missing_link|quality","description":"concise actionable finding"}]}</lint_result>
 
-Use at most two issues per page and keep each description under 240 characters. If no issues are found, return <lint_result>{"issues":[]}</lint_result>. Return no prose outside the tag.`;
+Use at most two issues per target page and keep each description under 240 characters. Do not report findings against pages outside the audit scope. If no issues are found, return <lint_result>{"issues":[]}</lint_result>. Return no prose outside the tag.`;
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
@@ -5665,14 +5680,19 @@ Use at most two issues per page and keep each description under 240 characters. 
         [`expected issues[] in tagged or raw JSON output; received keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') || 'none' : typeof result}`],
       );
     }
-    if (result.issues?.length > 0) {
-      console.log(`📚 Wiki lint: found ${result.issues.length} issue(s):`);
-      for (const issue of result.issues) {
+    const validIssues = result.issues.filter((issue) => (
+      issue && pagesToReview.includes(issue.page) && typeof issue.description === 'string'
+    ));
+    const ignoredIssueCount = result.issues.length - validIssues.length;
+    if (validIssues.length > 0) {
+      console.log(`📚 Wiki lint: found ${validIssues.length} in-scope issue(s):`);
+      for (const issue of validIssues) {
         console.log(`  - [${issue.type}] ${issue.page}: ${issue.description}`);
       }
     } else {
-      console.log('📚 Wiki lint: no issues found');
+      console.log('📚 Wiki lint: no in-scope issues found');
     }
+    if (ignoredIssueCount > 0) console.log(`📚 Wiki lint: ignored ${ignoredIssueCount} out-of-scope finding(s)`);
 
     // Prune history files older than 30 days
     try {
@@ -5695,9 +5715,6 @@ Use at most two issues per page and keep each description under 240 characters. 
     }
 
     const reviewedAt = new Date().toISOString();
-    const validIssues = (Array.isArray(result.issues) ? result.issues : []).filter((issue) => (
-      issue && WIKI_ALL_PAGES.includes(issue.page) && typeof issue.description === 'string'
-    ));
     const issuesByPage = new Map();
     for (const issue of validIssues) {
       if (!issuesByPage.has(issue.page)) issuesByPage.set(issue.page, []);
@@ -5705,7 +5722,7 @@ Use at most two issues per page and keep each description under 240 characters. 
     }
     const completionMeta = readWikiMeta();
     let reviewedPageCount = 0;
-    for (const pagePath of WIKI_ALL_PAGES) {
+    for (const pagePath of pagesToReview) {
       if (readWikiPage(pagePath) !== pages[pagePath]) {
         console.log(`📚 Wiki lint: ${pagePath} changed during audit; leaving it unreviewed`);
         continue;
@@ -5716,21 +5733,34 @@ Use at most two issues per page and keep each description under 240 characters. 
       });
       reviewedPageCount++;
     }
-    completionMeta.last_lint = reviewedAt;
+    if (isFullReview) completionMeta.last_lint = reviewedAt;
     completionMeta.last_lint_attempt = reviewedAt;
     completionMeta.last_lint_error = null;
-    completionMeta.last_lint_issues = validIssues.length;
+    const completedPageMeta = getWikiPageMetaMap(completionMeta);
+    const outstandingIssueCount = WIKI_ALL_PAGES.reduce((total, pagePath) => (
+      total + (Array.isArray(completedPageMeta[pagePath]?.issues) ? completedPageMeta[pagePath].issues.length : 0)
+    ), 0);
+    completionMeta.last_lint_issues = outstandingIssueCount;
     completionMeta.last_lint_updates = 0;
     writeWikiMeta(completionMeta);
     refreshWikiIndex();
-    appendWikiLog('lint', 'wiki lint complete', [
-      `issues: ${validIssues.length}`,
-      `pages reviewed: ${reviewedPageCount}/${WIKI_ALL_PAGES.length}`,
+    appendWikiLog('lint', isFullReview ? 'wiki lint complete' : 'wiki page revalidation complete', [
+      `issues in scope: ${validIssues.length}`,
+      `outstanding issues: ${outstandingIssueCount}`,
+      `pages reviewed: ${reviewedPageCount}/${pagesToReview.length} scoped (${WIKI_ALL_PAGES.length} total)`,
     ]);
     logWikiMetaSummary('📚 Wiki lint: wrote completion meta', completionMeta);
 
-    console.log(`📚 Wiki lint: complete (${validIssues.length} issue(s), ${reviewedPageCount}/${WIKI_ALL_PAGES.length} pages reviewed)`);
-    return { attempted: true, success: true, error: null, reviewedAt };
+    console.log(`📚 Wiki lint: complete (${validIssues.length} scoped issue(s), ${reviewedPageCount}/${pagesToReview.length} target page(s), ${outstandingIssueCount} outstanding)`);
+    return {
+      attempted: true,
+      success: true,
+      error: null,
+      reviewedAt,
+      fullReview: isFullReview,
+      reviewedPageCount,
+      outstandingIssues: outstandingIssueCount,
+    };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.log('📚 Wiki lint failed:', message);
@@ -13641,11 +13671,15 @@ const runBot = async () => {
         _wikiLintInFlight = true;
         lintWiki().then((result) => {
           if (result?.success) {
-            if (result.reviewedAt) {
+            if (result.reviewedAt && result.fullReview) {
               botData.lastWikiLintRun = new Date(result.reviewedAt).getTime();
               persistCycleState();
             }
-            console.log('📚 Scheduled wiki lint finished, next in 24h');
+            if (result.fullReview) {
+              console.log('📚 Scheduled wiki lint finished, next full audit in 24h');
+            } else {
+              console.log(`📚 Wiki page revalidation finished: reviewed=${result.reviewedPageCount || 0} outstanding=${result.outstandingIssues || 0}`);
+            }
             return;
           }
           console.log(`📚 Scheduled wiki lint failed, retry in 30m: ${result?.error || 'unknown error'}`);

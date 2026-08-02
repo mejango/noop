@@ -7921,7 +7921,14 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(SCRIPT_SOURCE.includes('do not rewrite page content during validation'));
     assert.ok(SCRIPT_SOURCE.includes('max_tokens: 1800'));
     assert.ok(SCRIPT_SOURCE.includes('changed during audit; leaving it unreviewed'));
-    assert.ok(SCRIPT_SOURCE.includes('pages reviewed: ${reviewedPageCount}/${WIKI_ALL_PAGES.length}'));
+    assert.ok(SCRIPT_SOURCE.includes('const pagesToReview = schedule.needsInitialReview'));
+    assert.ok(SCRIPT_SOURCE.includes('report issues only for these target pages'));
+    assert.ok(SCRIPT_SOURCE.includes('issue && pagesToReview.includes(issue.page)'));
+    assert.ok(SCRIPT_SOURCE.includes('ignored ${ignoredIssueCount} out-of-scope finding(s)'));
+    assert.ok(SCRIPT_SOURCE.includes('for (const pagePath of pagesToReview)'));
+    assert.ok(SCRIPT_SOURCE.includes('if (isFullReview) completionMeta.last_lint = reviewedAt'));
+    assert.ok(SCRIPT_SOURCE.includes('outstanding issues: ${outstandingIssueCount}'));
+    assert.ok(SCRIPT_SOURCE.includes('Wiki page revalidation finished:'));
     assert.ok(SCRIPT_SOURCE.includes('wikiLintSchedule.due'));
     assert.ok(wikiPagesRouteSource.includes('lastLintAttempt'));
     assert.ok(wikiPagesRouteSource.includes('lastLintError'));
@@ -7932,7 +7939,7 @@ describe('Wiki knowledge discipline', () => {
 
   test('wiki audit findings feed a bounded evidence-safe remediation queue', () => {
     assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_BATCH_SIZE = 2'));
-    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_FORMAT_VERSION = 2'));
+    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_FORMAT_VERSION = 3'));
     assert.ok(SCRIPT_SOURCE.includes('const getWikiRepairSchedule'));
     assert.ok(SCRIPT_SOURCE.includes('WIKI_REPAIR_PRIORITY'));
     assert.ok(SCRIPT_SOURCE.includes('stored.last_repair_format_version === WIKI_REPAIR_FORMAT_VERSION'));
@@ -7941,7 +7948,10 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(SCRIPT_SOURCE.includes('place one bold TLDR line immediately after that optional title'));
     assert.ok(SCRIPT_SOURCE.includes('replacement must place a bold TLDR immediately after the optional H1 title'));
     assert.ok(SCRIPT_SOURCE.includes('replacement invented source marker(s)'));
-    assert.ok(SCRIPT_SOURCE.includes('replacement removed all structured source markers'));
+    assert.ok(SCRIPT_SOURCE.includes('const existingMarkers = getStructuredWikiMarkers(existingContent)'));
+    assert.ok(SCRIPT_SOURCE.includes('existingMarkers.size > 0 && outputMarkers.size === 0'));
+    assert.ok(SCRIPT_SOURCE.includes('replacement removed all structured source markers from the target page'));
+    assert.ok(SCRIPT_SOURCE.includes('state uncertainty instead of importing an unrelated marker'));
     assert.ok(SCRIPT_SOURCE.includes('page changed while repair was running'));
     assert.ok(SCRIPT_SOURCE.includes('last_reviewed_at: null'));
     assert.ok(SCRIPT_SOURCE.includes('repairWikiIssues(wikiRepairSchedule)'));
