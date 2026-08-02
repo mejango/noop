@@ -7932,9 +7932,14 @@ describe('Wiki knowledge discipline', () => {
 
   test('wiki audit findings feed a bounded evidence-safe remediation queue', () => {
     assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_BATCH_SIZE = 2'));
+    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_FORMAT_VERSION = 2'));
     assert.ok(SCRIPT_SOURCE.includes('const getWikiRepairSchedule'));
     assert.ok(SCRIPT_SOURCE.includes('WIKI_REPAIR_PRIORITY'));
+    assert.ok(SCRIPT_SOURCE.includes('stored.last_repair_format_version === WIKI_REPAIR_FORMAT_VERSION'));
+    assert.ok(SCRIPT_SOURCE.includes('last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION'));
     assert.ok(SCRIPT_SOURCE.includes('repairing exactly one audited page'));
+    assert.ok(SCRIPT_SOURCE.includes('place one bold TLDR line immediately after that optional title'));
+    assert.ok(SCRIPT_SOURCE.includes('replacement must place a bold TLDR immediately after the optional H1 title'));
     assert.ok(SCRIPT_SOURCE.includes('replacement invented source marker(s)'));
     assert.ok(SCRIPT_SOURCE.includes('replacement removed all structured source markers'));
     assert.ok(SCRIPT_SOURCE.includes('page changed while repair was running'));

@@ -380,6 +380,7 @@ const WIKI_LINT_RETRY_INTERVAL_MS = 30 * 60 * 1000; // Retry failed validation p
 const WIKI_REPAIR_RETRY_INTERVAL_MS = 30 * 60 * 1000;
 const WIKI_REPAIR_COOLDOWN_MS = 8 * 60 * 60 * 1000;
 const WIKI_REPAIR_BATCH_SIZE = 2;
+const WIKI_REPAIR_FORMAT_VERSION = 2;
 
 // Common bot state structure
 const createBotData = () => {
@@ -4563,7 +4564,8 @@ const getWikiRepairSchedule = (meta = readWikiMeta(), nowMs = Date.now()) => {
       : [];
     if (issues.length === 0) continue;
     const fingerprint = getWikiIssueFingerprint(issues);
-    const sameIssues = stored.last_repair_issue_fingerprint === fingerprint;
+    const sameIssues = stored.last_repair_issue_fingerprint === fingerprint
+      && stored.last_repair_format_version === WIKI_REPAIR_FORMAT_VERSION;
     const lastAttemptMs = parseWikiMetaTimestamp(stored.last_repair_attempt_at);
     const lastSuccessMs = parseWikiMetaTimestamp(stored.last_repair_success_at);
     const successfullyHandled = sameIssues && lastSuccessMs > 0 && lastSuccessMs >= lastAttemptMs;
@@ -4992,7 +4994,7 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 ## Instructions
 1. Generate ONLY the missing or placeholder wiki pages listed below
 2. Use specific data values and dates from the raw evidence as evidence when available
-3. Each page MUST start with a bold TLDR line
+3. Each page may start with one H1 title; place the bold TLDR line immediately after that optional title
 4. Follow the required sections from the schema exactly
 5. If journal interpretation conflicts with factual evidence, trust the factual evidence and write uncertainty explicitly
 6. Cite material claims with the supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker; never invent a source marker
@@ -5133,7 +5135,7 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 3. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
 4. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" format
 5. Keep each page under 2000 words — consolidate older entries if approaching limit
-6. Every page must start with a bold TLDR line reflecting current state
+6. Each page may start with one H1 title; place a bold TLDR line reflecting current state immediately after that optional title
 7. Prefer the smallest set of page updates that captures the new information cleanly
 8. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
 9. If evidence is thin or mixed, say so explicitly instead of over-asserting
@@ -5280,6 +5282,7 @@ const recordWikiPageRepairFailure = (candidate, message) => {
   updateWikiPageMeta(meta, candidate.pagePath, {
     last_repair_attempt_at: failedAt,
     last_repair_issue_fingerprint: candidate.fingerprint,
+    last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
     last_repair_error: message,
   });
   meta.last_repair_attempt = failedAt;
@@ -5306,6 +5309,7 @@ const repairWikiPage = async (candidate) => {
   updateWikiPageMeta(startMeta, pagePath, {
     last_repair_attempt_at: startedAt,
     last_repair_issue_fingerprint: candidate.fingerprint,
+    last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
     last_repair_error: null,
   });
   startMeta.last_repair_attempt = startedAt;
@@ -5353,7 +5357,7 @@ ${learningContext || 'No canonical Learning rules supplied.'}
 
 ## Repair Rules
 1. Resolve only the supplied findings while preserving accurate material and every required section.
-2. Keep the page under 2000 words and start it with one bold TLDR line.
+2. Keep the page under 2000 words. It may start with one H1 title; place one bold TLDR line immediately after that optional title.
 3. Never invent facts or source markers. Material claims must retain an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker.
 4. If fresh evidence cannot support an old active claim, label current status unknown and move the dated observation to the appropriate historical section instead of pretending it is current.
 5. Use “Previously: X. Updated [${new Date().toISOString().split('T')[0]}]: Y” when evidence directly revises a prior claim.
@@ -5382,6 +5386,7 @@ ${learningContext || 'No canonical Learning rules supplied.'}
       updateWikiPageMeta(meta, pagePath, {
         last_repair_attempt_at: completedAt,
         last_repair_issue_fingerprint: candidate.fingerprint,
+        last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
         last_repair_success_at: completedAt,
         last_repair_error: null,
       });
@@ -5402,7 +5407,10 @@ ${learningContext || 'No canonical Learning rules supplied.'}
     }
     const wordCount = newContent.split(/\s+/).filter(Boolean).length;
     if (wordCount > 2000) return recordWikiPageRepairFailure(candidate, `replacement exceeds 2000 words (${wordCount})`);
-    if (!/^\s*\*\*[^\n]+\*\*/.test(newContent)) return recordWikiPageRepairFailure(candidate, 'replacement is missing the opening bold TLDR');
+    const hasOpeningTldr = /^\s*(?:#(?!#)[^\n]*\n+\s*)?\*\*[^\n]+\*\*/.test(newContent);
+    if (!hasOpeningTldr) {
+      return recordWikiPageRepairFailure(candidate, 'replacement must place a bold TLDR immediately after the optional H1 title');
+    }
     const missingHeaders = requiredHeaders.filter((header) => !newContent.includes(header));
     if (missingHeaders.length > 0) return recordWikiPageRepairFailure(candidate, `replacement is missing sections: ${missingHeaders.join(', ')}`);
 
@@ -5430,6 +5438,7 @@ ${learningContext || 'No canonical Learning rules supplied.'}
       change_summary: `Remediated Wiki review: ${candidate.issues[0].replace(/^\[[^\]]+\]\s*/, '').slice(0, 170)}`,
       last_repair_attempt_at: repairedAt,
       last_repair_issue_fingerprint: candidate.fingerprint,
+      last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
       last_repair_success_at: repairedAt,
       last_repair_error: null,
     });

@@ -144,7 +144,7 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 2. **Add with dates** — new observations include `[YYYY-MM-DD]` date stamps
 3. **Revise transparently** — when updating, use "Previously: X. Updated [YYYY-MM-DD]: Y" format
 4. **Word limit** — each page should stay under 2000 words. If approaching limit, consolidate older entries
-5. **Bold TLDR** — every page starts with a bold one-line summary of current state
+5. **Bold TLDR** — a page may begin with one H1 title; the next content must be a bold one-line summary of current state
 6. **Evidence required** — claims must reference specific data values (IV levels, percentages, dates)
 7. **Falsification criteria** — regime assessments and hypotheses include what would disprove them
 8. **No speculation without evidence** — wiki captures confirmed patterns, not guesses
@@ -153,8 +153,8 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 
 ## Format Conventions
 
-- Use markdown headers (##) for sections
-- Use **bold** for the TLDR line
+- An optional single H1 title may precede the TLDR; use markdown headers (##) for sections
+- Use **bold** for the TLDR line and place it immediately after the optional H1 title
 - Use `code` formatting for specific numeric values
 - Use tables for structured historical data
 - Use bullet lists for evidence and indicators
