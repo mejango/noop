@@ -7939,8 +7939,10 @@ describe('Wiki knowledge discipline', () => {
 
   test('wiki audit findings feed a bounded evidence-safe remediation queue', () => {
     assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_BATCH_SIZE = 2'));
-    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_FORMAT_VERSION = 3'));
+    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_FORMAT_VERSION = 4'));
     assert.ok(SCRIPT_SOURCE.includes('const getWikiRepairSchedule'));
+    assert.ok(SCRIPT_SOURCE.includes('paraphrasing the same finding cannot make it look like a brand-new repair target'));
+    assert.ok(SCRIPT_SOURCE.includes(".sort().join('|')"));
     assert.ok(SCRIPT_SOURCE.includes('WIKI_REPAIR_PRIORITY'));
     assert.ok(SCRIPT_SOURCE.includes('stored.last_repair_format_version === WIKI_REPAIR_FORMAT_VERSION'));
     assert.ok(SCRIPT_SOURCE.includes('last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION'));
@@ -7955,6 +7957,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(SCRIPT_SOURCE.includes('page changed while repair was running'));
     assert.ok(SCRIPT_SOURCE.includes('last_reviewed_at: null'));
     assert.ok(SCRIPT_SOURCE.includes('repairWikiIssues(wikiRepairSchedule)'));
+    assert.ok(SCRIPT_SOURCE.includes('due page(s) (${schedule.pendingCount} total flagged)'));
+    assert.ok(SCRIPT_SOURCE.includes('failed=${result.failed} flagged=${result.pending}'));
     assert.ok(SCRIPT_SOURCE.includes('!_wikiLintInFlight && !_wikiRepairInFlight && wikiLintSchedule.due'));
     assert.ok(wikiPagesRouteSource.includes('remediationPending'));
     assert.ok(wikiPagesRouteSource.includes('lastRemediationError'));

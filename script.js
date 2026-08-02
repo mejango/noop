@@ -380,7 +380,7 @@ const WIKI_LINT_RETRY_INTERVAL_MS = 30 * 60 * 1000; // Retry failed validation p
 const WIKI_REPAIR_RETRY_INTERVAL_MS = 30 * 60 * 1000;
 const WIKI_REPAIR_COOLDOWN_MS = 8 * 60 * 60 * 1000;
 const WIKI_REPAIR_BATCH_SIZE = 2;
-const WIKI_REPAIR_FORMAT_VERSION = 3;
+const WIKI_REPAIR_FORMAT_VERSION = 4;
 
 // Common bot state structure
 const createBotData = () => {
@@ -4543,14 +4543,12 @@ const getWikiLintSchedule = (meta = readWikiMeta(), nowMs = Date.now()) => {
   };
 };
 
-const getWikiIssueFingerprint = (issues) => (
+// Lint descriptions are generative prose. Key cooldowns to stable issue categories so
+// paraphrasing the same finding cannot make it look like a brand-new repair target.
+const getWikiIssueFingerprint = (issues) => Array.from(new Set(
   (Array.isArray(issues) ? issues : [])
-    .map((issue) => String(issue || '').trim())
-    .filter(Boolean)
-    .sort()
-    .join('|')
-    .slice(0, 2400)
-);
+    .map((issue) => String(issue || '').trim().match(/^\[([a-z_]+)\]/i)?.[1]?.toLowerCase() || 'untyped'),
+)).sort().join('|');
 
 const getWikiRepairSchedule = (meta = readWikiMeta(), nowMs = Date.now()) => {
   const pageMeta = meta?.pages && typeof meta.pages === 'object' && !Array.isArray(meta.pages)
@@ -4589,6 +4587,7 @@ const getWikiRepairSchedule = (meta = readWikiMeta(), nowMs = Date.now()) => {
   return {
     due: dueCandidates.length > 0,
     candidates: dueCandidates.slice(0, WIKI_REPAIR_BATCH_SIZE),
+    dueCount: dueCandidates.length,
     pendingCount: candidates.length,
     nextDueAt: nextDueMs ? new Date(nextDueMs).toISOString() : null,
   };
@@ -5464,7 +5463,7 @@ const repairWikiIssues = async (schedule = getWikiRepairSchedule()) => {
   if (!schedule.due || schedule.candidates.length === 0) {
     return { attempted: 0, repaired: 0, failed: 0, noChange: 0, pending: schedule.pendingCount || 0 };
   }
-  console.log(`📚 Wiki repair: processing ${schedule.candidates.length}/${schedule.pendingCount} page(s)...`);
+  console.log(`📚 Wiki repair: processing ${schedule.candidates.length} due page(s) (${schedule.pendingCount} total flagged): ${schedule.candidates.map((candidate) => candidate.pagePath).join(', ')}`);
   const results = [];
   for (const candidate of schedule.candidates) {
     results.push(await repairWikiPage(candidate));
@@ -13701,7 +13700,7 @@ const runBot = async () => {
       ) {
         _wikiRepairInFlight = true;
         repairWikiIssues(wikiRepairSchedule).then((result) => {
-          console.log(`📚 Wiki repair cycle finished: attempted=${result.attempted} repaired=${result.repaired} no_change=${result.noChange} failed=${result.failed} pending=${result.pending}`);
+          console.log(`📚 Wiki repair cycle finished: attempted=${result.attempted} repaired=${result.repaired} no_change=${result.noChange} failed=${result.failed} flagged=${result.pending}`);
         }).catch((error) => {
           console.log('📚 Wiki repair scheduler failed unexpectedly:', error.message);
         }).finally(() => {
