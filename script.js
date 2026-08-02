@@ -4607,12 +4607,14 @@ const appendWikiLog = (kind, title, bulletLines = []) => {
 
 const recordWikiLintFailure = (meta, message, title = 'wiki lint failed', details = []) => {
   const failedAt = new Date().toISOString();
-  meta.last_lint_attempt = failedAt;
-  meta.last_lint_error = message;
-  writeWikiMeta(meta);
+  const latestMeta = readWikiMeta();
+  const failureMeta = latestMeta && Object.keys(latestMeta).length > 0 ? latestMeta : meta;
+  failureMeta.last_lint_attempt = failedAt;
+  failureMeta.last_lint_error = message;
+  writeWikiMeta(failureMeta);
   refreshWikiIndex();
   appendWikiLog('lint', title, details.length > 0 ? details : [`error: ${message}`]);
-  logWikiMetaSummary('📚 Wiki lint: recorded failure', meta);
+  logWikiMetaSummary('📚 Wiki lint: recorded failure', failureMeta);
   return { attempted: true, success: false, error: message, attemptedAt: failedAt };
 };
 
@@ -5332,19 +5334,15 @@ ${pagesContext}
 7. **Ownership**: Do strategy pages faithfully summarize canonical [lesson:key] records without inventing a competing playbook?
 
 ## Instructions
-Return a JSON object with:
-{
-  "issues": [{"page": "path", "type": "contradiction|stale|redundant|missing_link|quality", "description": "..."}],
-  "updates": [{"page": "path", "content": "full updated page content"}]
-}
+Return one compact audit object and do not rewrite page content during validation:
+<lint_result>{"issues":[{"page":"path","type":"contradiction|stale|redundant|missing_link|quality","description":"concise actionable finding"}]}</lint_result>
 
-Only include updates for pages that genuinely need fixing. Do not introduce new market claims during lint, do not remove valid source markers, and do not manufacture evidence to freshen an old page. If no issues found, return {"issues":[],"updates":[]}.
-Wrap your JSON in a <lint_result> tag.`;
+Use at most two issues per page and keep each description under 240 characters. If no issues are found, return <lint_result>{"issues":[]}</lint_result>. Return no prose outside the tag.`;
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
-      max_tokens: 4096,
+      max_tokens: 1800,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -5369,16 +5367,15 @@ Wrap your JSON in a <lint_result> tag.`;
         [`parse error: ${parseErr.message}`],
       );
     }
-    if (!result || !Array.isArray(result.issues) || !Array.isArray(result.updates)) {
+    if (!result || !Array.isArray(result.issues)) {
       console.log('📚 Wiki lint: no valid structured result returned');
       return recordWikiLintFailure(
         meta,
         'invalid result schema',
         'no valid structured lint result',
-        ['expected issues[] and updates[] in tagged or raw JSON output'],
+        [`expected issues[] in tagged or raw JSON output; received keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') || 'none' : typeof result}`],
       );
     }
-
     if (result.issues?.length > 0) {
       console.log(`📚 Wiki lint: found ${result.issues.length} issue(s):`);
       for (const issue of result.issues) {
@@ -5386,31 +5383,6 @@ Wrap your JSON in a <lint_result> tag.`;
       }
     } else {
       console.log('📚 Wiki lint: no issues found');
-    }
-
-    // Apply updates with same safety guards as ingest
-    let updateCount = 0;
-    const lintUpdatedPages = [];
-    for (const update of (result.updates || [])) {
-      const pagePath = update.page;
-      const newContent = update.content?.trim();
-      if (!pagePath || !newContent) continue;
-      if (!WIKI_ALL_PAGES.includes(pagePath)) continue;
-      if (newContent.length < 50) continue;
-
-      const existingContent = pages[pagePath] || '';
-      if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) continue;
-      const required = WIKI_EXPECTED_HEADERS[pagePath] || [];
-      if (required.some((header) => !newContent.includes(header))) continue;
-
-      if (existingContent && !existingContent.includes('Awaiting initial assessment')) {
-        saveWikiHistory(pagePath, existingContent);
-      }
-
-      fs.writeFileSync(path.join(WIKI_DIR, pagePath), newContent);
-      updateCount++;
-      lintUpdatedPages.push({ pagePath, existingContent, newContent });
-      console.log(`📚 Wiki lint: updated ${pagePath}`);
     }
 
     // Prune history files older than 30 days
@@ -5442,36 +5414,33 @@ Wrap your JSON in a <lint_result> tag.`;
       if (!issuesByPage.has(issue.page)) issuesByPage.set(issue.page, []);
       issuesByPage.get(issue.page).push(`[${issue.type || 'quality'}] ${issue.description}`);
     }
+    const completionMeta = readWikiMeta();
+    let reviewedPageCount = 0;
     for (const pagePath of WIKI_ALL_PAGES) {
-      updateWikiPageMeta(meta, pagePath, {
+      if (readWikiPage(pagePath) !== pages[pagePath]) {
+        console.log(`📚 Wiki lint: ${pagePath} changed during audit; leaving it unreviewed`);
+        continue;
+      }
+      updateWikiPageMeta(completionMeta, pagePath, {
         last_reviewed_at: reviewedAt,
         issues: issuesByPage.get(pagePath) || [],
       });
+      reviewedPageCount++;
     }
-    for (const update of lintUpdatedPages) {
-      updateWikiPageMeta(meta, update.pagePath, {
-        last_changed_at: reviewedAt,
-        change_summary: summarizeWikiPageChange(
-          update.existingContent,
-          update.newContent,
-          'Wiki lint repaired structure or consistency',
-        ),
-      });
-    }
-    meta.last_lint = reviewedAt;
-    meta.last_lint_attempt = reviewedAt;
-    meta.last_lint_error = null;
-    meta.last_lint_issues = validIssues.length;
-    meta.last_lint_updates = updateCount;
-    writeWikiMeta(meta);
+    completionMeta.last_lint = reviewedAt;
+    completionMeta.last_lint_attempt = reviewedAt;
+    completionMeta.last_lint_error = null;
+    completionMeta.last_lint_issues = validIssues.length;
+    completionMeta.last_lint_updates = 0;
+    writeWikiMeta(completionMeta);
     refreshWikiIndex();
     appendWikiLog('lint', 'wiki lint complete', [
       `issues: ${validIssues.length}`,
-      `updates: ${updateCount}`,
+      `pages reviewed: ${reviewedPageCount}/${WIKI_ALL_PAGES.length}`,
     ]);
-    logWikiMetaSummary('📚 Wiki lint: wrote completion meta', meta);
+    logWikiMetaSummary('📚 Wiki lint: wrote completion meta', completionMeta);
 
-    console.log(`📚 Wiki lint: complete (${updateCount} updates applied)`);
+    console.log(`📚 Wiki lint: complete (${validIssues.length} issue(s), ${reviewedPageCount}/${WIKI_ALL_PAGES.length} pages reviewed)`);
     return { attempted: true, success: true, error: null, reviewedAt };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

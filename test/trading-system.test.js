@@ -7917,7 +7917,11 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(SCRIPT_SOURCE.includes('const getWikiLintSchedule'));
     assert.ok(SCRIPT_SOURCE.includes('needsInitialReview'));
     assert.ok(SCRIPT_SOURCE.includes('return recordWikiLintFailure'));
-    assert.ok(SCRIPT_SOURCE.includes('!Array.isArray(result.issues) || !Array.isArray(result.updates)'));
+    assert.ok(SCRIPT_SOURCE.includes('!result || !Array.isArray(result.issues)'));
+    assert.ok(SCRIPT_SOURCE.includes('do not rewrite page content during validation'));
+    assert.ok(SCRIPT_SOURCE.includes('max_tokens: 1800'));
+    assert.ok(SCRIPT_SOURCE.includes('changed during audit; leaving it unreviewed'));
+    assert.ok(SCRIPT_SOURCE.includes('pages reviewed: ${reviewedPageCount}/${WIKI_ALL_PAGES.length}'));
     assert.ok(SCRIPT_SOURCE.includes('wikiLintSchedule.due'));
     assert.ok(wikiPagesRouteSource.includes('lastLintAttempt'));
     assert.ok(wikiPagesRouteSource.includes('lastLintError'));
