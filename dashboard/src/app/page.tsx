@@ -86,6 +86,11 @@ interface OptionsPoint {
   lyra_spot: number | null;
 }
 
+interface SellCallEdgePoint {
+  timestamp: string;
+  edge_score: number;
+}
+
 interface LiquidityPoint {
   timestamp: string;
   [dex: string]: string | number;
@@ -287,6 +292,7 @@ interface SentimentData {
 interface ChartData {
   prices: SpotPrice[];
   options: OptionsPoint[];
+  sellCallEdge: SellCallEdgePoint[];
   liquidity: LiquidityPoint[];
   bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
@@ -411,6 +417,7 @@ const emptyStats: Stats = {
 const emptyChart: ChartData = {
   prices: [],
   options: [],
+  sellCallEdge: [],
   liquidity: [],
   bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 7, bestPutDetail: null, bestCallDetail: null },
   optionsHeatmap: [],
@@ -1061,6 +1068,7 @@ export default function OverviewPage() {
       momentumVal?: number;
       bestPut?: number | null;
       bestCall?: number | null;
+      callEdge?: number | null;
       bestPutDetail?: OptionDetail;
       bestCallDetail?: OptionDetail;
     };
@@ -1141,6 +1149,11 @@ export default function OverviewPage() {
       if (putSnap) rows[idx].bestPutDetail = makeDetail(putSnap, true);
       const callSnap = bestCallByTs.get(o.timestamp);
       if (callSnap) rows[idx].bestCallDetail = makeDetail(callSnap, false);
+    }
+
+    for (const point of chart.sellCallEdge || []) {
+      const idx = snapToNearest(new Date(point.timestamp).getTime());
+      rows[idx].callEdge = point.edge_score;
     }
 
     const liveTs = stats.last_price_time ? new Date(stats.last_price_time).getTime() : null;
@@ -1705,7 +1718,14 @@ export default function OverviewPage() {
             ETH L
           </span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL RAW</span>
+          <span className="flex items-center gap-1">
+            <span
+              className="w-3 h-0.5 inline-block"
+              style={{ background: 'repeating-linear-gradient(to right, #3b82f6 0 2px, transparent 2px 5px)' }}
+            />
+            CALL EDGE
+          </span>
           {visibleTradeMarkerKinds.map((kind) => {
             const markerStyle = tradeMarkerStyles[kind];
             return (
@@ -1788,8 +1808,10 @@ export default function OverviewPage() {
                   if (!row) return pinPrice.wrap(null);
                   const bestPut = row.bestPut;
                   const bestCall = row.bestCall;
+                  const callEdge = row.callEdge;
                   const fmtPut = bestPut != null && Number(bestPut) > 0 ? Number(bestPut).toFixed(6) : 'N/A';
                   const fmtCall = bestCall != null && Number(bestCall) > 0 ? Number(bestCall).toFixed(2) : 'N/A';
+                  const fmtCallEdge = callEdge != null && Number(callEdge) > 0 ? Number(callEdge).toFixed(2) : 'N/A';
                   const { windowDays } = chart.bestScores;
                   const { bestPutScore, bestCallScore } = displayedBestScores;
                   const pd = row.bestPutDetail;
@@ -1805,7 +1827,8 @@ export default function OverviewPage() {
                           Strike ${Number(pd.strike).toFixed(0)} | Delta {Number(pd.delta).toFixed(3)} | DTE {pd.dte ?? 'N/A'}
                         </div>
                       )}
-                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Value: {fmtCall}{cd ? <span className="text-xs text-gray-400 ml-2">Bid ${Number(cd.price).toFixed(4)}</span> : null}</div>
+                      <div className="text-sm" style={{ color: chartColors.secondary }}>CALL Raw Score: {fmtCall}{cd ? <span className="text-xs text-gray-400 ml-2">Bid ${Number(cd.price).toFixed(4)}</span> : null}</div>
+                      <div className="text-sm" style={{ color: chartColors.blue }}>CALL Edge Score: {fmtCallEdge}</div>
                       {cd && (
                         <div className="text-xs text-gray-500 pl-2 mb-0.5">
                           Strike ${Number(cd.strike).toFixed(0)} | Delta {Number(cd.delta).toFixed(3)} | DTE {cd.dte ?? 'N/A'}
@@ -1875,6 +1898,7 @@ export default function OverviewPage() {
               {/* PUT/CALL value overlays */}
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
+              <Line yAxisId="callVal" type="stepAfter" dataKey="callEdge" stroke={chartColors.blue} strokeDasharray="2 4" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} />
 
               {visibleTradesEnriched.map((trade) => {
                 const markerSpot = normalizeEthSpot(trade.index_price)

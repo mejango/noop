@@ -7983,6 +7983,30 @@ describe('Dashboard range loading UX', () => {
   });
 });
 
+describe('Sell-call composite edge chart', () => {
+  const botDbSource = fs.readFileSync(path.join(__dirname, '..', 'bot', 'db.js'), 'utf8');
+  const chartDbSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'db.ts'), 'utf8');
+  const chartRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'chart', 'route.ts'), 'utf8');
+  const overviewSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'page.tsx'), 'utf8');
+
+  test('persists the composite market edge independently of rule acceptance', () => {
+    assert.ok(botDbSource.includes('CREATE TABLE IF NOT EXISTS sell_call_edge_snapshots'));
+    assert.ok(botDbSource.includes('insertSellCallEdgeSnapshot'));
+    assert.ok(SCRIPT_SOURCE.includes('recordSellCallEdgeSnapshotSafe({'));
+    assert.ok(SCRIPT_SOURCE.includes('edge_score: entryBestSellCall.selection_score'));
+    assert.ok(SCRIPT_SOURCE.includes('scoreTrend24hPct: entrySellCallScoreTrend24hPct'));
+  });
+
+  test('serves and renders a distinct dotted blue edge series', () => {
+    assert.ok(chartDbSource.includes('getSellCallEdgeOverTime'));
+    assert.ok(chartRouteSource.includes('sellCallEdge'));
+    assert.ok(overviewSource.includes('CALL RAW'));
+    assert.ok(overviewSource.includes('CALL EDGE'));
+    assert.ok(overviewSource.includes('dataKey="callEdge"'));
+    assert.ok(overviewSource.includes('strokeDasharray="2 4"'));
+  });
+});
+
 // ============================================================================
 // Summary
 // ============================================================================

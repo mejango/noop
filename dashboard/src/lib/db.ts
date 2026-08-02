@@ -740,6 +740,60 @@ export function getBestOptionsOverTime(since: string) {
   return getStmts().getBestOptionsOverTime.all(since);
 }
 
+export function getSellCallEdgeOverTime(since: string, bucketMs = 0) {
+  const database = getDb();
+  const tableExists = (name: string) => Boolean(database.prepare(`
+    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1
+  `).get(name));
+  const sources: string[] = [];
+
+  if (tableExists('sell_call_edge_snapshots')) {
+    sources.push(`
+      SELECT timestamp, edge_score
+      FROM sell_call_edge_snapshots
+      WHERE timestamp > @since AND edge_score > 0
+    `);
+  }
+  // Older deployments only persisted candidates that reached decision telemetry.
+  // Keep those valid historical points while the continuous market series fills in.
+  if (tableExists('candidate_observations')) {
+    sources.push(`
+      SELECT observed_at AS timestamp, selection_score AS edge_score
+      FROM candidate_observations
+      WHERE observed_at > @since
+        AND action = 'sell_call'
+        AND selection_score > 0
+    `);
+  }
+  if (sources.length === 0) return [];
+
+  const bucketSeconds = bucketMs > 0 ? Math.max(1, Math.floor(bucketMs / 1000)) : 0;
+  const bucketExpression = bucketSeconds > 0
+    ? `(CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds) * @bucket_seconds`
+    : `CAST(strftime('%s', timestamp) AS INTEGER)`;
+  return database.prepare(`
+    WITH source AS (
+      ${sources.join('\nUNION ALL\n')}
+    ), per_tick AS (
+      SELECT timestamp, MAX(edge_score) AS edge_score
+      FROM source
+      GROUP BY timestamp
+    ), bucketed AS (
+      SELECT ${bucketExpression} AS bucket_epoch, AVG(edge_score) AS edge_score
+      FROM per_tick
+      GROUP BY bucket_epoch
+    )
+    SELECT
+      strftime('%Y-%m-%dT%H:%M:%SZ', bucket_epoch, 'unixepoch') AS timestamp,
+      edge_score
+    FROM bucketed
+    ORDER BY bucket_epoch ASC
+  `).all({ since, bucket_seconds: bucketSeconds }) as {
+    timestamp: string;
+    edge_score: number;
+  }[];
+}
+
 export function getSpotPricesBucketed(since: string, bucketMs: number) {
   if (!(bucketMs > 0)) return getSpotPrices(since, 40_000);
   const bucketSeconds = Math.max(1, Math.floor(bucketMs / 1000));

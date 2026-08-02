@@ -2192,7 +2192,12 @@ const getBestCurrentBuyPutCandidate = (tickerMap = {}, nowMs = Date.now(), marke
   return best;
 };
 
-const getBestCurrentSellCallCandidate = (tickerMap = {}, nowMs = Date.now(), marketContext = null) => {
+const getBestCurrentSellCallCandidate = (
+  tickerMap = {},
+  nowMs = Date.now(),
+  marketContext = null,
+  scoreTrend24hPct = null
+) => {
   let best = null;
   for (const [name, ticker] of Object.entries(tickerMap || {})) {
     const parsed = parseAdvisoryOptionInstrument(name);
@@ -2219,6 +2224,7 @@ const getBestCurrentSellCallCandidate = (tickerMap = {}, nowMs = Date.now(), mar
       askAmount,
       impliedVol: getTickerImpliedVol(ticker),
       openInterest: getTickerOpenInterest(ticker),
+      scoreTrend24hPct,
       marketContext,
     });
     const selectionScore = research.selection_score || score;
@@ -7089,6 +7095,16 @@ const recordCandidateObservationsSafe = (observations) => {
   }
 };
 
+const recordSellCallEdgeSnapshotSafe = (snapshot) => {
+  if (!db || typeof db.insertSellCallEdgeSnapshot !== 'function' || !snapshot) return null;
+  try {
+    return db.insertSellCallEdgeSnapshot(snapshot);
+  } catch (e) {
+    console.log(`DB: sell-call edge snapshot write failed: ${e.message}`);
+    return null;
+  }
+};
+
 const getCandidateOptionType = (candidate, criteria = {}) => (
   criteria.option_type
   || candidate?.instrument?.option_details?.option_type
@@ -9021,11 +9037,30 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
     const sellCallMarketContext = buildLiveSellCallMarketContext(tickerMap, Date.now(), {
       market_oi_delta_24h_pct: entryMarketOiDelta24hPct,
     });
-    const hasSellCallEntryRule = entryRules.some((rule) => rule?.action === 'sell_call');
-    const entryBestSellCall = hasSellCallEntryRule
-      ? getBestCurrentSellCallCandidate(tickerMap, Date.now(), sellCallMarketContext)
-      : null;
-    const entrySellCallScoreTrend24hPct = loadSellCallScoreTrend24hPct(entryBestSellCall?.score);
+    const entryBestRawSellCall = getBestCurrentSellCallCandidate(tickerMap, Date.now(), sellCallMarketContext);
+    const entrySellCallScoreTrend24hPct = loadSellCallScoreTrend24hPct(entryBestRawSellCall?.score);
+    const entryBestSellCall = getBestCurrentSellCallCandidate(
+      tickerMap,
+      Date.now(),
+      sellCallMarketContext,
+      entrySellCallScoreTrend24hPct
+    );
+    if (entryBestSellCall) {
+      recordSellCallEdgeSnapshotSafe({
+        timestamp: evaluationTimestamp,
+        instrument_name: entryBestSellCall.instrument,
+        raw_score: entryBestSellCall.score,
+        edge_score: entryBestSellCall.selection_score,
+        bid_price: entryBestSellCall.bid_price,
+        delta: entryBestSellCall.delta,
+        dte: entryBestSellCall.dte,
+        spot_price: spotPrice,
+        metadata: {
+          score_trend_24h_pct: entrySellCallScoreTrend24hPct,
+          research: entryBestSellCall.research,
+        },
+      });
+    }
     let buyPutOpportunityContext = null;
     const getBuyPutOpportunityContext = () => {
       if (buyPutOpportunityContext) return buyPutOpportunityContext;

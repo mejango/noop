@@ -500,6 +500,21 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_candidate_observations_action ON candidate_observations(action, observed_at);
   CREATE INDEX IF NOT EXISTS idx_candidate_observations_instrument ON candidate_observations(instrument_name, observed_at);
   CREATE INDEX IF NOT EXISTS idx_candidate_observations_pending ON candidate_observations(pending_action_id);
+
+  CREATE TABLE IF NOT EXISTS sell_call_edge_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL UNIQUE,
+    instrument_name TEXT NOT NULL,
+    raw_score REAL NOT NULL,
+    edge_score REAL NOT NULL,
+    bid_price REAL,
+    delta REAL,
+    dte REAL,
+    spot_price REAL,
+    metadata TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_sell_call_edge_snapshots_timestamp
+    ON sell_call_edge_snapshots(timestamp);
   CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument_ts ON options_snapshots(instrument_name, timestamp);
 
   CREATE TABLE IF NOT EXISTS decision_outcomes (
@@ -1564,6 +1579,23 @@ const stmts = {
     )
   `),
 
+  insertSellCallEdgeSnapshot: db.prepare(`
+    INSERT INTO sell_call_edge_snapshots (
+      timestamp, instrument_name, raw_score, edge_score, bid_price, delta, dte, spot_price, metadata
+    ) VALUES (
+      @timestamp, @instrument_name, @raw_score, @edge_score, @bid_price, @delta, @dte, @spot_price, @metadata
+    )
+    ON CONFLICT(timestamp) DO UPDATE SET
+      instrument_name = excluded.instrument_name,
+      raw_score = excluded.raw_score,
+      edge_score = excluded.edge_score,
+      bid_price = excluded.bid_price,
+      delta = excluded.delta,
+      dte = excluded.dte,
+      spot_price = excluded.spot_price,
+      metadata = excluded.metadata
+  `),
+
   insertDecisionOutcome: db.prepare(`
     INSERT OR IGNORE INTO decision_outcomes (observation_id, horizon_hours, due_at)
     VALUES (@observation_id, @horizon_hours, @due_at)
@@ -2075,6 +2107,25 @@ const insertCandidateObservations = (observations = [], horizons = DECISION_OUTC
   });
   insert(observations);
   return { inserted, outcomes };
+};
+
+const insertSellCallEdgeSnapshot = (snapshot = {}) => {
+  const rawScore = toNum(snapshot.raw_score);
+  const edgeScore = toNum(snapshot.edge_score);
+  if (!snapshot.instrument_name || !(rawScore > 0) || !(edgeScore > 0)) return null;
+  return stmts.insertSellCallEdgeSnapshot.run({
+    timestamp: snapshot.timestamp || new Date().toISOString(),
+    instrument_name: snapshot.instrument_name,
+    raw_score: rawScore,
+    edge_score: edgeScore,
+    bid_price: toNum(snapshot.bid_price),
+    delta: toNum(snapshot.delta),
+    dte: toNum(snapshot.dte),
+    spot_price: toNum(snapshot.spot_price),
+    metadata: snapshot.metadata
+      ? (typeof snapshot.metadata === 'string' ? snapshot.metadata : JSON.stringify(snapshot.metadata))
+      : null,
+  });
 };
 
 const evaluateDueDecisionOutcomes = ({ now = new Date().toISOString(), limit = 500, quoteWindowHours = 6 } = {}) => {
@@ -2768,6 +2819,7 @@ module.exports = {
   getRecentOrders,
   getOrdersInRange,
   insertCandidateObservations,
+  insertSellCallEdgeSnapshot,
   evaluateDueDecisionOutcomes,
   insertRuleDecision,
   refreshPositionLifecycle,

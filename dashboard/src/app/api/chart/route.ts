@@ -3,7 +3,7 @@ import {
   getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap,
   getFundingRates, getFundingRatesHourlySeries, getOISnapshots, getOISnapshotsBucketed,
   getOptionsCoverage, getSpotPricesHourly_rollup, getBestOptionsHourly_rollup, getLiquidityHourly_rollup,
-  getSpotPricesBucketed, getBestOptionsBucketed,
+  getSpotPricesBucketed, getBestOptionsBucketed, getSellCallEdgeOverTime,
 } from '@/lib/db';
 import { CHART_ROW_LIMITS } from '@/lib/limits';
 
@@ -192,6 +192,7 @@ export function GET(request: NextRequest) {
           (tailSince) => getLiquidityOverTime(tailSince) as TimestampedRow[],
         )
       : getLiquidityOverTime(since);
+    const sellCallEdge = getSellCallEdgeOverTime(since, bucketMs);
     const optionsHeatmap = getOptionsHeatmap(since, limits.heatmap, heatmapBucketMs);
 
     // Sentiment data
@@ -222,6 +223,10 @@ export function GET(request: NextRequest) {
         liquidity as Record<string, unknown>[],
         bucketMs,
       );
+      const dsSellCallEdge = downsample(
+        sellCallEdge as Record<string, unknown>[],
+        bucketMs, 'timestamp', ['edge_score'],
+      );
       const dsFunding = downsample(
         fundingRates as Record<string, unknown>[],
         bucketMs, 'timestamp', ['rate'],
@@ -241,7 +246,7 @@ export function GET(request: NextRequest) {
         ['expiry_count'],
       );
       return NextResponse.json({
-        prices: dsPrices, options: dsOptions, liquidity: dsLiquidity,
+        prices: dsPrices, options: dsOptions, liquidity: dsLiquidity, sellCallEdge: dsSellCallEdge,
         bestScores, optionsHeatmap,
         sentiment: { fundingRates: dsFunding, optionsSkew: dsSkew, aggregateOI: dsOI, oiSnapshots: dsOISnapshots },
         optionsCoverage: {
@@ -254,7 +259,7 @@ export function GET(request: NextRequest) {
     }
 
     return NextResponse.json({
-      prices, options, liquidity, bestScores, optionsHeatmap, sentiment,
+      prices, options, liquidity, sellCallEdge, bestScores, optionsHeatmap, sentiment,
       optionsCoverage: {
         ...optionsCoverage,
         requestedSince: since,
