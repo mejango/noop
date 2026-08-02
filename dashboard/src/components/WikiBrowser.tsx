@@ -47,6 +47,9 @@ interface WikiSummary {
   unreviewed: number;
   missing: number;
   lastLint: string | null;
+  lastLintAttempt: string | null;
+  lastLintError: string | null;
+  nextLintAt: string | null;
   lastIngest: string | null;
 }
 
@@ -57,6 +60,9 @@ const EMPTY_SUMMARY: WikiSummary = {
   unreviewed: 0,
   missing: 0,
   lastLint: null,
+  lastLintAttempt: null,
+  lastLintError: null,
+  nextLintAt: null,
   lastIngest: null,
 };
 
@@ -90,6 +96,18 @@ function timeAgo(ts: string): string {
 
 function formatRelative(ts: string | null | undefined): string {
   return ts ? timeAgo(ts) : 'never';
+}
+
+function timeUntil(ts: string | null | undefined): string {
+  if (!ts) return 'soon';
+  const parsed = new Date(ts).getTime();
+  if (!Number.isFinite(parsed)) return 'soon';
+  const diff = parsed - Date.now();
+  if (diff <= 0) return 'now';
+  const mins = Math.ceil(diff / 60000);
+  if (mins < 60) return `in ${mins}m`;
+  const hrs = Math.ceil(mins / 60);
+  return hrs < 24 ? `in ${hrs}h` : `in ${Math.ceil(hrs / 24)}d`;
 }
 
 function StatusPill({ status }: { status: WikiPageStatus }) {
@@ -324,6 +342,16 @@ export default function WikiBrowser() {
                   </div>
                 ))}
               </div>
+              {summary.lastLintError && (
+                <div className="mt-2 border border-red-500/20 bg-red-500/5 px-3 py-2 text-[10px] leading-relaxed text-red-200/80">
+                  Wiki validation failed {formatRelative(summary.lastLintAttempt)}: {summary.lastLintError}. Automatic retry {timeUntil(summary.nextLintAt)}.
+                </div>
+              )}
+              {!summary.lastLintError && summary.unreviewed > 0 && (
+                <div className="mt-2 border border-blue-500/15 bg-blue-500/5 px-3 py-2 text-[10px] leading-relaxed text-blue-200/70">
+                  {summary.unreviewed} page{summary.unreviewed === 1 ? '' : 's'} awaiting page-level validation. Next review {timeUntil(summary.nextLintAt)}.
+                </div>
+              )}
             </section>
 
             <section>

@@ -661,6 +661,17 @@ function formatLearningPercent(value: number | null) {
 function TradeLessonCard({ lesson, legacyBootstrapFailed = false }: { lesson: TradeLesson; legacyBootstrapFailed?: boolean }) {
   const status = LEARNING_STATUS_STYLES[lesson.status] || LEARNING_STATUS_STYLES.candidate;
   const evidenceRows = [...lesson.evidence.contradicting, ...lesson.evidence.supporting];
+  const [expandedEvidence, setExpandedEvidence] = useState<Set<string>>(() => new Set());
+  const [showAllEvidence, setShowAllEvidence] = useState(false);
+  const visibleEvidenceRows = showAllEvidence ? evidenceRows : evidenceRows.slice(0, 10);
+  const toggleEvidence = (key: string) => {
+    setExpandedEvidence((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
   return (
     <article className={`border px-3 py-3 space-y-2.5 ${lesson.status === 'disputed' ? 'border-amber-500/25 bg-amber-500/[0.03]' : 'border-white/10 bg-white/[0.02]'}`}>
       <div className="flex items-start justify-between gap-3">
@@ -713,23 +724,45 @@ function TradeLessonCard({ lesson, legacyBootstrapFailed = false }: { lesson: Tr
       {evidenceRows.length > 0 && (
         <details className="group border-t border-white/5 pt-2">
           <summary className="cursor-pointer list-none text-[10px] text-gray-400 hover:text-white transition-colors flex items-center">
-            <span>Evidence ledger</span>
+            <span>Evidence ledger ({evidenceRows.length})</span>
             <span className="ml-auto text-gray-600 group-open:hidden">show</span>
             <span className="ml-auto text-gray-600 hidden group-open:inline">hide</span>
           </summary>
           <div className="mt-2 space-y-2">
-            {evidenceRows.slice(0, 10).map((evidence) => (
-              <div key={`${evidence.review_id}-${evidence.stance}`} className="border-l border-white/10 pl-2 space-y-0.5">
-                <div className="flex items-center gap-2 text-[9px]">
-                  <span className={evidence.stance === 'contradicting' ? 'text-amber-300' : 'text-green-300'}>
-                    {evidence.stance === 'contradicting' ? 'CONTRADICTS' : 'SUPPORTS'}
+            {visibleEvidenceRows.map((evidence) => {
+              const evidenceKey = `${evidence.review_id}-${evidence.stance}`;
+              const isExpanded = expandedEvidence.has(evidenceKey);
+              return (
+                <button
+                  key={evidenceKey}
+                  type="button"
+                  aria-expanded={isExpanded}
+                  onClick={() => toggleEvidence(evidenceKey)}
+                  className="block w-full border-l border-white/10 py-0.5 pl-2 text-left transition-colors hover:border-white/25 hover:bg-white/[0.015]"
+                >
+                  <span className="flex items-center gap-2 text-[9px]">
+                    <span className={evidence.stance === 'contradicting' ? 'text-amber-300' : 'text-green-300'}>
+                      {evidence.stance === 'contradicting' ? 'CONTRADICTS' : 'SUPPORTS'}
+                    </span>
+                    <span className="truncate text-gray-400">{evidence.instrument_name}</span>
+                    <span className="ml-auto shrink-0 text-gray-600">{evidence.review_window_days}d</span>
                   </span>
-                  <span className="text-gray-400 truncate">{evidence.instrument_name}</span>
-                  <span className="text-gray-600 ml-auto shrink-0">{evidence.review_window_days}d</span>
-                </div>
-                <p className="text-[10px] leading-relaxed text-gray-500 line-clamp-3">{evidence.summary}</p>
-              </div>
-            ))}
+                  <span className={`mt-0.5 block text-[10px] leading-relaxed text-gray-500 ${isExpanded ? '' : 'line-clamp-3'}`}>
+                    {evidence.summary}
+                  </span>
+                  <span className="mt-1 block text-[9px] text-gray-600">{isExpanded ? 'show less' : 'read full statement'}</span>
+                </button>
+              );
+            })}
+            {evidenceRows.length > 10 && (
+              <button
+                type="button"
+                onClick={() => setShowAllEvidence((current) => !current)}
+                className="text-[9px] text-gray-500 transition-colors hover:text-gray-300"
+              >
+                {showAllEvidence ? 'show first 10' : `show all ${evidenceRows.length} entries`}
+              </button>
+            )}
           </div>
         </details>
       )}

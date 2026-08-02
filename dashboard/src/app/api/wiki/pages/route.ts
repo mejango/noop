@@ -99,6 +99,21 @@ export function GET() {
       .filter((page) => page.changeSummary)
       .sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime())
       .slice(0, 6);
+    const lastLint = typeof meta.last_lint === 'string' ? meta.last_lint : null;
+    const lastLintAttempt = typeof meta.last_lint_attempt === 'string' ? meta.last_lint_attempt : null;
+    const lastLintError = typeof meta.last_lint_error === 'string' && meta.last_lint_error.trim()
+      ? meta.last_lint_error.trim()
+      : null;
+    const needsInitialReview = pages.some((page) => page.lastReviewed === null);
+    const lastLintMs = lastLint ? new Date(lastLint).getTime() : 0;
+    const lastLintAttemptMs = lastLintAttempt ? new Date(lastLintAttempt).getTime() : 0;
+    const nextLintMs = lastLintError
+      ? (Number.isFinite(lastLintAttemptMs) && lastLintAttemptMs > 0 ? lastLintAttemptMs + 30 * 60 * 1000 : Date.now())
+      : needsInitialReview
+        ? Date.now()
+        : Number.isFinite(lastLintMs) && lastLintMs > 0
+          ? lastLintMs + 24 * 60 * 60 * 1000
+          : Date.now();
 
     return NextResponse.json({
       pages,
@@ -111,7 +126,10 @@ export function GET() {
         needsAttention: counts.needs_attention || 0,
         unreviewed: counts.unreviewed || 0,
         missing: counts.missing || 0,
-        lastLint: typeof meta.last_lint === 'string' ? meta.last_lint : null,
+        lastLint,
+        lastLintAttempt,
+        lastLintError,
+        nextLintAt: new Date(nextLintMs).toISOString(),
         lastIngest: typeof meta.last_ingest === 'string' ? meta.last_ingest : null,
       },
     });

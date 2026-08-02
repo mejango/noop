@@ -7912,6 +7912,20 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiCatalogSource.includes('reviewedMs < changedMs'));
   });
 
+  test('wiki validation retries failures and exposes its operational state', () => {
+    assert.ok(SCRIPT_SOURCE.includes('const WIKI_LINT_RETRY_INTERVAL_MS = 30 * 60 * 1000'));
+    assert.ok(SCRIPT_SOURCE.includes('const getWikiLintSchedule'));
+    assert.ok(SCRIPT_SOURCE.includes('needsInitialReview'));
+    assert.ok(SCRIPT_SOURCE.includes('return recordWikiLintFailure'));
+    assert.ok(SCRIPT_SOURCE.includes('!Array.isArray(result.issues) || !Array.isArray(result.updates)'));
+    assert.ok(SCRIPT_SOURCE.includes('wikiLintSchedule.due'));
+    assert.ok(wikiPagesRouteSource.includes('lastLintAttempt'));
+    assert.ok(wikiPagesRouteSource.includes('lastLintError'));
+    assert.ok(wikiPagesRouteSource.includes('nextLintAt'));
+    assert.ok(wikiBrowserSource.includes('Wiki validation failed'));
+    assert.ok(wikiBrowserSource.includes('awaiting page-level validation'));
+  });
+
   test('wiki UI is briefing-first and exposes ownership and validation state', () => {
     assert.ok(wikiBrowserSource.includes('Knowledge briefing'));
     assert.ok(wikiBrowserSource.includes('What changed'));
@@ -7930,6 +7944,13 @@ describe('Learning bootstrap diagnostics', () => {
     assert.ok(learningRouteSource.includes('last_trade_lesson_error ? 30 * 60 * 1000'));
     assert.ok(advisorDrawerSource.includes('Canonical evidence bootstrap failed:'));
     assert.ok(advisorDrawerSource.includes('evidence bootstrap retrying'));
+  });
+
+  test('evidence ledger statements can be expanded without losing a compact overview', () => {
+    assert.ok(advisorDrawerSource.includes('aria-expanded={isExpanded}'));
+    assert.ok(advisorDrawerSource.includes("isExpanded ? '' : 'line-clamp-3'"));
+    assert.ok(advisorDrawerSource.includes('read full statement'));
+    assert.ok(advisorDrawerSource.includes('show all ${evidenceRows.length} entries'));
   });
 });
 

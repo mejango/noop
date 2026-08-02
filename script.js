@@ -376,6 +376,7 @@ const TRADE_LESSON_RETRY_INTERVAL_MS = 30 * 60 * 1000; // Retry failed synthesis
 const TRADE_LESSON_SYNTHESIS_TIMEOUT_MS = 90 * 1000;
 const TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT = 48;
 const WIKI_LINT_INTERVAL_MS = 24 * 60 * 60 * 1000; // Every 24 hours
+const WIKI_LINT_RETRY_INTERVAL_MS = 30 * 60 * 1000; // Retry failed validation promptly
 
 // Common bot state structure
 const createBotData = () => {
@@ -4490,6 +4491,36 @@ const writeWikiMeta = (meta) => {
   fs.writeFileSync(WIKI_META_PATH, JSON.stringify(meta, null, 2));
 };
 
+const parseWikiMetaTimestamp = (value) => {
+  const timestamp = typeof value === 'string' ? new Date(value).getTime() : 0;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
+
+const getWikiLintSchedule = (meta = readWikiMeta(), nowMs = Date.now()) => {
+  const pageMeta = meta?.pages && typeof meta.pages === 'object' && !Array.isArray(meta.pages)
+    ? meta.pages
+    : {};
+  const needsInitialReview = WIKI_ALL_PAGES.some((pagePath) => !pageMeta[pagePath]?.last_reviewed_at);
+  const lastAttemptMs = parseWikiMetaTimestamp(meta?.last_lint_attempt);
+  const lastSuccessMs = parseWikiMetaTimestamp(meta?.last_lint);
+  const lastError = typeof meta?.last_lint_error === 'string' && meta.last_lint_error.trim()
+    ? meta.last_lint_error.trim()
+    : null;
+  const nextDueMs = lastError
+    ? (lastAttemptMs ? lastAttemptMs + WIKI_LINT_RETRY_INTERVAL_MS : 0)
+    : needsInitialReview
+      ? 0
+      : lastSuccessMs
+        ? lastSuccessMs + WIKI_LINT_INTERVAL_MS
+        : 0;
+  return {
+    due: nextDueMs === 0 || nowMs >= nextDueMs,
+    needsInitialReview,
+    lastError,
+    nextDueAt: nextDueMs ? new Date(nextDueMs).toISOString() : new Date(nowMs).toISOString(),
+  };
+};
+
 const ensureWikiSupportFiles = () => {
   if (!fs.existsSync(WIKI_INDEX_PATH)) {
     fs.writeFileSync(WIKI_INDEX_PATH, '# Knowledge Index\n\nSystem-maintained index. Awaiting first refresh.\n');
@@ -4572,6 +4603,17 @@ const appendWikiLog = (kind, title, bulletLines = []) => {
   }
   lines.push('');
   fs.appendFileSync(WIKI_LOG_PATH, `${lines.join('\n')}\n`);
+};
+
+const recordWikiLintFailure = (meta, message, title = 'wiki lint failed', details = []) => {
+  const failedAt = new Date().toISOString();
+  meta.last_lint_attempt = failedAt;
+  meta.last_lint_error = message;
+  writeWikiMeta(meta);
+  refreshWikiIndex();
+  appendWikiLog('lint', title, details.length > 0 ? details : [`error: ${message}`]);
+  logWikiMetaSummary('📚 Wiki lint: recorded failure', meta);
+  return { attempted: true, success: false, error: message, attemptedAt: failedAt };
 };
 
 const parseTickSummary = (row) => {
@@ -5238,16 +5280,15 @@ const getWikiSignalContext = () => {
 const lintWiki = async () => {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('📚 Wiki lint: skipped — no ANTHROPIC_API_KEY');
-    return;
+    return { attempted: false, success: false, error: 'ANTHROPIC_API_KEY unavailable' };
   }
 
-  // Guard: only run once per 24 hours
   const meta = readWikiMeta();
   logWikiMetaSummary('📚 Wiki lint: preflight', meta);
-  if (meta.last_lint && Date.now() - new Date(meta.last_lint).getTime() < WIKI_LINT_INTERVAL_MS) {
-    const nextEligibleAt = new Date(new Date(meta.last_lint).getTime() + WIKI_LINT_INTERVAL_MS).toISOString();
-    console.log(`📚 Wiki lint: skipped — throttled until ${nextEligibleAt}`);
-    return;
+  const schedule = getWikiLintSchedule(meta);
+  if (!schedule.due) {
+    console.log(`📚 Wiki lint: skipped — ${schedule.lastError ? 'retry' : 'next review'} at ${schedule.nextDueAt}`);
+    return { attempted: false, success: true, error: null, nextDueAt: schedule.nextDueAt };
   }
 
   console.log('📚 Wiki lint: auditing wiki pages...');
@@ -5261,9 +5302,12 @@ const lintWiki = async () => {
   }
   if (!hasContent) {
     console.log('📚 Wiki lint: skipped — wiki not yet seeded');
-    logWikiMetaSummary('📚 Wiki lint: post-skip', meta);
-    return;
+    return recordWikiLintFailure(meta, 'wiki not yet seeded', 'wiki lint waiting for seed');
   }
+
+  meta.last_lint_attempt = new Date().toISOString();
+  meta.last_lint_error = null;
+  writeWikiMeta(meta);
 
   const schema = readWikiPage('schema.md');
   const pagesContext = Object.entries(pages)
@@ -5313,29 +5357,26 @@ Wrap your JSON in a <lint_result> tag.`;
 
     const text = response.data?.content?.[0]?.text || '';
     const lintMatch = text.match(/<lint_result>([\s\S]*?)<\/lint_result>/);
-    if (!lintMatch) {
-      console.log('📚 Wiki lint: no structured result returned');
-      meta.last_lint_attempt = new Date().toISOString();
-      meta.last_lint_error = 'unstructured result';
-      writeWikiMeta(meta);
-      refreshWikiIndex();
-      appendWikiLog('lint', 'no structured lint result', ['result parsing failed or model returned unstructured output']);
-      logWikiMetaSummary('📚 Wiki lint: wrote fallback last_lint', meta);
-      return;
-    }
-
-    let result;
+    let result = null;
     try {
-      result = JSON.parse(lintMatch[1].trim());
+      result = lintMatch ? JSON.parse(lintMatch[1].trim()) : extractJSON(text);
     } catch (parseErr) {
       console.log('📚 Wiki lint: malformed JSON in lint_result:', parseErr.message);
-      meta.last_lint_attempt = new Date().toISOString();
-      meta.last_lint_error = `malformed result: ${parseErr.message}`;
-      writeWikiMeta(meta);
-      refreshWikiIndex();
-      appendWikiLog('lint', 'malformed lint result', [`parse error: ${parseErr.message}`]);
-      logWikiMetaSummary('📚 Wiki lint: wrote parse-fallback last_lint', meta);
-      return;
+      return recordWikiLintFailure(
+        meta,
+        `malformed result: ${parseErr.message}`,
+        'malformed lint result',
+        [`parse error: ${parseErr.message}`],
+      );
+    }
+    if (!result || !Array.isArray(result.issues) || !Array.isArray(result.updates)) {
+      console.log('📚 Wiki lint: no valid structured result returned');
+      return recordWikiLintFailure(
+        meta,
+        'invalid result schema',
+        'no valid structured lint result',
+        ['expected issues[] and updates[] in tagged or raw JSON output'],
+      );
     }
 
     if (result.issues?.length > 0) {
@@ -5431,9 +5472,11 @@ Wrap your JSON in a <lint_result> tag.`;
     logWikiMetaSummary('📚 Wiki lint: wrote completion meta', meta);
 
     console.log(`📚 Wiki lint: complete (${updateCount} updates applied)`);
+    return { attempted: true, success: true, error: null, reviewedAt };
   } catch (e) {
-    console.log('📚 Wiki lint failed:', e.message);
-    logWikiMetaSummary('📚 Wiki lint: failure state', meta);
+    const message = e instanceof Error ? e.message : String(e);
+    console.log('📚 Wiki lint failed:', message);
+    return recordWikiLintFailure(meta, message);
   }
 };
 
@@ -13333,18 +13376,23 @@ const runBot = async () => {
         });
       }
 
-      // Independent wiki lint cadence every 24 hours
-      if (process.env.ANTHROPIC_API_KEY && !_wikiLintInFlight && (Date.now() - botData.lastWikiLintRun >= WIKI_LINT_INTERVAL_MS)) {
-        const prevWikiLintTs = botData.lastWikiLintRun;
-        botData.lastWikiLintRun = Date.now();
+      // Validate never-reviewed pages immediately, retry failures after 30 minutes,
+      // and otherwise keep the normal 24-hour audit cadence.
+      const wikiLintSchedule = getWikiLintSchedule();
+      if (process.env.ANTHROPIC_API_KEY && !_wikiLintInFlight && wikiLintSchedule.due) {
         _wikiLintInFlight = true;
-        persistCycleState();
-        lintWiki().then(() => {
-          console.log('📚 Scheduled wiki lint finished, next in 24h');
+        lintWiki().then((result) => {
+          if (result?.success) {
+            if (result.reviewedAt) {
+              botData.lastWikiLintRun = new Date(result.reviewedAt).getTime();
+              persistCycleState();
+            }
+            console.log('📚 Scheduled wiki lint finished, next in 24h');
+            return;
+          }
+          console.log(`📚 Scheduled wiki lint failed, retry in 30m: ${result?.error || 'unknown error'}`);
         }).catch((e) => {
-          botData.lastWikiLintRun = prevWikiLintTs;
-          persistCycleState();
-          console.log('📚 Scheduled wiki lint failed (will retry next tick):', e.message);
+          console.log('📚 Scheduled wiki lint failed unexpectedly (metadata retry remains active):', e.message);
         }).finally(() => {
           _wikiLintInFlight = false;
         });
