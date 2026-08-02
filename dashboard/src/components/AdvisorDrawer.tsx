@@ -626,8 +626,6 @@ interface LearningStatus {
     last_run_at: string | null;
     last_success_at: string | null;
     last_error: string | null;
-    historical_backfill_completed_at: string | null;
-    historical_backfill_pending: boolean;
     next_due_at: string | null;
   };
 }
@@ -1662,19 +1660,6 @@ export default function AdvisorDrawer() {
                     </div>
                   )}
 
-                  {learningData.status?.learningSummary?.canonical_mode && learningData.status.tradeLessonJob?.historical_backfill_pending && (
-                    <div className={`border px-3 py-2 text-[10px] leading-relaxed ${tradeLessonJobError ? 'border-red-500/25 bg-red-500/[0.05] text-red-200/90' : 'border-blue-500/20 bg-blue-500/[0.04] text-blue-200/80'}`}>
-                      {tradeLessonJobError ? (
-                        <>
-                          Historical evidence backfill failed: {tradeLessonJobError}. Canonical rules remain active while the bot retries
-                          {learningData.status.tradeLessonJob.next_due_at ? ` ${timeUntil(learningData.status.tradeLessonJob.next_due_at)}` : ' automatically'}.
-                        </>
-                      ) : (
-                        <>Canonical rules are active. Older campaign reviews are being linked in a stratified historical backfill.</>
-                      )}
-                    </div>
-                  )}
-
                   {learningData.lessons.some((lesson) => lesson.is_legacy) && (
                     <div className={`border px-3 py-2 text-[10px] leading-relaxed ${tradeLessonJobError ? 'border-red-500/25 bg-red-500/[0.05] text-red-200/90' : 'border-blue-500/20 bg-blue-500/[0.04] text-blue-200/80'}`}>
                       {tradeLessonJobError ? (
@@ -1799,7 +1784,6 @@ export default function AdvisorDrawer() {
                         <p>next due: {learningData.status.tradeReviewJob?.next_due_at ? timeUntil(learningData.status.tradeReviewJob.next_due_at) : 'n/a'}</p>
                         <p>lesson synthesis: {learningData.status.tradeLessonJob?.last_run_at ? timeAgo(learningData.status.tradeLessonJob.last_run_at) : 'never'}</p>
                         <p>lesson retry: {learningData.status.tradeLessonJob?.next_due_at ? timeUntil(learningData.status.tradeLessonJob.next_due_at) : 'n/a'}</p>
-                        <p>historical backfill: {learningData.status.tradeLessonJob?.historical_backfill_pending ? 'pending' : learningData.status.tradeLessonJob?.historical_backfill_completed_at ? timeAgo(learningData.status.tradeLessonJob.historical_backfill_completed_at) : 'n/a'}</p>
                       </div>
                       {learningData.status.tradeReviewJob?.last_error && (
                         <div className="border border-red-500/20 bg-red-500/[0.04] px-2 py-1.5 text-[10px] text-red-400">

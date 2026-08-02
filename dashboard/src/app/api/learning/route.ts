@@ -548,7 +548,6 @@ export async function GET() {
       last_trade_lesson_run: 0,
       last_trade_lesson_success: 0,
       last_trade_lesson_error: null,
-      last_trade_lesson_backfill_at: 0,
     };
     const canonicalLessonRows = hasTradeLessonsTable ? getCanonicalTradeLessons() : [];
     const legacyLessonRows = hasTradeLessonsTable && canonicalLessonRows.length === 0 ? getActiveTradeLessons() : [];
@@ -721,18 +720,12 @@ export async function GET() {
             ? new Date(tradeReviewState.last_trade_lesson_success).toISOString()
             : null,
           last_error: tradeReviewState.last_trade_lesson_error ?? null,
-          historical_backfill_completed_at: tradeReviewState.last_trade_lesson_backfill_at
-            ? new Date(tradeReviewState.last_trade_lesson_backfill_at).toISOString()
-            : null,
-          historical_backfill_pending: !tradeReviewState.last_trade_lesson_backfill_at,
-          next_due_at: !tradeReviewState.last_trade_lesson_backfill_at && !tradeReviewState.last_trade_lesson_error
-            ? new Date().toISOString()
-            : tradeReviewState.last_trade_lesson_run
-              ? new Date(
-                  tradeReviewState.last_trade_lesson_run
-                  + (tradeReviewState.last_trade_lesson_error ? 30 * 60 * 1000 : 8 * 60 * 60 * 1000)
-                ).toISOString()
-              : new Date().toISOString(),
+          next_due_at: tradeReviewState.last_trade_lesson_run
+            ? new Date(
+                tradeReviewState.last_trade_lesson_run
+                + (tradeReviewState.last_trade_lesson_error ? 30 * 60 * 1000 : 8 * 60 * 60 * 1000)
+              ).toISOString()
+            : new Date().toISOString(),
         },
       },
     });

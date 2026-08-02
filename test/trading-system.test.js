@@ -7846,21 +7846,11 @@ describe('Canonical trade learning', () => {
 
   test('canonical synthesis has bounded bootstrap input, a resilient timeout, and prompt retry', () => {
     assert.ok(SCRIPT_SOURCE.includes('const TRADE_LESSON_SYNTHESIS_TIMEOUT_MS = 90 * 1000'));
+    assert.ok(SCRIPT_SOURCE.includes('const TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT = 48'));
     assert.ok(SCRIPT_SOURCE.includes('getRecentTradeReviews(TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT)'));
     assert.ok(SCRIPT_SOURCE.includes('legacyLessons.slice(0, 12)'));
     assert.ok(SCRIPT_SOURCE.includes('const TRADE_LESSON_RETRY_INTERVAL_MS = 30 * 60 * 1000'));
     assert.ok(SCRIPT_SOURCE.includes('Date.now() - botData.lastTradeLessonRun >= tradeLessonDelay'));
-  });
-
-  test('historical review backfill is stratified and runs before incremental synthesis', () => {
-    assert.ok(SCRIPT_SOURCE.includes('const selectStratifiedTradeLessonReviews'));
-    assert.ok(SCRIPT_SOURCE.includes("const preferredFamilies = ['short_call_campaign', 'long_put_campaign']"));
-    assert.ok(SCRIPT_SOURCE.includes('tradeLessonReviewPriority(b.reviews[0])'));
-    assert.ok(SCRIPT_SOURCE.includes('originalBootstrapUniverse.slice(TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT)'));
-    assert.ok(SCRIPT_SOURCE.includes("isHistoricalBackfill ? 'Backfilling'"));
-    assert.ok(SCRIPT_SOURCE.includes('Every supplied #ID must appear in at least one supporting_review_ids or contradicting_review_ids list.'));
-    assert.ok(SCRIPT_SOURCE.includes('Historical backfill omitted review ID(s):'));
-    assert.ok(SCRIPT_SOURCE.includes('if (isHistoricalBackfill) botData.lastTradeLessonBackfillAt = Date.now()'));
   });
 
   test('canonical synthesis diagnostics survive bot restarts', () => {
@@ -7868,13 +7858,11 @@ describe('Canonical trade learning', () => {
       lastTradeLessonRun: 101,
       lastTradeLessonSuccess: 99,
       lastTradeLessonError: 'timeout',
-      lastTradeLessonBackfillAt: 88,
     });
     const state = learningDb.loadBotState();
     assert.strictEqual(state.last_trade_lesson_run, 101);
     assert.strictEqual(state.last_trade_lesson_success, 99);
     assert.strictEqual(state.last_trade_lesson_error, 'timeout');
-    assert.strictEqual(state.last_trade_lesson_backfill_at, 88);
   });
 
   test('canonical synthesis requires review ids and never requests an evidence count', () => {
@@ -7940,10 +7928,8 @@ describe('Learning bootstrap diagnostics', () => {
   test('failed canonical bootstrap is explicit in the API and interface', () => {
     assert.ok(learningRouteSource.includes('tradeLessonJob:'));
     assert.ok(learningRouteSource.includes('last_trade_lesson_error ? 30 * 60 * 1000'));
-    assert.ok(learningRouteSource.includes('historical_backfill_pending'));
     assert.ok(advisorDrawerSource.includes('Canonical evidence bootstrap failed:'));
     assert.ok(advisorDrawerSource.includes('evidence bootstrap retrying'));
-    assert.ok(advisorDrawerSource.includes('Older campaign reviews are being linked in a stratified historical backfill.'));
   });
 });
 
