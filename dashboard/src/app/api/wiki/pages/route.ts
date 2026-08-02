@@ -130,11 +130,6 @@ export function GET() {
         lastLintAttempt,
         lastLintError,
         nextLintAt: new Date(nextLintMs).toISOString(),
-        remediationPending: counts.needs_attention || 0,
-        lastRemediationAt: typeof meta.last_repair_batch === 'string' ? meta.last_repair_batch : null,
-        lastRemediationError: typeof meta.last_repair_error === 'string' && meta.last_repair_error.trim()
-          ? meta.last_repair_error.trim()
-          : null,
         lastIngest: typeof meta.last_ingest === 'string' ? meta.last_ingest : null,
       },
     });

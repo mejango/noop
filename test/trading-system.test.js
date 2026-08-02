@@ -7921,14 +7921,7 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(SCRIPT_SOURCE.includes('do not rewrite page content during validation'));
     assert.ok(SCRIPT_SOURCE.includes('max_tokens: 1800'));
     assert.ok(SCRIPT_SOURCE.includes('changed during audit; leaving it unreviewed'));
-    assert.ok(SCRIPT_SOURCE.includes('const pagesToReview = schedule.needsInitialReview'));
-    assert.ok(SCRIPT_SOURCE.includes('report issues only for these target pages'));
-    assert.ok(SCRIPT_SOURCE.includes('issue && pagesToReview.includes(issue.page)'));
-    assert.ok(SCRIPT_SOURCE.includes('ignored ${ignoredIssueCount} out-of-scope finding(s)'));
-    assert.ok(SCRIPT_SOURCE.includes('for (const pagePath of pagesToReview)'));
-    assert.ok(SCRIPT_SOURCE.includes('if (isFullReview) completionMeta.last_lint = reviewedAt'));
-    assert.ok(SCRIPT_SOURCE.includes('outstanding issues: ${outstandingIssueCount}'));
-    assert.ok(SCRIPT_SOURCE.includes('Wiki page revalidation finished:'));
+    assert.ok(SCRIPT_SOURCE.includes('pages reviewed: ${reviewedPageCount}/${WIKI_ALL_PAGES.length}'));
     assert.ok(SCRIPT_SOURCE.includes('wikiLintSchedule.due'));
     assert.ok(wikiPagesRouteSource.includes('lastLintAttempt'));
     assert.ok(wikiPagesRouteSource.includes('lastLintError'));
@@ -7937,37 +7930,10 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiBrowserSource.includes('awaiting page-level validation'));
   });
 
-  test('wiki audit findings feed a bounded evidence-safe remediation queue', () => {
-    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_BATCH_SIZE = 2'));
-    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_FORMAT_VERSION = 5'));
-    assert.ok(SCRIPT_SOURCE.includes('const getWikiRepairSchedule'));
-    assert.ok(SCRIPT_SOURCE.includes('paraphrasing the same finding cannot make it look like a brand-new repair target'));
-    assert.ok(SCRIPT_SOURCE.includes(".sort().join('|')"));
-    assert.ok(SCRIPT_SOURCE.includes('WIKI_REPAIR_PRIORITY'));
-    assert.ok(SCRIPT_SOURCE.includes('stored.last_repair_format_version === WIKI_REPAIR_FORMAT_VERSION'));
-    assert.ok(SCRIPT_SOURCE.includes('last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION'));
-    assert.ok(SCRIPT_SOURCE.includes('repairing exactly one audited page'));
-    assert.ok(SCRIPT_SOURCE.includes('place one bold TLDR line immediately after that optional title'));
-    assert.ok(SCRIPT_SOURCE.includes('replacement must place a bold TLDR immediately after the optional H1 title'));
-    assert.ok(SCRIPT_SOURCE.includes('replacement invented source marker(s)'));
-    assert.ok(SCRIPT_SOURCE.includes('const existingMarkers = getStructuredWikiMarkers(existingContent)'));
-    assert.ok(SCRIPT_SOURCE.includes('existingMarkers.size > 0 && outputMarkers.size === 0'));
-    assert.ok(SCRIPT_SOURCE.includes('replacement removed all structured source markers from the target page'));
-    assert.ok(SCRIPT_SOURCE.includes('state uncertainty instead of importing an unrelated marker'));
-    assert.ok(SCRIPT_SOURCE.includes('page changed while repair was running'));
-    assert.ok(SCRIPT_SOURCE.includes('last_reviewed_at: null'));
-    assert.ok(SCRIPT_SOURCE.includes("last_repair_result: 'no_change'"));
-    assert.ok(SCRIPT_SOURCE.includes('needs no content change; queued for re-review'));
-    assert.ok(SCRIPT_SOURCE.includes("last_repair_result: 'failed'"));
-    assert.ok(SCRIPT_SOURCE.includes("last_repair_result: 'repaired'"));
-    assert.ok(SCRIPT_SOURCE.includes('repairWikiIssues(wikiRepairSchedule)'));
-    assert.ok(SCRIPT_SOURCE.includes('due page(s) (${schedule.pendingCount} total flagged)'));
-    assert.ok(SCRIPT_SOURCE.includes('failed=${result.failed} flagged=${result.pending}'));
-    assert.ok(SCRIPT_SOURCE.includes('!_wikiLintInFlight && !_wikiRepairInFlight && wikiLintSchedule.due'));
-    assert.ok(wikiPagesRouteSource.includes('remediationPending'));
-    assert.ok(wikiPagesRouteSource.includes('lastRemediationError'));
-    assert.ok(wikiBrowserSource.includes('Automated remediation queue:'));
-    assert.ok(wikiBrowserSource.includes('up to two are repaired per cycle and then re-reviewed'));
+  test('wiki validation remains read-only outside the daily audit cadence', () => {
+    assert.ok(!SCRIPT_SOURCE.includes('repairWikiIssues('));
+    assert.ok(!SCRIPT_SOURCE.includes('getWikiRepairSchedule'));
+    assert.ok(!wikiBrowserSource.includes('Automated remediation queue:'));
   });
 
   test('wiki UI is briefing-first and exposes ownership and validation state', () => {
