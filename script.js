@@ -380,7 +380,7 @@ const WIKI_LINT_RETRY_INTERVAL_MS = 30 * 60 * 1000; // Retry failed validation p
 const WIKI_REPAIR_RETRY_INTERVAL_MS = 30 * 60 * 1000;
 const WIKI_REPAIR_COOLDOWN_MS = 8 * 60 * 60 * 1000;
 const WIKI_REPAIR_BATCH_SIZE = 2;
-const WIKI_REPAIR_FORMAT_VERSION = 4;
+const WIKI_REPAIR_FORMAT_VERSION = 5;
 
 // Common bot state structure
 const createBotData = () => {
@@ -5282,6 +5282,7 @@ const recordWikiPageRepairFailure = (candidate, message) => {
     last_repair_attempt_at: failedAt,
     last_repair_issue_fingerprint: candidate.fingerprint,
     last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
+    last_repair_result: 'failed',
     last_repair_error: message,
   });
   meta.last_repair_attempt = failedAt;
@@ -5309,6 +5310,7 @@ const repairWikiPage = async (candidate) => {
     last_repair_attempt_at: startedAt,
     last_repair_issue_fingerprint: candidate.fingerprint,
     last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
+    last_repair_result: 'in_progress',
     last_repair_error: null,
   });
   startMeta.last_repair_attempt = startedAt;
@@ -5386,14 +5388,16 @@ ${learningContext || 'No canonical Learning rules supplied.'}
         last_repair_attempt_at: completedAt,
         last_repair_issue_fingerprint: candidate.fingerprint,
         last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
+        last_repair_result: 'no_change',
         last_repair_success_at: completedAt,
+        last_reviewed_at: null,
         last_repair_error: null,
       });
       meta.last_repair_success = completedAt;
       meta.last_repair_error = null;
       writeWikiMeta(meta);
-      appendWikiLog('repair', 'wiki page already consistent', [`page: ${pagePath}`]);
-      console.log(`📚 Wiki repair: ${pagePath} needs no content change`);
+      appendWikiLog('repair', 'wiki page already consistent; revalidation queued', [`page: ${pagePath}`]);
+      console.log(`📚 Wiki repair: ${pagePath} needs no content change; queued for re-review`);
       return { pagePath, status: 'no_change', error: null };
     }
 
@@ -5439,6 +5443,7 @@ ${learningContext || 'No canonical Learning rules supplied.'}
       last_repair_attempt_at: repairedAt,
       last_repair_issue_fingerprint: candidate.fingerprint,
       last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
+      last_repair_result: 'repaired',
       last_repair_success_at: repairedAt,
       last_repair_error: null,
     });
