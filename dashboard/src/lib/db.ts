@@ -1375,6 +1375,7 @@ export function getBudgetCycleState() {
       last_trade_lesson_run: number;
       last_trade_lesson_success: number;
       last_trade_lesson_error: string | null;
+      last_trade_lesson_backfill_at: number;
       last_advisory_run: number;
       last_advisory_success: number;
       last_advisory_error: string | null;

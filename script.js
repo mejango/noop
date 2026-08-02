@@ -375,6 +375,7 @@ const TRADE_LESSON_INTERVAL_MS = 8 * 60 * 60 * 1000; // Normal canonical synthes
 const TRADE_LESSON_RETRY_INTERVAL_MS = 30 * 60 * 1000; // Retry failed synthesis promptly
 const TRADE_LESSON_SYNTHESIS_TIMEOUT_MS = 90 * 1000;
 const TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT = 30;
+const TRADE_LESSON_BACKFILL_SOURCE_LIMIT = 48;
 const WIKI_LINT_INTERVAL_MS = 24 * 60 * 60 * 1000; // Every 24 hours
 
 // Common bot state structure
@@ -408,6 +409,7 @@ let botData = {
     lastTradeLessonRun: 0,
     lastTradeLessonSuccess: 0,
     lastTradeLessonError: null,
+    lastTradeLessonBackfillAt: 0,
 
     // Advisory tracking
     lastAdvisoryRun: 0,
@@ -668,6 +670,7 @@ const loadData = () => {
       botData.lastTradeLessonRun = state.last_trade_lesson_run || 0;
       botData.lastTradeLessonSuccess = state.last_trade_lesson_success || 0;
       botData.lastTradeLessonError = state.last_trade_lesson_error || null;
+      botData.lastTradeLessonBackfillAt = state.last_trade_lesson_backfill_at || 0;
       botData.lastAdvisoryRun = state.last_advisory_run || 0;
       botData.lastAdvisorySuccess = state.last_advisory_success || 0;
       botData.lastAdvisoryError = state.last_advisory_error || null;
@@ -4246,6 +4249,73 @@ const formatTradeReviewForLessonSynthesis = (review) => {
   ].join(' ');
 };
 
+const tradeLessonReviewPriority = (review) => ({
+  risk_mistake: 4,
+  execution_mistake: 3,
+  disciplined_loss: 2,
+  disciplined_win: 1,
+}[review.review_status] || 0);
+
+const selectStratifiedTradeLessonReviews = (reviews, limit) => {
+  if (!Array.isArray(reviews) || reviews.length === 0 || limit <= 0) return [];
+  const campaigns = new Map();
+  for (const review of reviews) {
+    const key = `${review.instrument_name}|${review.closed_at}`;
+    const campaign = campaigns.get(key) || {
+      action_family: review.action_family || 'other',
+      closed_at: review.closed_at,
+      reviews: [],
+    };
+    campaign.reviews.push(review);
+    campaigns.set(key, campaign);
+  }
+
+  const compareReviews = (a, b) => (
+    tradeLessonReviewPriority(b) - tradeLessonReviewPriority(a)
+    || Number(b.review_window_days || 0) - Number(a.review_window_days || 0)
+    || Number(b.id || 0) - Number(a.id || 0)
+  );
+  const familyQueues = new Map();
+  for (const campaign of campaigns.values()) {
+    campaign.reviews.sort(compareReviews);
+    const queue = familyQueues.get(campaign.action_family) || [];
+    queue.push(campaign);
+    familyQueues.set(campaign.action_family, queue);
+  }
+  for (const queue of familyQueues.values()) {
+    queue.sort((a, b) => (
+      tradeLessonReviewPriority(b.reviews[0]) - tradeLessonReviewPriority(a.reviews[0])
+      || new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime()
+    ));
+  }
+
+  const preferredFamilies = ['short_call_campaign', 'long_put_campaign'];
+  const familyOrder = [
+    ...preferredFamilies.filter((family) => familyQueues.has(family)),
+    ...Array.from(familyQueues.keys()).filter((family) => !preferredFamilies.includes(family)).sort(),
+  ];
+  const selected = [];
+  const selectedIds = new Set();
+  let added = true;
+  while (selected.length < limit && added) {
+    added = false;
+    for (const family of familyOrder) {
+      const campaign = familyQueues.get(family)?.shift();
+      if (!campaign) continue;
+      const representative = campaign.reviews[0];
+      selected.push(representative);
+      selectedIds.add(Number(representative.id));
+      added = true;
+      if (selected.length >= limit) break;
+    }
+  }
+
+  const remaining = reviews
+    .filter((review) => !selectedIds.has(Number(review.id)))
+    .sort(compareReviews);
+  return [...selected, ...remaining].slice(0, limit);
+};
+
 let _tradeLessonInFlight = false;
 const extractTradeLessons = async () => {
   if (_tradeLessonInFlight || !process.env.ANTHROPIC_API_KEY || !db?.upsertCanonicalTradeLesson) {
@@ -4261,16 +4331,26 @@ const extractTradeLessons = async () => {
     const canonicalLessons = db.getCanonicalTradeLessons?.() || [];
     const legacyLessons = db.getLegacyTradeLessons?.() || [];
     const isBootstrap = canonicalLessons.length === 0;
-    const reviews = isBootstrap
-      ? (db.getRecentTradeReviews(TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT) || [])
-      : (db.getTradeReviewsSinceId?.(botData.lastTradeLessonReviewId || 0, 12) || []);
-    if (reviews.length < 2) {
+    const isHistoricalBackfill = !isBootstrap && !botData.lastTradeLessonBackfillAt;
+    const reviews = (() => {
+      if (isBootstrap) return db.getRecentTradeReviews(TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT) || [];
+      if (isHistoricalBackfill) {
+        const originalBootstrapUniverse = db.getRecentTradeReviews(TRADE_LESSON_BACKFILL_SOURCE_LIMIT) || [];
+        const omittedReviews = originalBootstrapUniverse.slice(TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT);
+        return selectStratifiedTradeLessonReviews(omittedReviews, omittedReviews.length);
+      }
+      return db.getTradeReviewsSinceId?.(botData.lastTradeLessonReviewId || 0, 12) || [];
+    })();
+    const minimumReviewCount = isHistoricalBackfill ? 1 : 2;
+    if (reviews.length < minimumReviewCount) {
+      if (isHistoricalBackfill) botData.lastTradeLessonBackfillAt = Date.now();
       botData.lastTradeLessonSuccess = Date.now();
       persistCycleState();
       return { attempted: true, processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0, error: null };
     }
 
-    console.log(`🧠 ${isBootstrap ? 'Bootstrapping' : 'Updating'} canonical trade lessons from ${reviews.length} linked review(s)...`);
+    const synthesisMode = isBootstrap ? 'Bootstrapping' : isHistoricalBackfill ? 'Backfilling' : 'Updating';
+    console.log(`🧠 ${synthesisMode} canonical trade lessons from ${reviews.length} linked review(s)...`);
     const taxonomyText = TRADE_LESSON_TAXONOMY
       .map((definition) => `- ${definition.lesson_key}: ${definition.title} — ${definition.purpose}`)
       .join('\n');
@@ -4300,6 +4380,7 @@ Requirements:
 7. Use applicability for short phrases describing when the rule matters, such as "spot below strike", "under 24h DTE", or "risk mandate unchanged".
 8. change_summary must say what the new review evidence changed or confirmed in under 100 characters.
 ${isBootstrap ? '9. This is a bootstrap. Cover at least four relevant keys so the legacy list can be replaced safely.' : ''}
+${isHistoricalBackfill ? '9. This is a historical backfill. Update every relevant existing key so these older review IDs enter its evidence ledger. Every supplied #ID must appear in at least one supporting_review_ids or contradicting_review_ids list. Preserve the current operational rule unless the older evidence materially changes or contradicts it; never erase newer evidence.' : ''}
 
 Output JSON only:
 {"lesson_updates":[{"lesson_key":"short_call.exit_insurance","lesson":"<canonical operational rule>","applicability":["<condition>"],"supporting_review_ids":[1,2],"contradicting_review_ids":[3],"change_summary":"<what changed>"}]}`;
@@ -4337,6 +4418,23 @@ Output JSON only:
     }
 
     const reviewIds = new Set(reviews.map((review) => Number(review.id)).filter(Number.isInteger));
+    if (isHistoricalBackfill) {
+      const referencedReviewIds = new Set();
+      for (const update of updates) {
+        for (const id of [...(update.supporting_review_ids || []), ...(update.contradicting_review_ids || [])]) {
+          const reviewId = Number(id);
+          if (reviewIds.has(reviewId)) referencedReviewIds.add(reviewId);
+        }
+      }
+      const missingReviewIds = Array.from(reviewIds).filter((id) => !referencedReviewIds.has(id));
+      if (missingReviewIds.length > 0) {
+        const message = `Historical backfill omitted review ID(s): ${missingReviewIds.join(', ')}`;
+        botData.lastTradeLessonError = message;
+        persistCycleState();
+        console.log(`🧠 ${message}`);
+        return { attempted: true, processed: 0, advancedToId: botData.lastTradeLessonReviewId || 0, error: message };
+      }
+    }
     let storedCount = 0;
     for (const update of updates) {
       const definition = definitions.get(update.lesson_key);
@@ -4359,10 +4457,11 @@ Output JSON only:
 
     const highestReviewId = Math.max(...Array.from(reviewIds), botData.lastTradeLessonReviewId || 0);
     botData.lastTradeLessonReviewId = highestReviewId;
+    if (isHistoricalBackfill) botData.lastTradeLessonBackfillAt = Date.now();
     botData.lastTradeLessonSuccess = Date.now();
     botData.lastTradeLessonError = null;
     persistCycleState();
-    console.log(`🧠 Canonical trade lessons: ${storedCount} updated from ${reviews.length} linked review(s)`);
+    console.log(`🧠 Canonical trade lessons: ${storedCount} updated from ${reviews.length} linked review(s)${isHistoricalBackfill ? ' (historical backfill complete)' : ''}`);
     return { attempted: true, processed: reviews.length, advancedToId: highestReviewId, error: null };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -13378,7 +13477,9 @@ const runBot = async () => {
       // bootstrap recover promptly instead of waiting for another trade review.
       const tradeLessonDelay = botData.lastTradeLessonError
         ? TRADE_LESSON_RETRY_INTERVAL_MS
-        : TRADE_LESSON_INTERVAL_MS;
+        : !botData.lastTradeLessonBackfillAt
+          ? 0
+          : TRADE_LESSON_INTERVAL_MS;
       if (
         process.env.ANTHROPIC_API_KEY
         && !_tradeLessonInFlight
