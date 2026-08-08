@@ -150,6 +150,9 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 8. **No speculation without evidence** — wiki captures confirmed patterns, not guesses
 9. **Truthful freshness** — distinguish when a page was checked, when new evidence changed it, and when it was validated
 10. **Canonical strategy ownership** — execution guidance must remain traceable to Learning
+11. **Current means current** — replace superseded claims in TLDR, Current, and Active sections; move useful prior state into the matching Historical section
+12. **One live snapshot** — regime, protection, and revenue current-state pages must reconcile against the same latest evidence packet
+13. **Durable strategy views** — Learning-owned strategy pages express conditional `[lesson:key]` rules and must not embed current spot, skew, score, budget, gate state, or other live snapshot values
 
 ## Format Conventions
 

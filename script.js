@@ -377,6 +377,10 @@ const TRADE_LESSON_SYNTHESIS_TIMEOUT_MS = 90 * 1000;
 const TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT = 48;
 const WIKI_LINT_INTERVAL_MS = 24 * 60 * 60 * 1000; // Every 24 hours
 const WIKI_LINT_RETRY_INTERVAL_MS = 30 * 60 * 1000; // Retry failed validation promptly
+const WIKI_REPAIR_RETRY_INTERVAL_MS = 30 * 60 * 1000;
+const WIKI_REPAIR_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+const WIKI_REPAIR_BATCH_SIZE = 1;
+const WIKI_REPAIR_FORMAT_VERSION = 6;
 
 // Common bot state structure
 const createBotData = () => {
@@ -431,7 +435,9 @@ let botData = createBotData();
 
 // Advisory mutex — prevent overlapping LLM advisory runs
 let _advisoryInFlight = false;
+let _wikiIngestInFlight = false;
 let _wikiLintInFlight = false;
+let _wikiRepairInFlight = false;
 
 const ADVISORY_RETRY_BACKOFF_MS = [
   5 * 60 * 1000,
@@ -4408,11 +4414,15 @@ const WIKI_KEY_PAGES = [
   'strategy/playbook.md',
 ];
 
-const WIKI_INGEST_BASE_PAGES = [
+// These pages make live-state claims and must be reconciled against the same
+// evidence packet. Updating only some of them creates contradictory snapshots.
+const WIKI_LIVE_RESEARCH_PAGES = [
   'regimes/current.md',
   'protection/pricing.md',
   'protection/windows.md',
+  'protection/convexity.md',
   'revenue/pricing.md',
+  'revenue/windows.md',
   'indicators/leading.md',
 ];
 
@@ -4455,6 +4465,23 @@ const WIKI_ALL_PAGES = [
   'strategy/mistakes.md',
   'strategy/playbook.md',
 ];
+
+const WIKI_REPAIR_PRIORITY = {
+  'protection/windows.md': 100,
+  'protection/convexity.md': 95,
+  'revenue/pricing.md': 90,
+  'revenue/windows.md': 85,
+  'regimes/current.md': 80,
+  'indicators/leading.md': 75,
+  'indicators/divergences.md': 70,
+  'strategy/lessons.md': 65,
+  'strategy/playbook.md': 60,
+  'regimes/history.md': 55,
+  'protection/pricing.md': 50,
+  'revenue/efficiency.md': 45,
+  'indicators/correlations.md': 40,
+  'strategy/mistakes.md': 35,
+};
 
 const getWikiPageMetaMap = (meta) => {
   if (!meta.pages || typeof meta.pages !== 'object' || Array.isArray(meta.pages)) meta.pages = {};
@@ -4506,7 +4533,13 @@ const getWikiLintSchedule = (meta = readWikiMeta(), nowMs = Date.now()) => {
   const pageMeta = meta?.pages && typeof meta.pages === 'object' && !Array.isArray(meta.pages)
     ? meta.pages
     : {};
-  const needsInitialReview = WIKI_ALL_PAGES.some((pagePath) => !pageMeta[pagePath]?.last_reviewed_at);
+  const pagesNeedingReview = WIKI_ALL_PAGES.filter((pagePath) => {
+    const stored = pageMeta[pagePath] || {};
+    const reviewedMs = parseWikiMetaTimestamp(stored.last_reviewed_at);
+    const changedMs = parseWikiMetaTimestamp(stored.last_changed_at || stored.last_evidence_at);
+    return !reviewedMs || (changedMs > 0 && reviewedMs < changedMs);
+  });
+  const needsInitialReview = pagesNeedingReview.length > 0;
   const lastAttemptMs = parseWikiMetaTimestamp(meta?.last_lint_attempt);
   const lastSuccessMs = parseWikiMetaTimestamp(meta?.last_lint);
   const lastError = typeof meta?.last_lint_error === 'string' && meta.last_lint_error.trim()
@@ -4522,8 +4555,61 @@ const getWikiLintSchedule = (meta = readWikiMeta(), nowMs = Date.now()) => {
   return {
     due: nextDueMs === 0 || nowMs >= nextDueMs,
     needsInitialReview,
+    pagesNeedingReview,
     lastError,
     nextDueAt: nextDueMs ? new Date(nextDueMs).toISOString() : new Date(nowMs).toISOString(),
+  };
+};
+
+// Lint prose can be paraphrased between passes. Cooldowns therefore key to the
+// stable issue categories for a page instead of the generated wording.
+const getWikiIssueFingerprint = (issues) => Array.from(new Set(
+  (Array.isArray(issues) ? issues : [])
+    .map((issue) => String(issue || '').trim().match(/^\[([a-z_]+)\]/i)?.[1]?.toLowerCase() || 'untyped'),
+)).sort().join('|');
+
+const getWikiRepairSchedule = (meta = readWikiMeta(), nowMs = Date.now()) => {
+  const pageMeta = meta?.pages && typeof meta.pages === 'object' && !Array.isArray(meta.pages)
+    ? meta.pages
+    : {};
+  const candidates = [];
+  for (const pagePath of WIKI_ALL_PAGES) {
+    const stored = pageMeta[pagePath] || {};
+    const issues = Array.isArray(stored.issues)
+      ? stored.issues.map((issue) => String(issue || '').trim()).filter(Boolean)
+      : [];
+    const reviewedMs = parseWikiMetaTimestamp(stored.last_reviewed_at);
+    const changedMs = parseWikiMetaTimestamp(stored.last_changed_at || stored.last_evidence_at);
+    if (issues.length === 0 || !reviewedMs || (changedMs > 0 && reviewedMs < changedMs)) continue;
+    const fingerprint = getWikiIssueFingerprint(issues);
+    const sameIssues = stored.last_repair_issue_fingerprint === fingerprint
+      && stored.last_repair_format_version === WIKI_REPAIR_FORMAT_VERSION;
+    const lastAttemptMs = parseWikiMetaTimestamp(stored.last_repair_attempt_at);
+    const lastSuccessMs = parseWikiMetaTimestamp(stored.last_repair_success_at);
+    const successfullyHandled = sameIssues && lastSuccessMs > 0 && lastSuccessMs >= lastAttemptMs;
+    const retryDelay = successfullyHandled && !stored.last_repair_error
+      ? WIKI_REPAIR_COOLDOWN_MS
+      : WIKI_REPAIR_RETRY_INTERVAL_MS;
+    const nextDueMs = sameIssues && lastAttemptMs ? lastAttemptMs + retryDelay : 0;
+    const issueBoost = issues.some((issue) => /^\[(?:contradiction|stale)\]/i.test(issue)) ? 10 : 0;
+    candidates.push({
+      pagePath,
+      issues,
+      fingerprint,
+      nextDueMs,
+      priority: (WIKI_REPAIR_PRIORITY[pagePath] || 0) + issueBoost,
+    });
+  }
+  candidates.sort((a, b) => b.priority - a.priority || a.nextDueMs - b.nextDueMs || a.pagePath.localeCompare(b.pagePath));
+  const dueCandidates = candidates.filter((candidate) => candidate.nextDueMs === 0 || nowMs >= candidate.nextDueMs);
+  const futureDueTimes = candidates.map((candidate) => candidate.nextDueMs).filter((value) => value > nowMs);
+  const nextDueMs = dueCandidates.length > 0 ? nowMs : futureDueTimes.length > 0 ? Math.min(...futureDueTimes) : 0;
+  return {
+    due: dueCandidates.length > 0,
+    candidates: dueCandidates.slice(0, WIKI_REPAIR_BATCH_SIZE),
+    dueCount: dueCandidates.length,
+    pendingCount: candidates.length,
+    nextDueAt: nextDueMs ? new Date(nextDueMs).toISOString() : null,
   };
 };
 
@@ -4555,6 +4641,11 @@ const countWikiEvidencePoints = (content = '') => {
   if (structured.length > 0) return new Set(structured.map((value) => value.toLowerCase())).size;
   return new Set(String(content).match(/\[\d{4}-\d{2}-\d{2}\]/g) || []).size;
 };
+
+const getStructuredWikiMarkers = (content = '') => new Set(
+  (String(content).match(/\[(?:source:\s*[^\]]+|(?:tick|order|review):#\d+|lesson:[^\]]+)\]/gi) || [])
+    .map((value) => value.toLowerCase()),
+);
 
 const refreshWikiIndex = () => {
   const meta = readWikiMeta();
@@ -4789,7 +4880,7 @@ const getWikiPagesNeedingSeed = () => {
 };
 
 const inferWikiPagesForJournalEntries = (journalEntries = []) => {
-  const selected = new Set(WIKI_INGEST_BASE_PAGES);
+  const selected = new Set(WIKI_LIVE_RESEARCH_PAGES);
 
   for (const entry of journalEntries) {
     const type = entry?.type || entry?.entry_type || '';
@@ -5015,7 +5106,7 @@ const ingestToWiki = async (journalEntries) => {
   const recentTradeReviews = db.getRecentTradeReviews(30) || [];
   const recentTradeCampaigns = groupTradeReviewsForWiki(recentTradeReviews, 10);
   const activeTradeLessons = db.getActiveTradeLessons() || [];
-  const researchPages = selectedPages.filter((pagePath) => !WIKI_STRATEGY_PAGES.has(pagePath)).slice(0, 7);
+  const researchPages = selectedPages.filter((pagePath) => !WIKI_STRATEGY_PAGES.has(pagePath)).slice(0, 8);
   selectedPages.splice(0, selectedPages.length, ...researchPages);
   if (activeTradeLessons.some((lesson) => lesson.lesson_key)) {
     for (const pagePath of WIKI_STRATEGY_PAGES) {
@@ -5058,17 +5149,18 @@ ${recentTradeCampaigns.length > 0 ? recentTradeCampaigns.slice(0, 6).map(formatT
 ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPrompt).join('\n') : 'None'}
 
 ## Instructions
-1. Analyze which ALLOWED wiki pages need updating based primarily on the raw evidence packet
-2. Preserve existing accurate content — ADD to it, don't replace it
+1. Reconcile every allowed live-state research page against the same raw evidence packet. Return an update for each page whose TLDR, Current, or Active section disagrees with newer evidence; do not omit a stale dependent page merely to minimize the update set
+2. Preserve accurate durable and historical content. In TLDR, Current, and Active sections, replace superseded state instead of appending it; move useful prior observations into the matching Historical section
 3. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
-4. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" format
+4. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" only in historical context—never leave the obsolete value in the current TLDR or Active section
 5. Keep each page under 2000 words — consolidate older entries if approaching limit
 6. Each page may start with one H1 title; place a bold TLDR line reflecting current state immediately after that optional title
-7. Prefer the smallest set of page updates that captures the new information cleanly
+7. Prefer a compact update set only after every live-state page has been checked for cross-page consistency
 8. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
 9. If evidence is thin or mixed, say so explicitly instead of over-asserting
 10. Every materially new factual claim must cite an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker; never invent a source marker
 11. Strategy pages are Learning-owned views. They may summarize canonical [lesson:key] records, including status and contradictions, but must not invent independent execution rules or present disputed lessons as settled
+12. Strategy pages contain durable conditional rules, not the current spot, skew, score, budget, gate state, or other live snapshot values. Live market state belongs in research pages and the trading advisory
 
 Output your updates as XML blocks. Only include pages that need changes:
 
@@ -5121,6 +5213,19 @@ If no pages need updating, output: <no_updates/>`;
     let match;
     let updateCount = 0;
     const updatedPages = [];
+    const learningContext = activeTradeLessons.map(formatTradeLessonForPrompt).join('\n');
+    const campaignContext = recentTradeCampaigns.map(formatTradeReviewCampaignEvidence).join('\n\n');
+    const allowedMarkers = getStructuredWikiMarkers(
+      `${Object.values(pages).join('\n')}\n${rawEvidencePacket?.content || ''}\n${learningContext}\n${campaignContext}`,
+    );
+    const latestTickMarkers = new Set(
+      Array.from(getStructuredWikiMarkers(rawEvidencePacket?.content || ''))
+        .filter((marker) => marker.startsWith('[tick:')),
+    );
+    const availableLessonMarkers = new Set(
+      Array.from(getStructuredWikiMarkers(learningContext))
+        .filter((marker) => marker.startsWith('[lesson:')),
+    );
 
     while ((match = updateRegex.exec(text)) !== null) {
       const pagePath = match[1];
@@ -5153,6 +5258,29 @@ If no pages need updating, output: <no_updates/>`;
         continue;
       }
 
+      const outputMarkers = getStructuredWikiMarkers(newContent);
+      const unknownMarkers = Array.from(outputMarkers).filter((marker) => !allowedMarkers.has(marker));
+      if (unknownMarkers.length > 0) {
+        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — invented source marker(s): ${unknownMarkers.slice(0, 5).join(', ')}`);
+        continue;
+      }
+      if (
+        WIKI_LIVE_RESEARCH_PAGES.includes(pagePath)
+        && latestTickMarkers.size > 0
+        && !Array.from(outputMarkers).some((marker) => latestTickMarkers.has(marker))
+      ) {
+        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — live state lacks an exact marker from the latest tick packet`);
+        continue;
+      }
+      if (
+        WIKI_STRATEGY_PAGES.has(pagePath)
+        && availableLessonMarkers.size > 0
+        && !Array.from(outputMarkers).some((marker) => availableLessonMarkers.has(marker))
+      ) {
+        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — Learning-owned page lacks a canonical lesson marker`);
+        continue;
+      }
+
       // Save history before overwriting
       if (existingContent && !existingContent.includes('Awaiting initial assessment')) {
         saveWikiHistory(pagePath, existingContent);
@@ -5182,6 +5310,8 @@ If no pages need updating, output: <no_updates/>`;
       updateWikiPageMeta(meta, update.pagePath, {
         last_evidence_at: ingestedAt,
         last_changed_at: ingestedAt,
+        last_reviewed_at: null,
+        issues: [],
         change_summary: summarizeWikiPageChange(
           update.existingContent,
           update.newContent,
@@ -5202,6 +5332,262 @@ If no pages need updating, output: <no_updates/>`;
     console.log('📚 Wiki ingest failed:', e.message);
     throw e;
   }
+};
+
+const recordWikiPageRepairFailure = (candidate, message) => {
+  const failedAt = new Date().toISOString();
+  const meta = readWikiMeta();
+  updateWikiPageMeta(meta, candidate.pagePath, {
+    last_repair_attempt_at: failedAt,
+    last_repair_issue_fingerprint: candidate.fingerprint,
+    last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
+    last_repair_result: 'failed',
+    last_repair_error: message,
+  });
+  meta.last_repair_attempt = failedAt;
+  meta.last_repair_error = `${candidate.pagePath}: ${message}`;
+  writeWikiMeta(meta);
+  appendWikiLog('repair', 'wiki attention repair failed', [
+    `page: ${candidate.pagePath}`,
+    `error: ${message}`,
+  ]);
+  console.log(`📚 Wiki attention: ${candidate.pagePath} repair failed — ${message}`);
+  return { pagePath: candidate.pagePath, status: 'failed', error: message };
+};
+
+const repairWikiPage = async (candidate) => {
+  const pagePath = candidate.pagePath;
+  const startedAt = new Date().toISOString();
+  const pages = Object.fromEntries(WIKI_ALL_PAGES.map((pathName) => [pathName, readWikiPage(pathName)]));
+  const existingContent = pages[pagePath] || '';
+  if (!existingContent || isPlaceholderWikiPage(existingContent)) {
+    return recordWikiPageRepairFailure(candidate, 'page is missing or still a placeholder');
+  }
+
+  const startMeta = readWikiMeta();
+  updateWikiPageMeta(startMeta, pagePath, {
+    last_repair_attempt_at: startedAt,
+    last_repair_issue_fingerprint: candidate.fingerprint,
+    last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
+    last_repair_result: 'in_progress',
+    last_repair_error: null,
+  });
+  startMeta.last_repair_attempt = startedAt;
+  startMeta.last_repair_error = null;
+  writeWikiMeta(startMeta);
+
+  const schema = readWikiPage('schema.md');
+  const pageMeta = getWikiPageMetaMap(startMeta);
+  const relatedContext = WIKI_ALL_PAGES
+    .filter((pathName) => pathName !== pagePath && pages[pathName] && !isPlaceholderWikiPage(pages[pathName]))
+    .map((pathName) => {
+      const stored = pageMeta[pathName] || {};
+      const freshness = `changed=${stored.last_changed_at || 'unknown'} | evidence=${stored.last_evidence_at || 'unknown'} | reviewed=${stored.last_reviewed_at || 'unreviewed'}`;
+      return `--- ${pathName} ---\nMetadata: ${freshness}\n${buildWikiAdvisorExcerpt(pages[pathName], 650)}`;
+    })
+    .join('\n\n');
+  const evidencePacketPath = typeof startMeta.last_evidence_packet === 'string' && startMeta.last_evidence_packet.startsWith('raw/evidence/')
+    ? startMeta.last_evidence_packet
+    : null;
+  const rawEvidence = evidencePacketPath ? readWikiPage(evidencePacketPath) : '';
+  const activeTradeLessons = db?.getActiveTradeLessons?.() || [];
+  const learningContext = activeTradeLessons
+    .filter((lesson) => lesson.lesson_key)
+    .map((lesson) => `[lesson:${lesson.lesson_key}] ${String(lesson.lesson || '').replace(/\s+/g, ' ').slice(0, 500)}`)
+    .join('\n');
+  const requiredHeaders = WIKI_EXPECTED_HEADERS[pagePath] || [];
+  const prompt = `You are giving attention to exactly one audited page in a knowledge wiki for a Spitznagel-style ETH options bot.
+
+Page to fix: ${pagePath}
+Audit findings to resolve:
+${candidate.issues.map((issue) => `- ${issue}`).join('\n')}
+
+Required section headings: ${requiredHeaders.length > 0 ? requiredHeaders.join(', ') : 'none beyond the schema'}
+Today's date: ${new Date().toISOString().split('T')[0]}
+
+## Wiki Schema
+${schema}
+
+## Current Target Page (return the full repaired version)
+${existingContent}
+
+## Related Wiki Context
+${relatedContext}
+
+## Latest Raw Evidence${evidencePacketPath ? ` (${evidencePacketPath})` : ''}
+${rawEvidence ? truncateWikiContextAtBoundary(rawEvidence, 14000) : 'No recent raw evidence packet is available.'}
+
+## Canonical Learning Rules
+${learningContext || 'No canonical Learning rules supplied.'}
+
+## Attention Rules
+1. Resolve only the supplied findings while preserving accurate durable and historical material and every required section.
+2. The finding is assigned to the page that should change. If this target is actually the newer accurate reference and only older related pages need changes, return <no_repair/> instead of degrading the target.
+3. In TLDR, Current, and Active sections, replace superseded state. Move useful prior observations to a Historical section; never leave an obsolete value framed as current.
+4. Keep the page under 2000 words. It may start with one H1 title; place one bold TLDR line immediately after that optional title.
+5. Never invent facts or source markers. Material claims must retain an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker. If no exact supporting marker exists, state uncertainty instead of importing an unrelated marker.
+6. Strategy pages are Learning-owned durable views. Use canonical [lesson:key] rules and remove current spot, skew, score, budget, gate state, and other live snapshot values.
+7. Return only <wiki_repair>FULL MARKDOWN PAGE</wiki_repair>. If no target-page content change is justified, return <no_repair/>.
+`;
+
+  try {
+    const response = await axios.post('https://api.anthropic.com/v1/messages', {
+      model: ANTHROPIC_SONNET_MODEL,
+      max_tokens: 4096,
+      messages: [{ role: 'user', content: prompt }],
+    }, {
+      headers: {
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json',
+      },
+      timeout: 180000,
+    });
+
+    const text = response.data?.content?.[0]?.text || '';
+    if (/<no_repair\b[^>]*\/>/i.test(text)) {
+      const completedAt = new Date().toISOString();
+      const meta = readWikiMeta();
+      updateWikiPageMeta(meta, pagePath, {
+        last_repair_attempt_at: completedAt,
+        last_repair_issue_fingerprint: candidate.fingerprint,
+        last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
+        last_repair_result: 'no_change',
+        last_repair_success_at: completedAt,
+        last_reviewed_at: null,
+        last_repair_error: null,
+      });
+      meta.last_repair_success = completedAt;
+      meta.last_repair_error = null;
+      writeWikiMeta(meta);
+      appendWikiLog('repair', 'wiki attention needed no target-page change', [`page: ${pagePath}`, 'focused revalidation queued']);
+      console.log(`📚 Wiki attention: ${pagePath} needs no content change; focused revalidation queued`);
+      return { pagePath, status: 'no_change', error: null };
+    }
+
+    const repairMatch = text.match(/<wiki_repair>([\s\S]*?)<\/wiki_repair>/);
+    if (!repairMatch) return recordWikiPageRepairFailure(candidate, 'no complete wiki_repair block returned');
+    const newContent = repairMatch[1].trim();
+    if (newContent.length < 50) return recordWikiPageRepairFailure(candidate, 'replacement content is too short');
+    if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) {
+      return recordWikiPageRepairFailure(candidate, `replacement shrinks page by more than 50% (${existingContent.length} -> ${newContent.length})`);
+    }
+    const wordCount = newContent.split(/\s+/).filter(Boolean).length;
+    if (wordCount > 2000) return recordWikiPageRepairFailure(candidate, `replacement exceeds 2000 words (${wordCount})`);
+    const hasOpeningTldr = /^\s*(?:#(?!#)[^\n]*\n+\s*)?\*\*[^\n]+\*\*/.test(newContent);
+    if (!hasOpeningTldr) {
+      return recordWikiPageRepairFailure(candidate, 'replacement must place a bold TLDR immediately after the optional H1 title');
+    }
+    const missingHeaders = requiredHeaders.filter((header) => !newContent.includes(header));
+    if (missingHeaders.length > 0) return recordWikiPageRepairFailure(candidate, `replacement is missing sections: ${missingHeaders.join(', ')}`);
+
+    const allowedMarkerText = `${Object.values(pages).join('\n')}\n${rawEvidence}\n${learningContext}`;
+    const allowedMarkers = getStructuredWikiMarkers(allowedMarkerText);
+    const existingMarkers = getStructuredWikiMarkers(existingContent);
+    const outputMarkers = getStructuredWikiMarkers(newContent);
+    if (existingMarkers.size > 0 && outputMarkers.size === 0) {
+      return recordWikiPageRepairFailure(candidate, 'replacement removed all structured source markers from the target page');
+    }
+    const unknownMarkers = Array.from(outputMarkers).filter((marker) => !allowedMarkers.has(marker));
+    if (unknownMarkers.length > 0) {
+      return recordWikiPageRepairFailure(candidate, `replacement invented source marker(s): ${unknownMarkers.slice(0, 5).join(', ')}`);
+    }
+    const latestTickMarkers = new Set(
+      Array.from(getStructuredWikiMarkers(rawEvidence)).filter((marker) => marker.startsWith('[tick:')),
+    );
+    if (
+      WIKI_LIVE_RESEARCH_PAGES.includes(pagePath)
+      && latestTickMarkers.size > 0
+      && !Array.from(outputMarkers).some((marker) => latestTickMarkers.has(marker))
+    ) {
+      return recordWikiPageRepairFailure(candidate, 'live-state replacement lacks an exact marker from the latest tick packet');
+    }
+    const availableLessonMarkers = new Set(
+      Array.from(getStructuredWikiMarkers(learningContext)).filter((marker) => marker.startsWith('[lesson:')),
+    );
+    if (
+      WIKI_STRATEGY_PAGES.has(pagePath)
+      && availableLessonMarkers.size > 0
+      && !Array.from(outputMarkers).some((marker) => availableLessonMarkers.has(marker))
+    ) {
+      return recordWikiPageRepairFailure(candidate, 'Learning-owned replacement lacks a canonical lesson marker');
+    }
+    if (readWikiPage(pagePath) !== existingContent) {
+      return recordWikiPageRepairFailure(candidate, 'page changed while repair was running');
+    }
+
+    saveWikiHistory(pagePath, existingContent);
+    fs.writeFileSync(path.join(WIKI_DIR, pagePath), newContent);
+    const repairedAt = new Date().toISOString();
+    const meta = readWikiMeta();
+    updateWikiPageMeta(meta, pagePath, {
+      last_evidence_at: repairedAt,
+      last_changed_at: repairedAt,
+      last_reviewed_at: null,
+      change_summary: `Attention repair: ${candidate.issues[0].replace(/^\[[^\]]+\]\s*/, '').slice(0, 180)}`,
+      last_repair_attempt_at: repairedAt,
+      last_repair_issue_fingerprint: candidate.fingerprint,
+      last_repair_format_version: WIKI_REPAIR_FORMAT_VERSION,
+      last_repair_result: 'repaired',
+      last_repair_success_at: repairedAt,
+      last_repair_error: null,
+    });
+    meta.last_repair_success = repairedAt;
+    meta.last_repair_error = null;
+    writeWikiMeta(meta);
+    refreshWikiIndex();
+    appendWikiLog('repair', 'wiki attention repaired', [
+      `page: ${pagePath}`,
+      `findings addressed: ${candidate.issues.length}`,
+      evidencePacketPath ? `evidence packet: ${evidencePacketPath}` : 'evidence packet: none',
+      'focused revalidation queued',
+    ]);
+    console.log(`📚 Wiki attention: updated ${pagePath}; focused revalidation queued`);
+    return { pagePath, status: 'repaired', error: null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return recordWikiPageRepairFailure(candidate, message);
+  }
+};
+
+const repairWikiIssues = async (schedule = getWikiRepairSchedule()) => {
+  if (!schedule.due || schedule.candidates.length === 0) {
+    return { attempted: 0, repaired: 0, failed: 0, noChange: 0, pending: schedule.pendingCount || 0, validation: null };
+  }
+  console.log(`📚 Wiki attention: processing ${schedule.candidates.length} due page(s) (${schedule.pendingCount} total flagged): ${schedule.candidates.map((candidate) => candidate.pagePath).join(', ')}`);
+  const results = [];
+  for (const candidate of schedule.candidates) {
+    results.push(await repairWikiPage(candidate));
+  }
+
+  const changedOrQueued = results.some((result) => result.status === 'repaired' || result.status === 'no_change');
+  const validation = changedOrQueued ? await lintWiki({ forcePageReview: true }) : null;
+  const summary = {
+    attempted: results.length,
+    repaired: results.filter((result) => result.status === 'repaired').length,
+    failed: results.filter((result) => result.status === 'failed').length,
+    noChange: results.filter((result) => result.status === 'no_change').length,
+    pending: schedule.pendingCount,
+    validation,
+  };
+  const meta = readWikiMeta();
+  const failedResults = results.filter((result) => result.status === 'failed');
+  meta.last_repair_error = failedResults.length > 0
+    ? failedResults.map((result) => `${result.pagePath}: ${result.error}`).join(' | ').slice(0, 1200)
+    : validation && !validation.success
+      ? `focused revalidation: ${validation.error || 'unknown error'}`
+      : null;
+  meta.last_repair_batch = new Date().toISOString();
+  meta.last_repair_batch_result = {
+    attempted: summary.attempted,
+    repaired: summary.repaired,
+    failed: summary.failed,
+    noChange: summary.noChange,
+    revalidated: Boolean(validation?.attempted && validation?.success),
+  };
+  meta.repair_pending_count = getWikiRepairSchedule(meta).pendingCount;
+  writeWikiMeta(meta);
+  return summary;
 };
 
 const getWikiSectionText = (content, heading) => {
@@ -5285,7 +5671,7 @@ const getWikiSignalContext = () => {
   }
 };
 
-const lintWiki = async () => {
+const lintWiki = async ({ forcePageReview = false } = {}) => {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('📚 Wiki lint: skipped — no ANTHROPIC_API_KEY');
     return { attempted: false, success: false, error: 'ANTHROPIC_API_KEY unavailable' };
@@ -5294,12 +5680,18 @@ const lintWiki = async () => {
   const meta = readWikiMeta();
   logWikiMetaSummary('📚 Wiki lint: preflight', meta);
   const schedule = getWikiLintSchedule(meta);
-  if (!schedule.due) {
+  if (!schedule.due && !forcePageReview) {
     console.log(`📚 Wiki lint: skipped — ${schedule.lastError ? 'retry' : 'next review'} at ${schedule.nextDueAt}`);
     return { attempted: false, success: true, error: null, nextDueAt: schedule.nextDueAt };
   }
 
-  console.log('📚 Wiki lint: auditing wiki pages...');
+  const pagesToReview = schedule.needsInitialReview && schedule.pagesNeedingReview.length > 0
+    ? schedule.pagesNeedingReview
+    : WIKI_ALL_PAGES;
+  const isFullReview = pagesToReview.length === WIKI_ALL_PAGES.length;
+  console.log(isFullReview
+    ? '📚 Wiki lint: auditing all wiki pages...'
+    : `📚 Wiki lint: revalidating ${pagesToReview.length} changed/attention page(s) with full wiki context...`);
 
   // Read all pages
   const pages = {};
@@ -5318,8 +5710,18 @@ const lintWiki = async () => {
   writeWikiMeta(meta);
 
   const schema = readWikiPage('schema.md');
+  const storedPageMeta = getWikiPageMetaMap(meta);
   const pagesContext = Object.entries(pages)
-    .map(([p, content]) => `--- ${p} ---\n${content}`)
+    .map(([p, content]) => {
+      const stored = storedPageMeta[p] || {};
+      const freshness = [
+        `live_state=${WIKI_LIVE_RESEARCH_PAGES.includes(p)}`,
+        `changed=${stored.last_changed_at || 'unknown'}`,
+        `evidence=${stored.last_evidence_at || 'unknown'}`,
+        `reviewed=${stored.last_reviewed_at || 'unreviewed'}`,
+      ].join(' | ');
+      return `--- ${p} ---\nMetadata: ${freshness}\n${content}`;
+    })
     .join('\n\n');
 
   const prompt = `You are auditing a knowledge wiki for a Spitznagel-style tail-risk hedging bot. Check for quality issues.
@@ -5330,6 +5732,10 @@ ${schema}
 ## Current Wiki Pages
 ${pagesContext}
 
+## Audit Scope
+Use every page above as cross-page context, but report issues only for these target pages:
+${pagesToReview.map((pagePath) => `- ${pagePath}`).join('\n')}
+
 ## Audit Checklist
 1. **Contradictions**: Do any pages contradict each other?
 2. **Staleness**: Are time-sensitive current-state claims old enough to mislead? Do not call stable historical or structural knowledge stale merely because it is old.
@@ -5338,12 +5744,13 @@ ${pagesContext}
 5. **Quality**: Are TLDRs accurate? Are evidence values specific?
 6. **Provenance**: Are material claims linked to supplied source, review, or canonical lesson markers where available?
 7. **Ownership**: Do strategy pages faithfully summarize canonical [lesson:key] records without inventing a competing playbook?
+8. **Live-state boundaries**: Do strategy pages avoid embedding current spot, skew, score, budget, or gate values that belong in research/advisory state?
 
 ## Instructions
 Return one compact audit object and do not rewrite page content during validation:
-<lint_result>{"issues":[{"page":"path","type":"contradiction|stale|redundant|missing_link|quality","description":"concise actionable finding"}]}</lint_result>
+<lint_result>{"issues":[{"page_to_fix":"path","reference_page":"path or null","type":"contradiction|stale|redundant|missing_link|quality","description":"concise actionable finding"}]}</lint_result>
 
-Use at most two issues per page and keep each description under 240 characters. If no issues are found, return <lint_result>{"issues":[]}</lint_result>. Return no prose outside the tag.`;
+Assign page_to_fix to the page whose content should change. For a cross-page conflict, use metadata and exact evidence markers to identify the older or less-supported page; never flag a newer accurate reference page merely because it exposes stale related content. Put that newer page in reference_page instead. Use at most two issues per target page, keep each description under 240 characters, and do not report findings against pages outside the audit scope. If no issues are found, return <lint_result>{"issues":[]}</lint_result>. Return no prose outside the tag.`;
 
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
@@ -5382,14 +5789,23 @@ Use at most two issues per page and keep each description under 240 characters. 
         [`expected issues[] in tagged or raw JSON output; received keys: ${result && typeof result === 'object' ? Object.keys(result).join(', ') || 'none' : typeof result}`],
       );
     }
-    if (result.issues?.length > 0) {
-      console.log(`📚 Wiki lint: found ${result.issues.length} issue(s):`);
-      for (const issue of result.issues) {
-        console.log(`  - [${issue.type}] ${issue.page}: ${issue.description}`);
+    const normalizedIssues = result.issues.map((issue) => ({
+      ...issue,
+      page: issue?.page_to_fix || issue?.page,
+    }));
+    const validIssues = normalizedIssues.filter((issue) => (
+      issue && pagesToReview.includes(issue.page) && typeof issue.description === 'string'
+    ));
+    const ignoredIssueCount = normalizedIssues.length - validIssues.length;
+    if (validIssues.length > 0) {
+      console.log(`📚 Wiki lint: found ${validIssues.length} in-scope issue(s):`);
+      for (const issue of validIssues) {
+        console.log(`  - [${issue.type}] ${issue.page}${issue.reference_page ? ` (reference: ${issue.reference_page})` : ''}: ${issue.description}`);
       }
     } else {
-      console.log('📚 Wiki lint: no issues found');
+      console.log('📚 Wiki lint: no in-scope issues found');
     }
+    if (ignoredIssueCount > 0) console.log(`📚 Wiki lint: ignored ${ignoredIssueCount} out-of-scope finding(s)`);
 
     // Prune history files older than 30 days
     try {
@@ -5412,17 +5828,17 @@ Use at most two issues per page and keep each description under 240 characters. 
     }
 
     const reviewedAt = new Date().toISOString();
-    const validIssues = (Array.isArray(result.issues) ? result.issues : []).filter((issue) => (
-      issue && WIKI_ALL_PAGES.includes(issue.page) && typeof issue.description === 'string'
-    ));
     const issuesByPage = new Map();
     for (const issue of validIssues) {
       if (!issuesByPage.has(issue.page)) issuesByPage.set(issue.page, []);
-      issuesByPage.get(issue.page).push(`[${issue.type || 'quality'}] ${issue.description}`);
+      const reference = issue.reference_page && WIKI_ALL_PAGES.includes(issue.reference_page) && issue.reference_page !== issue.page
+        ? ` Reference: ${issue.reference_page}.`
+        : '';
+      issuesByPage.get(issue.page).push(`[${issue.type || 'quality'}] ${issue.description}${reference}`);
     }
     const completionMeta = readWikiMeta();
     let reviewedPageCount = 0;
-    for (const pagePath of WIKI_ALL_PAGES) {
+    for (const pagePath of pagesToReview) {
       if (readWikiPage(pagePath) !== pages[pagePath]) {
         console.log(`📚 Wiki lint: ${pagePath} changed during audit; leaving it unreviewed`);
         continue;
@@ -5433,21 +5849,34 @@ Use at most two issues per page and keep each description under 240 characters. 
       });
       reviewedPageCount++;
     }
-    completionMeta.last_lint = reviewedAt;
+    if (isFullReview) completionMeta.last_lint = reviewedAt;
     completionMeta.last_lint_attempt = reviewedAt;
     completionMeta.last_lint_error = null;
-    completionMeta.last_lint_issues = validIssues.length;
+    const completedPageMeta = getWikiPageMetaMap(completionMeta);
+    const outstandingIssueCount = WIKI_ALL_PAGES.reduce((total, pagePath) => (
+      total + (Array.isArray(completedPageMeta[pagePath]?.issues) ? completedPageMeta[pagePath].issues.length : 0)
+    ), 0);
+    completionMeta.last_lint_issues = outstandingIssueCount;
     completionMeta.last_lint_updates = 0;
     writeWikiMeta(completionMeta);
     refreshWikiIndex();
-    appendWikiLog('lint', 'wiki lint complete', [
-      `issues: ${validIssues.length}`,
-      `pages reviewed: ${reviewedPageCount}/${WIKI_ALL_PAGES.length}`,
+    appendWikiLog('lint', isFullReview ? 'wiki lint complete' : 'wiki focused revalidation complete', [
+      `issues in scope: ${validIssues.length}`,
+      `outstanding issues: ${outstandingIssueCount}`,
+      `pages reviewed: ${reviewedPageCount}/${pagesToReview.length} scoped (${WIKI_ALL_PAGES.length} total)`,
     ]);
     logWikiMetaSummary('📚 Wiki lint: wrote completion meta', completionMeta);
 
-    console.log(`📚 Wiki lint: complete (${validIssues.length} issue(s), ${reviewedPageCount}/${WIKI_ALL_PAGES.length} pages reviewed)`);
-    return { attempted: true, success: true, error: null, reviewedAt };
+    console.log(`📚 Wiki lint: complete (${validIssues.length} scoped issue(s), ${reviewedPageCount}/${pagesToReview.length} target page(s), ${outstandingIssueCount} outstanding)`);
+    return {
+      attempted: true,
+      success: true,
+      error: null,
+      reviewedAt,
+      fullReview: isFullReview,
+      reviewedPageCount,
+      outstandingIssues: outstandingIssueCount,
+    };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.log('📚 Wiki lint failed:', message);
@@ -13361,11 +13790,16 @@ const runBot = async () => {
         const prevJournalTs = botData.lastJournalGeneration;
         botData.lastJournalGeneration = Date.now();
         persistCycleState();
+        _wikiIngestInFlight = true;
         generateJournalEntries(tickSummary, botData).then(async (entries) => {
           console.log('📓 Journal generation succeeded, next in 8h');
           // Ingest journal entries into wiki (non-fatal)
-          try { await ingestToWiki(entries); } catch (e) {
+          try {
+            await ingestToWiki(entries);
+          } catch (e) {
             console.log('📚 Wiki ingest failed (non-fatal):', e.message);
+          } finally {
+            _wikiIngestInFlight = false;
           }
           // Generate trading advisory alongside journal
           try { await generateTradingAdvisory(positions, spotPrice, tickerMap, tickTimestamp); }
@@ -13374,6 +13808,7 @@ const runBot = async () => {
           await reviewExpiredHypotheses();
           await extractHypothesisLessons();
         }).catch(e => {
+          _wikiIngestInFlight = false;
           botData.lastJournalGeneration = prevJournalTs;
           persistCycleState();
           console.log('📓 Journal generation failed (will retry next tick):', e.message);
@@ -13383,15 +13818,19 @@ const runBot = async () => {
       // Validate never-reviewed pages immediately, retry failures after 30 minutes,
       // and otherwise keep the normal 24-hour audit cadence.
       const wikiLintSchedule = getWikiLintSchedule();
-      if (process.env.ANTHROPIC_API_KEY && !_wikiLintInFlight && wikiLintSchedule.due) {
+      if (process.env.ANTHROPIC_API_KEY && !_wikiIngestInFlight && !_wikiLintInFlight && !_wikiRepairInFlight && wikiLintSchedule.due) {
         _wikiLintInFlight = true;
         lintWiki().then((result) => {
           if (result?.success) {
-            if (result.reviewedAt) {
+            if (result.reviewedAt && result.fullReview) {
               botData.lastWikiLintRun = new Date(result.reviewedAt).getTime();
               persistCycleState();
             }
-            console.log('📚 Scheduled wiki lint finished, next in 24h');
+            if (result.fullReview) {
+              console.log('📚 Scheduled wiki lint finished, next full audit in 24h');
+            } else {
+              console.log(`📚 Wiki focused revalidation finished: reviewed=${result.reviewedPageCount || 0} outstanding=${result.outstandingIssues || 0}`);
+            }
             return;
           }
           console.log(`📚 Scheduled wiki lint failed, retry in 30m: ${result?.error || 'unknown error'}`);
@@ -13399,6 +13838,27 @@ const runBot = async () => {
           console.log('📚 Scheduled wiki lint failed unexpectedly (metadata retry remains active):', e.message);
         }).finally(() => {
           _wikiLintInFlight = false;
+        });
+      }
+
+      // Give one reviewed attention page a bounded, evidence-safe repair pass.
+      // The repair immediately invokes focused lint before its warning can clear.
+      const wikiRepairSchedule = getWikiRepairSchedule();
+      if (
+        process.env.ANTHROPIC_API_KEY
+        && !_wikiIngestInFlight
+        && !_wikiLintInFlight
+        && !_wikiRepairInFlight
+        && wikiRepairSchedule.due
+      ) {
+        _wikiRepairInFlight = true;
+        repairWikiIssues(wikiRepairSchedule).then((result) => {
+          const revalidated = result.validation?.success ? 'yes' : result.validation ? 'failed' : 'no';
+          console.log(`📚 Wiki attention cycle finished: attempted=${result.attempted} repaired=${result.repaired} no_change=${result.noChange} failed=${result.failed} revalidated=${revalidated} flagged=${result.pending}`);
+        }).catch((error) => {
+          console.log('📚 Wiki attention scheduler failed unexpectedly:', error.message);
+        }).finally(() => {
+          _wikiRepairInFlight = false;
         });
       }
 

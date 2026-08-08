@@ -104,7 +104,12 @@ export function GET() {
     const lastLintError = typeof meta.last_lint_error === 'string' && meta.last_lint_error.trim()
       ? meta.last_lint_error.trim()
       : null;
-    const needsInitialReview = pages.some((page) => page.lastReviewed === null);
+    const needsInitialReview = pages.some((page) => {
+      if (page.lastReviewed === null) return true;
+      const reviewedMs = new Date(page.lastReviewed).getTime();
+      const changedMs = new Date(page.lastEvidenceAt || page.lastModified).getTime();
+      return !Number.isFinite(reviewedMs) || (Number.isFinite(changedMs) && reviewedMs < changedMs);
+    });
     const lastLintMs = lastLint ? new Date(lastLint).getTime() : 0;
     const lastLintAttemptMs = lastLintAttempt ? new Date(lastLintAttempt).getTime() : 0;
     const nextLintMs = lastLintError
@@ -130,6 +135,11 @@ export function GET() {
         lastLintAttempt,
         lastLintError,
         nextLintAt: new Date(nextLintMs).toISOString(),
+        remediationPending: counts.needs_attention || 0,
+        lastRemediationAt: typeof meta.last_repair_batch === 'string' ? meta.last_repair_batch : null,
+        lastRemediationError: typeof meta.last_repair_error === 'string' && meta.last_repair_error.trim()
+          ? meta.last_repair_error.trim()
+          : null,
         lastIngest: typeof meta.last_ingest === 'string' ? meta.last_ingest : null,
       },
     });
