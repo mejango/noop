@@ -106,6 +106,11 @@ const path = require('path');
 const axios = require('axios');
 const { ADX, MACD } = require('technicalindicators');
 const { ethers, AbiCoder } = require('ethers');
+const {
+  SELL_CALL_EDGE_REFERENCE_DTE,
+  SELL_CALL_EDGE_DTE_EXPONENT,
+  normalizeSellCallScore,
+} = require('./bot/call-score');
 
 const encoder = new AbiCoder();
 
@@ -350,19 +355,6 @@ const CALL_EXPIRATION_RANGE = [5, 12];
 const CALL_DELTA_RANGE = [0.04, 0.12]; // Positive delta for calls
 const SELL_CALL_FALLBACK_MIN_BID = 4;
 const SELL_CALL_FALLBACK_MIN_SCORE = 65;
-const SELL_CALL_FALLBACK_MIN_EDGE_SCORE = 80;
-const SELL_CALL_RESEARCH_BALANCED_DTE_RANGE = [7, 10.5];
-const SELL_CALL_RESEARCH_RICH_SCORE = 86;
-const SELL_CALL_RESEARCH_STRONG_SCORE = 90;
-const SELL_CALL_RESEARCH_CANDIDATE_SPREAD_GOOD = 0.10;
-const SELL_CALL_RESEARCH_CANDIDATE_SPREAD_STRONG = 0.095;
-const SELL_CALL_RESEARCH_MARKET_SPREAD_GOOD = 0.13;
-const SELL_CALL_RESEARCH_MARKET_SPREAD_WIDE = 0.16;
-const SELL_CALL_RESEARCH_SCORE_TREND_FADING_PCT = -3;
-const SELL_CALL_RESEARCH_SCORE_TREND_SPIKE_CAUTION_PCT = 25;
-const SELL_CALL_RESEARCH_PUT_STRESS_SCORE = 0.0029;
-const SELL_CALL_RESEARCH_SKEW_CAUTION = 0.073;
-const SELL_CALL_RESEARCH_OI_TREND_GOOD_PCT = 5;
 const CANDIDATE_OBSERVATION_TOP_N = 8;
 
 // Call buyback thresholds
@@ -1681,6 +1673,9 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
 
   const askDeltaValue = askPrice == 0 ? 0 : Math.abs(delta) / askPrice;
   const bidDeltaValue = bidPrice == 0 ? 0 : bidPrice / Math.abs(delta);
+  const expirySeconds = Number(instrument?.option_details?.expiry);
+  const dte = computeDteAt(expirySeconds);
+  const callEdgeScore = normalizeSellCallScore(bidDeltaValue, dte);
 
   return {
     ...instrument,
@@ -1688,6 +1683,8 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
       delta,
       askDeltaValue,
       bidDeltaValue,
+      callEdgeScore,
+      dte,
       askPrice,
       askAmount,
       bidPrice,
@@ -1703,13 +1700,15 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
 const summarizeBestCandidate = (candidate, type) => {
   if (!candidate?.details) return null;
   return {
-    score: type === 'put' ? Number(candidate.details.askDeltaValue || 0) : Number(candidate.details.bidDeltaValue || 0),
+    score: type === 'put' ? Number(candidate.details.askDeltaValue || 0) : Number(candidate.details.callEdgeScore || 0),
     detail: {
       delta: Number(candidate.details.delta ?? 0),
       price: type === 'put' ? Number(candidate.details.askPrice ?? 0) : Number(candidate.details.bidPrice ?? 0),
       strike: Number(candidate.option_details?.strike ?? 0),
       expiry: Number(candidate.option_details?.expiry ?? 0),
       instrument: candidate.instrument_name || null,
+      raw_score: type === 'call' ? Number(candidate.details.bidDeltaValue || 0) : null,
+      dte: candidate.details.dte ?? null,
     },
   };
 };
@@ -2200,9 +2199,7 @@ const getBestCurrentBuyPutCandidate = (tickerMap = {}, nowMs = Date.now(), marke
 
 const getBestCurrentSellCallCandidate = (
   tickerMap = {},
-  nowMs = Date.now(),
-  marketContext = null,
-  scoreTrend24hPct = null
+  nowMs = Date.now()
 ) => {
   let best = null;
   for (const [name, ticker] of Object.entries(tickerMap || {})) {
@@ -2220,19 +2217,7 @@ const getBestCurrentSellCallCandidate = (
     if (!(bidPrice > 0)) continue;
 
     const score = bidPrice / Math.abs(delta);
-    const research = classifySellCallResearchBand({
-      score,
-      dte,
-      bidPrice,
-      askPrice,
-      markPrice,
-      bidAmount,
-      askAmount,
-      impliedVol: getTickerImpliedVol(ticker),
-      openInterest: getTickerOpenInterest(ticker),
-      scoreTrend24hPct,
-      marketContext,
-    });
+    const research = buildSellCallEdge({ score, dte });
     const selectionScore = research.selection_score || score;
     if (!best || selectionScore > (best.selection_score || best.score)) {
       best = {
@@ -2302,26 +2287,6 @@ const computeScoreTrendPct = (samples, currentScore, hours) => {
   if (recent.length === 0) return null;
   const avg = recent.reduce((sum, score) => sum + score, 0) / recent.length;
   return avg > 0 ? roundForAdvisory(((currentScore - avg) / avg) * 100, 2) : null;
-};
-
-const loadSellCallScoreTrend24hPct = (currentScore, before = new Date().toISOString()) => {
-  const score = finiteOrNull(currentScore);
-  if (!(score > 0) || !db || typeof db.getSellCallScoreSamples !== 'function') return null;
-  const since = new Date(Date.now() - ADVISORY_OPTION_VALUE_WINDOW_DAYS * 86400000).toISOString();
-  try {
-    const samples = db.getSellCallScoreSamples({
-      since,
-      before,
-      minDelta: CALL_DELTA_RANGE[0],
-      maxDelta: CALL_DELTA_RANGE[1],
-      minDte: CALL_EXPIRATION_RANGE[0],
-      maxDte: CALL_EXPIRATION_RANGE[1],
-    });
-    return computeScoreTrendPct(samples, score, 24);
-  } catch (e) {
-    console.log(`📋 Sell-call score trend unavailable: ${e.message}`);
-    return null;
-  }
 };
 
 const summarizeRecentScoreWindow = (samples, currentScore, hours) => {
@@ -2517,7 +2482,7 @@ const buildRollingOptionValueContext = ({
     market_oi_delta_24h_pct: marketOiDelta24hPct,
   });
   const currentPut = getBestCurrentBuyPutCandidate(tickerMap, Date.now(), sellCallMarketContext, spotPrice);
-  const currentCall = getBestCurrentSellCallCandidate(tickerMap, Date.now(), sellCallMarketContext);
+  const currentCall = getBestCurrentSellCallCandidate(tickerMap, Date.now());
   let priorSamples = [];
   let priorBestDetail = null;
   let priorCallSamples = [];
@@ -2584,7 +2549,7 @@ const buildRollingOptionValueContext = ({
   const freshBest = currentScore > 0 && priorBestScore > 0 && currentScore > priorBestScore;
   const priorCallScores = priorCallSamples.map((row) => Number(row.score)).filter((score) => score > 0);
   const priorCallBestScore = priorCallScores.length > 0 ? Math.max(...priorCallScores) : null;
-  const currentCallScore = currentCall ? finiteOrNull(currentCall.score) : null;
+  const currentCallScore = currentCall ? finiteOrNull(currentCall.selection_score) : null;
   const currentCallVsPriorBestPct = currentCallScore != null && priorCallBestScore > 0
     ? (currentCallScore / priorCallBestScore) * 100
     : null;
@@ -2596,17 +2561,7 @@ const buildRollingOptionValueContext = ({
   const callTrend6hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 6);
   const callTrend24hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 24);
   const callResearchContext = currentCall
-    ? classifySellCallResearchBand({
-        score: currentCallScore,
-        dte: currentCall.dte,
-        bidPrice: currentCall.bid_price,
-        askPrice: currentCall.ask_price,
-        markPrice: currentCall.mark_price,
-        bidAmount: currentCall.bid_amount,
-        askAmount: currentCall.ask_amount,
-        scoreTrend24hPct: callTrend24hPct,
-        marketContext: sellCallMarketContext,
-      })
+    ? buildSellCallEdge({ score: currentCall.score, dte: currentCall.dte })
     : null;
   const activeBuyPutRules = activeRules.filter((rule) => rule?.is_active !== 0 && rule?.rule_type === 'entry' && rule?.action === 'buy_put').length;
   const workingBuyPutActions = recentPendingActions.filter((action) =>
@@ -2675,7 +2630,7 @@ const buildRollingOptionValueContext = ({
       delta_range: CALL_DELTA_RANGE,
       dte_range: CALL_EXPIRATION_RANGE,
       raw_score: 'bid_price / abs(delta)',
-      edge_score: 'raw_score adjusted for spread quality, premium trend, put-stress, skew, OI, and DTE',
+      edge_score: `raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}`,
     },
     put_value_context: {
       current_score: roundForAdvisory(currentScore, 6),
@@ -2747,9 +2702,7 @@ const buildRollingOptionValueContext = ({
         market_total_oi: roundForAdvisory(sellCallMarketContext.market_total_oi, 2),
         sell_call_candidates: sellCallMarketContext.sell_call_candidates,
         buy_put_candidates: sellCallMarketContext.buy_put_candidates,
-        put_stress_warning: sellCallMarketContext.market_best_put_score != null
-          ? sellCallMarketContext.market_best_put_score >= SELL_CALL_RESEARCH_PUT_STRESS_SCORE
-          : null,
+        put_stress_warning: null,
       },
       research_context: callResearchContext ? {
         recommendation: callResearchContext.recommendation,
@@ -2758,18 +2711,14 @@ const buildRollingOptionValueContext = ({
         dte_bucket: callResearchContext.dte_bucket,
         score_band: callResearchContext.score_band,
         edge_components: callResearchContext.edge_components,
-        new_expiry_caution: callResearchContext.new_expiry_caution,
-        score_spike_caution: callResearchContext.score_spike_caution,
-        put_stress_caution: callResearchContext.put_stress_caution,
-        skew_caution: callResearchContext.skew_caution,
-        score_fading_caution: callResearchContext.score_fading_caution,
-        wide_spread_caution: callResearchContext.wide_spread_caution,
         selection_multiplier: roundForAdvisory(callResearchContext.selection_multiplier, 4),
         selection_score: roundForAdvisory(callResearchContext.selection_score, 2),
         reason: callResearchContext.reason,
       } : null,
       current_detail: currentCall ? {
         instrument: currentCall.instrument,
+        raw_score: roundForAdvisory(currentCall.score, 2),
+        edge_score: roundForAdvisory(currentCall.selection_score, 2),
         delta: roundForAdvisory(currentCall.delta, 4),
         bid_price: roundForAdvisory(currentCall.bid_price, 4),
         ask_price: roundForAdvisory(currentCall.ask_price, 4),
@@ -2852,18 +2801,12 @@ const formatRollingOptionValueContext = (context) => {
       putResearch.weak_shock_payoff_caution ? 'weak_shock_payoff' : null,
     ].filter(Boolean).join(',') || 'none'}; components={candidate_iv=${putResearch.edge_components?.candidate_iv_pct ?? 'n/a'}%, market_put_iv=${putResearch.edge_components?.market_put_iv_pct ?? 'n/a'}%, skew=${putResearch.edge_components?.market_skew_pct ?? 'n/a'}%, oi_24h=${putResearch.edge_components?.market_oi_delta_24h_pct ?? 'n/a'}%, shock40=${putResearch.edge_components?.shock_payoff_multiple_40pct ?? 'n/a'}x}; reason=${putResearch.reason || 'n/a'}.`,
     `Sell-call filters: delta ${JSON.stringify(context.sell_call_filters?.delta_range)}; DTE ${JSON.stringify(context.sell_call_filters?.dte_range)}; raw_score=${context.sell_call_filters?.raw_score}; edge_score=${context.sell_call_filters?.edge_score}.`,
-    `Current CALL raw score: ${call.current_score ?? 'n/a'}${callDetail ? ` (${callDetail.instrument}, delta=${callDetail.delta}, bid=$${callDetail.bid_price}, spread=${callDetail.spread_pct ?? 'n/a'}%, DTE=${callDetail.dte})` : ''}.`,
-    `Prior ${context.window_days}d best CALL score: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
+    `Current CALL EDGE: ${call.current_score ?? 'n/a'}${callDetail ? ` (raw=${callDetail.raw_score ?? 'n/a'}, ${callDetail.instrument}, delta=${callDetail.delta}, bid=$${callDetail.bid_price}, DTE=${callDetail.dte})` : ''}.`,
+    `Prior ${context.window_days}d best CALL EDGE: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
     `Current CALL vs prior best: ${call.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${call.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${call.is_strict_fresh_best ? 'yes' : 'no'}; samples=${call.samples ?? 0}.`,
     `CALL score trend: 1h=${call.trend_1h_pct ?? 'n/a'}%, 6h=${call.trend_6h_pct ?? 'n/a'}%, 24h=${call.trend_24h_pct ?? 'n/a'}%.`,
-    `CALL market quality: avg_spread=${callMarket.market_avg_spread_pct ?? 'n/a'}%; best_put_score=${callMarket.market_best_put_score ?? 'n/a'}; skew=${callMarket.put_call_iv_skew_pct ?? 'n/a'}%; oi_24h=${callMarket.market_oi_delta_24h_pct ?? 'n/a'}%; pc_oi=${callMarket.market_pc_oi ?? 'n/a'}; put_stress_warning=${callMarket.put_stress_warning === true ? 'yes' : callMarket.put_stress_warning === false ? 'no' : 'n/a'}.`,
-    `CALL edge gate: recommendation=${callResearch.recommendation || 'n/a'}; preferred=${callResearch.preferred ? 'yes' : 'no'}; edge_score=${callResearch.selection_score ?? 'n/a'}; dte_bucket=${callResearch.dte_bucket || 'n/a'}; score_band=${callResearch.score_band || 'n/a'}; warnings=${[
-      callResearch.put_stress_caution ? 'put_stress' : null,
-      callResearch.skew_caution ? 'skew' : null,
-      callResearch.score_fading_caution ? 'score_fading' : null,
-      callResearch.wide_spread_caution ? 'wide_spread' : null,
-      callResearch.score_spike_caution ? 'new_expiry_spike' : null,
-    ].filter(Boolean).join(',') || 'none'}; reason=${callResearch.reason || 'n/a'}.`,
+    `CALL market context (not part of CALL EDGE): avg_spread=${callMarket.market_avg_spread_pct ?? 'n/a'}%; best_put_score=${callMarket.market_best_put_score ?? 'n/a'}; skew=${callMarket.put_call_iv_skew_pct ?? 'n/a'}%; oi_24h=${callMarket.market_oi_delta_24h_pct ?? 'n/a'}%; pc_oi=${callMarket.market_pc_oi ?? 'n/a'}.`,
+    `CALL EDGE normalization: edge_score=${callResearch.selection_score ?? 'n/a'}; raw_score=${callResearch.edge_components?.raw_score ?? 'n/a'}; DTE=${callResearch.edge_components?.dte ?? 'n/a'}; factor=${callResearch.edge_components?.normalization_factor ?? 'n/a'}; formula=${callResearch.reason || 'n/a'}.`,
     `Spot-lag repricing check: detected=${lag.is_detected ? 'yes' : 'no'}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%; spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%; near_best=${lag.current_vs_prior_best_pct ?? 'n/a'}%; reason=${lag.reason || 'n/a'}.`,
     `Recent-relative value check: detected=${recent.is_detected ? 'yes' : 'no'}; lookback=${recent.lookback_hours ?? 'n/a'}h; samples=${recent.samples ?? 0}; percentile=${recent.percentile ?? 'n/a'}; vs_recent_avg=${recent.current_vs_recent_avg_pct ?? 'n/a'}%; vs_rolling_best=${recent.current_vs_rolling_best_pct ?? 'n/a'}%; reason=${recent.reason || 'n/a'}.`,
     `Put budget: remaining=$${budget.remaining ?? 'n/a'}; active_buy_put_rules=${budget.active_buy_put_rules ?? 0}; blocking_buy_put_actions=${budget.blocking_buy_put_actions ?? 0}; working_buy_put_actions=${budget.working_buy_put_actions ?? 0}; resting_buy_put_orders=${budget.resting_buy_put_orders ?? 0}.`,
@@ -6699,7 +6642,7 @@ const buildRulebookRequirements = ({
       action: 'sell_call',
       type: 'entry',
       applies: 'call margin headroom remains',
-      instruction: `Create a standing sell_call watcher only for favorable call premium. Encode value with min_edge_score plus min_bid, DTE, delta, and margin criteria. The edge score combines raw call score, spread quality, premium trend, put-stress/skew warnings, OI context, and DTE; raw call score alone is not enough, and do not use a broad spot_price floor as a substitute for better premium or post-drop recovery.`,
+      instruction: `Create a standing sell_call watcher only for favorable call premium. Encode value with min_score plus min_bid, DTE, delta, and margin criteria. CALL EDGE is raw bid / abs(delta), lightly normalized by (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT} to reduce weekly expiry-roll artifacts.`,
     });
   }
 
@@ -6766,11 +6709,11 @@ const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
         delta_range: CALL_DELTA_RANGE,
         dte_range: CALL_EXPIRATION_RANGE,
         min_bid: SELL_CALL_FALLBACK_MIN_BID,
-        min_edge_score: SELL_CALL_FALLBACK_MIN_EDGE_SCORE,
+        min_score: SELL_CALL_FALLBACK_MIN_SCORE,
       },
       budget_limit: null,
       priority: 'low',
-      reasoning: `Required sell-call coverage fallback: patient watcher for favorable short-dated call premium only; requires ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE, delta ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]}, bid >= $${SELL_CALL_FALLBACK_MIN_BID.toFixed(2)}, and composite sell-call edge score >= ${SELL_CALL_FALLBACK_MIN_EDGE_SCORE}.`,
+      reasoning: `Required sell-call coverage fallback: patient watcher for favorable short-dated call premium only; requires ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE, delta ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]}, bid >= $${SELL_CALL_FALLBACK_MIN_BID.toFixed(2)}, and DTE-normalized CALL EDGE >= ${SELL_CALL_FALLBACK_MIN_SCORE}.`,
       advisory_id: context.advisoryId || null,
       preferred_order_type: 'post_only',
     };
@@ -7295,208 +7238,31 @@ const isSellCallCandidateInStrategyRange = (dte, delta) => (
   && delta <= CALL_DELTA_RANGE[1]
 );
 
-const classifySellCallResearchBand = ({
-  score,
-  dte,
-  scoreTrend24hPct = null,
-  bidPrice = null,
-  askPrice = null,
-  markPrice = null,
-  bidAmount = null,
-  askAmount = null,
-  impliedVol = null,
-  openInterest = null,
-  marketContext = null,
-} = {}) => {
-  const numericScore = Number(score);
+const buildSellCallEdge = ({ score, dte } = {}) => {
+  const rawScore = Number(score);
   const numericDte = Number(dte);
-  const numericTrend24h = finiteOrNull(scoreTrend24hPct);
-  const numericBid = Number(bidPrice);
-  const numericAsk = Number(askPrice);
-  const numericMark = Number(markPrice);
-  const numericBidAmount = Number(bidAmount);
-  const numericAskAmount = Number(askAmount);
-  const candidateSpreadPct = numericBid > 0 && numericAsk > 0 && numericMark > 0
-    ? (numericAsk - numericBid) / numericMark
-    : null;
-  const depth = (Number.isFinite(numericBidAmount) ? numericBidAmount : 0)
-    + (Number.isFinite(numericAskAmount) ? numericAskAmount : 0);
-  const marketSpread = finiteOrNull(marketContext?.market_avg_spread);
-  const marketBestPutScore = finiteOrNull(marketContext?.market_best_put_score);
-  const marketSkew = finiteOrNull(marketContext?.market_skew);
-  const marketOiDelta24hPct = finiteOrNull(marketContext?.market_oi_delta_24h_pct);
-  const hasScore = Number.isFinite(numericScore) && numericScore > 0;
-  const hasDte = Number.isFinite(numericDte);
-  const reasons = [];
-
-  const balancedDte = hasDte
-    && numericDte >= SELL_CALL_RESEARCH_BALANCED_DTE_RANGE[0]
-    && numericDte <= SELL_CALL_RESEARCH_BALANCED_DTE_RANGE[1];
-  const newExpiryCaution = hasDte && numericDte >= 11;
-  const scoreFading = Number.isFinite(numericTrend24h)
-    && numericTrend24h < SELL_CALL_RESEARCH_SCORE_TREND_FADING_PCT;
-  const scoreStableOrImproving = Number.isFinite(numericTrend24h)
-    && numericTrend24h >= SELL_CALL_RESEARCH_SCORE_TREND_FADING_PCT;
-  const scoreSpikeCaution = Number.isFinite(numericTrend24h)
-    && numericTrend24h > SELL_CALL_RESEARCH_SCORE_TREND_SPIKE_CAUTION_PCT
-    && newExpiryCaution;
-  const wideCandidateSpread = candidateSpreadPct != null
-    && candidateSpreadPct > SELL_CALL_RESEARCH_CANDIDATE_SPREAD_GOOD;
-  const tightCandidateSpread = candidateSpreadPct != null
-    && candidateSpreadPct <= SELL_CALL_RESEARCH_CANDIDATE_SPREAD_GOOD;
-  const tightMarketSpread = marketSpread != null
-    && marketSpread <= SELL_CALL_RESEARCH_MARKET_SPREAD_GOOD;
-  const wideMarketSpread = marketSpread != null
-    && marketSpread > SELL_CALL_RESEARCH_MARKET_SPREAD_WIDE;
-  const putStressCaution = marketBestPutScore != null
-    && marketBestPutScore >= SELL_CALL_RESEARCH_PUT_STRESS_SCORE;
-  const skewCaution = marketSkew != null
-    && marketSkew >= SELL_CALL_RESEARCH_SKEW_CAUTION;
-  const oiSupport = marketOiDelta24hPct != null
-    && marketOiDelta24hPct >= SELL_CALL_RESEARCH_OI_TREND_GOOD_PCT;
-
-  let dteBucket = 'unknown';
-  let multiplier = 1;
-  if (hasDte) {
-    if (numericDte < 7) {
-      dteBucket = 'early_5_7';
-      multiplier *= 0.95;
-      reasons.push('5-7 DTE can work, but needs execution quality and enough premium');
-    } else if (numericDte <= 10.5) {
-      dteBucket = 'balanced_7_10_5';
-      multiplier *= 1.05;
-      reasons.push('7-10.5 DTE is balanced for short-call premium harvesting');
-    } else {
-      dteBucket = 'new_expiry_11_12';
-      multiplier *= 0.95;
-      reasons.push('11-12 DTE may include new-expiry score artifacts; require spread/trend confirmation');
-    }
-  }
-
-  let scoreBand = 'unknown';
-  if (hasScore) {
-    if (numericScore < SELL_CALL_FALLBACK_MIN_SCORE) {
-      scoreBand = 'low_raw_score';
-      multiplier *= 0.85;
-      reasons.push('raw call score is below the legacy premium floor');
-    } else if (numericScore < SELL_CALL_RESEARCH_RICH_SCORE) {
-      scoreBand = 'acceptable_raw_score';
-      multiplier *= 1.02;
-      reasons.push('raw call score is acceptable but not enough by itself');
-    } else if (numericScore < SELL_CALL_RESEARCH_STRONG_SCORE) {
-      scoreBand = 'rich_raw_score';
-      multiplier *= 1.08;
-      reasons.push('raw call score is rich');
-    } else {
-      scoreBand = 'strong_raw_score';
-      multiplier *= 1.14;
-      reasons.push('raw call score is strong, subject to spread and put-stress checks');
-    }
-  }
-
-  if (Number.isFinite(numericBid) && numericBid >= 7.3) {
-    multiplier *= 1.08;
-    reasons.push('actual executable bid is in the historically better premium bucket');
-  }
-
-  if (tightCandidateSpread) {
-    multiplier *= candidateSpreadPct <= SELL_CALL_RESEARCH_CANDIDATE_SPREAD_STRONG ? 1.18 : 1.12;
-    reasons.push('candidate spread is tight enough for call-sale edge');
-  } else if (wideCandidateSpread) {
-    multiplier *= candidateSpreadPct > 0.13 ? 0.65 : 0.82;
-    reasons.push('candidate spread is wide; raw score may be a quote artifact');
-  }
-
-  if (tightMarketSpread) {
-    multiplier *= 1.12;
-    reasons.push('market-wide option spread is tight');
-  } else if (wideMarketSpread) {
-    multiplier *= 0.75;
-    reasons.push('market-wide option spread is wide');
-  } else if (marketSpread != null && marketSpread > SELL_CALL_RESEARCH_MARKET_SPREAD_GOOD) {
-    multiplier *= 0.9;
-    reasons.push('market-wide option spread is above the favorable bucket');
-  }
-
-  if (scoreFading) {
-    multiplier *= 0.75;
-    reasons.push('24h call score trend is fading');
-  } else if (scoreStableOrImproving) {
-    multiplier *= 1.1;
-    reasons.push('24h call score is holding or improving');
-  }
-
-  if (scoreSpikeCaution) {
-    multiplier *= 0.9;
-    reasons.push(`new-expiry score spike above ${SELL_CALL_RESEARCH_SCORE_TREND_SPIKE_CAUTION_PCT}% needs confirmation`);
-  }
-
-  if (putStressCaution) {
-    multiplier *= 0.75;
-    reasons.push('high put value is a sell-call warning, not upside edge');
-  } else if (marketBestPutScore != null) {
-    multiplier *= 1.05;
-    reasons.push('put-value stress is not elevated');
-  }
-
-  if (skewCaution) {
-    multiplier *= 0.85;
-    reasons.push('put-call IV skew is elevated');
-  } else if (marketSkew != null) {
-    multiplier *= 1.04;
-    reasons.push('put-call IV skew is not elevated');
-  }
-
-  if (oiSupport) {
-    multiplier *= 1.08;
-    reasons.push('24h market OI growth supports richer call-sale outcomes');
-  }
-
-  const edgeScore = hasScore ? numericScore * multiplier : 0;
-  const isStrong = edgeScore >= 110 && tightCandidateSpread && !putStressCaution && !scoreFading;
-  const isPreferred = edgeScore >= SELL_CALL_FALLBACK_MIN_EDGE_SCORE
-    && (tightCandidateSpread || tightMarketSpread)
-    && !putStressCaution
-    && !scoreFading;
-  const recommendation = isStrong
-    ? 'preferred'
-    : isPreferred
-      ? 'acceptable'
-      : (putStressCaution || scoreFading || wideCandidateSpread || wideMarketSpread || edgeScore < SELL_CALL_FALLBACK_MIN_EDGE_SCORE)
-        ? 'caution'
-        : 'neutral';
+  const edgeScore = normalizeSellCallScore(rawScore, numericDte);
+  const normalizationFactor = rawScore > 0 ? edgeScore / rawScore : 0;
+  const passesFloor = edgeScore >= SELL_CALL_FALLBACK_MIN_SCORE;
 
   return {
-    recommendation,
-    preferred: isPreferred,
-    strong: isStrong,
-    dte_bucket: dteBucket,
-    score_band: scoreBand,
+    recommendation: passesFloor ? 'acceptable' : 'caution',
+    preferred: passesFloor,
+    strong: false,
+    dte_bucket: Number.isFinite(numericDte) ? 'strategy_5_12_dte' : 'unknown',
+    score_band: passesFloor ? 'above_normalized_floor' : 'below_normalized_floor',
     edge_components: {
-      raw_score: roundForAdvisory(numericScore, 2),
-      candidate_spread_pct: roundForAdvisory(candidateSpreadPct != null ? candidateSpreadPct * 100 : null, 2),
-      market_spread_pct: roundForAdvisory(marketSpread != null ? marketSpread * 100 : null, 2),
-      market_best_put_score: roundForAdvisory(marketBestPutScore, 6),
-      market_skew_pct: roundForAdvisory(marketSkew != null ? marketSkew * 100 : null, 2),
-      market_oi_delta_24h_pct: roundForAdvisory(marketOiDelta24hPct, 2),
-      score_trend_24h_pct: roundForAdvisory(numericTrend24h, 2),
-      bid_price: roundForAdvisory(numericBid, 4),
-      depth: roundForAdvisory(depth, 2),
-      implied_vol: roundForAdvisory(finiteOrNull(impliedVol), 4),
-      open_interest: roundForAdvisory(finiteOrNull(openInterest), 2),
+      raw_score: roundForAdvisory(rawScore, 2),
+      dte: roundForAdvisory(numericDte, 4),
+      reference_dte: SELL_CALL_EDGE_REFERENCE_DTE,
+      dte_exponent: SELL_CALL_EDGE_DTE_EXPONENT,
+      normalization_factor: roundForAdvisory(normalizationFactor, 6),
     },
-    new_expiry_caution: newExpiryCaution,
-    score_spike_caution: scoreSpikeCaution,
-    put_stress_caution: putStressCaution,
-    skew_caution: skewCaution,
-    score_fading_caution: scoreFading,
-    wide_spread_caution: Boolean(wideCandidateSpread || wideMarketSpread),
-    selection_multiplier: Number(multiplier.toFixed(4)),
+    selection_multiplier: roundForAdvisory(normalizationFactor, 6),
     selection_score: edgeScore,
-    reason: reasons.join('; '),
+    reason: `CALL EDGE = raw score × (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}`,
   };
 };
-
 const telemetryNumber = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -7996,9 +7762,7 @@ const validateAdvisorRuleContract = (rule, context = {}) => {
     if (criteria.option_type !== 'C') return { valid: false, reason: 'sell_call requires option_type C' };
     if (!isRangeWithin(criteria.delta_range, CALL_DELTA_RANGE[0], CALL_DELTA_RANGE[1])) return { valid: false, reason: `sell_call delta_range must stay within ${JSON.stringify(CALL_DELTA_RANGE)}` };
     if (!isRangeWithin(criteria.dte_range, CALL_EXPIRATION_RANGE[0], CALL_EXPIRATION_RANGE[1])) return { valid: false, reason: `sell_call dte_range must stay within ${JSON.stringify(CALL_EXPIRATION_RANGE)}` };
-    if (!(Number(criteria.min_edge_score) > 0) && !(Number(criteria.min_score) > 0)) {
-      return { valid: false, reason: 'sell_call requires min_edge_score as the composite premium value gate' };
-    }
+    if (!(Number(criteria.min_score) > 0)) return { valid: false, reason: 'sell_call requires min_score as the DTE-normalized CALL EDGE gate' };
     if (!(Number(criteria.min_bid) > 0)) return { valid: false, reason: 'sell_call requires min_bid as the liquidity/premium floor' };
     const marketConditions = Array.isArray(criteria.market_conditions) ? criteria.market_conditions : [];
     if (marketConditions.some((condition) => condition?.field !== 'spot_price')) return { valid: false, reason: 'sell_call market_conditions may only use spot_price as supporting context' };
@@ -8371,55 +8135,34 @@ const buildBuyPutPatientMakerContext = (action, triggerData = {}, advisorLimitPr
 const formatSellCallConfirmationContext = ({ action, triggerData, ticker, currentPrice }) => {
   if (action?.action !== 'sell_call') return '';
   const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
-  const triggerScore = Number(triggerData?.score);
+  const triggerDte = Number(triggerData?.dte);
   const triggerDelta = Number(triggerData?.delta);
   const liveDelta = Number(ticker?.option_pricing?.d);
-  const triggerDte = Number(triggerData?.dte);
-  const triggerBid = Number(triggerData?.live_price ?? currentPrice ?? action.price);
   const executionBid = Number(currentPrice || action.price);
-  const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
-  const plannedScore = Math.abs(scoreDelta) > 0 && executionBid > 0
+  const scoreDelta = Number.isFinite(liveDelta) ? liveDelta : triggerDelta;
+  const liveRawScore = Math.abs(scoreDelta) > 0 && executionBid > 0
     ? executionBid / Math.abs(scoreDelta)
     : null;
-  const sellCallResearch = triggerData?.sell_call_research || {};
-  const edgeScore = Number(triggerData?.selection_score ?? sellCallResearch?.selection_score);
-  const minEdgeScore = Number(criteria.min_edge_score);
-  const legacyMinScore = Number(criteria.min_score);
-  const hasMinEdgeScore = Number.isFinite(minEdgeScore) && minEdgeScore > 0;
-  const hasLegacyMinScore = Number.isFinite(legacyMinScore) && legacyMinScore > 0;
-  const edgeGateStatus = hasMinEdgeScore
-    ? (Number.isFinite(edgeScore) && edgeScore + 1e-9 >= minEdgeScore ? 'PASS' : 'FAIL')
-    : 'NOT_CONFIGURED';
-  const rawGateStatus = hasMinEdgeScore
-    ? 'NOT_APPLICABLE (min_edge_score takes precedence)'
-    : hasLegacyMinScore
-      ? (Number.isFinite(triggerScore) && triggerScore + 1e-9 >= legacyMinScore ? 'PASS' : 'FAIL')
-      : 'NOT_CONFIGURED';
-  const edgeComponents = sellCallResearch?.edge_components || {};
-  const edgeWarnings = [
-    sellCallResearch?.put_stress_caution ? 'put_stress' : null,
-    sellCallResearch?.skew_caution ? 'skew' : null,
-    sellCallResearch?.score_fading_caution ? 'score_fading' : null,
-    sellCallResearch?.wide_spread_caution ? 'wide_spread' : null,
-    sellCallResearch?.score_spike_caution ? 'new_expiry_spike' : null,
-  ].filter(Boolean);
-  const marketConditions = Array.isArray(criteria.market_conditions) && criteria.market_conditions.length > 0
-    ? JSON.stringify(criteria.market_conditions)
-    : 'none';
+  const liveEdgeScore = normalizeSellCallScore(liveRawScore, triggerDte);
+  const triggerRawScore = Number(triggerData?.raw_score ?? triggerData?.sell_call_research?.edge_components?.raw_score);
+  const triggerEdgeScore = Number(triggerData?.selection_score ?? triggerData?.score);
+  const configuredMinScore = Number(criteria.min_score);
+  const minScore = Number.isFinite(configuredMinScore) && configuredMinScore > 0
+    ? configuredMinScore
+    : SELL_CALL_FALLBACK_MIN_SCORE;
+  const gateStatus = Number.isFinite(liveEdgeScore) && liveEdgeScore + 1e-9 >= minScore ? 'PASS' : 'FAIL';
   const fmt = (value, digits = 4) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
+
   return [
     'Sell-call value confirmation context:',
-    `- Raw score: ${fmt(triggerScore, 2)} using raw_score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
-    `- Rule gates: min_edge_score=${fmt(minEdgeScore, 2)}, legacy_min_score=${fmt(legacyMinScore, 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}, market_conditions=${marketConditions}.`,
-    `- Composite edge: edge_score=${fmt(edgeScore, 2)}, recommendation=${sellCallResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={raw_score:${fmt(edgeComponents.raw_score, 2)}, candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, market_spread_pct:${fmt(edgeComponents.market_spread_pct, 2)}, best_put_score:${fmt(edgeComponents.market_best_put_score, 6)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, trend_24h_pct:${fmt(edgeComponents.score_trend_24h_pct, 2)}}.`,
-    `- Typed value gates: edge_gate=${edgeGateStatus}${hasMinEdgeScore ? ` (edge_score=${fmt(edgeScore, 2)} ${edgeGateStatus === 'PASS' ? '>=' : '<'} min_edge_score=${fmt(minEdgeScore, 2)})` : ''}; raw_gate=${rawGateStatus}${!hasMinEdgeScore && hasLegacyMinScore ? ` (raw_score=${fmt(triggerScore, 2)} ${rawGateStatus === 'PASS' ? '>=' : '<'} legacy_min_score=${fmt(legacyMinScore, 2)})` : ''}.`,
-    `- Live reference: executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}, planned_score=${fmt(plannedScore, 2)}.`,
-    '- Gate semantics: min_edge_score is compared only with edge_score. legacy_min_score is compared with raw_score only when min_edge_score is not configured. Never describe a passing typed gate as failed. A passing value gate does not force confirmation; reject only for a separate, concrete fresh market, warning, or risk fact and name that fact explicitly.',
-    '- Confirm sell_call when the fresh bid, composite edge score, min_bid, delta/DTE, and margin facts satisfy the advisor rule. Raw call score alone is not enough when the composite edge or explicit warnings contradict it. A broad spot floor is not premium value by itself; if fresh market action materially contradicts the rule premise, reject rather than inventing a new thesis.',
+    `- CALL EDGE formula: raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}; raw_score = bid / abs(delta).`,
+    `- Trigger: raw_score=${fmt(triggerRawScore, 2)}, edge_score=${fmt(triggerEdgeScore, 2)}, bid=${fmtPrice(triggerData?.live_price ?? action.price)}, delta=${fmt(triggerDelta, 4)}, DTE=${fmt(triggerDte, 2)}, strike=${triggerData?.strike ?? 'n/a'}.`,
+    `- Fresh market: raw_score=${fmt(liveRawScore, 2)}, edge_score=${fmt(liveEdgeScore, 2)}, executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}.`,
+    `- Rule: min_score=${fmt(minScore, 2)}, min_bid=${fmtPrice(criteria.min_bid)}, edge_gate=${gateStatus} (edge_score=${fmt(liveEdgeScore, 2)} ${gateStatus === 'PASS' ? '>=' : '<'} min_score=${fmt(minScore, 2)}).`,
+    '- Confirm only when fresh CALL EDGE, min_bid, delta/DTE, and margin facts still satisfy the rule. Old saved min_edge_score values are not composite gates; they use the normalized fallback floor until the next advisory refresh.',
   ].join('\n');
 };
-
 const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, advisorLimitPrice, currentPrice }) => {
   if (action?.action !== 'sell_put') return '';
   const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
@@ -8542,7 +8285,6 @@ const validateRestingSellCallEntryOrder = ({
   marginState = null,
   positions = [],
   spotPrice = 0,
-  scoreTrend24hPct = null,
 }) => {
   const instrumentName = order?.instrument_name;
   if (!instrumentName) return { valid: true, unchecked: true, reason: 'missing instrument name' };
@@ -8568,20 +8310,7 @@ const validateRestingSellCallEntryOrder = ({
   const absDelta = Math.abs(delta);
   const strike = Number(instrument?.option_details?.strike || instrumentName.split('-')?.[2] || 0) || 0;
   const score = absDelta > 0 ? orderLimitPrice / absDelta : 0;
-  const sellCallMarketContext = buildLiveSellCallMarketContext(tickerMap);
-  const research = classifySellCallResearchBand({
-    score,
-    dte,
-    bidPrice: orderLimitPrice,
-    askPrice: ticker?.a,
-    markPrice: ticker?.M,
-    bidAmount: ticker?.B,
-    askAmount: ticker?.A,
-    impliedVol: getTickerImpliedVol(ticker),
-    openInterest: getTickerOpenInterest(ticker),
-    scoreTrend24hPct,
-    marketContext: sellCallMarketContext,
-  });
+  const research = buildSellCallEdge({ score, dte });
   const edgeScore = Number(research?.selection_score || 0);
   const reasons = [];
 
@@ -8635,15 +8364,10 @@ const validateRestingSellCallEntryOrder = ({
       continue;
     }
 
-    const minScore = Number(criteria.min_score ?? 0);
-    if (minScore > 0 && score + 1e-9 < minScore) {
-      reasons.push(`rule ${rule.id}: order_limit_score ${score.toFixed(2)} below min_score ${minScore.toFixed(2)}`);
-      continue;
-    }
-
-    const minEdgeScore = Number(criteria.min_edge_score ?? 0);
-    if (minEdgeScore > 0 && edgeScore + 1e-9 < minEdgeScore) {
-      reasons.push(`rule ${rule.id}: order_edge_score ${edgeScore.toFixed(2)} below min_edge_score ${minEdgeScore.toFixed(2)} (${research.reason || 'composite gate'})`);
+    const configuredMinScore = Number(criteria.min_score ?? 0);
+    const minScore = configuredMinScore > 0 ? configuredMinScore : SELL_CALL_FALLBACK_MIN_SCORE;
+    if (edgeScore + 1e-9 < minScore) {
+      reasons.push(`rule ${rule.id}: order CALL EDGE ${edgeScore.toFixed(2)} below min_score ${minScore.toFixed(2)}`);
       continue;
     }
 
@@ -8659,18 +8383,20 @@ const validateRestingSellCallEntryOrder = ({
     return {
       valid: true,
       ruleId: rule.id,
-      score,
+      score: edgeScore,
+      rawScore: score,
       selectionScore: edgeScore,
       delta,
       dte,
       orderLimitPrice,
-      reason: `rule ${rule.id} still satisfied (order_limit_score=${score.toFixed(2)}, edge_score=${edgeScore.toFixed(2)}, delta=${delta.toFixed(4)}, dte=${dte.toFixed(2)})`,
+      reason: `rule ${rule.id} still satisfied (raw_score=${score.toFixed(2)}, CALL_EDGE=${edgeScore.toFixed(2)}, delta=${delta.toFixed(4)}, dte=${dte.toFixed(2)})`,
     };
   }
 
   return {
     valid: false,
-    score,
+    score: edgeScore,
+    rawScore: score,
     selectionScore: edgeScore,
     delta,
     dte,
@@ -9466,14 +9192,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
     const sellCallMarketContext = buildLiveSellCallMarketContext(tickerMap, Date.now(), {
       market_oi_delta_24h_pct: entryMarketOiDelta24hPct,
     });
-    const entryBestRawSellCall = getBestCurrentSellCallCandidate(tickerMap, Date.now(), sellCallMarketContext);
-    const entrySellCallScoreTrend24hPct = loadSellCallScoreTrend24hPct(entryBestRawSellCall?.score);
-    const entryBestSellCall = getBestCurrentSellCallCandidate(
-      tickerMap,
-      Date.now(),
-      sellCallMarketContext,
-      entrySellCallScoreTrend24hPct
-    );
+    const entryBestSellCall = getBestCurrentSellCallCandidate(tickerMap, Date.now());
     if (entryBestSellCall) {
       recordSellCallEdgeSnapshotSafe({
         timestamp: evaluationTimestamp,
@@ -9485,8 +9204,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         dte: entryBestSellCall.dte,
         spot_price: spotPrice,
         metadata: {
-          score_trend_24h_pct: entrySellCallScoreTrend24hPct,
-          research: entryBestSellCall.research,
+          formula: entryBestSellCall.research?.reason,
+          normalization: entryBestSellCall.research?.edge_components,
         },
       });
     }
@@ -9663,7 +9382,15 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const maxCost = rule.action === 'buy_put' ? null : criteria.max_cost ?? null;
         const minBid = Number(criteria.min_bid ?? 0) > 0 ? Number(criteria.min_bid) : null;
         const minScore = Number(criteria.min_score ?? 0) > 0 ? Number(criteria.min_score) : null;
-        const minEdgeScore = Number(criteria.min_edge_score ?? 0) > 0 ? Number(criteria.min_edge_score) : null;
+        const minEdgeScore = rule.action === 'buy_put' && Number(criteria.min_edge_score ?? 0) > 0
+          ? Number(criteria.min_edge_score)
+          : null;
+        // Saved sell-call rules from the former composite-edge system only have
+        // min_edge_score. Run those through the established normalized floor
+        // until the next advisory replaces them with an explicit min_score.
+        const sellCallMinScore = rule.action === 'sell_call'
+          ? (minScore ?? SELL_CALL_FALLBACK_MIN_SCORE)
+          : null;
         const rawValueSignal = criteria.value_signal ?? criteria.buy_put_signal;
         const valueSignal = normalizeBuyPutValueSignal(rawValueSignal);
         let targetScore = Number(criteria.target_score ?? 0) > 0 ? Number(criteria.target_score) : null;
@@ -9782,19 +9509,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               score = absDelta > 0 ? bidPrice / absDelta : 0;
             }
             const sellCallResearch = rule.action === 'sell_call'
-              ? classifySellCallResearchBand({
-                score,
-                dte,
-                bidPrice,
-                askPrice,
-                markPrice: Number(ticker?.M),
-                bidAmount,
-                askAmount,
-                impliedVol: getTickerImpliedVol(ticker),
-                openInterest: getTickerOpenInterest(ticker),
-                scoreTrend24hPct: entrySellCallScoreTrend24hPct,
-                marketContext: sellCallMarketContext,
-              })
+              ? buildSellCallEdge({ score, dte })
               : null;
             const buyPutResearch = rule.action === 'buy_put'
               ? classifyBuyPutEdge({
@@ -9816,8 +9531,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
             if (optionType === 'P' && !(candidateLimitPrice > 0)) { filterStats.scoreOut++; continue; }
             if (rule.action === 'sell_call') {
-              if (minEdgeScore != null && selectionScore < Number(minEdgeScore)) { filterStats.scoreOut++; continue; }
-              if (minEdgeScore == null && minScore != null && score < Number(minScore)) { filterStats.scoreOut++; continue; }
+              if (selectionScore < sellCallMinScore) { filterStats.scoreOut++; continue; }
             } else if (rule.action === 'buy_put') {
               if (minScore != null && score < Number(minScore)) { filterStats.scoreOut++; continue; }
               if (minEdgeScore != null && selectionScore < Number(minEdgeScore)) { filterStats.scoreOut++; continue; }
@@ -9887,8 +9601,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
-        // Pick best candidate. Entry selection uses composite edge after hard
-        // price gates pass, so raw score does not dominate market-quality facts.
+        // Pick best candidate. Sell calls use the DTE-normalized CALL EDGE;
+        // buy puts retain their separate insurance edge calculation.
         candidates.sort((a, b) => {
           const aRank = ['sell_call', 'buy_put'].includes(rule.action) ? (a.selectionScore ?? a.score) : a.score;
           const bRank = ['sell_call', 'buy_put'].includes(rule.action) ? (b.selectionScore ?? b.score) : b.score;
@@ -10346,7 +10060,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           amount: qty,
           price: price,
           trigger_details: {
-            score: best.score,
+            score: rule.action === 'sell_call' ? roundForAdvisory(best.selectionScore, 2) : best.score,
+            raw_score: rule.action === 'sell_call' ? roundForAdvisory(best.score, 2) : null,
             delta: best.delta,
             dte: best.dte,
             strike: best.strike,
@@ -10380,12 +10095,6 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               score_band: best.sellCallResearch.score_band,
               edge_components: best.sellCallResearch.edge_components,
               selection_multiplier: best.sellCallResearch.selection_multiplier,
-              new_expiry_caution: best.sellCallResearch.new_expiry_caution,
-              score_spike_caution: best.sellCallResearch.score_spike_caution,
-              put_stress_caution: best.sellCallResearch.put_stress_caution,
-              skew_caution: best.sellCallResearch.skew_caution,
-              score_fading_caution: best.sellCallResearch.score_fading_caution,
-              wide_spread_caution: best.sellCallResearch.wide_spread_caution,
               reason: best.sellCallResearch.reason,
             } : null,
             advisor_limit_price: advisorLimitPrice,
@@ -10586,13 +10295,6 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
   if (hasOpenSellCall) {
     try { openOrderMarginState = await fetchSubaccount(); } catch { /* ok */ }
   }
-  const openOrderSellCallMarketContext = hasOpenSellCall
-    ? buildLiveSellCallMarketContext(tickerMap)
-    : null;
-  const openOrderBestSellCall = openOrderSellCallMarketContext
-    ? getBestCurrentSellCallCandidate(tickerMap, Date.now(), openOrderSellCallMarketContext)
-    : null;
-  const openOrderSellCallScoreTrend24hPct = loadSellCallScoreTrend24hPct(openOrderBestSellCall?.score);
   let openOrderBuyPutContext = null;
   const hasTrackedRestingBuyPut = openOrders.some((order) => {
     const tracked = trackedResting.find((item) => item.order_id === order.order_id)
@@ -10646,7 +10348,6 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
         marginState: openOrderMarginState,
         positions,
         spotPrice,
-        scoreTrend24hPct: openOrderSellCallScoreTrend24hPct,
       });
       if (!validation.valid) {
         invalidRestingEntryReason = `resting sell_call no longer satisfies active rule: ${validation.reason}`;
@@ -10948,11 +10649,10 @@ const getStandingRulebookDisciplinePrompt = () => [
   '- The advisory output is a standing rulebook for tick-by-tick execution, not only a list of trades that should execute at the current tick.',
   '- Every REQUIRED STANDING RULEBOOK COVERAGE item must have a corresponding rule in the final agenda. If the favorable condition is not true now, encode the condition that would make it favorable later.',
   '- buy_put rules define a price/score where insurance is worth buying while put budget remains. Use min_score/target_score as the hard price contract, and use the PUT edge gate to decide whether raw score is actually good insurance value.',
-  '- sell_call rules define premium, delta, DTE, spread quality, put-stress/skew, and margin conditions where call selling is worth doing while margin headroom remains. They must include min_edge_score so ordinary available bids or raw-score artifacts do not become false value signals.',
-  '- For sell_call, raw score means bid / abs(delta). min_bid is only a liquidity/premium floor; raw score and min_bid are not enough by themselves to prove favorable call value.',
-  `- For sell_call, anchor min_edge_score to the SELL-CALL VALUE CONTEXT in the rolling option value section: current CALL raw score, composite edge_score, candidate spread, market spread, PUT value, skew, and score trend. If premium is compressed, put value is high, spread is wide, or the stance is "wait", min_edge_score should be above the weak current edge and should describe the premium emergence you are waiting for; do not set a low floor merely to satisfy watcher coverage.`,
-  '- If the sell_call thesis is patience, weak/downward price action, high put value, near margin-cap discipline, or "wait for better premium", encode that waiting stance through stricter min_edge_score/min_bid criteria or low priority. The written reasoning and JSON trigger must not contradict each other.',
-  '- sell_call market_conditions may only use spot_price as optional supporting context. Do not put momentum, margin, regime, volatility, DTE, delta, score, bid, skew, spread, or custom fields inside market_conditions; express those through min_edge_score, min_bid, delta_range, dte_range, priority, and reasoning.',
+  `- sell_call rules must include min_score for CALL EDGE, where CALL EDGE = (bid / abs(delta)) * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}. This light correction reduces the mechanical Sunday jump when the available expiry range rolls forward.`,
+  '- min_bid is the executable premium/liquidity floor. min_score is compared with CALL EDGE; do not emit min_edge_score for sell_call.',
+  '- If the sell_call thesis is patience or margin is near its cap, encode that stance through a stricter min_score/min_bid, lower priority, or narrower delta/DTE range. The written reasoning and JSON trigger must not contradict each other.',
+  '- sell_call market_conditions may only use spot_price as optional supporting context. Express other selectivity through min_score, min_bid, delta_range, dte_range, priority, and reasoning.',
   '- Do not use broad spot_price floors as a proxy for sell_call recovery, stability, or good premium. After a sharp drop, spot can remain above a floor while call selling is still unattractive.',
   `- sell_call rules must stay inside the normal call sale universe: ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE and ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]} delta.`,
   `- sell_put rules must declare put_exit_intent. Use "roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long puts; roll_protection may close the aging instrument fully because the replacement protection is already on. Use "monetize_tail_win" only when executable unrealized_pnl_pct > ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. For monetization, never sell all downside protection at once or dump into sparse crash bids.`,
@@ -12411,7 +12111,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
     } else if (parsed.optionType === 'C') {
       if (isSellCallCandidateInStrategyRange(parsed.dte, delta) && bidPrice > 0) {
         const score = bidPrice / Math.abs(delta);
-        const research = classifySellCallResearchBand({
+        const research = buildSellCallEdge({
           score,
           dte: parsed.dte,
           bidPrice,
@@ -12435,12 +12135,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
           research: research.recommendation,
           dteBucket: research.dte_bucket,
           scoreBand: research.score_band,
-          warnings: [
-            research.put_stress_caution ? 'put_stress' : null,
-            research.skew_caution ? 'skew' : null,
-            research.score_fading_caution ? 'score_fading' : null,
-            research.wide_spread_caution ? 'wide_spread' : null,
-          ].filter(Boolean),
+          warnings: [],
         });
       }
     }
@@ -12603,21 +12298,21 @@ Given market data, produce a JSON trading agenda with:
 CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, min_edge_score, min_bid, market_conditions. Exit criteria uses typed intents plus conditions. sell_put criteria must include put_exit_intent. buyback_call criteria must include buyback_intent.
 
 Rules:
-- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_edge_score (optional hard buy_put edge floor; primary sell_call value gate), min_bid (for sell_call), market_conditions. For sell_call, include min_edge_score as the primary value gate and min_bid as the executable premium floor. For buy_put, include min_edge_score only when you want an explicit spread/IV/skew/OI/shock-payoff floor in addition to min_score/target_score. For sell_call, market_conditions may only contain spot_price conditions; translate momentum, margin caution, regime, volatility, edge, bid, delta, or DTE selectivity into min_edge_score, min_bid, priority, delta_range, or dte_range instead.
+- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_edge_score (optional hard buy_put edge floor only), min_bid (for sell_call), market_conditions. For sell_call, include min_score as the CALL EDGE gate and min_bid as the executable premium floor; do not emit min_edge_score. For buy_put, include min_edge_score only when you want an explicit spread/IV/skew/OI/shock-payoff floor in addition to min_score/target_score. For sell_call, market_conditions may only contain spot_price conditions; translate other selectivity into min_score, min_bid, priority, delta_range, or dte_range instead.
 - Exit criteria MUST include: conditions (array of {field, op, value}) and condition_logic ("any" or "all"). Fields: dte, delta, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte. Do not use mark_price as a strategy trigger. For sell_put, include put_exit_intent. For monetize_tail_win, also include min_exit_price or limit_price. For buyback_call, include buyback_intent; set allow_below_profit_floor true only for threat_management.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: roll_protection sell_put and threat_management buyback_call should use preferred_order_type "ioc". Patient monetize_tail_win sell_put and profit_capture buyback_call may use "gtc" or "post_only" as synthetic reduce-only resting exits, with limit_price/min_exit_price/max_buyback_price carrying the price discipline.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.12, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. Raw score is abs(delta)/ask and controls price; PUT edge score decides whether that price is good insurance value after spread, IV/skew, OI trend, DTE durability, and 30/40/50% drawdown payoff checks. Do not prefer higher delta by itself; use broad tail-convexity math and market-quality facts. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~${PUT_ROLL_DTE_THRESHOLD} only if the book already holds longer-dated long puts. Use put_exit_intent="roll_protection", requires_longer_dated_protection=true, condition dte lte ${PUT_ROLL_DTE_THRESHOLD}. This roll trigger is independent of the ${PUT_MONETIZATION_PROFIT_THRESHOLD}% monetization threshold.
-- For sell_call: set option_type "C", positive delta_range (e.g. [0.04, 0.12]), min_bid for the minimum executable bid, and min_edge_score for favorable premium. Sell-call raw score is bid / abs(delta), but raw score is only one component. The executor's edge score adjusts raw score for candidate spread, market-wide spread, 24h premium trend, high-put-value stress, IV skew, OI context, and DTE. Anchor min_edge_score to SELL-CALL VALUE CONTEXT: current CALL raw score, composite edge_score, spread quality, best PUT score, skew, trend, and warnings. High put value is a sell-call warning, not a reason to sell calls. Prefer tight spreads and holding/improving call premium; penalize wide books, fading premium, elevated skew, and high put-value regimes. If current call premium is compressed or the edge gate says caution, set min_edge_score above the current weak edge and explain the stronger edge you are waiting for; do not use a low threshold just to keep a watcher alive. Do not rely on spot_price >= some floor as a recovery or value condition. Do not encode non-spot evidence in market_conditions; if the market is weak, margin is tight, premium is mediocre, or the edge gate is caution, raise min_edge_score/min_bid or lower priority; narrow DTE only when that improves edge quality. DTE DISCIPLINE: sell calls at 5-12 DTE. Short-dated calls maximize theta decay harvesting, but do not chase the raw max score when it is only a spread or new-expiry artifact. dte_range must be within [5, 12].
+- For sell_call: set option_type "C", positive delta_range (e.g. [0.04, 0.12]), min_bid for the minimum executable bid, and min_score for favorable CALL EDGE. Raw score is bid / abs(delta). CALL EDGE = raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}; this light DTE normalization reduces the mechanical weekly spike when the eligible expiry range rolls forward. Rank and gate sell calls by CALL EDGE while retaining raw score for comparison. Do not emit min_edge_score for sell_call. DTE DISCIPLINE: sell calls at 5-12 DTE; dte_range must remain within [5, 12].
 - For sell_put exits: IMPORTANT: sell_put means selling an already-owned long put to close, trim, or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do not sell a long-dated protective put merely because it has recoverable bid/mark value. When DTE is above ${PUT_ROLL_DTE_THRESHOLD}, use put_exit_intent="monetize_tail_win"; require executable unrealized_pnl_pct gt ${PUT_MONETIZATION_PROFIT_THRESHOLD}, retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. Sell chunks, never all protection at once, so the book can capture more if ETH keeps dropping or bounces around. In severe crashes with sparse books, visible bids may badly understate fair value; if monetizing, make the market at a disciplined floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and payoff role instead of dumping into a stale bid. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you avoid triggering a sell_put, do it because removing protection is strategically unwise or value has not delivered extreme asymmetric upside, not because the exit itself uses more margin.
 - For buyback_call exits, choose one intent. Intent 1: profit_capture / capacity reset while the short call is working. Use buyback_intent "profit_capture", condition_logic "all", and executable unrealized_pnl_pct gte ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic condition. For patient resting attempts before the live ask reaches the capture line, also set target_capture_pct=${CALL_BUYBACK_PROFIT_THRESHOLD}, max_buyback_price to the highest price you are willing to bid, and preferred_order_type "post_only" or "gtc"; the limit price must imply at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture if filled. This uses synthetic reduce-only guarded by live position checks and one open exit order per instrument. Do not add dte or mark_price trigger blockers; executable capture already includes the live ask and is the relevant economic threshold. Intent 2: threat_management when price is moving against the short call and time is running out for recovery inside the threatened range. Use buyback_intent "threat_management", set allow_below_profit_floor true, and use real threat conditions such as delta, spot_price vs strike, and remaining DTE. Do not mix these two intents in one rule. Do not prematurely buy back calls just because price is rising; spot can come back down and buying back fear premium can make us the sucker of the trade. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. The ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line is a minimum acceptable capture, not a target. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not give back edge by bidding at the threshold. Never create a threshold-style buyback rule without a live buyback market price. Do not use margin utilization by itself as the buyback trigger. Margin release is a benefit of a good profit-harvest close, not a reason to panic-close. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending. Selling owned puts realizes cash but does not replenish the current cycle's put-buying budget.
 - For calls: the normal target cap is ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization; the ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% is last-mile execution safety, not planned sell-call capacity. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold; the code may size down within that zone but must not deliberately fill the buffer with dust orders. In the specific case of an upside breakout with short calls already open, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit so the bot can sell into richer bullish premium rather than paying up for fear-driven buybacks. This override is for breakout add-ons only, not generic leverage creep.
-- Entry rules should target the best composite edge after the hard price, DTE, delta, budget, and risk gates pass. For buy_put, raw score sets price discipline but does not outrank spread, IV/skew, OI trend, and crash-payoff quality.
+- Entry rules should target the best action-specific score after hard price, DTE, delta, budget, and risk gates pass. Sell calls use DTE-normalized CALL EDGE; buy_put keeps its separate insurance edge model.
 - Exit rules MUST reference specific instrument_name from current positions
 - If the market is unclear, tighten the watcher criteria and lower priority. Do not omit required standing watchers solely because they are not currently triggered.
 - Maximum 5 entry rules; exit rules should cover each required open-position watcher from REQUIRED STANDING RULEBOOK COVERAGE.
@@ -13731,7 +13426,7 @@ const runBot = async () => {
         const displayPutCandidates = filterValidOptions(enrichedPutCandidates, PUT_DELTA_RANGE[0], PUT_DELTA_RANGE[1]);
         const displayCallCandidates = filterValidOptions(enrichedCallCandidates, CALL_DELTA_RANGE[0], CALL_DELTA_RANGE[1]);
         const bestCurrentPut = [...displayPutCandidates].sort((a, b) => (b?.details?.askDeltaValue || 0) - (a?.details?.askDeltaValue || 0))[0] || null;
-        const bestCurrentCall = [...displayCallCandidates].sort((a, b) => (b?.details?.bidDeltaValue || 0) - (a?.details?.bidDeltaValue || 0))[0] || null;
+        const bestCurrentCall = [...displayCallCandidates].sort((a, b) => (b?.details?.callEdgeScore || 0) - (a?.details?.callEdgeScore || 0))[0] || null;
         const bestPutSummary = summarizeBestCandidate(bestCurrentPut, 'put');
         const bestCallSummary = summarizeBestCandidate(bestCurrentCall, 'call');
         const historicalBestScores = typeof db.getBestScores === 'function' ? db.getBestScores(7) : null;

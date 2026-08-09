@@ -3,6 +3,10 @@ const path = require('path');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
 const fs = require('fs');
+const {
+  SELL_CALL_EDGE_REFERENCE_DTE,
+  SELL_CALL_EDGE_DTE_EXPONENT,
+} = require('./call-score');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -760,7 +764,9 @@ const stmts = {
         THEN ask_delta_value END) as best_put_score,
       MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
         AND delta >= 0.04 AND delta <= 0.12
-        THEN bid_delta_value END) as best_call_score
+        AND expiry IS NOT NULL
+        AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN 5 AND 12
+        THEN bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) END) as best_call_score
     FROM options_snapshots
     WHERE timestamp > @since
   `),
@@ -822,7 +828,7 @@ const stmts = {
   getSellCallScoreSamples: db.prepare(`
     SELECT
       timestamp,
-      MAX(bid_delta_value) as score
+      MAX(bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT})) as score
     FROM options_snapshots
     WHERE timestamp > @since
       AND timestamp < @before
@@ -846,7 +852,8 @@ const stmts = {
       bid_price,
       strike,
       expiry,
-      bid_delta_value as score,
+      bid_delta_value as raw_score,
+      bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) as score,
       ((expiry - strftime('%s', timestamp)) / 86400.0) as dte
     FROM options_snapshots
     WHERE timestamp > @since
@@ -859,17 +866,21 @@ const stmts = {
       AND expiry IS NOT NULL
       AND ((expiry - strftime('%s', timestamp)) / 86400.0) >= @min_dte
       AND ((expiry - strftime('%s', timestamp)) / 86400.0) <= @max_dte
-    ORDER BY bid_delta_value DESC
+    ORDER BY score DESC
     LIMIT 1
   `),
 
   getBestCallDetail: db.prepare(`
-    SELECT instrument_name, delta, bid_price, strike, expiry
+    SELECT instrument_name, delta, bid_price, strike, expiry,
+      bid_delta_value as raw_score,
+      bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) as edge_score
     FROM options_snapshots
     WHERE timestamp > @since
       AND (option_type = 'C' OR instrument_name LIKE '%-C')
       AND delta >= 0.04 AND delta <= 0.12
-      AND bid_delta_value = @score
+      AND expiry IS NOT NULL
+      AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN 5 AND 12
+      AND abs((bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT})) - @score) < 0.000001
     LIMIT 1
   `),
 

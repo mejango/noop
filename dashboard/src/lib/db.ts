@@ -13,6 +13,10 @@ const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
 const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
 const PERIOD_MS = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 const MEASUREMENT_WINDOW_DAYS = 6.2;
+// Dashboard image is built independently from the bot image; the production
+// parity test keeps these values aligned with bot/call-score.js.
+const SELL_CALL_EDGE_REFERENCE_DTE = 8.5;
+const SELL_CALL_EDGE_DTE_EXPONENT = 0.12;
 
 function getPutBudgetPortfolioValue(snapshot: {
   spot_price: number;
@@ -133,7 +137,9 @@ function prepareAll(d: Database.Database) {
           THEN ask_delta_value END) as best_put_score,
         MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
           AND delta >= 0.04 AND delta <= 0.12
-          THEN bid_delta_value END) as best_call_score
+          AND expiry IS NOT NULL
+          AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN 5 AND 12
+          THEN bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) END) as best_call_score
       FROM options_snapshots
       WHERE timestamp > ?
     `),
@@ -149,12 +155,16 @@ function prepareAll(d: Database.Database) {
     `),
 
     getBestCallDetail: d.prepare(`
-      SELECT instrument_name, delta, bid_price, strike, expiry
+      SELECT instrument_name, delta, bid_price, strike, expiry,
+        bid_delta_value as raw_score,
+        bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) as edge_score
       FROM options_snapshots
       WHERE timestamp > ?
         AND (option_type = 'C' OR instrument_name LIKE '%-C')
         AND delta >= 0.04 AND delta <= 0.12
-        AND bid_delta_value = ?
+        AND expiry IS NOT NULL
+        AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN 5 AND 12
+        AND abs((bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT})) - ?) < 0.000001
       LIMIT 1
     `),
 
@@ -741,42 +751,31 @@ export function getBestOptionsOverTime(since: string) {
 }
 
 export function getSellCallEdgeOverTime(since: string, bucketMs = 0) {
-  const database = getDb();
-  const tableExists = (name: string) => Boolean(database.prepare(`
-    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1
-  `).get(name));
-  const sources: string[] = [];
-
-  if (tableExists('sell_call_edge_snapshots')) {
-    sources.push(`
-      SELECT timestamp, edge_score
-      FROM sell_call_edge_snapshots
-      WHERE timestamp > @since AND edge_score > 0
-    `);
-  }
-  // Older deployments only persisted candidates that reached decision telemetry.
-  // Keep those valid historical points while the continuous market series fills in.
-  if (tableExists('candidate_observations')) {
-    sources.push(`
-      SELECT observed_at AS timestamp, selection_score AS edge_score
-      FROM candidate_observations
-      WHERE observed_at > @since
-        AND action = 'sell_call'
-        AND selection_score > 0
-    `);
-  }
-  if (sources.length === 0) return [];
-
   const bucketSeconds = bucketMs > 0 ? Math.max(1, Math.floor(bucketMs / 1000)) : 0;
   const bucketExpression = bucketSeconds > 0
-    ? `(CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds) * @bucket_seconds`
+    ? `CAST(CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds AS INTEGER) * @bucket_seconds`
     : `CAST(strftime('%s', timestamp) AS INTEGER)`;
-  return database.prepare(`
-    WITH source AS (
-      ${sources.join('\nUNION ALL\n')}
+
+  // CALL EDGE is derived from the immutable raw snapshots so the entire chart
+  // has one meaning, including dates recorded before the normalization shipped.
+  return getDb().prepare(`
+    WITH eligible AS (
+      SELECT
+        timestamp,
+        bid_delta_value,
+        ((expiry - strftime('%s', timestamp)) / 86400.0) AS dte
+      FROM options_snapshots
+      WHERE timestamp > @since
+        AND (option_type = 'C' OR instrument_name LIKE '%-C')
+        AND delta BETWEEN 0.04 AND 0.12
+        AND bid_delta_value > 0
+        AND expiry IS NOT NULL
     ), per_tick AS (
-      SELECT timestamp, MAX(edge_score) AS edge_score
-      FROM source
+      SELECT
+        timestamp,
+        MAX(bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT})) AS edge_score
+      FROM eligible
+      WHERE dte BETWEEN 5 AND 12
       GROUP BY timestamp
     ), bucketed AS (
       SELECT ${bucketExpression} AS bucket_epoch, AVG(edge_score) AS edge_score

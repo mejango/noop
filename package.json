@@ -10,7 +10,12 @@
     "bot:standalone": "node script.js",
     "dashboard": "node dashboard_server.js",
     "research:correlate": "node scripts/profit-correlation-report.js",
-    "research:correlate:deep": "node scripts/profit-correlation-report.js --sample=all-candidates"
+    "research:correlate:deep": "node scripts/profit-correlation-report.js --sample=all-candidates",
+    "research:backtest:calls": "node scripts/sell-call-backtest.js",
+    "research:analyze:call-dte": "node scripts/analyze-call-dte-normalization.js",
+    "research:validate:call-dte": "node scripts/validate-call-dte-exponent.js",
+    "research:tune:call-edge": "node scripts/tune-sell-call-edge.js",
+    "test:backtest": "node test/sell-call-backtest.test.js"
   },
   "dependencies": {
     "axios": "^1.6.0",

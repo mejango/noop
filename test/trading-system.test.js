@@ -10,6 +10,11 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const {
+  SELL_CALL_EDGE_REFERENCE_DTE,
+  SELL_CALL_EDGE_DTE_EXPONENT,
+  normalizeSellCallScore,
+} = require('../bot/call-score');
 
 let passed = 0, failed = 0;
 const test = (name, fn) => {
@@ -44,7 +49,6 @@ const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
 const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
 const SELL_CALL_FALLBACK_MIN_BID = 4;
 const SELL_CALL_FALLBACK_MIN_SCORE = 65;
-const SELL_CALL_FALLBACK_MIN_EDGE_SCORE = 80;
 const VENUE_AMOUNT_DECIMALS = 2;
 const VENUE_MIN_ORDER_AMOUNT = 0.1;
 
@@ -542,7 +546,7 @@ const buildRulebookRequirements = ({ putBudgetRemaining = 0, accountHealth = {},
     requirements.push({
       type: 'entry',
       action: 'sell_call',
-      instruction: 'Create a standing sell_call watcher only for favorable call premium. Encode value with min_edge_score plus min_bid, DTE, delta, and margin criteria. The edge score combines raw call score, spread quality, premium trend, put-stress/skew warnings, OI context, and DTE; raw call score alone is not enough, and do not use a broad spot_price floor as a substitute for better premium or post-drop recovery.',
+      instruction: `Create a standing sell_call watcher only for favorable call premium. Encode value with min_score plus min_bid, DTE, delta, and margin criteria. CALL EDGE is raw bid / abs(delta), lightly normalized by (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT} to reduce weekly expiry-roll artifacts.`,
     });
   }
 
@@ -594,7 +598,7 @@ const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
         delta_range: CALL_DELTA_RANGE,
         dte_range: CALL_EXPIRATION_RANGE,
         min_bid: SELL_CALL_FALLBACK_MIN_BID,
-        min_edge_score: SELL_CALL_FALLBACK_MIN_EDGE_SCORE,
+        min_score: SELL_CALL_FALLBACK_MIN_SCORE,
       },
       priority: 'low',
       preferred_order_type: 'post_only',
@@ -906,42 +910,28 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
 const formatSellCallConfirmationContext = ({ action, triggerData, ticker, currentPrice }) => {
   if (action?.action !== 'sell_call') return '';
   const criteria = typeof action.rule_criteria === 'string' ? JSON.parse(action.rule_criteria) : (action.rule_criteria || {});
-  const triggerScore = Number(triggerData?.score);
+  const triggerDte = Number(triggerData?.dte);
   const triggerDelta = Number(triggerData?.delta);
   const liveDelta = Number(ticker?.option_pricing?.d);
-  const triggerDte = Number(triggerData?.dte);
-  const triggerBid = Number(triggerData?.live_price ?? currentPrice ?? action.price);
   const executionBid = Number(currentPrice || action.price);
-  const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
-  const plannedScore = Math.abs(scoreDelta) > 0 && executionBid > 0 ? executionBid / Math.abs(scoreDelta) : null;
-  const sellCallResearch = triggerData?.sell_call_research || {};
-  const edgeScore = Number(triggerData?.selection_score ?? sellCallResearch?.selection_score);
-  const minEdgeScore = Number(criteria.min_edge_score);
-  const legacyMinScore = Number(criteria.min_score);
-  const hasMinEdgeScore = Number.isFinite(minEdgeScore) && minEdgeScore > 0;
-  const hasLegacyMinScore = Number.isFinite(legacyMinScore) && legacyMinScore > 0;
-  const edgeGateStatus = hasMinEdgeScore
-    ? (Number.isFinite(edgeScore) && edgeScore + 1e-9 >= minEdgeScore ? 'PASS' : 'FAIL')
-    : 'NOT_CONFIGURED';
-  const rawGateStatus = hasMinEdgeScore
-    ? 'NOT_APPLICABLE (min_edge_score takes precedence)'
-    : hasLegacyMinScore
-      ? (Number.isFinite(triggerScore) && triggerScore + 1e-9 >= legacyMinScore ? 'PASS' : 'FAIL')
-      : 'NOT_CONFIGURED';
+  const scoreDelta = Number.isFinite(liveDelta) ? liveDelta : triggerDelta;
+  const liveRawScore = Math.abs(scoreDelta) > 0 && executionBid > 0 ? executionBid / Math.abs(scoreDelta) : null;
+  const liveEdgeScore = normalizeSellCallScore(liveRawScore, triggerDte);
+  const triggerRawScore = Number(triggerData?.raw_score ?? triggerData?.sell_call_research?.edge_components?.raw_score);
+  const triggerEdgeScore = Number(triggerData?.selection_score ?? triggerData?.score);
+  const configuredMinScore = Number(criteria.min_score);
+  const minScore = Number.isFinite(configuredMinScore) && configuredMinScore > 0 ? configuredMinScore : SELL_CALL_FALLBACK_MIN_SCORE;
+  const gateStatus = Number.isFinite(liveEdgeScore) && liveEdgeScore + 1e-9 >= minScore ? 'PASS' : 'FAIL';
   const fmt = (value, digits = 4) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
   return [
     'Sell-call value confirmation context:',
-    `- Raw score: ${fmt(triggerScore, 2)} using raw_score = bid / abs(delta); trigger_bid=${fmtPrice(triggerBid)}, trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(triggerDte, 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
-    `- Rule gates: min_edge_score=${fmt(minEdgeScore, 2)}, legacy_min_score=${fmt(legacyMinScore, 2)}, min_bid=${fmtPrice(criteria.min_bid)}, delta_range=${JSON.stringify(criteria.delta_range || null)}, dte_range=${JSON.stringify(criteria.dte_range || null)}.`,
-    `- Composite edge: edge_score=${fmt(edgeScore, 2)}, recommendation=${sellCallResearch?.recommendation || 'n/a'}.`,
-    `- Typed value gates: edge_gate=${edgeGateStatus}${hasMinEdgeScore ? ` (edge_score=${fmt(edgeScore, 2)} ${edgeGateStatus === 'PASS' ? '>=' : '<'} min_edge_score=${fmt(minEdgeScore, 2)})` : ''}; raw_gate=${rawGateStatus}${!hasMinEdgeScore && hasLegacyMinScore ? ` (raw_score=${fmt(triggerScore, 2)} ${rawGateStatus === 'PASS' ? '>=' : '<'} legacy_min_score=${fmt(legacyMinScore, 2)})` : ''}.`,
-    `- Live reference: executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}, planned_score=${fmt(plannedScore, 2)}.`,
-    '- Gate semantics: min_edge_score is compared only with edge_score. legacy_min_score is compared with raw_score only when min_edge_score is not configured. Never describe a passing typed gate as failed. A passing value gate does not force confirmation; reject only for a separate, concrete fresh market, warning, or risk fact and name that fact explicitly.',
-    '- Confirm sell_call when the fresh bid, composite edge score, min_bid, delta/DTE, and margin facts satisfy the advisor rule. Raw call score alone is not enough when the composite edge or explicit warnings contradict it.',
+    `- CALL EDGE formula: raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}; raw_score = bid / abs(delta).`,
+    `- Trigger: raw_score=${fmt(triggerRawScore, 2)}, edge_score=${fmt(triggerEdgeScore, 2)}.`,
+    `- Fresh market: raw_score=${fmt(liveRawScore, 2)}, edge_score=${fmt(liveEdgeScore, 2)}, executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}.`,
+    `- Rule: min_score=${fmt(minScore, 2)}, min_bid=${fmtPrice(criteria.min_bid)}, edge_gate=${gateStatus} (edge_score=${fmt(liveEdgeScore, 2)} ${gateStatus === 'PASS' ? '>=' : '<'} min_score=${fmt(minScore, 2)}).`,
   ].join('\n');
 };
-
 const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, advisorLimitPrice, currentPrice }) => {
   if (action?.action !== 'sell_put') return '';
   const criteria = typeof action.rule_criteria === 'string' ? JSON.parse(action.rule_criteria) : (action.rule_criteria || {});
@@ -1183,17 +1173,13 @@ describe('finiteOrNull', () => {
     assert.strictEqual(finiteOrNull('7.42'), 7.42);
   });
 
-  test('missing sell-call trend cannot earn the stable or improving multiplier', () => {
-    const numericTrend24h = finiteOrNull(null);
-    const scoreStableOrImproving = Number.isFinite(numericTrend24h) && numericTrend24h >= -3;
-
-    assert.strictEqual(scoreStableOrImproving, false);
-    assert.ok(SCRIPT_SOURCE.includes("if (value == null || (typeof value === 'string' && value.trim() === '')) return null;"));
-    assert.ok(SCRIPT_SOURCE.includes('const numericTrend24h = finiteOrNull(scoreTrend24hPct);'));
-    assert.ok(SCRIPT_SOURCE.includes('score_trend_24h_pct: roundForAdvisory(numericTrend24h, 2)'));
-    assert.ok(SCRIPT_SOURCE.includes('const currentCallScore = currentCall ? finiteOrNull(currentCall.score) : null;'));
-    assert.ok(SCRIPT_SOURCE.includes('scoreTrend24hPct: entrySellCallScoreTrend24hPct'));
-    assert.ok(SCRIPT_SOURCE.includes('scoreTrend24hPct: openOrderSellCallScoreTrend24hPct'));
+  test('sell-call edge is only the light DTE normalization', () => {
+    assert.strictEqual(normalizeSellCallScore(100, SELL_CALL_EDGE_REFERENCE_DTE), 100);
+    assert.ok(normalizeSellCallScore(100, 5) > 100);
+    assert.ok(normalizeSellCallScore(100, 12) < 100);
+    assert.strictEqual(normalizeSellCallScore(0, 8), 0);
+    assert.ok(SCRIPT_SOURCE.includes('const edgeScore = normalizeSellCallScore(rawScore, numericDte);'));
+    assert.ok(!SCRIPT_SOURCE.includes('classifySellCallResearchBand'));
   });
 });
 
@@ -1512,7 +1498,7 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(requirements.some((req) => req.type === 'exit' && req.action === 'buyback_call' && req.instrument_name === 'ETH-20260529-2400-C'));
   });
 
-  test('sell_call watcher requirement demands composite edge value', () => {
+  test('sell_call watcher requirement uses DTE-normalized CALL EDGE', () => {
     const requirements = buildRulebookRequirements({
       accountHealth: {
         margin: { is_under_liquidation: false, margin_usage_pct: 49.8 },
@@ -1522,11 +1508,9 @@ describe('Standing rulebook coverage requirements', () => {
     const requirement = requirements.find((req) => req.type === 'entry' && req.action === 'sell_call');
 
     assert.ok(requirement);
-    assert.ok(requirement.instruction.includes('min_edge_score'));
-    assert.ok(requirement.instruction.includes('raw call score alone is not enough'));
-    assert.ok(requirement.instruction.includes('put-stress/skew'));
+    assert.ok(requirement.instruction.includes('min_score'));
+    assert.ok(requirement.instruction.includes('(8.5 / DTE)^0.12'));
     assert.ok(requirement.instruction.includes('min_bid'));
-    assert.ok(requirement.instruction.includes('do not use a broad spot_price floor'));
   });
 
   test('buy_put watcher requirement demands edge-quality context without delta chasing', () => {
@@ -1545,18 +1529,16 @@ describe('Standing rulebook coverage requirements', () => {
   test('advisor prompt forbids non-spot sell-call market conditions', () => {
     assert.ok(SCRIPT_SOURCE.includes('sell_call market_conditions may only use spot_price'));
     assert.ok(SCRIPT_SOURCE.includes('For sell_call, market_conditions may only contain spot_price conditions'));
-    assert.ok(SCRIPT_SOURCE.includes('Do not encode non-spot evidence in market_conditions'));
-    assert.ok(SCRIPT_SOURCE.includes('raise min_edge_score/min_bid or lower priority'));
+    assert.ok(SCRIPT_SOURCE.includes('Express other selectivity through min_score, min_bid'));
   });
 
-  test('advisor prompt anchors sell-call min_edge_score to rolling call edge context', () => {
+  test('advisor prompt defines rolling CALL EDGE with the DTE formula', () => {
     assert.ok(SCRIPT_SOURCE.includes('getSellCallScoreSamples'));
     assert.ok(SCRIPT_SOURCE.includes('call_value_context'));
-    assert.ok(SCRIPT_SOURCE.includes('Current CALL raw score:'));
-    assert.ok(SCRIPT_SOURCE.includes('Prior ${context.window_days}d best CALL score'));
-    assert.ok(SCRIPT_SOURCE.includes('CALL edge gate:'));
-    assert.ok(SCRIPT_SOURCE.includes('High put value is a sell-call warning'));
-    assert.ok(SCRIPT_SOURCE.includes('min_edge_score should be above the weak current edge'));
+    assert.ok(SCRIPT_SOURCE.includes('Current CALL EDGE:'));
+    assert.ok(SCRIPT_SOURCE.includes('Prior ${context.window_days}d best CALL EDGE'));
+    assert.ok(SCRIPT_SOURCE.includes('CALL EDGE normalization:'));
+    assert.ok(SCRIPT_SOURCE.includes('CALL EDGE = raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}'));
   });
 
   test('advisor prompt anchors buy-put edge to spread IV skew OI and shock payoff', () => {
@@ -1633,7 +1615,7 @@ describe('Standing rulebook coverage requirements', () => {
       delta_range: CALL_DELTA_RANGE,
       dte_range: CALL_EXPIRATION_RANGE,
       min_bid: SELL_CALL_FALLBACK_MIN_BID,
-      min_edge_score: SELL_CALL_FALLBACK_MIN_EDGE_SCORE,
+      min_score: SELL_CALL_FALLBACK_MIN_SCORE,
     });
     assert.strictEqual(fallback.priority, 'low');
     assert.strictEqual(fallback.preferred_order_type, 'post_only');
@@ -7269,12 +7251,13 @@ describe('confirmation prompt margin context', () => {
           delta_range: [0.04, 0.12],
           dte_range: [5, 12],
           min_bid: 4,
-          min_edge_score: 80,
+          min_score: 65,
         },
       },
       triggerData: {
-        score: 68.55,
-        selection_score: 91.2,
+        score: 68.37,
+        raw_score: 68.55,
+        selection_score: 68.37,
         delta: 0.1182,
         dte: 8.7,
         strike: 2100,
@@ -7289,19 +7272,16 @@ describe('confirmation prompt margin context', () => {
     });
 
     assert.ok(context.includes('Sell-call value confirmation context'));
-    assert.ok(context.includes('Raw score: 68.55'));
-    assert.ok(context.includes('min_edge_score=80.00'));
-    assert.ok(context.includes('edge_score=91.20'));
-    assert.ok(context.includes('edge_gate=PASS (edge_score=91.20 >= min_edge_score=80.00)'));
-    assert.ok(context.includes('raw_gate=NOT_APPLICABLE (min_edge_score takes precedence)'));
+    assert.ok(context.includes('CALL EDGE formula'));
+    assert.ok(context.includes('raw_score=68.55'));
+    assert.ok(context.includes('min_score=65.00'));
+    assert.ok(context.includes('edge_score=68.37'));
+    assert.ok(context.includes('edge_gate=PASS'));
     assert.ok(context.includes('min_bid=$4.0000'));
-    assert.ok(context.includes('planned_score=68.53'));
-    assert.ok(context.includes('min_edge_score is compared only with edge_score'));
-    assert.ok(context.includes('fresh bid, composite edge score, min_bid, delta/DTE, and margin facts satisfy the advisor rule'));
-    assert.ok(context.includes('Raw call score alone is not enough'));
+    assert.ok(context.includes('Fresh market: raw_score=68.53'));
   });
 
-  test('sell_call confirmation does not mistake a raw score below the composite edge threshold for a failed gate', () => {
+  test('sell_call confirmation applies the DTE correction before the min_score gate', () => {
     const context = formatSellCallConfirmationContext({
       action: {
         action: 'sell_call',
@@ -7311,14 +7291,15 @@ describe('confirmation prompt margin context', () => {
           delta_range: [0.04, 0.12],
           dte_range: [5, 12],
           min_bid: 4,
-          min_edge_score: 55,
+          min_score: 55,
         },
       },
       triggerData: {
-        score: 53.86,
-        selection_score: 57.27,
+        score: 56.77,
+        raw_score: 53.86,
+        selection_score: 56.77,
         delta: 0.12,
-        dte: 8,
+        dte: 5,
         strike: 2050,
         live_price: 6.46,
         sell_call_research: { recommendation: 'caution', wide_spread_caution: true },
@@ -7327,14 +7308,10 @@ describe('confirmation prompt margin context', () => {
       currentPrice: 6.46,
     });
 
-    assert.ok(context.includes('Raw score: 53.86'));
-    assert.ok(context.includes('edge_gate=PASS (edge_score=57.27 >= min_edge_score=55.00)'));
-    assert.ok(context.includes('raw_gate=NOT_APPLICABLE (min_edge_score takes precedence)'));
-    assert.ok(context.includes('Never describe a passing typed gate as failed'));
-    assert.ok(context.includes('A passing value gate does not force confirmation'));
-    assert.ok(SCRIPT_SOURCE.includes('Raw score: ${fmt(triggerScore, 2)} using raw_score'));
-    assert.ok(SCRIPT_SOURCE.includes('Typed value gates: edge_gate=${edgeGateStatus}'));
-    assert.ok(SCRIPT_SOURCE.includes('min_edge_score is compared only with edge_score'));
+    assert.ok(context.includes('raw_score=53.86'));
+    assert.ok(context.includes('edge_gate=PASS'));
+    assert.ok(context.includes('min_score=55.00'));
+    assert.ok(SCRIPT_SOURCE.includes('const liveEdgeScore = normalizeSellCallScore(liveRawScore, triggerDte);'));
   });
 
   test('sell_put confirmation context preserves tail monetization floor and tranche discipline', () => {
@@ -8013,18 +7990,21 @@ describe('Dashboard range loading UX', () => {
   });
 });
 
-describe('Sell-call composite edge chart', () => {
+describe('Sell-call DTE-normalized edge chart', () => {
   const botDbSource = fs.readFileSync(path.join(__dirname, '..', 'bot', 'db.js'), 'utf8');
   const chartDbSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'db.ts'), 'utf8');
   const chartRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'chart', 'route.ts'), 'utf8');
   const overviewSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'page.tsx'), 'utf8');
 
-  test('persists the composite market edge independently of rule acceptance', () => {
+  test('persists normalized edge telemetry independently of rule acceptance', () => {
     assert.ok(botDbSource.includes('CREATE TABLE IF NOT EXISTS sell_call_edge_snapshots'));
     assert.ok(botDbSource.includes('insertSellCallEdgeSnapshot'));
     assert.ok(SCRIPT_SOURCE.includes('recordSellCallEdgeSnapshotSafe({'));
     assert.ok(SCRIPT_SOURCE.includes('edge_score: entryBestSellCall.selection_score'));
-    assert.ok(SCRIPT_SOURCE.includes('scoreTrend24hPct: entrySellCallScoreTrend24hPct'));
+    assert.ok(SCRIPT_SOURCE.includes('normalization: entryBestSellCall.research?.edge_components'));
+    assert.ok(chartDbSource.includes('const SELL_CALL_EDGE_REFERENCE_DTE = 8.5'));
+    assert.ok(chartDbSource.includes('const SELL_CALL_EDGE_DTE_EXPONENT = 0.12'));
+    assert.ok(chartDbSource.includes('MAX(bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT})) AS edge_score'));
   });
 
   test('serves and renders a distinct dotted blue edge series', () => {
