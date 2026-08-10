@@ -16,18 +16,28 @@ const {
   CURRENT_EDGE_CONFIG,
   RAW_EQUIVALENT_CONFIG,
   analyzeRolloverDiscontinuity,
+  attachTrailingDteBenchmarks,
+  buildEconomicExamples,
+  buildEconomicPredictionTape,
   buildLabeledExamples,
+  constantMaturityPoint,
   currentEdgeScore,
   edgeVariantScore,
   enrichFrames,
   generateVariantConfigs,
   loadHistoricalFrames,
+  makeDteNormalizedRawPolicy,
+  makeEconomicValuePolicy,
   makeNoCallPolicy,
   makeRawScorePolicy,
   normalizeDteScore,
+  normalizeLinearDteScore,
   runBacktest,
+  scoreSimpleCall,
   splitChronologicalFrames,
+  trainEconomicModels,
   trainOutcomeModels,
+  predictEconomicOutcome,
   predictOutcome,
   WalkForwardLearnedPolicy,
 } = require('../research/sell-call-backtest');
@@ -184,6 +194,39 @@ describe('DTE normalization', () => {
     assert.ok(normalizeDteScore(100, 5, { referenceDte: 8.5, exponent: 0.25 }) > 100);
   });
 
+  test('linear normalization applies one continuous slope around the reference DTE', () => {
+    const options = { referenceDte: 8.5, slope: 0.02 };
+    assert.strictEqual(normalizeLinearDteScore(100, 8.5, options), 100);
+    assert.strictEqual(normalizeLinearDteScore(100, 5, options), 107);
+    assert.strictEqual(normalizeLinearDteScore(100, 12, options), 93);
+    assert.strictEqual(
+      normalizeLinearDteScore(100, 6, options) - normalizeLinearDteScore(100, 7, options),
+      normalizeLinearDteScore(100, 10, options) - normalizeLinearDteScore(100, 11, options),
+    );
+  });
+
+  test('reference DTE only rescales scores and can be offset by the floor', () => {
+    const exponent = 0.12;
+    const oldReference = 8.5;
+    const newReference = 10;
+    const oldFloor = 65;
+    const newFloor = oldFloor * Math.pow(newReference / oldReference, exponent);
+    for (const dte of [4, 7, 10, 14]) {
+      const oldMargin = normalizeDteScore(70, dte, { referenceDte: oldReference, exponent }) / oldFloor;
+      const newMargin = normalizeDteScore(70, dte, { referenceDte: newReference, exponent }) / newFloor;
+      assert.ok(Math.abs(oldMargin - newMargin) < 1e-12);
+    }
+  });
+
+  test('normalized policy applies an independently configurable DTE window', () => {
+    const policy = makeDteNormalizedRawPolicy({ minDte: 6, maxDte: 10, minScore: 1, minBid: 1 });
+    const base = { bid_price: 10, raw_score: 100, expiry: 1, instrument_name: 'CALL' };
+    assert.strictEqual(policy.select({ candidates: [{ ...base, dte: 5.9 }] }), null);
+    assert.ok(policy.select({ candidates: [{ ...base, dte: 6 }] }));
+    assert.ok(policy.select({ candidates: [{ ...base, dte: 10 }] }));
+    assert.strictEqual(policy.select({ candidates: [{ ...base, dte: 10.1 }] }), null);
+  });
+
   test('normalization reduces a synthetic expiry-roll discontinuity', () => {
     const start = Date.UTC(2026, 0, 3, 0);
     const oldExpiry = Math.floor((start + 5.1 * 24 * HOUR_MS) / 1000);
@@ -211,6 +254,79 @@ describe('DTE normalization', () => {
     assert.strictEqual(raw.rollover_events, 1);
     assert.strictEqual(normalized.rollover_events, 1);
     assert.ok(normalized.mean_positive_peak_jump_pct < raw.mean_positive_peak_jump_pct);
+  });
+});
+
+describe('simple call-score hypotheses', () => {
+  const candidate = {
+    raw_score: 100,
+    dte: 8.5,
+    bid_price: 10,
+    ask_price: 12,
+    delta: 0.1,
+    implied_vol: 0.6,
+  };
+  const frame = { spot_price: 2000 };
+
+  test('production hypothesis preserves the production score at reference DTE', () => {
+    assert.strictEqual(scoreSimpleCall(candidate, frame, { family: 'production' }), 100);
+  });
+
+  test('spread haircut measures executable premium left after crossing cost', () => {
+    assert.strictEqual(scoreSimpleCall(candidate, frame, { family: 'spread_haircut', spreadHaircut: 0.5 }), 90);
+    assert.strictEqual(scoreSimpleCall(candidate, frame, { family: 'spread_haircut', spreadHaircut: 1 }), 80);
+  });
+
+  test('additive DTE detrend is a continuous score-point adjustment', () => {
+    assert.strictEqual(scoreSimpleCall({ ...candidate, dte: 12 }, frame, { family: 'additive_dte', additiveSlope: 1 }), 96.5);
+    assert.strictEqual(scoreSimpleCall({ ...candidate, dte: 5 }, frame, { family: 'additive_dte', additiveSlope: 1 }), 103.5);
+  });
+
+  test('expected-move efficiency falls when implied volatility rises', () => {
+    const calm = scoreSimpleCall(candidate, frame, { family: 'expected_move' });
+    const volatile = scoreSimpleCall({ ...candidate, implied_vol: 1.2 }, frame, { family: 'expected_move' });
+    assert.ok(calm > volatile);
+    assert.ok(Math.abs(calm / volatile - 2) < 1e-12);
+  });
+
+  test('balanced expected-move value is the geometric mean of absolute and risk-scaled value', () => {
+    const production = scoreSimpleCall(candidate, frame, { family: 'production' });
+    const netMove = scoreSimpleCall(candidate, frame, { family: 'expected_move_net' });
+    const balanced = scoreSimpleCall(candidate, frame, { family: 'balanced_expected_move' });
+    assert.ok(Math.abs(balanced - Math.sqrt(production * netMove)) < 1e-12);
+  });
+
+  test('trailing DTE-relative value uses prior frames and excludes the current quote', () => {
+    const start = Date.UTC(2026, 0, 1);
+    const frames = [100, 200].map((rawScore, index) => ({
+      timestamp_ms: start + index * HOUR_MS,
+      spot_price: 2000,
+      candidates: [{
+        ...candidate,
+        instrument_name: `CALL-${index}`,
+        expiry: Math.floor((start + 8.5 * 24 * HOUR_MS) / 1000),
+        raw_score: rawScore,
+        bid_price: rawScore * 0.1,
+      }],
+    }));
+    attachTrailingDteBenchmarks(frames, { minSamples: 1, lookbackDays: 30 });
+    assert.strictEqual(scoreSimpleCall(frames[0].candidates[0], frames[0], { family: 'trailing_dte_relative' }), 0);
+    assert.strictEqual(scoreSimpleCall(frames[1].candidates[0], frames[1], { family: 'trailing_dte_relative' }), 2);
+  });
+
+  test('constant-maturity value interpolates between surrounding expiries', () => {
+    const point = constantMaturityPoint({
+      timestamp: '2026-01-01T00:00:00.000Z',
+      timestamp_ms: Date.UTC(2026, 0, 1),
+      spot_price: 2000,
+      candidates: [
+        { ...candidate, instrument_name: 'LOWER', expiry: 1, dte: 5, raw_score: 50, bid_price: 5 },
+        { ...candidate, instrument_name: 'UPPER', expiry: 2, dte: 12, raw_score: 120, bid_price: 12 },
+      ],
+    }, { family: 'production', exponent: 0, targetDte: 8.5, minDte: 1, maxDte: 21 });
+    assert.ok(point);
+    assert.strictEqual(point.score, 85);
+    assert.strictEqual(point.interpolation_weight, 0.5);
   });
 });
 
@@ -255,6 +371,121 @@ describe('counterfactual labels', () => {
     ]);
     const examples = buildLabeledExamples(frames, { horizonHours: 1, quoteWindowHours: 1, topPerFrame: 1 });
     assert.strictEqual(examples.length, 0);
+  });
+});
+
+describe('economic path outcomes', () => {
+  test('matches the replay exit policy and records capital-time plus adverse excursion', () => {
+    const start = Date.UTC(2026, 0, 1, 0);
+    const expiry = Math.floor((start + 8 * 24 * HOUR_MS) / 1000);
+    const frames = framesFrom([
+      { timestampMs: start, spot: 2000, options: [option({ expiry, bid: 10, ask: 11 })] },
+      { timestampMs: start + HOUR_MS, spot: 2010, options: [option({ expiry, bid: 7, ask: 8 })] },
+      { timestampMs: start + 2 * HOUR_MS, spot: 2000, options: [option({ expiry, bid: 1, ask: 1.9 })] },
+    ]);
+    const examples = buildEconomicExamples(frames, { minBid: 4, profitCapturePct: 0.8, marginRate: 0.15 });
+    const first = examples.find((example) => example.observed_at_ms === start);
+    assert.ok(first);
+    assert.strictEqual(first.exit_reason, 'profit_capture');
+    assert.strictEqual(first.close_price, 1.9);
+    assert.strictEqual(first.pnl, 8.1);
+    assert.strictEqual(first.holding_hours, 2);
+    assert.strictEqual(first.margin_per_contract, 300);
+    assert.strictEqual(first.max_adverse_excursion, 1);
+    assert.ok(Math.abs(first.profit_per_margin_day - 0.324) < 1e-12);
+  });
+
+  test('labels every eligible candidate rather than inheriting a raw-score top-N filter', () => {
+    const start = Date.UTC(2026, 0, 1, 0);
+    const expiry = Math.floor((start + 8 * 24 * HOUR_MS) / 1000);
+    const atEntry = [
+      option({ name: 'HIGH', expiry, bid: 10, ask: 11, delta: 0.1 }),
+      option({ name: 'LOW', expiry, bid: 5, ask: 6, delta: 0.1 }),
+    ];
+    const atExit = [
+      option({ name: 'HIGH', expiry, bid: 1, ask: 1.9, delta: 0.1 }),
+      option({ name: 'LOW', expiry, bid: 0.5, ask: 0.9, delta: 0.1 }),
+    ];
+    const frames = framesFrom([
+      { timestampMs: start, spot: 2000, options: atEntry },
+      { timestampMs: start + HOUR_MS, spot: 2000, options: atExit },
+    ]);
+    const examples = buildEconomicExamples(frames, { minBid: 4, profitCapturePct: 0.8 });
+    assert.deepStrictEqual(examples.map((example) => example.instrument_name).sort(), ['HIGH', 'LOW']);
+    assert.ok(examples.every((example) => example.weight === 0.5));
+  });
+
+  test('learns profit-rate direction separately from adverse-path risk', () => {
+    const start = Date.UTC(2026, 0, 1);
+    const examples = Array.from({ length: 80 }, (_, index) => {
+      const value = 3 + index / 20;
+      return {
+        observed_at_ms: start + index * HOUR_MS,
+        label_available_at_ms: start + (index + 1) * HOUR_MS,
+        features: { log_raw_score: value, spread_to_bid: index % 5 / 10 },
+        profit_per_margin_day: value / 100,
+        adverse_per_margin_day: (8 - value) / 100,
+        loss: index < 8 ? 1 : 0,
+        adverse_breach: index < 20 ? 1 : 0,
+        weight: 1,
+      };
+    });
+    const model = trainEconomicModels(examples, { lossIterations: 30 });
+    const low = predictEconomicOutcome(model, { log_raw_score: 3.2, spread_to_bid: 0.1 });
+    const high = predictEconomicOutcome(model, { log_raw_score: 6.5, spread_to_bid: 0.1 });
+    assert.ok(high.expected_profit_per_margin_day > low.expected_profit_per_margin_day);
+    assert.ok(high.expected_adverse_per_margin_day < low.expected_adverse_per_margin_day);
+    assert.ok(model.targets.primary.includes('margin-day'));
+  });
+
+  test('walk-forward predictions admit labels only after maturity and embargo', () => {
+    const start = Date.UTC(2026, 0, 1);
+    const expiry = Math.floor((start + 8 * 24 * HOUR_MS) / 1000);
+    const frames = framesFrom(Array.from({ length: 10 }, (_, hour) => ({
+      timestampMs: start + hour * HOUR_MS,
+      spot: 2000,
+      options: [option({ expiry, bid: 10, ask: 11 })],
+    })));
+    const example = {
+      observed_at_ms: start,
+      label_available_at_ms: start + HOUR_MS,
+      features: { log_raw_score: Math.log1p(100) },
+      profit_per_margin_day: 0.01,
+      adverse_per_margin_day: 0.02,
+      loss: 0,
+      adverse_breach: 0,
+      weight: 1,
+    };
+    const tape = buildEconomicPredictionTape(frames, [example], {
+      minSamples: 1,
+      minIndependentFrames: 1,
+      embargoHours: 6,
+      retrainHours: 24,
+      readinessCheckHours: 1,
+      lossIterations: 5,
+    });
+    assert.strictEqual(tape.first_prediction_at, new Date(start + 7 * HOUR_MS).toISOString());
+    assert.ok(tape.artifacts.every((artifact) => (
+      new Date(artifact.label_through).getTime() <= new Date(artifact.training_cutoff).getTime()
+    )));
+  });
+
+  test('value policy can abstain and ranks by risk-adjusted profit rate', () => {
+    const timestampMs = Date.UTC(2026, 0, 1);
+    const predictions = new Map([[timestampMs, new Map([
+      ['SAFE', { expected_profit_per_margin_day: 0.03, expected_adverse_per_margin_day: 0.01, loss_probability: 0.1, model_version: 'm1' }],
+      ['RISKY', { expected_profit_per_margin_day: 0.05, expected_adverse_per_margin_day: 0.20, loss_probability: 0.4, adverse_breach_probability: 0.4, model_version: 'm1' }],
+    ])]]);
+    const tape = { predictions, options: { minBid: 4 } };
+    const candidates = [
+      { instrument_name: 'SAFE', bid_price: 5, raw_score: 50 },
+      { instrument_name: 'RISKY', bid_price: 8, raw_score: 80 },
+    ];
+    predictions.get(timestampMs).get('SAFE').adverse_breach_probability = 0.1;
+    const policy = makeEconomicValuePolicy(tape, { riskPenalty: 0.25, minUtility: 0, maxLossProbability: 0.35 });
+    assert.strictEqual(policy.select({ frame: { timestamp_ms: timestampMs }, candidates }).candidate.instrument_name, 'SAFE');
+    const abstain = makeEconomicValuePolicy(tape, { riskPenalty: 0.25, minUtility: 0.1, maxLossProbability: 0.35 });
+    assert.strictEqual(abstain.select({ frame: { timestamp_ms: timestampMs }, candidates }), null);
   });
 });
 

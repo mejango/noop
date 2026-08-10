@@ -155,7 +155,7 @@ function loadHistoricalFrames(db, options = {}) {
   }
   const spots = loadSpotRows(db, window.from, window.to);
   attachPriorSpot(rawFrames, spots);
-  const frames = enrichFrames(rawFrames);
+  const frames = enrichFrames(rawFrames, { callDteRange: options.callDteRange });
   return {
     frames,
     window,

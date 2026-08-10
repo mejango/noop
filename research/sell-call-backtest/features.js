@@ -44,16 +44,26 @@ function spreadPct(option) {
   return bid != null && ask != null && mark > 0 ? (ask - bid) / mark : null;
 }
 
-function isEligibleCall(option, timestampMs) {
+function normalizeRange(value, fallback) {
+  if (!Array.isArray(value) || value.length !== 2) return fallback;
+  const min = Number(value[0]);
+  const max = Number(value[1]);
+  return Number.isFinite(min) && Number.isFinite(max) && min >= 0 && max > min
+    ? [min, max]
+    : fallback;
+}
+
+function isEligibleCall(option, timestampMs, dteRange = CALL_DTE_RANGE) {
   const delta = finite(option?.delta);
   const dte = computeDte(option, timestampMs);
+  const range = normalizeRange(dteRange, CALL_DTE_RANGE);
   return optionType(option) === 'C'
     && finite(option?.bid_price) > 0
     && finite(option?.ask_price) > 0
     && delta >= CALL_DELTA_RANGE[0]
     && delta <= CALL_DELTA_RANGE[1]
-    && dte >= CALL_DTE_RANGE[0]
-    && dte <= CALL_DTE_RANGE[1];
+    && dte >= range[0]
+    && dte <= range[1];
 }
 
 function isEligiblePut(option, timestampMs) {
@@ -90,7 +100,8 @@ function priorPointAtOrBefore(history, timestampMs) {
   return index >= 0 ? history[index] : null;
 }
 
-function enrichFrames(rawFrames = []) {
+function enrichFrames(rawFrames = [], options = {}) {
+  const callDteRange = normalizeRange(options.callDteRange, CALL_DTE_RANGE);
   const frames = rawFrames
     .map((frame) => ({
       timestamp: frame.timestamp,
@@ -108,7 +119,7 @@ function enrichFrames(rawFrames = []) {
       .filter((spot) => spot >= 100 && spot <= 20000);
     if (!(frame.spot_price > 0)) frame.spot_price = mean(indexedSpots);
 
-    const calls = frame.options.filter((option) => isEligibleCall(option, frame.timestamp_ms));
+    const calls = frame.options.filter((option) => isEligibleCall(option, frame.timestamp_ms, callDteRange));
     const puts = frame.options.filter((option) => isEligiblePut(option, frame.timestamp_ms));
     const valueOptions = [...calls, ...puts];
     const bestRawScore = Math.max(0, ...calls.map((option) => option.bid_price / Math.abs(option.delta)));

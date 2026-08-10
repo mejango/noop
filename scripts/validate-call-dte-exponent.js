@@ -66,6 +66,8 @@ function main() {
   const policyConfig = {
     minBid: parseNumber(args['min-bid'], 4),
     minScore: parseNumber(args['min-score'], 65),
+    minDte: parseNumber(args['min-dte'], 5),
+    maxDte: parseNumber(args['max-dte'], 12),
     referenceDte: parseNumber(args['reference-dte'], 8.5),
   };
   const config = simulationConfig(args);
@@ -77,6 +79,10 @@ function main() {
       from: args.from,
       to: args.to,
       cadenceHours: parseNumber(args['cadence-hours'], 1),
+      callDteRange: [
+        parseNumber(args['load-min-dte'], policyConfig.minDte),
+        parseNumber(args['load-max-dte'], policyConfig.maxDte),
+      ],
     });
     const foldSize = Math.floor(data.frames.length / folds);
     const periods = Array.from({ length: folds }, (_, index) => {

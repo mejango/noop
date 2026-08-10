@@ -13,22 +13,45 @@ function normalizeDteScore(rawScore, dte, options = {}) {
   return score * Math.pow(referenceDte / days, exponent);
 }
 
+function normalizeLinearDteScore(rawScore, dte, options = {}) {
+  const score = Number(rawScore);
+  const days = Number(dte);
+  const referenceDte = Number(options.referenceDte ?? DEFAULT_DTE_REFERENCE);
+  const slope = Number(options.slope ?? 0);
+  if (!(score > 0) || !(days > 0) || !(referenceDte > 0) || !Number.isFinite(slope)) return 0;
+  return score * Math.max(0, 1 + slope * (referenceDte - days));
+}
+
+function scoreForFormula(rawScore, dte, options = {}) {
+  return options.formula === 'linear'
+    ? normalizeLinearDteScore(rawScore, dte, options)
+    : normalizeDteScore(rawScore, dte, options);
+}
+
 function makeDteNormalizedRawPolicy(options = {}, name = 'dte_normalized_raw') {
   const config = {
     minBid: Number(options.minBid ?? 4),
     minScore: Number(options.minScore ?? 65),
+    minDte: Number(options.minDte ?? 5),
+    maxDte: Number(options.maxDte ?? 12),
+    formula: options.formula === 'linear' ? 'linear' : 'power',
     referenceDte: Number(options.referenceDte ?? DEFAULT_DTE_REFERENCE),
     exponent: Number(options.exponent ?? 0.25),
+    slope: Number(options.slope ?? 0),
   };
   return {
     name,
-    description: `Raw bid/delta normalized to ${config.referenceDte} DTE with exponent ${config.exponent}`,
+    description: config.formula === 'linear'
+      ? `Raw bid/delta normalized linearly to ${config.referenceDte} DTE with slope ${config.slope}`
+      : `Raw bid/delta normalized to ${config.referenceDte} DTE with exponent ${config.exponent}`,
     select({ candidates }) {
       const ranked = candidates
-        .filter((candidate) => candidate.bid_price >= config.minBid)
+        .filter((candidate) => candidate.bid_price >= config.minBid
+          && candidate.dte >= config.minDte
+          && candidate.dte <= config.maxDte)
         .map((candidate) => ({
           candidate,
-          normalizedScore: normalizeDteScore(candidate.raw_score, candidate.dte, config),
+          normalizedScore: scoreForFormula(candidate.raw_score, candidate.dte, config),
         }))
         .filter((item) => item.normalizedScore >= config.minScore)
         .sort((a, b) => b.normalizedScore - a.normalizedScore || b.candidate.raw_score - a.candidate.raw_score);
@@ -36,13 +59,17 @@ function makeDteNormalizedRawPolicy(options = {}, name = 'dte_normalized_raw') {
       return {
         candidate: ranked[0].candidate,
         score: ranked[0].normalizedScore,
-        model_version: `dte-normalized-${config.referenceDte}-${config.exponent}`,
+        model_version: config.formula === 'linear'
+          ? `dte-linear-${config.referenceDte}-${config.slope}`
+          : `dte-normalized-${config.referenceDte}-${config.exponent}`,
         diagnostics: {
           raw_score: ranked[0].candidate.raw_score,
           normalized_score: ranked[0].normalizedScore,
           dte: ranked[0].candidate.dte,
           reference_dte: config.referenceDte,
+          formula: config.formula,
           exponent: config.exponent,
+          slope: config.slope,
         },
       };
     },
@@ -53,14 +80,16 @@ function makeDteNormalizedRawPolicy(options = {}, name = 'dte_normalized_raw') {
 function topScoreSeries(frames = [], options = {}) {
   return frames.map((frame) => {
     const ranked = frame.candidates
+      .filter((candidate) => candidate.dte >= Number(options.minDte ?? 5)
+        && candidate.dte <= Number(options.maxDte ?? 12))
       .map((candidate) => ({
         candidate,
-        score: normalizeDteScore(candidate.raw_score, candidate.dte, options),
+        score: scoreForFormula(candidate.raw_score, candidate.dte, options),
       }))
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score || b.candidate.raw_score - a.candidate.raw_score);
     if (ranked.length === 0) return null;
-    const nearestExpiry = Math.min(...frame.candidates.map((candidate) => Number(candidate.expiry)).filter((expiry) => expiry > 0));
+    const nearestExpiry = Math.min(...ranked.map((item) => Number(item.candidate.expiry)).filter((expiry) => expiry > 0));
     return {
       timestamp: frame.timestamp,
       timestamp_ms: frame.timestamp_ms,
@@ -131,5 +160,7 @@ module.exports = {
   analyzeRolloverDiscontinuity,
   makeDteNormalizedRawPolicy,
   normalizeDteScore,
+  normalizeLinearDteScore,
+  scoreForFormula,
   topScoreSeries,
 };

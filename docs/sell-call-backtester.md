@@ -46,6 +46,29 @@ Outputs default to:
 
 The tuner does not edit or import the live scoring path. A tuned formula remains a research challenger until it repeats out of sample and in shadow execution.
 
+## Learn economic call value from realized paths
+
+The economic call-value study is the newer research-only challenger for the production DTE-normalized `bid / abs(delta)` score. Instead of treating delta as the complete definition of risk, it reconstructs the actual future path for every eligible call and labels:
+
+- net P&L under the configured profit-capture, stop, maximum-hold, or expiry rule
+- P&L per reserved-margin day
+- maximum adverse buyback excursion per margin-day
+- realized loss and adverse-excursion breach probabilities
+
+It uses premium, delta, DTE, moneyness, IV, spread, depth, open interest, market skew, OI/score trends, and causal 6h/24h/72h spot context. Weekly walk-forward models may train only on path labels that completed before the prediction timestamp plus an embargo.
+
+```sh
+DB_PATH=/private/tmp/noop-research.db npm run research:study:economic-call-value -- --days=all
+```
+
+Outputs default to:
+
+- `data/economic-call-value-study.json`
+- `data/economic-call-value-study.md`
+- `data/economic-call-value-models.json`
+
+Value/risk gates are generated from the chronological training window, selected on validation, and evaluated once on the final holdout. Entries near every fold boundary are purged so a position can follow its normal exit policy rather than being artificially closed at the split. Promotion requires a material holdout P&L improvement, no worse P&L per margin-day, and no worse realized or tail losses. The component has no live-bot import.
+
 ## Study weekly DTE rollover normalization
 
 Raw `bid / abs(delta)` compares otherwise similar calls with different time remaining. The DTE study tests a partial constant-delta time normalization:

@@ -13,6 +13,10 @@
     "research:correlate:deep": "node scripts/profit-correlation-report.js --sample=all-candidates",
     "research:backtest:calls": "node scripts/sell-call-backtest.js",
     "research:analyze:call-dte": "node scripts/analyze-call-dte-normalization.js",
+    "research:analyze:call-window": "node scripts/analyze-sell-call-dte-window.js",
+    "research:analyze:constant-call": "node scripts/analyze-call-constant-maturity.js",
+    "research:analyze:simple-call-scores": "node scripts/research-simple-call-scores.js",
+    "research:study:economic-call-value": "node scripts/research-economic-call-value.js",
     "research:validate:call-dte": "node scripts/validate-call-dte-exponent.js",
     "research:tune:call-edge": "node scripts/tune-sell-call-edge.js",
     "test:backtest": "node test/sell-call-backtest.test.js"
