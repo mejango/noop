@@ -167,14 +167,32 @@ function normalizeProse(content: string): string {
   return content.replace(/\s+/g, ' ').trim();
 }
 
+function getUncertainArtifactAnchors(issues: string[]): Set<string> {
+  const anchors = new Set<string>();
+  issues.forEach((issue) => {
+    if (!/artifact/i.test(issue)) return;
+    if (!/(?:likely|possibly|potentially|may|might|could|unverified|unconfirmed|needs?\s+(?:caveat|reconciliation))/i.test(issue)) return;
+    (issue.match(/\b\d+\.\d{3,}\b/g) || []).forEach((value) => anchors.add(value));
+  });
+  return anchors;
+}
+
 export function validateWikiReplacement(args: {
   pagePath: string;
   previousContent: string;
   replacementContent: string;
   allowedMarkerContent: string;
   canonicalLessonContent: string;
+  validationIssues: string[];
 }): string[] {
-  const { pagePath, previousContent, replacementContent, allowedMarkerContent, canonicalLessonContent } = args;
+  const {
+    pagePath,
+    previousContent,
+    replacementContent,
+    allowedMarkerContent,
+    canonicalLessonContent,
+    validationIssues,
+  } = args;
   const errors: string[] = [];
   const replacement = replacementContent.trim();
   if (!WIKI_PAGE_PATHS.includes(pagePath)) errors.push('Unknown Wiki page');
@@ -225,6 +243,18 @@ export function validateWikiReplacement(args: {
   if (revivedResolvedTopics.size > 0) {
     errors.push(`Replacement revives resolved escalations: ${Array.from(revivedResolvedTopics).join(', ')}`);
   }
+
+  const uncertainArtifactAnchors = getUncertainArtifactAnchors(validationIssues);
+  uncertainArtifactAnchors.forEach((anchor) => {
+    const overconfidentParagraph = replacement.split(/\n\s*\n/).find((paragraph) => (
+      paragraph.includes(anchor)
+      && /artifact/i.test(paragraph)
+      && !/(?:likely|possibly|potentially|may|might|could|appears?|unverified|unconfirmed|not\s+confirmed|treat\s+as)/i.test(paragraph)
+    ));
+    if (overconfidentParagraph) {
+      errors.push(`Replacement turns an uncertain artifact interpretation into fact: ${anchor}`);
+    }
+  });
 
   const previousMarkers = getStructuredWikiMarkers(previousContent);
   const replacementMarkers = getStructuredWikiMarkers(replacement);

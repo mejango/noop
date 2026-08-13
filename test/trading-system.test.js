@@ -7953,8 +7953,11 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('REFERENCE_ONLY_SECTIONS'));
     assert.ok(wikiLibSource.includes('${heading} section must contain only: ${canonicalBody}'));
     assert.ok(wikiLibSource.includes('Replacement revives resolved escalations'));
+    assert.ok(wikiLibSource.includes('Replacement turns an uncertain artifact interpretation into fact'));
+    assert.ok(wikiLibSource.includes('validationIssues: string[]'));
     assert.ok(wikiRepairRouteSource.includes('isObsoleteUnresolvedEscalationIssue'));
     assert.ok(wikiRepairRouteSource.includes('current supplied page content outranks finding text'));
+    assert.ok(wikiRepairRouteSource.includes('Preserve epistemic qualifiers exactly'));
     assert.ok(wikiRepairRouteSource.includes('action gate remains CLOSED'));
     assert.ok(wikiRepairRouteSource.includes('never turn it into an invented fixed tick count'));
     assert.ok(wikiRepairRouteSource.includes('Do not add skew history, values, observations, analysis, or evidence'));
