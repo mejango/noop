@@ -260,6 +260,30 @@ function getDuplicateMatches(content: string, pattern: RegExp): string[] {
   return Array.from(counts.entries()).filter(([, count]) => count > 1).map(([value]) => value);
 }
 
+function getProvenanceRequirementTypes(content: string): Set<string> {
+  const types = new Set<string>();
+  Array.from(content.matchAll(/\[([a-z][a-z0-9_-]*):#(?:\d+|NNN)\]/gi), (match) => match[1].toLowerCase())
+    .forEach((type) => types.add(type));
+  Array.from(
+    content.matchAll(/\b(tick|order|review|task)\s+(?:source\s+)?markers?\b/gi),
+    (match) => match[1].toLowerCase(),
+  ).forEach((type) => types.add(type));
+  return types;
+}
+
+function findTaskParagraph(content: string, taskLabel: string): string {
+  return content.split(/\n\s*\n/).find((paragraph) => paragraph.includes(taskLabel)) || '';
+}
+
+function findNumberedMetadataTask(content: string, taskNumber: number): string {
+  const metadata = content.split(/\n\s*\n/).find((paragraph) => /Page metadata:/i.test(paragraph)) || '';
+  const nextBoundary = taskNumber + 1;
+  return metadata.match(new RegExp(
+    `\\(${taskNumber}\\)([\\s\\S]*?)(?=;\\s*\\(${nextBoundary}\\)|\\.\\s*Additionally:|\\*?$)`,
+    'i',
+  ))?.[1] || '';
+}
+
 export function validateWikiReplacement(args: {
   pagePath: string;
   previousContent: string;
@@ -333,6 +357,24 @@ export function validateWikiReplacement(args: {
     }
     const stalenessNoticeCount = (currentCycleBody.match(/^>\s*⚠️\s*\*\*Staleness notice/gm) || []).length;
     if (stalenessNoticeCount > 1) errors.push('Current Cycle Status repeats the staleness notice');
+  }
+
+  if (pagePath === 'strategy/mistakes.md') {
+    const taskScopes = [
+      ['Open review task', findTaskParagraph(previousContent, 'Open review task'), findTaskParagraph(replacement, 'Open review task')],
+      ['Open provenance task', findTaskParagraph(previousContent, 'Open provenance task'), findTaskParagraph(replacement, 'Open provenance task')],
+      ['Metadata task 1', findNumberedMetadataTask(previousContent, 1), findNumberedMetadataTask(replacement, 1)],
+      ['Metadata task 2', findNumberedMetadataTask(previousContent, 2), findNumberedMetadataTask(replacement, 2)],
+    ];
+    taskScopes.forEach(([taskLabel, previousTask, replacementTask]) => {
+      if (!previousTask || !replacementTask) return;
+      const previousTypes = getProvenanceRequirementTypes(previousTask);
+      const inventedTypes = Array.from(getProvenanceRequirementTypes(replacementTask))
+        .filter((type) => !previousTypes.has(type));
+      if (inventedTypes.length > 0) {
+        errors.push(`${taskLabel} invents provenance requirements: ${inventedTypes.join(', ')}`);
+      }
+    });
   }
 
   const previousParagraphs = new Set(

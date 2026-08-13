@@ -7960,6 +7960,7 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('Replacement turns an uncertain artifact interpretation into fact'));
     assert.ok(wikiLibSource.includes('Replacement retains unsupported marker types'));
     assert.ok(wikiLibSource.includes('Replacement retains placeholder source markers'));
+    assert.ok(wikiLibSource.includes('invents provenance requirements'));
     assert.ok(wikiLibSource.includes('Replacement invents unsupported numeric trading triggers'));
     assert.ok(wikiLibSource.includes('Replacement classifies outcomes without recorded resolution as failed'));
     assert.ok(wikiLibSource.includes('Unresolved episodes remain as rows in Confirmed Leading Indicators'));
@@ -7983,6 +7984,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes("One review is an example, not a general policy"));
     assert.ok(wikiRepairRouteSource.includes('labeling an invention as a hypothesis does not make it acceptable'));
     assert.ok(wikiRepairRouteSource.includes('Remove every literal #NNN placeholder'));
+    assert.ok(wikiRepairRouteSource.includes('must never be compensated for by adding a different provenance category'));
+    assert.ok(wikiRepairRouteSource.includes('loss audit requires confirmed review provenance only'));
     assert.ok(wikiRepairRouteSource.includes("Strategy pages are durable Learning-owned views"));
     assert.ok(wikiRepairRouteSource.includes('Do not add skew history, values, observations, analysis, or evidence'));
     assert.ok(wikiRepairRouteSource.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED BEFORE HUMAN REVIEW'));
