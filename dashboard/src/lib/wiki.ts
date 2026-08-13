@@ -122,6 +122,31 @@ function getConsecutiveTickRequirements(content: string): Set<number> {
   );
 }
 
+const REFERENCE_ONLY_MISSING_SECTIONS: Record<string, Record<string, string>> = {
+  'revenue/pricing.md': {
+    'Skew & IV Context': 'Current skew and IV readings are perishable. Consult protection/pricing.md and regimes/current.md for current values.',
+  },
+};
+
+function hasH2(content: string, heading: string): boolean {
+  return content.split('\n').some((line) => line.trim() === `## ${heading}`);
+}
+
+function getH2Body(content: string, heading: string): string | null {
+  const lines = content.split('\n');
+  const headingIndex = lines.findIndex((line) => line.trim() === `## ${heading}`);
+  if (headingIndex < 0) return null;
+  const nextHeadingOffset = lines
+    .slice(headingIndex + 1)
+    .findIndex((line) => /^##\s+/.test(line.trim()));
+  const endIndex = nextHeadingOffset < 0 ? lines.length : headingIndex + 1 + nextHeadingOffset;
+  return lines.slice(headingIndex + 1, endIndex).join('\n').trim();
+}
+
+function normalizeProse(content: string): string {
+  return content.replace(/\s+/g, ' ').trim();
+}
+
 export function validateWikiReplacement(args: {
   pagePath: string;
   previousContent: string;
@@ -154,8 +179,17 @@ export function validateWikiReplacement(args: {
     errors.push('Replacement must keep a bold TLDR immediately after the optional H1');
   }
   const missingHeaders = (WIKI_EXPECTED_HEADERS[pagePath] || [])
-    .filter((heading) => !replacement.split('\n').some((line) => line.trim() === `## ${heading}`));
+    .filter((heading) => !hasH2(replacement, heading));
   if (missingHeaders.length > 0) errors.push(`Replacement is missing sections: ${missingHeaders.join(', ')}`);
+
+  const referenceOnlySections = REFERENCE_ONLY_MISSING_SECTIONS[pagePath] || {};
+  Object.entries(referenceOnlySections).forEach(([heading, canonicalBody]) => {
+    if (hasH2(previousContent, heading)) return;
+    const replacementBody = getH2Body(replacement, heading);
+    if (replacementBody != null && normalizeProse(replacementBody) !== normalizeProse(canonicalBody)) {
+      errors.push(`New ${heading} section must contain only: ${canonicalBody}`);
+    }
+  });
 
   const previousMarkers = getStructuredWikiMarkers(previousContent);
   const replacementMarkers = getStructuredWikiMarkers(replacement);
