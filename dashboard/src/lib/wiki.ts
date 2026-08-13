@@ -181,12 +181,54 @@ function normalizeProse(content: string): string {
   return content.replace(/\s+/g, ' ').trim();
 }
 
+function getTradingRuleNumericTokens(content: string): Map<string, string> {
+  const tokens = new Map<string, string>();
+  const matches = content.match(/~?\$[\d,]+(?:\.\d+)?|~?\d+(?:\.\d+)?%|(?:≥|≤|>=|<=|>|<)\s*\d+(?:\.\d+)?/g) || [];
+  matches.forEach((value) => {
+    const normalized = value.replace(/[~,\s]/g, '').replace('>=', '≥').replace('<=', '≤');
+    tokens.set(normalized, value);
+  });
+  return tokens;
+}
+
+function getUnsupportedNumericTradingRules(
+  previousContent: string,
+  replacementContent: string,
+  canonicalLessonContent: string,
+  validationIssues: string[],
+): Set<string> {
+  const previousLines = new Set(previousContent.split('\n').map(normalizeProse).filter(Boolean));
+  const supportedTokens = getTradingRuleNumericTokens(
+    `${previousContent}\n${canonicalLessonContent}\n${validationIssues.join('\n')}`,
+  );
+  const unsupported = new Set<string>();
+  replacementContent.split('\n').forEach((line) => {
+    const normalizedLine = normalizeProse(line);
+    if (!normalizedLine || previousLines.has(normalizedLine)) return;
+    if (!/\b(?:buyback|buy\s+back|buy_put|sell_call|sell_put|accumulat(?:e|ion)|harvest|enter|entry|exit|close)\b/i.test(line)) return;
+    if (!/\b(?:obligation|mandatory|required|must|shall|automatic(?:ally)?|triggers?|only\s+(?:if|when)|do\s+not|never|preferred\s+path)\b/i.test(line)) return;
+    getTradingRuleNumericTokens(line).forEach((displayValue, token) => {
+      if (!supportedTokens.has(token)) unsupported.add(displayValue);
+    });
+  });
+  return unsupported;
+}
+
 function getUncertainArtifactAnchors(issues: string[]): Set<string> {
   const anchors = new Set<string>();
   issues.forEach((issue) => {
     if (!/artifact/i.test(issue)) return;
     if (!/(?:likely|possibly|potentially|may|might|could|unverified|unconfirmed|needs?\s+(?:caveat|reconciliation))/i.test(issue)) return;
     (issue.match(/\b\d+\.\d{3,}\b/g) || []).forEach((value) => anchors.add(value));
+  });
+  return anchors;
+}
+
+function getUnresolvedOutcomeAnchors(issues: string[]): Set<string> {
+  const anchors = new Set<string>();
+  issues.forEach((issue) => {
+    if (!/(?:never\s+recorded|not\s+recorded|unrecorded|resolution\s+(?:unknown|missing)|outcome\s+(?:unknown|missing))/i.test(issue)) return;
+    (issue.match(/[+-]?\d+(?:\.\d+)?%/g) || []).forEach((value) => anchors.add(value));
   });
   return anchors;
 }
@@ -276,6 +318,27 @@ export function validateWikiReplacement(args: {
       errors.push(`Replacement turns an uncertain artifact interpretation into fact: ${anchor}`);
     }
   });
+
+  const unsupportedNumericTradingRules = getUnsupportedNumericTradingRules(
+    previousContent,
+    replacement,
+    canonicalLessonContent,
+    validationIssues,
+  );
+  if (unsupportedNumericTradingRules.size > 0) {
+    errors.push(
+      `Replacement invents unsupported numeric trading triggers: ${Array.from(unsupportedNumericTradingRules).join(', ')}`,
+    );
+  }
+
+  const failedIndicators = getH2Body(replacement, 'Failed Indicators') || '';
+  const misclassifiedUnresolvedOutcomes = Array.from(getUnresolvedOutcomeAnchors(validationIssues))
+    .filter((anchor) => failedIndicators.includes(anchor));
+  if (misclassifiedUnresolvedOutcomes.length > 0) {
+    errors.push(
+      `Replacement classifies outcomes without recorded resolution as failed: ${misclassifiedUnresolvedOutcomes.join(', ')}`,
+    );
+  }
 
   const previousMarkers = getStructuredWikiMarkers(previousContent);
   const replacementMarkers = getStructuredWikiMarkers(replacement);

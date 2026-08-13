@@ -7955,6 +7955,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('Replacement revives resolved escalations'));
     assert.ok(wikiLibSource.includes('Replacement turns an uncertain artifact interpretation into fact'));
     assert.ok(wikiLibSource.includes('Replacement invents unsupported marker types'));
+    assert.ok(wikiLibSource.includes('Replacement invents unsupported numeric trading triggers'));
+    assert.ok(wikiLibSource.includes('Replacement classifies outcomes without recorded resolution as failed'));
     assert.ok(wikiRepairRouteSource.includes('isUnsupportedStructuredMarkerIssue'));
     assert.ok(wikiRepairRouteSource.includes('no page content changes required'));
     assert.ok(wikiRepairRouteSource.includes('never add [task:#NNN]'));
@@ -7964,8 +7966,11 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('isObsoleteUnresolvedEscalationIssue'));
     assert.ok(wikiRepairRouteSource.includes('current supplied page content outranks finding text'));
     assert.ok(wikiRepairRouteSource.includes('Preserve epistemic qualifiers exactly'));
+    assert.ok(wikiRepairRouteSource.includes('never classify it as confirmed or failed'));
     assert.ok(wikiRepairRouteSource.includes('action gate remains CLOSED'));
     assert.ok(wikiRepairRouteSource.includes('never turn it into an invented fixed tick count'));
+    assert.ok(wikiRepairRouteSource.includes('Never upgrade advisory language'));
+    assert.ok(wikiRepairRouteSource.includes('labeling an invention as a hypothesis does not make it acceptable'));
     assert.ok(wikiRepairRouteSource.includes('Do not add skew history, values, observations, analysis, or evidence'));
     assert.ok(wikiRepairRouteSource.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED BEFORE HUMAN REVIEW'));
     assert.ok(wikiRepairRouteSource.includes('proposal = await proposeRepair(state, { rejectedProposal, errors })'));
