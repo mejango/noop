@@ -40,6 +40,16 @@ interface SearchResult {
   snippets: string[];
 }
 
+interface WikiRepairPreview {
+  pagePath: string;
+  summary: string;
+  proposedContent: string;
+  baseHash: string;
+  contextHash: string;
+}
+
+type DiffLine = { type: 'same' | 'add' | 'remove'; line: string };
+
 interface WikiSummary {
   current: number;
   stale: number;
@@ -112,6 +122,34 @@ function timeUntil(ts: string | null | undefined): string {
   return hrs < 24 ? `in ${hrs}h` : `in ${Math.ceil(hrs / 24)}d`;
 }
 
+function buildLineDiff(before: string, after: string): DiffLine[] {
+  const left = before.split('\n');
+  const right = after.split('\n');
+  const table = Array.from({ length: left.length + 1 }, () => new Uint16Array(right.length + 1));
+  for (let i = left.length - 1; i >= 0; i--) {
+    for (let j = right.length - 1; j >= 0; j--) {
+      table[i][j] = left[i] === right[j]
+        ? table[i + 1][j + 1] + 1
+        : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  const result: DiffLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < left.length || j < right.length) {
+    if (i < left.length && j < right.length && left[i] === right[j]) {
+      result.push({ type: 'same', line: left[i] });
+      i++;
+      j++;
+    } else if (j < right.length && (i >= left.length || table[i][j + 1] >= table[i + 1][j])) {
+      result.push({ type: 'add', line: right[j++] });
+    } else {
+      result.push({ type: 'remove', line: left[i++] });
+    }
+  }
+  return result;
+}
+
 function StatusPill({ status }: { status: WikiPageStatus }) {
   const meta = STATUS_META[status];
   return (
@@ -148,9 +186,13 @@ export default function WikiBrowser() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [writeToken, setWriteToken] = useState('');
+  const [repairPreview, setRepairPreview] = useState<WikiRepairPreview | null>(null);
+  const [repairBusy, setRepairBusy] = useState<'preview' | 'apply' | null>(null);
+  const [repairError, setRepairError] = useState<string | null>(null);
+  const [repairNotice, setRepairNotice] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetch('/api/wiki/pages')
+  const refreshPages = useCallback(() => fetch('/api/wiki/pages')
       .then((response) => response.json())
       .then((data) => {
         setPages(data.pages || []);
@@ -159,8 +201,12 @@ export default function WikiBrowser() {
         setRecentChanges(data.recentChanges || []);
         setSummary(data.summary || EMPTY_SUMMARY);
       })
-      .catch(() => {});
-  }, []);
+      .catch(() => {}), []);
+
+  useEffect(() => {
+    setWriteToken(sessionStorage.getItem('noop-write-token') || '');
+    refreshPages();
+  }, [refreshPages]);
 
   const selectedMeta = useMemo(
     () => pages.find((page) => page.path === selectedPage) || null,
@@ -173,11 +219,19 @@ export default function WikiBrowser() {
     return acc;
   }, {}), [pages]);
 
+  const repairDiff = useMemo(
+    () => repairPreview && pageDetail ? buildLineDiff(pageDetail.content, repairPreview.proposedContent) : [],
+    [pageDetail, repairPreview],
+  );
+
   const loadPage = useCallback(async (pagePath: string) => {
     setSelectedPage(pagePath);
     setSearchResults(null);
     setPageDetail(null);
     setPageError(null);
+    setRepairPreview(null);
+    setRepairError(null);
+    setRepairNotice(null);
     setLoading(true);
     try {
       const slug = pagePath.replace('.md', '');
@@ -193,6 +247,60 @@ export default function WikiBrowser() {
     }
     setLoading(false);
   }, []);
+
+  const persistWriteToken = useCallback((token: string) => {
+    setWriteToken(token);
+    if (token) sessionStorage.setItem('noop-write-token', token);
+    else sessionStorage.removeItem('noop-write-token');
+  }, []);
+
+  const generateRepairDiff = useCallback(async () => {
+    if (!selectedPage || !writeToken) {
+      setRepairError('Enter the admin write token to generate a repair.');
+      return;
+    }
+    setRepairBusy('preview');
+    setRepairError(null);
+    setRepairNotice(null);
+    try {
+      const response = await fetch('/api/wiki/repair', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-noop-write-token': writeToken },
+        body: JSON.stringify({ action: 'preview', pagePath: selectedPage }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error([data.error, ...(data.validationErrors || [])].filter(Boolean).join(': '));
+      setRepairPreview(data as WikiRepairPreview);
+    } catch (error) {
+      setRepairError(error instanceof Error ? error.message : 'Failed to generate AI diff');
+    } finally {
+      setRepairBusy(null);
+    }
+  }, [selectedPage, writeToken]);
+
+  const applyRepair = useCallback(async () => {
+    if (!selectedPage || !repairPreview || !writeToken) return;
+    if (!window.confirm(`Apply this AI repair to ${selectedPage}? A second AI will validate it before anything is written.`)) return;
+    setRepairBusy('apply');
+    setRepairError(null);
+    setRepairNotice(null);
+    try {
+      const response = await fetch('/api/wiki/repair', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-noop-write-token': writeToken },
+        body: JSON.stringify({ action: 'apply', ...repairPreview }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error([data.error, ...(data.remainingIssues || [])].filter(Boolean).join(': '));
+      setRepairPreview(null);
+      await Promise.all([refreshPages(), loadPage(selectedPage)]);
+      setRepairNotice(`Applied and independently validated. ${data.resolvedCount} finding${data.resolvedCount === 1 ? '' : 's'} cleared.`);
+    } catch (error) {
+      setRepairError(error instanceof Error ? error.message : 'Failed to apply AI repair');
+    } finally {
+      setRepairBusy(null);
+    }
+  }, [loadPage, refreshPages, repairPreview, selectedPage, writeToken]);
 
   const handleSearch = useCallback(async () => {
     if (searchQuery.trim().length < 2) return;
@@ -215,6 +323,9 @@ export default function WikiBrowser() {
     setPageDetail(null);
     setPageError(null);
     setSearchResults(null);
+    setRepairPreview(null);
+    setRepairError(null);
+    setRepairNotice(null);
   };
 
   return (
@@ -294,6 +405,23 @@ export default function WikiBrowser() {
                   <div className="mt-2 border border-red-500/20 bg-red-500/5 p-2">
                     <p className="text-[10px] uppercase tracking-wider text-red-300">Validation issues</p>
                     {selectedMeta.issues.map((issue) => <p key={issue} className="mt-1 text-[10px] text-red-200/80">{issue}</p>)}
+                    <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-red-500/10 pt-2">
+                      <input
+                        type="password"
+                        value={writeToken}
+                        onChange={(event) => persistWriteToken(event.target.value)}
+                        placeholder="Admin write token"
+                        aria-label="Admin write token"
+                        className="min-w-0 flex-1 border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-white placeholder-gray-600 focus:border-juice-orange/50 focus:outline-none"
+                      />
+                      <button
+                        onClick={generateRepairDiff}
+                        disabled={!pageDetail || repairBusy !== null}
+                        className="border border-juice-orange/30 bg-juice-orange/10 px-2 py-1 text-[10px] text-juice-orange transition-colors hover:bg-juice-orange/20 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {repairBusy === 'preview' ? 'Generating diff…' : repairPreview ? 'Regenerate AI diff' : 'Generate AI diff'}
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -301,6 +429,44 @@ export default function WikiBrowser() {
 
             {loading && <p className="text-[10px] text-gray-500">Loading page…</p>}
             {!loading && pageError && <div className="border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-400">{pageError}</div>}
+            {repairError && <div className="border border-red-500/20 bg-red-500/5 px-3 py-2 text-[10px] leading-relaxed text-red-300">{repairError}</div>}
+            {repairNotice && <div className="border border-emerald-500/20 bg-emerald-500/5 px-3 py-2 text-[10px] leading-relaxed text-emerald-300">{repairNotice}</div>}
+            {repairPreview && pageDetail && (
+              <section className="border border-juice-orange/25 bg-juice-orange/[0.03] p-3">
+                <div className="flex flex-wrap items-start gap-2">
+                  <div className="mr-auto">
+                    <p className="text-[10px] uppercase tracking-[0.18em] text-juice-orange">Human-triggered AI repair</p>
+                    <p className="mt-1 max-w-2xl text-[10px] leading-relaxed text-gray-300">{repairPreview.summary}</p>
+                  </div>
+                  <button
+                    onClick={() => setRepairPreview(null)}
+                    disabled={repairBusy !== null}
+                    className="px-2 py-1 text-[10px] text-gray-500 hover:text-gray-200 disabled:opacity-40"
+                  >
+                    Discard
+                  </button>
+                  <button
+                    onClick={applyRepair}
+                    disabled={repairBusy !== null}
+                    className="border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-300 transition-colors hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {repairBusy === 'apply' ? 'Validating…' : 'Apply + AI validate'}
+                  </button>
+                </div>
+                <div className="mt-3 max-h-[32rem] overflow-auto border border-white/10 bg-black/30 font-mono text-[9px] leading-relaxed">
+                  {repairDiff.map((item, index) => (
+                    <div
+                      key={`${index}-${item.type}`}
+                      className={`flex min-w-max whitespace-pre px-2 ${item.type === 'add' ? 'bg-emerald-500/10 text-emerald-200' : item.type === 'remove' ? 'bg-red-500/10 text-red-200' : 'text-gray-600'}`}
+                    >
+                      <span className="mr-2 inline-block w-3 select-none text-right opacity-60">{item.type === 'add' ? '+' : item.type === 'remove' ? '−' : ' '}</span>
+                      <span>{item.line || ' '}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-2 text-[9px] leading-relaxed text-gray-500">Applying performs a fresh independent AI validation and refuses the write if the page or its evidence context changed after this diff was generated.</p>
+              </section>
+            )}
             {pageDetail && (
               <>
                 {pageDetail.history.length > 0 && (
@@ -356,7 +522,7 @@ export default function WikiBrowser() {
               )}
               {summary.manualReviewPending > 0 && (
                 <div className="mt-2 border border-amber-500/15 bg-amber-500/5 px-3 py-2 text-[10px] leading-relaxed text-amber-100/70">
-                  Manual review: {summary.manualReviewPending} flagged page{summary.manualReviewPending === 1 ? '' : 's'}. Automatic repairs are disabled; findings remain visible until a maintainer edits the page and a daily validation passes.
+                  Manual review: {summary.manualReviewPending} flagged page{summary.manualReviewPending === 1 ? '' : 's'}. Background repairs are disabled; open a page to generate, review, and apply an AI diff on demand.
                 </div>
               )}
             </section>

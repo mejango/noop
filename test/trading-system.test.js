@@ -7858,8 +7858,10 @@ describe('Canonical trade learning', () => {
 
 describe('Wiki knowledge discipline', () => {
   const wikiPagesRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'wiki', 'pages', 'route.ts'), 'utf8');
+  const wikiRepairRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'wiki', 'repair', 'route.ts'), 'utf8');
   const wikiBrowserSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'components', 'WikiBrowser.tsx'), 'utf8');
   const wikiCatalogSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'wikiCatalog.ts'), 'utf8');
+  const wikiLibSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'wiki.ts'), 'utf8');
 
   test('raw wiki evidence preserves missing numbers as unknown', () => {
     assert.ok(SCRIPT_SOURCE.includes("if (value == null || (typeof value === 'string' && value.trim() === '')) return 'unknown';"));
@@ -7926,8 +7928,25 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiPagesRouteSource.includes('manualReviewPending'));
     assert.ok(!wikiPagesRouteSource.includes('lastRemediationError'));
     assert.ok(wikiBrowserSource.includes('Manual review:'));
-    assert.ok(wikiBrowserSource.includes('Automatic repairs are disabled'));
+    assert.ok(wikiBrowserSource.includes('Background repairs are disabled'));
     assert.ok(!wikiBrowserSource.includes('Attention worker:'));
+  });
+
+  test('human-triggered wiki repairs require diff review and independent validation', () => {
+    assert.ok(wikiRepairRouteSource.includes('validateWriteAccess(request)'));
+    assert.ok(wikiRepairRouteSource.includes("action === 'preview'"));
+    assert.ok(wikiRepairRouteSource.includes("action === 'apply'"));
+    assert.ok(wikiRepairRouteSource.includes("name: 'propose_wiki_repair'"));
+    assert.ok(wikiRepairRouteSource.includes("name: 'validate_wiki_repair'"));
+    assert.ok(wikiRepairRouteSource.includes('state.baseHash !== baseHash || state.contextHash !== contextHash'));
+    assert.ok(wikiRepairRouteSource.includes('finalState.baseHash !== baseHash || finalState.contextHash !== contextHash'));
+    assert.ok(wikiRepairRouteSource.includes('saveWikiHistory(pagePath'));
+    assert.ok(wikiRepairRouteSource.includes('fs.renameSync(temporaryPath, targetPath)'));
+    assert.ok(wikiRepairRouteSource.includes('last_reviewed_at: appliedAt'));
+    assert.ok(wikiLibSource.includes('Replacement invents source markers'));
+    assert.ok(wikiBrowserSource.includes('Generate AI diff'));
+    assert.ok(wikiBrowserSource.includes('Apply + AI validate'));
+    assert.ok(wikiBrowserSource.includes('buildLineDiff'));
   });
 
   test('wiki ingest prevents partial live-state drift and invalid provenance', () => {
