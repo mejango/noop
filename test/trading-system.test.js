@@ -7950,8 +7950,11 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('const permittedWordCount = Math.max(2_050, previousWordCount)'));
     assert.ok(wikiLibSource.includes('Oversized page grows during repair'));
     assert.ok(wikiLibSource.includes('Replacement invents a consecutive-tick gate rule'));
-    assert.ok(wikiLibSource.includes('REFERENCE_ONLY_MISSING_SECTIONS'));
-    assert.ok(wikiLibSource.includes('New ${heading} section must contain only: ${canonicalBody}'));
+    assert.ok(wikiLibSource.includes('REFERENCE_ONLY_SECTIONS'));
+    assert.ok(wikiLibSource.includes('${heading} section must contain only: ${canonicalBody}'));
+    assert.ok(wikiLibSource.includes('Replacement revives resolved escalations'));
+    assert.ok(wikiRepairRouteSource.includes('isObsoleteUnresolvedEscalationIssue'));
+    assert.ok(wikiRepairRouteSource.includes('current supplied page content outranks finding text'));
     assert.ok(wikiRepairRouteSource.includes('action gate remains CLOSED'));
     assert.ok(wikiRepairRouteSource.includes('never turn it into an invented fixed tick count'));
     assert.ok(wikiRepairRouteSource.includes('Do not add skew history, values, observations, analysis, or evidence'));
