@@ -7962,6 +7962,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('Replacement retains placeholder source markers'));
     assert.ok(wikiLibSource.includes('Replacement invents unsupported numeric trading triggers'));
     assert.ok(wikiLibSource.includes('Replacement classifies outcomes without recorded resolution as failed'));
+    assert.ok(wikiLibSource.includes('Unresolved episodes remain as rows in Confirmed Leading Indicators'));
+    assert.ok(wikiLibSource.includes('Unresolved episodes must be classified under Experimental Indicators'));
     assert.ok(wikiLibSource.includes('Learning-owned strategy page adds perishable tick evidence'));
     assert.ok(wikiLibSource.includes('Learning-owned strategy page retains expired live tick evidence'));
     assert.ok(wikiRepairRouteSource.includes('isUnsupportedStructuredMarkerIssue'));
@@ -7973,6 +7975,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('current supplied page content outranks finding text'));
     assert.ok(wikiRepairRouteSource.includes('Preserve epistemic qualifiers exactly'));
     assert.ok(wikiRepairRouteSource.includes('never classify it as confirmed or failed'));
+    assert.ok(wikiRepairRouteSource.includes('An indicator episode with no recorded outcome is unresolved evidence'));
+    assert.ok(wikiRepairRouteSource.includes('Do not add it to Failed Indicators'));
     assert.ok(wikiRepairRouteSource.includes('action gate remains CLOSED'));
     assert.ok(wikiRepairRouteSource.includes('never turn it into an invented fixed tick count'));
     assert.ok(wikiRepairRouteSource.includes('Never upgrade advisory language'));

@@ -47,6 +47,16 @@ type RepairCorrection = {
   errors: string[];
 };
 
+function pageSpecificRepairInstructions(state: WikiPageState): string {
+  if (state.pagePath === 'indicators/leading.md' && state.issues.some((issue) => (
+    /(?:never\s+recorded|not\s+recorded|resolution\s+(?:unknown|missing))/i.test(issue)
+  ))) {
+    return `PAGE-SPECIFIC RESOLUTION
+An indicator episode with no recorded outcome is unresolved evidence, not a failed indicator. Remove its row from the Confirmed Leading Indicators episode table and add one concise entry under Experimental Indicators that preserves its observed evidence and says the outcome remains unresolved/inconclusive and excluded from confirmed statistics. Do not add it to Failed Indicators; keep Failed Indicators as "*(None recorded)*" unless supplied evidence independently records a failed resolution. Preserve any existing falsification note that the unresolved episode neither confirms nor falsifies the indicator.`;
+  }
+  return '';
+}
+
 function excerpt(content: string, maxChars: number): string {
   if (content.length <= maxChars) return content;
   const half = Math.floor(maxChars / 2);
@@ -169,6 +179,8 @@ ${state.learningContext || 'None supplied.'}
 
 LATEST RAW EVIDENCE
 ${state.rawEvidence || 'None supplied.'}
+
+${pageSpecificRepairInstructions(state)}
 
 ${correction ? `YOUR PREVIOUS PROPOSAL WAS REJECTED BEFORE HUMAN REVIEW
 ${correction.errors.map((error) => `- ${error}`).join('\n')}

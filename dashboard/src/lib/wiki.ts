@@ -385,12 +385,28 @@ export function validateWikiReplacement(args: {
   }
 
   const failedIndicators = getH2Body(replacement, 'Failed Indicators') || '';
-  const misclassifiedUnresolvedOutcomes = Array.from(getUnresolvedOutcomeAnchors(validationIssues))
+  const unresolvedOutcomeAnchors = Array.from(getUnresolvedOutcomeAnchors(validationIssues));
+  const misclassifiedUnresolvedOutcomes = unresolvedOutcomeAnchors
     .filter((anchor) => failedIndicators.includes(anchor));
   if (misclassifiedUnresolvedOutcomes.length > 0) {
     errors.push(
       `Replacement classifies outcomes without recorded resolution as failed: ${misclassifiedUnresolvedOutcomes.join(', ')}`,
     );
+  }
+  if (pagePath === 'indicators/leading.md' && unresolvedOutcomeAnchors.length > 0) {
+    const confirmedIndicators = getH2Body(replacement, 'Confirmed Leading Indicators') || '';
+    const experimentalIndicators = getH2Body(replacement, 'Experimental Indicators') || '';
+    const unresolvedConfirmedRows = unresolvedOutcomeAnchors.filter((anchor) => (
+      confirmedIndicators.split('\n').some((line) => line.trim().startsWith('|') && line.includes(anchor))
+    ));
+    if (unresolvedConfirmedRows.length > 0) {
+      errors.push(`Unresolved episodes remain as rows in Confirmed Leading Indicators: ${unresolvedConfirmedRows.join(', ')}`);
+    }
+    const missingExperimentalClassifications = unresolvedOutcomeAnchors
+      .filter((anchor) => !experimentalIndicators.includes(anchor));
+    if (missingExperimentalClassifications.length > 0) {
+      errors.push(`Unresolved episodes must be classified under Experimental Indicators: ${missingExperimentalClassifications.join(', ')}`);
+    }
   }
 
   if (pagePath.startsWith('strategy/')) {
