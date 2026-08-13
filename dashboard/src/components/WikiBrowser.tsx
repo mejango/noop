@@ -50,9 +50,7 @@ interface WikiSummary {
   lastLintAttempt: string | null;
   lastLintError: string | null;
   nextLintAt: string | null;
-  remediationPending: number;
-  lastRemediationAt: string | null;
-  lastRemediationError: string | null;
+  manualReviewPending: number;
   lastIngest: string | null;
 }
 
@@ -66,9 +64,7 @@ const EMPTY_SUMMARY: WikiSummary = {
   lastLintAttempt: null,
   lastLintError: null,
   nextLintAt: null,
-  remediationPending: 0,
-  lastRemediationAt: null,
-  lastRemediationError: null,
+  manualReviewPending: 0,
   lastIngest: null,
 };
 
@@ -350,18 +346,17 @@ export default function WikiBrowser() {
               </div>
               {summary.lastLintError && (
                 <div className="mt-2 border border-red-500/20 bg-red-500/5 px-3 py-2 text-[10px] leading-relaxed text-red-200/80">
-                  Wiki validation failed {formatRelative(summary.lastLintAttempt)}: {summary.lastLintError}. Automatic retry {timeUntil(summary.nextLintAt)}.
+                  Wiki validation failed {formatRelative(summary.lastLintAttempt)}: {summary.lastLintError}. Next daily validation {timeUntil(summary.nextLintAt)}.
                 </div>
               )}
               {!summary.lastLintError && summary.unreviewed > 0 && (
                 <div className="mt-2 border border-blue-500/15 bg-blue-500/5 px-3 py-2 text-[10px] leading-relaxed text-blue-200/70">
-                  {summary.unreviewed} page{summary.unreviewed === 1 ? '' : 's'} awaiting page-level validation. Next review {timeUntil(summary.nextLintAt)}.
+                  {summary.unreviewed} page{summary.unreviewed === 1 ? '' : 's'} awaiting page-level validation. Next daily validation {timeUntil(summary.nextLintAt)}.
                 </div>
               )}
-              {summary.remediationPending > 0 && (
+              {summary.manualReviewPending > 0 && (
                 <div className="mt-2 border border-amber-500/15 bg-amber-500/5 px-3 py-2 text-[10px] leading-relaxed text-amber-100/70">
-                  Attention worker: {summary.remediationPending} page{summary.remediationPending === 1 ? '' : 's'} queued; one evidence-safe repair runs per cycle and is revalidated immediately.
-                  {summary.lastRemediationError ? <span className="mt-1 block text-red-300/80">Last repair error: {summary.lastRemediationError}</span> : null}
+                  Manual review: {summary.manualReviewPending} flagged page{summary.manualReviewPending === 1 ? '' : 's'}. Automatic repairs are disabled; findings remain visible until a maintainer edits the page and a daily validation passes.
                 </div>
               )}
             </section>

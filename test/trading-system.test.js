@@ -7889,10 +7889,13 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiCatalogSource.includes('reviewedMs < changedMs'));
   });
 
-  test('wiki validation retries failures and exposes its operational state', () => {
-    assert.ok(SCRIPT_SOURCE.includes('const WIKI_LINT_RETRY_INTERVAL_MS = 30 * 60 * 1000'));
+  test('wiki validation runs at most daily and exposes its operational state', () => {
+    assert.ok(SCRIPT_SOURCE.includes('const WIKI_LINT_INTERVAL_MS = 24 * 60 * 60 * 1000'));
     assert.ok(SCRIPT_SOURCE.includes('const getWikiLintSchedule'));
     assert.ok(SCRIPT_SOURCE.includes('needsInitialReview'));
+    assert.ok(SCRIPT_SOURCE.includes('const lastRunMs = Math.max(lastAttemptMs, lastSuccessMs)'));
+    assert.ok(SCRIPT_SOURCE.includes('const nextDueMs = lastRunMs ? lastRunMs + WIKI_LINT_INTERVAL_MS : 0'));
+    assert.ok(!SCRIPT_SOURCE.includes('WIKI_LINT_RETRY_INTERVAL_MS'));
     assert.ok(SCRIPT_SOURCE.includes('return recordWikiLintFailure'));
     assert.ok(SCRIPT_SOURCE.includes('!result || !Array.isArray(result.issues)'));
     assert.ok(SCRIPT_SOURCE.includes('do not rewrite page content during validation'));
@@ -7909,28 +7912,22 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiPagesRouteSource.includes('lastLintError'));
     assert.ok(wikiPagesRouteSource.includes('nextLintAt'));
     assert.ok(wikiBrowserSource.includes('Wiki validation failed'));
+    assert.ok(wikiBrowserSource.includes('Next daily validation'));
     assert.ok(wikiBrowserSource.includes('awaiting page-level validation'));
   });
 
-  test('wiki attention findings feed a bounded evidence-safe repair and revalidation queue', () => {
-    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_BATCH_SIZE = 1'));
-    assert.ok(SCRIPT_SOURCE.includes('const WIKI_REPAIR_FORMAT_VERSION = 6'));
-    assert.ok(SCRIPT_SOURCE.includes('const getWikiRepairSchedule'));
-    assert.ok(SCRIPT_SOURCE.includes('const getWikiIssueFingerprint'));
-    assert.ok(SCRIPT_SOURCE.includes('giving attention to exactly one audited page'));
-    assert.ok(SCRIPT_SOURCE.includes('newer accurate reference'));
-    assert.ok(SCRIPT_SOURCE.includes('replacement invented source marker(s)'));
-    assert.ok(SCRIPT_SOURCE.includes('live-state replacement lacks an exact marker from the latest tick packet'));
-    assert.ok(SCRIPT_SOURCE.includes('Learning-owned replacement lacks a canonical lesson marker'));
-    assert.ok(SCRIPT_SOURCE.includes('page changed while repair was running'));
-    assert.ok(SCRIPT_SOURCE.includes("last_repair_result: 'repaired'"));
-    assert.ok(SCRIPT_SOURCE.includes("last_repair_result: 'no_change'"));
-    assert.ok(SCRIPT_SOURCE.includes('const validation = changedOrQueued ? await lintWiki({ forcePageReview: true }) : null'));
-    assert.ok(SCRIPT_SOURCE.includes('repairWikiIssues(wikiRepairSchedule)'));
-    assert.ok(SCRIPT_SOURCE.includes('!_wikiLintInFlight && !_wikiRepairInFlight && wikiLintSchedule.due'));
-    assert.ok(wikiPagesRouteSource.includes('remediationPending'));
-    assert.ok(wikiBrowserSource.includes('Attention worker:'));
-    assert.ok(wikiBrowserSource.includes('revalidated immediately'));
+  test('wiki attention findings remain a manual review queue without autonomous repairs', () => {
+    assert.ok(!SCRIPT_SOURCE.includes('WIKI_REPAIR_'));
+    assert.ok(!SCRIPT_SOURCE.includes('const getWikiRepairSchedule'));
+    assert.ok(!SCRIPT_SOURCE.includes('const repairWikiPage'));
+    assert.ok(!SCRIPT_SOURCE.includes('repairWikiIssues('));
+    assert.ok(!SCRIPT_SOURCE.includes('_wikiRepairInFlight'));
+    assert.ok(SCRIPT_SOURCE.includes('the bot never rewrites Wiki pages in response to lint'));
+    assert.ok(wikiPagesRouteSource.includes('manualReviewPending'));
+    assert.ok(!wikiPagesRouteSource.includes('lastRemediationError'));
+    assert.ok(wikiBrowserSource.includes('Manual review:'));
+    assert.ok(wikiBrowserSource.includes('Automatic repairs are disabled'));
+    assert.ok(!wikiBrowserSource.includes('Attention worker:'));
   });
 
   test('wiki ingest prevents partial live-state drift and invalid provenance', () => {

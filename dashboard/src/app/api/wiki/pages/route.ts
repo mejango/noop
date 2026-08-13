@@ -104,21 +104,15 @@ export function GET() {
     const lastLintError = typeof meta.last_lint_error === 'string' && meta.last_lint_error.trim()
       ? meta.last_lint_error.trim()
       : null;
-    const needsInitialReview = pages.some((page) => {
-      if (page.lastReviewed === null) return true;
-      const reviewedMs = new Date(page.lastReviewed).getTime();
-      const changedMs = new Date(page.lastEvidenceAt || page.lastModified).getTime();
-      return !Number.isFinite(reviewedMs) || (Number.isFinite(changedMs) && reviewedMs < changedMs);
-    });
     const lastLintMs = lastLint ? new Date(lastLint).getTime() : 0;
     const lastLintAttemptMs = lastLintAttempt ? new Date(lastLintAttempt).getTime() : 0;
-    const nextLintMs = lastLintError
-      ? (Number.isFinite(lastLintAttemptMs) && lastLintAttemptMs > 0 ? lastLintAttemptMs + 30 * 60 * 1000 : Date.now())
-      : needsInitialReview
-        ? Date.now()
-        : Number.isFinite(lastLintMs) && lastLintMs > 0
-          ? lastLintMs + 24 * 60 * 60 * 1000
-          : Date.now();
+    const lastLintRunMs = Math.max(
+      Number.isFinite(lastLintMs) ? lastLintMs : 0,
+      Number.isFinite(lastLintAttemptMs) ? lastLintAttemptMs : 0,
+    );
+    const nextLintMs = lastLintRunMs > 0
+      ? lastLintRunMs + 24 * 60 * 60 * 1000
+      : Date.now();
 
     return NextResponse.json({
       pages,
@@ -135,11 +129,7 @@ export function GET() {
         lastLintAttempt,
         lastLintError,
         nextLintAt: new Date(nextLintMs).toISOString(),
-        remediationPending: counts.needs_attention || 0,
-        lastRemediationAt: typeof meta.last_repair_batch === 'string' ? meta.last_repair_batch : null,
-        lastRemediationError: typeof meta.last_repair_error === 'string' && meta.last_repair_error.trim()
-          ? meta.last_repair_error.trim()
-          : null,
+        manualReviewPending: counts.needs_attention || 0,
         lastIngest: typeof meta.last_ingest === 'string' ? meta.last_ingest : null,
       },
     });
