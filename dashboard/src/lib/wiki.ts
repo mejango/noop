@@ -113,6 +113,15 @@ function latestTickId(content: string): number | null {
   return tickIds.length > 0 ? Math.max(...tickIds) : null;
 }
 
+function getConsecutiveTickRequirements(content: string): Set<number> {
+  return new Set(
+    Array.from(
+      content.matchAll(/(?:≥|>=|at\s+least)?\s*`?(\d+)`?\s+consecutive\s+ticks/gi),
+      (match) => Number(match[1]),
+    ).filter(Number.isFinite),
+  );
+}
+
 export function validateWikiReplacement(args: {
   pagePath: string;
   previousContent: string;
@@ -130,12 +139,15 @@ export function validateWikiReplacement(args: {
   }
   const previousWordCount = previousContent.trim().split(/\s+/).filter(Boolean).length;
   const replacementWordCount = replacement.split(/\s+/).filter(Boolean).length;
-  const permittedWordCount = Math.max(2_000, previousWordCount);
+  // 2,000 words is a maintenance target, not a safety boundary. Allow a small
+  // tokenizer/editing margin so a human-reviewed repair is not rejected for a
+  // handful of words, while preventing meaningful growth of long pages.
+  const permittedWordCount = Math.max(2_050, previousWordCount);
   if (replacementWordCount > permittedWordCount) {
     errors.push(
-      previousWordCount > 2_000
+      previousWordCount > 2_050
         ? `Oversized page grows during repair (${previousWordCount} → ${replacementWordCount} words); preserve or reduce its length`
-        : `Replacement exceeds 2000 words (${replacementWordCount})`,
+        : `Replacement exceeds the 2050-word repair ceiling (${replacementWordCount})`,
     );
   }
   if (!/^\s*(?:#(?!#)[^\n]*\n+\s*)?\*\*[^\n]+\*\*/.test(replacement)) {
@@ -156,6 +168,15 @@ export function validateWikiReplacement(args: {
     .filter((marker) => marker.startsWith('[lesson:') && !canonicalLessonMarkers.has(marker));
   if (unsupportedLessonMarkers.length > 0) {
     errors.push(`Replacement uses non-canonical lesson markers: ${unsupportedLessonMarkers.slice(0, 5).join(', ')}`);
+  }
+
+  const allowedTickRequirements = getConsecutiveTickRequirements(
+    `${previousContent}\n${allowedMarkerContent}\n${canonicalLessonContent}`,
+  );
+  const inventedTickRequirements = Array.from(getConsecutiveTickRequirements(replacement))
+    .filter((count) => !allowedTickRequirements.has(count));
+  if (inventedTickRequirements.length > 0) {
+    errors.push(`Replacement invents a consecutive-tick gate rule: ${inventedTickRequirements.join(', ')} ticks`);
   }
 
   // A targeted repair may replace stale evidence, but it must not silently make

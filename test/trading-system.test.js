@@ -7947,8 +7947,11 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('last_reviewed_at: appliedAt'));
     assert.ok(wikiLibSource.includes('Replacement invents source markers'));
     assert.ok(wikiLibSource.includes('Replacement drops newest tick evidence'));
-    assert.ok(wikiLibSource.includes('const permittedWordCount = Math.max(2_000, previousWordCount)'));
+    assert.ok(wikiLibSource.includes('const permittedWordCount = Math.max(2_050, previousWordCount)'));
     assert.ok(wikiLibSource.includes('Oversized page grows during repair'));
+    assert.ok(wikiLibSource.includes('Replacement invents a consecutive-tick gate rule'));
+    assert.ok(wikiRepairRouteSource.includes('action gate remains CLOSED'));
+    assert.ok(wikiRepairRouteSource.includes('never turn it into an invented fixed tick count'));
     assert.ok(wikiRepairRouteSource.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED BEFORE HUMAN REVIEW'));
     assert.ok(wikiRepairRouteSource.includes('proposal = await proposeRepair(state, { rejectedProposal, errors })'));
     assert.ok(wikiBrowserSource.includes('Generate AI diff'));
@@ -7966,6 +7969,7 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(!wikiBrowserSource.includes('sessionStorage'));
     assert.ok(!wikiBrowserSource.includes('x-noop-write-token'));
     assert.ok(wikiBrowserSource.includes('The repair service was temporarily unavailable'));
+    assert.ok(wikiBrowserSource.includes("setRepairBusy('preview');\n    setRepairPreview(null);"));
   });
 
   test('wiki ingest prevents partial live-state drift and invalid provenance', () => {

@@ -288,6 +288,7 @@ export default function WikiBrowser() {
   const generateRepairDiff = useCallback(async () => {
     if (!selectedPage) return;
     setRepairBusy('preview');
+    setRepairPreview(null);
     setRepairError(null);
     setRepairNotice(null);
     try {
