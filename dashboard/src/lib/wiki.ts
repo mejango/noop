@@ -148,6 +148,20 @@ export function isObsoleteUnresolvedEscalationIssue(
   return Array.from(topics).some((topic) => hasResolvedEscalationForTopic(referencedContent, topic));
 }
 
+const SUPPORTED_NUMERIC_MARKER_TYPES = new Set(['tick', 'order', 'review']);
+
+function getUnsupportedNumericMarkerTypes(content: string): Set<string> {
+  return new Set(
+    Array.from(content.matchAll(/\[([a-z][a-z0-9_-]*):#(?:\d+|NNN)\]/gi), (match) => match[1].toLowerCase())
+      .filter((type) => !SUPPORTED_NUMERIC_MARKER_TYPES.has(type)),
+  );
+}
+
+export function isUnsupportedStructuredMarkerIssue(issue: string): boolean {
+  return getUnsupportedNumericMarkerTypes(issue).size > 0
+    && /(?:schema|marker|evidence|required|compliant|enforce)/i.test(issue);
+}
+
 function hasH2(content: string, heading: string): boolean {
   return content.split('\n').some((line) => line.trim() === `## ${heading}`);
 }
@@ -242,6 +256,13 @@ export function validateWikiReplacement(args: {
   });
   if (revivedResolvedTopics.size > 0) {
     errors.push(`Replacement revives resolved escalations: ${Array.from(revivedResolvedTopics).join(', ')}`);
+  }
+
+  const previousUnsupportedMarkerTypes = getUnsupportedNumericMarkerTypes(previousContent);
+  const inventedUnsupportedMarkerTypes = Array.from(getUnsupportedNumericMarkerTypes(replacement))
+    .filter((type) => !previousUnsupportedMarkerTypes.has(type));
+  if (inventedUnsupportedMarkerTypes.length > 0) {
+    errors.push(`Replacement invents unsupported marker types: ${inventedUnsupportedMarkerTypes.join(', ')}`);
   }
 
   const uncertainArtifactAnchors = getUncertainArtifactAnchors(validationIssues);

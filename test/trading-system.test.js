@@ -7954,6 +7954,12 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('${heading} section must contain only: ${canonicalBody}'));
     assert.ok(wikiLibSource.includes('Replacement revives resolved escalations'));
     assert.ok(wikiLibSource.includes('Replacement turns an uncertain artifact interpretation into fact'));
+    assert.ok(wikiLibSource.includes('Replacement invents unsupported marker types'));
+    assert.ok(wikiRepairRouteSource.includes('isUnsupportedStructuredMarkerIssue'));
+    assert.ok(wikiRepairRouteSource.includes('no page content changes required'));
+    assert.ok(wikiRepairRouteSource.includes('never add [task:#NNN]'));
+    assert.ok(wikiRepairRouteSource.includes('Deterministic cleanup; no content changes required'));
+    assert.ok(wikiRepairRouteSource.includes("appendWikiLog('manual-cleanup'"));
     assert.ok(wikiLibSource.includes('validationIssues: string[]'));
     assert.ok(wikiRepairRouteSource.includes('isObsoleteUnresolvedEscalationIssue'));
     assert.ok(wikiRepairRouteSource.includes('current supplied page content outranks finding text'));
