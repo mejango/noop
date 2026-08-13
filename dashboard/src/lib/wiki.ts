@@ -126,6 +126,10 @@ const REFERENCE_ONLY_SECTIONS: Record<string, Record<string, string>> = {
   'revenue/pricing.md': {
     'Skew & IV Context': 'Current skew and IV readings are perishable. Consult protection/pricing.md and regimes/current.md for current values.',
   },
+  'revenue/efficiency.md': {
+    'Strike Selection Patterns': 'Strikes 11–22% OTM have produced consistent disciplined wins; select strike distance by the OTM buffer tolerable if spot touches the top of the expected range. See [lesson:short_call.strike_and_sizing].',
+    'Buyback Patterns': 'When spot is ≥10% below strike with DTE collapsing, buying back converts near-certain theta income into a certain realized loss. Assess strike distance, DTE, and momentum before any buyback; a buyback below strike requires a credible breakout thesis. See [lesson:short_call.exit_insurance] and [lesson:process.decision_quality].',
+  },
 };
 
 function getEscalationTopics(content: string): Set<string> {
@@ -248,6 +252,14 @@ function getExpiredTickIds(issues: string[]): Set<number> {
   return tickIds;
 }
 
+function getDuplicateMatches(content: string, pattern: RegExp): string[] {
+  const counts = new Map<string, number>();
+  Array.from(content.matchAll(pattern), (match) => match[1].toUpperCase()).forEach((value) => {
+    counts.set(value, (counts.get(value) || 0) + 1);
+  });
+  return Array.from(counts.entries()).filter(([, count]) => count > 1).map(([value]) => value);
+}
+
 export function validateWikiReplacement(args: {
   pagePath: string;
   previousContent: string;
@@ -298,6 +310,30 @@ export function validateWikiReplacement(args: {
       errors.push(`${heading} section must contain only: ${canonicalBody}`);
     }
   });
+
+  if (pagePath === 'revenue/efficiency.md') {
+    const premiumRiskBody = getH2Body(replacement, 'Premium Per Unit Risk') || '';
+    const duplicateCampaignRows = getDuplicateMatches(
+      premiumRiskBody,
+      /^\|\s*(ETH-\d{8}-\d+-[CP])\s*\|/gmi,
+    );
+    if (duplicateCampaignRows.length > 0) {
+      errors.push(`Premium Per Unit Risk repeats campaign rows: ${duplicateCampaignRows.join(', ')}`);
+    }
+    const callScoreNoteCount = (premiumRiskBody.match(/^>\s*\*\*Call Score Context note/gm) || []).length;
+    if (callScoreNoteCount > 1) errors.push('Premium Per Unit Risk repeats the Call Score Context note');
+
+    const currentCycleBody = getH2Body(replacement, 'Current Cycle Status') || '';
+    const duplicateCurrentCampaigns = getDuplicateMatches(
+      currentCycleBody,
+      /^\s*-\s*(ETH-\d{8}-\d+-[CP])\s+(?:—|-)/gmi,
+    );
+    if (duplicateCurrentCampaigns.length > 0) {
+      errors.push(`Current Cycle Status repeats active campaigns: ${duplicateCurrentCampaigns.join(', ')}`);
+    }
+    const stalenessNoticeCount = (currentCycleBody.match(/^>\s*⚠️\s*\*\*Staleness notice/gm) || []).length;
+    if (stalenessNoticeCount > 1) errors.push('Current Cycle Status repeats the staleness notice');
+  }
 
   const previousParagraphs = new Set(
     previousContent.split(/\n\s*\n/).map(normalizeProse).filter(Boolean),

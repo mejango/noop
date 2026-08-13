@@ -7952,6 +7952,10 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('Replacement invents a consecutive-tick gate rule'));
     assert.ok(wikiLibSource.includes('REFERENCE_ONLY_SECTIONS'));
     assert.ok(wikiLibSource.includes('${heading} section must contain only: ${canonicalBody}'));
+    assert.ok(wikiLibSource.includes('Premium Per Unit Risk repeats campaign rows'));
+    assert.ok(wikiLibSource.includes('Premium Per Unit Risk repeats the Call Score Context note'));
+    assert.ok(wikiLibSource.includes('Current Cycle Status repeats active campaigns'));
+    assert.ok(wikiLibSource.includes('Current Cycle Status repeats the staleness notice'));
     assert.ok(wikiLibSource.includes('Replacement revives resolved escalations'));
     assert.ok(wikiLibSource.includes('Replacement turns an uncertain artifact interpretation into fact'));
     assert.ok(wikiLibSource.includes('Replacement retains unsupported marker types'));
@@ -7972,6 +7976,7 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('action gate remains CLOSED'));
     assert.ok(wikiRepairRouteSource.includes('never turn it into an invented fixed tick count'));
     assert.ok(wikiRepairRouteSource.includes('Never upgrade advisory language'));
+    assert.ok(wikiRepairRouteSource.includes("One review is an example, not a general policy"));
     assert.ok(wikiRepairRouteSource.includes('labeling an invention as a hypothesis does not make it acceptable'));
     assert.ok(wikiRepairRouteSource.includes('Remove every literal #NNN placeholder'));
     assert.ok(wikiRepairRouteSource.includes("Strategy pages are durable Learning-owned views"));
