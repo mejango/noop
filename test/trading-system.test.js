@@ -7954,12 +7954,14 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('${heading} section must contain only: ${canonicalBody}'));
     assert.ok(wikiLibSource.includes('Replacement revives resolved escalations'));
     assert.ok(wikiLibSource.includes('Replacement turns an uncertain artifact interpretation into fact'));
-    assert.ok(wikiLibSource.includes('Replacement invents unsupported marker types'));
+    assert.ok(wikiLibSource.includes('Replacement retains unsupported marker types'));
+    assert.ok(wikiLibSource.includes('Replacement retains placeholder source markers'));
     assert.ok(wikiLibSource.includes('Replacement invents unsupported numeric trading triggers'));
     assert.ok(wikiLibSource.includes('Replacement classifies outcomes without recorded resolution as failed'));
+    assert.ok(wikiLibSource.includes('Learning-owned strategy page adds perishable tick evidence'));
+    assert.ok(wikiLibSource.includes('Learning-owned strategy page retains expired live tick evidence'));
     assert.ok(wikiRepairRouteSource.includes('isUnsupportedStructuredMarkerIssue'));
     assert.ok(wikiRepairRouteSource.includes('no page content changes required'));
-    assert.ok(wikiRepairRouteSource.includes('never add [task:#NNN]'));
     assert.ok(wikiRepairRouteSource.includes('Deterministic cleanup; no content changes required'));
     assert.ok(wikiRepairRouteSource.includes("appendWikiLog('manual-cleanup'"));
     assert.ok(wikiLibSource.includes('validationIssues: string[]'));
@@ -7971,6 +7973,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('never turn it into an invented fixed tick count'));
     assert.ok(wikiRepairRouteSource.includes('Never upgrade advisory language'));
     assert.ok(wikiRepairRouteSource.includes('labeling an invention as a hypothesis does not make it acceptable'));
+    assert.ok(wikiRepairRouteSource.includes('Remove every literal #NNN placeholder'));
+    assert.ok(wikiRepairRouteSource.includes("Strategy pages are durable Learning-owned views"));
     assert.ok(wikiRepairRouteSource.includes('Do not add skew history, values, observations, analysis, or evidence'));
     assert.ok(wikiRepairRouteSource.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED BEFORE HUMAN REVIEW'));
     assert.ok(wikiRepairRouteSource.includes('proposal = await proposeRepair(state, { rejectedProposal, errors })'));

@@ -157,6 +157,12 @@ function getUnsupportedNumericMarkerTypes(content: string): Set<string> {
   );
 }
 
+function getPlaceholderMarkerTypes(content: string): Set<string> {
+  return new Set(
+    Array.from(content.matchAll(/\[([a-z][a-z0-9_-]*):#NNN\]/gi), (match) => match[1].toLowerCase()),
+  );
+}
+
 export function isUnsupportedStructuredMarkerIssue(issue: string): boolean {
   return getUnsupportedNumericMarkerTypes(issue).size > 0
     && /(?:schema|marker|evidence|required|compliant|enforce)/i.test(issue);
@@ -233,6 +239,15 @@ function getUnresolvedOutcomeAnchors(issues: string[]): Set<string> {
   return anchors;
 }
 
+function getExpiredTickIds(issues: string[]): Set<number> {
+  const tickIds = new Set<number>();
+  issues.forEach((issue) => {
+    if (!/(?:stale|expired|superseded)/i.test(issue)) return;
+    getTickIds(issue).forEach((tickId) => tickIds.add(tickId));
+  });
+  return tickIds;
+}
+
 export function validateWikiReplacement(args: {
   pagePath: string;
   previousContent: string;
@@ -300,11 +315,13 @@ export function validateWikiReplacement(args: {
     errors.push(`Replacement revives resolved escalations: ${Array.from(revivedResolvedTopics).join(', ')}`);
   }
 
-  const previousUnsupportedMarkerTypes = getUnsupportedNumericMarkerTypes(previousContent);
-  const inventedUnsupportedMarkerTypes = Array.from(getUnsupportedNumericMarkerTypes(replacement))
-    .filter((type) => !previousUnsupportedMarkerTypes.has(type));
-  if (inventedUnsupportedMarkerTypes.length > 0) {
-    errors.push(`Replacement invents unsupported marker types: ${inventedUnsupportedMarkerTypes.join(', ')}`);
+  const unsupportedMarkerTypes = Array.from(getUnsupportedNumericMarkerTypes(replacement));
+  if (unsupportedMarkerTypes.length > 0) {
+    errors.push(`Replacement retains unsupported marker types: ${unsupportedMarkerTypes.join(', ')}`);
+  }
+  const placeholderMarkerTypes = Array.from(getPlaceholderMarkerTypes(replacement));
+  if (placeholderMarkerTypes.length > 0) {
+    errors.push(`Replacement retains placeholder source markers: ${placeholderMarkerTypes.join(', ')}`);
   }
 
   const uncertainArtifactAnchors = getUncertainArtifactAnchors(validationIssues);
@@ -340,6 +357,23 @@ export function validateWikiReplacement(args: {
     );
   }
 
+  if (pagePath.startsWith('strategy/')) {
+    const previousTickIds = new Set(getTickIds(previousContent));
+    const addedTickIds = getTickIds(replacement).filter((tickId) => !previousTickIds.has(tickId));
+    if (addedTickIds.length > 0) {
+      errors.push(
+        `Learning-owned strategy page adds perishable tick evidence: ${Array.from(new Set(addedTickIds)).map((tickId) => `[tick:#${tickId}]`).join(', ')}`,
+      );
+    }
+    const retainedExpiredTickIds = Array.from(getExpiredTickIds(validationIssues))
+      .filter((tickId) => getTickIds(replacement).includes(tickId));
+    if (retainedExpiredTickIds.length > 0) {
+      errors.push(
+        `Learning-owned strategy page retains expired live tick evidence: ${retainedExpiredTickIds.map((tickId) => `[tick:#${tickId}]`).join(', ')}`,
+      );
+    }
+  }
+
   const previousMarkers = getStructuredWikiMarkers(previousContent);
   const replacementMarkers = getStructuredWikiMarkers(replacement);
   const allowedMarkers = getStructuredWikiMarkers(allowedMarkerContent);
@@ -366,7 +400,14 @@ export function validateWikiReplacement(args: {
   // the page less current by dropping the newest tick cited anywhere on it.
   const previousLatestTick = latestTickId(previousContent);
   const replacementLatestTick = latestTickId(replacement);
-  if (previousLatestTick != null && (replacementLatestTick == null || replacementLatestTick < previousLatestTick)) {
+  const removesExpiredStrategyTick = pagePath.startsWith('strategy/')
+    && previousLatestTick != null
+    && getExpiredTickIds(validationIssues).has(previousLatestTick);
+  if (
+    previousLatestTick != null
+    && !removesExpiredStrategyTick
+    && (replacementLatestTick == null || replacementLatestTick < previousLatestTick)
+  ) {
     errors.push(`Replacement drops newest tick evidence [tick:#${previousLatestTick}]`);
   }
   return errors;
