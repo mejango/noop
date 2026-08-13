@@ -7947,6 +7947,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('last_reviewed_at: appliedAt'));
     assert.ok(wikiLibSource.includes('Replacement invents source markers'));
     assert.ok(wikiLibSource.includes('Replacement drops newest tick evidence'));
+    assert.ok(wikiLibSource.includes('const permittedWordCount = Math.max(2_000, previousWordCount)'));
+    assert.ok(wikiLibSource.includes('Oversized page grows during repair'));
     assert.ok(wikiRepairRouteSource.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED BEFORE HUMAN REVIEW'));
     assert.ok(wikiRepairRouteSource.includes('proposal = await proposeRepair(state, { rejectedProposal, errors })'));
     assert.ok(wikiBrowserSource.includes('Generate AI diff'));

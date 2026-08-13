@@ -128,8 +128,16 @@ export function validateWikiReplacement(args: {
   if (previousContent.length > 100 && replacement.length < previousContent.length * 0.5) {
     errors.push('Replacement shrinks the page by more than 50%');
   }
-  const wordCount = replacement.split(/\s+/).filter(Boolean).length;
-  if (wordCount > 2000) errors.push(`Replacement exceeds 2000 words (${wordCount})`);
+  const previousWordCount = previousContent.trim().split(/\s+/).filter(Boolean).length;
+  const replacementWordCount = replacement.split(/\s+/).filter(Boolean).length;
+  const permittedWordCount = Math.max(2_000, previousWordCount);
+  if (replacementWordCount > permittedWordCount) {
+    errors.push(
+      previousWordCount > 2_000
+        ? `Oversized page grows during repair (${previousWordCount} → ${replacementWordCount} words); preserve or reduce its length`
+        : `Replacement exceeds 2000 words (${replacementWordCount})`,
+    );
+  }
   if (!/^\s*(?:#(?!#)[^\n]*\n+\s*)?\*\*[^\n]+\*\*/.test(replacement)) {
     errors.push('Replacement must keep a bold TLDR immediately after the optional H1');
   }
