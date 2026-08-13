@@ -8004,7 +8004,7 @@ describe('Sell-call DTE-normalized edge chart', () => {
     assert.ok(SCRIPT_SOURCE.includes('normalization: entryBestSellCall.research?.edge_components'));
     assert.ok(chartDbSource.includes('const SELL_CALL_EDGE_REFERENCE_DTE = 8.5'));
     assert.ok(chartDbSource.includes('const SELL_CALL_EDGE_DTE_EXPONENT = 0.12'));
-    assert.ok(chartDbSource.includes('MAX(bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT})) AS edge_score'));
+    assert.ok(chartDbSource.includes('raw_score * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT}) AS edge_score'));
   });
 
   test('serves and renders a distinct dotted blue edge series', () => {
@@ -8014,6 +8014,20 @@ describe('Sell-call DTE-normalized edge chart', () => {
     assert.ok(overviewSource.includes('CALL EDGE'));
     assert.ok(overviewSource.includes('dataKey="callEdge"'));
     assert.ok(overviewSource.includes('strokeDasharray="2 4"'));
+  });
+
+  test('keeps long-range chart queries on compact indexed samples', () => {
+    const edgeFunction = chartDbSource.slice(
+      chartDbSource.indexOf('export function getSellCallEdgeOverTime'),
+      chartDbSource.indexOf('export function getSpotPricesBucketed'),
+    );
+    assert.ok(edgeFunction.includes("tableExists('sell_call_edge_snapshots')"));
+    assert.ok(edgeFunction.includes("tableExists('candidate_observations')"));
+    assert.ok(!edgeFunction.includes('FROM options_snapshots'));
+    assert.ok(chartDbSource.includes('WITH RECURSIVE bucket_starts(bucket_epoch)'));
+    assert.ok(chartDbSource.includes('sample_times AS MATERIALIZED'));
+    assert.ok(chartDbSource.includes('CROSS JOIN options_snapshots snapshots'));
+    assert.ok(chartDbSource.includes('LIMIT @point_limit'));
   });
 });
 

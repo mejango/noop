@@ -650,78 +650,66 @@ export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
     return getStmts().getOptionsHeatmap.all(since, limit);
   }
   const bucketSeconds = Math.max(1, Math.floor(bucketMs / 1000));
+  const sinceEpoch = Math.floor(Date.parse(since) / 1000);
+  const untilEpoch = Math.floor(Date.now() / 1000);
+
+  // A scatter plot only needs a representative market snapshot per time bucket.
+  // Looking up that snapshot through the timestamp index avoids window-ranking
+  // every option quote in a long range (millions of rows for the 365d view).
   return getDb().prepare(`
-    WITH bucketed AS (
-      SELECT
-        timestamp,
-        option_type,
-        instrument_name,
-        strike,
-        delta,
-        ask_price,
-        bid_price,
-        index_price,
-        expiry,
-        ask_delta_value,
-        bid_delta_value,
-        mark_price,
-        implied_vol,
-        ask_amount,
-        bid_amount,
-        (CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds) * @bucket_seconds AS bucket_epoch,
-        ROW_NUMBER() OVER (
-          PARTITION BY instrument_name, (CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds)
-          ORDER BY timestamp DESC
-        ) AS rn
-      FROM options_snapshots
-      WHERE timestamp > @since
-        AND (
-          ((option_type = 'P' OR instrument_name LIKE '%-P') AND delta <= -0.02 AND delta >= -0.12)
-          OR
-          ((option_type = 'C' OR instrument_name LIKE '%-C') AND delta >= 0.04 AND delta <= 0.12)
-        )
+    WITH RECURSIVE bucket_starts(bucket_epoch) AS (
+      SELECT CAST(@since_epoch / @bucket_seconds AS INTEGER) * @bucket_seconds
+      UNION ALL
+      SELECT bucket_epoch + @bucket_seconds
+      FROM bucket_starts
+      WHERE bucket_epoch + @bucket_seconds <= @until_epoch
     ),
-    normalized AS (
+    sample_times AS MATERIALIZED (
       SELECT
-        datetime(bucket_epoch, 'unixepoch') || 'Z' AS timestamp,
-        option_type,
-        instrument_name,
-        strike,
-        delta,
-        ask_price,
-        bid_price,
-        index_price,
-        expiry,
-        ask_delta_value,
-        bid_delta_value,
-        mark_price,
-        implied_vol,
-        ask_amount,
-        bid_amount
-      FROM bucketed
-      WHERE rn = 1
+        bucket_epoch,
+        (
+          SELECT timestamp
+          FROM options_snapshots
+          WHERE timestamp > @since
+            AND timestamp >= strftime('%Y-%m-%dT%H:%M:%fZ', bucket_epoch, 'unixepoch')
+            AND timestamp < strftime('%Y-%m-%dT%H:%M:%fZ', bucket_epoch + @bucket_seconds, 'unixepoch')
+          ORDER BY timestamp DESC
+          LIMIT 1
+        ) AS sample_timestamp
+      FROM bucket_starts
     )
     SELECT
-      timestamp,
-      option_type,
-      instrument_name,
-      strike,
-      delta,
-      ask_price,
-      bid_price,
-      index_price,
-      expiry,
-      ask_delta_value,
-      bid_delta_value,
-      mark_price,
-      implied_vol,
-      ask_amount,
-      bid_amount
-    FROM normalized
-    ORDER BY timestamp ASC, instrument_name ASC
+      strftime('%Y-%m-%dT%H:%M:%SZ', samples.bucket_epoch, 'unixepoch') AS timestamp,
+      snapshots.option_type,
+      snapshots.instrument_name,
+      snapshots.strike,
+      snapshots.delta,
+      snapshots.ask_price,
+      snapshots.bid_price,
+      snapshots.index_price,
+      snapshots.expiry,
+      snapshots.ask_delta_value,
+      snapshots.bid_delta_value,
+      snapshots.mark_price,
+      snapshots.implied_vol,
+      snapshots.ask_amount,
+      snapshots.bid_amount
+    FROM sample_times samples
+    CROSS JOIN options_snapshots snapshots
+    WHERE snapshots.timestamp = samples.sample_timestamp
+      AND (
+        ((snapshots.option_type = 'P' OR snapshots.instrument_name LIKE '%-P') AND snapshots.delta BETWEEN -0.12 AND -0.02)
+        OR
+        ((snapshots.option_type = 'C' OR snapshots.instrument_name LIKE '%-C') AND snapshots.delta BETWEEN 0.04 AND 0.12)
+      )
+    ORDER BY samples.bucket_epoch ASC, snapshots.instrument_name ASC
+    LIMIT @point_limit
   `).all({
     since,
+    since_epoch: Number.isFinite(sinceEpoch) ? sinceEpoch : untilEpoch,
+    until_epoch: untilEpoch,
     bucket_seconds: bucketSeconds,
+    point_limit: Math.max(1, limit),
   });
 }
 
@@ -751,31 +739,53 @@ export function getBestOptionsOverTime(since: string) {
 }
 
 export function getSellCallEdgeOverTime(since: string, bucketMs = 0) {
+  const database = getDb();
+  const tableExists = (name: string) => Boolean(database.prepare(`
+    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1
+  `).get(name));
+  const sources: string[] = [];
+
+  // Recompute the current formula from compact immutable telemetry. Reading one
+  // winner per tick is orders of magnitude cheaper than scanning every option
+  // quote, and raw_score + dte keep pre-normalization rows comparable.
+  if (tableExists('sell_call_edge_snapshots')) {
+    sources.push(`
+      SELECT
+        timestamp,
+        raw_score * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT}) AS edge_score
+      FROM sell_call_edge_snapshots
+      WHERE timestamp > @since
+        AND raw_score > 0
+        AND dte BETWEEN 5 AND 12
+    `);
+  }
+  // Candidate observations predate the dedicated continuous series and contain
+  // all ranked candidates. per_tick below chooses the best normalized value.
+  if (tableExists('candidate_observations')) {
+    sources.push(`
+      SELECT
+        observed_at AS timestamp,
+        raw_score * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT}) AS edge_score
+      FROM candidate_observations
+      WHERE observed_at > @since
+        AND action = 'sell_call'
+        AND raw_score > 0
+        AND dte BETWEEN 5 AND 12
+    `);
+  }
+  if (sources.length === 0) return [];
+
   const bucketSeconds = bucketMs > 0 ? Math.max(1, Math.floor(bucketMs / 1000)) : 0;
   const bucketExpression = bucketSeconds > 0
     ? `CAST(CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds AS INTEGER) * @bucket_seconds`
     : `CAST(strftime('%s', timestamp) AS INTEGER)`;
 
-  // CALL EDGE is derived from the immutable raw snapshots so the entire chart
-  // has one meaning, including dates recorded before the normalization shipped.
-  return getDb().prepare(`
-    WITH eligible AS (
-      SELECT
-        timestamp,
-        bid_delta_value,
-        ((expiry - strftime('%s', timestamp)) / 86400.0) AS dte
-      FROM options_snapshots
-      WHERE timestamp > @since
-        AND (option_type = 'C' OR instrument_name LIKE '%-C')
-        AND delta BETWEEN 0.04 AND 0.12
-        AND bid_delta_value > 0
-        AND expiry IS NOT NULL
+  return database.prepare(`
+    WITH source AS (
+      ${sources.join('\nUNION ALL\n')}
     ), per_tick AS (
-      SELECT
-        timestamp,
-        MAX(bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT})) AS edge_score
-      FROM eligible
-      WHERE dte BETWEEN 5 AND 12
+      SELECT timestamp, MAX(edge_score) AS edge_score
+      FROM source
       GROUP BY timestamp
     ), bucketed AS (
       SELECT ${bucketExpression} AS bucket_epoch, AVG(edge_score) AS edge_score
