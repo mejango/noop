@@ -7984,6 +7984,9 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED BEFORE HUMAN REVIEW'));
     assert.ok(wikiRepairRouteSource.includes('proposal = await proposeRepair(state, { rejectedProposal, errors })'));
     assert.ok(wikiBrowserSource.includes('Generate AI diff'));
+    assert.ok(wikiBrowserSource.includes("repairPreview.proposedContent"));
+    assert.ok(wikiBrowserSource.includes("'Copy latest'"));
+    assert.ok(wikiBrowserSource.includes('Copy the proposed final Markdown without diff markers'));
     assert.ok(wikiBrowserSource.includes('Apply + AI validate'));
     assert.ok(wikiBrowserSource.includes('buildLineDiff'));
   });

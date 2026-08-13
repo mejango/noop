@@ -209,6 +209,7 @@ export default function WikiBrowser() {
   const [repairBusy, setRepairBusy] = useState<'preview' | 'apply' | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
   const [repairNotice, setRepairNotice] = useState<string | null>(null);
+  const [repairCopied, setRepairCopied] = useState(false);
 
   const refreshPages = useCallback(() => fetch('/api/wiki/pages')
       .then((response) => response.json())
@@ -289,6 +290,7 @@ export default function WikiBrowser() {
     if (!selectedPage) return;
     setRepairBusy('preview');
     setRepairPreview(null);
+    setRepairCopied(false);
     setRepairError(null);
     setRepairNotice(null);
     try {
@@ -309,6 +311,19 @@ export default function WikiBrowser() {
       setRepairBusy(null);
     }
   }, [ensureAdminSession, selectedPage]);
+
+  const copyLatestRepair = useCallback(async () => {
+    if (!repairPreview) return;
+    try {
+      await navigator.clipboard.writeText(repairPreview.proposedContent);
+      setRepairCopied(true);
+      setRepairError(null);
+      window.setTimeout(() => setRepairCopied(false), 2_000);
+    } catch {
+      setRepairCopied(false);
+      setRepairError('Could not copy the latest proposed Markdown.');
+    }
+  }, [repairPreview]);
 
   const applyRepair = useCallback(async () => {
     if (!selectedPage || !repairPreview) return;
@@ -479,7 +494,18 @@ export default function WikiBrowser() {
                     <p className="mt-1 max-w-2xl text-[10px] leading-relaxed text-gray-300">{repairPreview.summary}</p>
                   </div>
                   <button
-                    onClick={() => setRepairPreview(null)}
+                    onClick={copyLatestRepair}
+                    disabled={repairBusy !== null}
+                    title="Copy the proposed final Markdown without diff markers"
+                    className="border border-white/10 bg-white/[0.03] px-2 py-1 text-[10px] text-gray-300 transition-colors hover:border-white/20 hover:bg-white/[0.07] hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    {repairCopied ? 'Copied' : 'Copy latest'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setRepairPreview(null);
+                      setRepairCopied(false);
+                    }}
                     disabled={repairBusy !== null}
                     className="px-2 py-1 text-[10px] text-gray-500 hover:text-gray-200 disabled:opacity-40"
                   >
