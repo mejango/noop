@@ -6,6 +6,7 @@ import {
   getSpotPricesBucketed, getBestOptionsBucketed, getSellCallEdgeOverTime,
 } from '@/lib/db';
 import { CHART_ROW_LIMITS } from '@/lib/limits';
+import { cachedJsonRoute } from '@/lib/response-cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -141,7 +142,7 @@ function downsampleLiquidity(rows: Record<string, any>[], bucketMs: number): Rec
   return result;
 }
 
-export function GET(request: NextRequest) {
+function getChartResponse(request: NextRequest) {
   try {
     const range = request.nextUrl.searchParams.get('range') || '14d';
     const rangeMs: Record<string, number> = {
@@ -271,4 +272,13 @@ export function GET(request: NextRequest) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+export function GET(request: NextRequest) {
+  const range = request.nextUrl.searchParams.get('range') || '14d';
+  return cachedJsonRoute(request, `chart:${range}`, () => getChartResponse(request), {
+    freshMs: 60_000,
+    staleMs: 5 * 60_000,
+    browserMaxAgeSeconds: 30,
+  });
 }

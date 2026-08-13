@@ -7862,6 +7862,8 @@ describe('Wiki knowledge discipline', () => {
   const wikiBrowserSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'components', 'WikiBrowser.tsx'), 'utf8');
   const wikiCatalogSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'wikiCatalog.ts'), 'utf8');
   const wikiLibSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'wiki.ts'), 'utf8');
+  const writeAccessSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'write-access.ts'), 'utf8');
+  const adminSessionRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'admin', 'session', 'route.ts'), 'utf8');
 
   test('raw wiki evidence preserves missing numbers as unknown', () => {
     assert.ok(SCRIPT_SOURCE.includes("if (value == null || (typeof value === 'string' && value.trim() === '')) return 'unknown';"));
@@ -7944,9 +7946,24 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('fs.renameSync(temporaryPath, targetPath)'));
     assert.ok(wikiRepairRouteSource.includes('last_reviewed_at: appliedAt'));
     assert.ok(wikiLibSource.includes('Replacement invents source markers'));
+    assert.ok(wikiLibSource.includes('Replacement drops newest tick evidence'));
+    assert.ok(wikiRepairRouteSource.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED BEFORE HUMAN REVIEW'));
+    assert.ok(wikiRepairRouteSource.includes('proposal = await proposeRepair(state, { rejectedProposal, errors })'));
     assert.ok(wikiBrowserSource.includes('Generate AI diff'));
     assert.ok(wikiBrowserSource.includes('Apply + AI validate'));
     assert.ok(wikiBrowserSource.includes('buildLineDiff'));
+  });
+
+  test('wiki admin passphrase becomes an HttpOnly session instead of browser-stored write access', () => {
+    assert.ok(writeAccessSource.includes("export const ADMIN_SESSION_COOKIE = 'noop_admin_session'"));
+    assert.ok(writeAccessSource.includes('hasValidAdminSession(request)'));
+    assert.ok(adminSessionRouteSource.includes('httpOnly: true'));
+    assert.ok(adminSessionRouteSource.includes("sameSite: 'strict'"));
+    assert.ok(adminSessionRouteSource.includes('MAX_FAILED_ATTEMPTS'));
+    assert.ok(wikiBrowserSource.includes("fetch('/api/admin/session'"));
+    assert.ok(!wikiBrowserSource.includes('sessionStorage'));
+    assert.ok(!wikiBrowserSource.includes('x-noop-write-token'));
+    assert.ok(wikiBrowserSource.includes('The repair service was temporarily unavailable'));
   });
 
   test('wiki ingest prevents partial live-state drift and invalid provenance', () => {
@@ -7990,6 +8007,10 @@ describe('Learning bootstrap diagnostics', () => {
 describe('Dashboard range loading UX', () => {
   const overviewSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'page.tsx'), 'utf8');
   const pollingHookSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'hooks.ts'), 'utf8');
+  const responseCacheSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'response-cache.ts'), 'utf8');
+  const chartRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'chart', 'route.ts'), 'utf8');
+  const learningRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'learning', 'route.ts'), 'utf8');
+  const lyraSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'lyra.ts'), 'utf8');
 
   test('range changes keep stale data visible with explicit progress feedback', () => {
     assert.ok(overviewSource.includes('chartRangeLoading && merged.length > 0'));
@@ -8003,6 +8024,19 @@ describe('Dashboard range loading UX', () => {
     assert.ok(pollingHookSource.includes('requestId !== requestIdRef.current'));
     assert.ok(pollingHookSource.includes('setDataUrl(url)'));
     assert.ok(pollingHookSource.includes('setSettledUrl(url)'));
+  });
+
+  test('large dashboard responses are compressed, cached, and refreshed without request stampedes', () => {
+    assert.ok(responseCacheSource.includes("'Content-Encoding', 'gzip'"));
+    assert.ok(responseCacheSource.includes('stale-while-revalidate='));
+    assert.ok(responseCacheSource.includes("cacheStatus: 'hit' | 'miss' | 'stale'"));
+    assert.ok(responseCacheSource.includes('state.pending.get(key)'));
+    assert.ok(chartRouteSource.includes("cachedJsonRoute(request, `chart:${range}`"));
+    assert.ok(learningRouteSource.includes("cachedJsonRoute(request, 'learning'"));
+    assert.ok(lyraSource.includes('const inFlight = new Map'));
+    assert.ok(lyraSource.includes('return pending as Promise<T>'));
+    assert.ok(overviewSource.includes('const pnlQuery = `/api/pnl-report?range='));
+    assert.ok(!overviewSource.includes('function rangeToWindow'));
   });
 });
 

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPositions, getCollaterals } from '@/lib/lyra';
 import { getOrderTradesSince } from '@/lib/db';
+import { cachedJsonRoute } from '@/lib/response-cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,7 +23,7 @@ function normalizeSpotPrice(value: unknown): number {
   return Number.isFinite(n) && n >= 100 && n <= 20000 ? n : 0;
 }
 
-export async function GET(request: NextRequest) {
+async function getAccountResponse(request: NextRequest) {
   try {
     const range = request.nextUrl.searchParams.get('range') || '30d';
     const rangeMs = RANGE_MS[range] || RANGE_MS['30d'];
@@ -85,4 +86,13 @@ export async function GET(request: NextRequest) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message, collaterals: [], positions: [], trades: [] }, { status: 500 });
   }
+}
+
+export function GET(request: NextRequest) {
+  const range = request.nextUrl.searchParams.get('range') || '30d';
+  return cachedJsonRoute(request, `account:${range}`, () => getAccountResponse(request), {
+    freshMs: 30_000,
+    staleMs: 2 * 60_000,
+    browserMaxAgeSeconds: 15,
+  });
 }

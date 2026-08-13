@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getOrderCashflowTotalsBefore, getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange } from '@/lib/db';
+import { cachedJsonRoute } from '@/lib/response-cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -125,7 +126,7 @@ function bucketKey(ts: number, bucketMs: number): number {
   return Math.floor(ts / bucketMs) * bucketMs;
 }
 
-export function GET(req: NextRequest) {
+function getPnlResponse(req: NextRequest) {
   try {
     const { range, from, to } = resolveWindow(req);
     const fromIso = from.toISOString();
@@ -357,4 +358,13 @@ export function GET(req: NextRequest) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+export function GET(request: NextRequest) {
+  const key = `pnl:${request.nextUrl.searchParams.toString()}`;
+  return cachedJsonRoute(request, key, () => getPnlResponse(request), {
+    freshMs: 60_000,
+    staleMs: 5 * 60_000,
+    browserMaxAgeSeconds: 30,
+  });
 }

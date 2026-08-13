@@ -103,6 +103,16 @@ export function getStructuredWikiMarkers(content: string): Set<string> {
   );
 }
 
+function getTickIds(content: string): number[] {
+  return Array.from(content.matchAll(/\[tick:#(\d+)\]/gi), (match) => Number(match[1]))
+    .filter(Number.isFinite);
+}
+
+function latestTickId(content: string): number | null {
+  const tickIds = getTickIds(content);
+  return tickIds.length > 0 ? Math.max(...tickIds) : null;
+}
+
 export function validateWikiReplacement(args: {
   pagePath: string;
   previousContent: string;
@@ -138,6 +148,14 @@ export function validateWikiReplacement(args: {
     .filter((marker) => marker.startsWith('[lesson:') && !canonicalLessonMarkers.has(marker));
   if (unsupportedLessonMarkers.length > 0) {
     errors.push(`Replacement uses non-canonical lesson markers: ${unsupportedLessonMarkers.slice(0, 5).join(', ')}`);
+  }
+
+  // A targeted repair may replace stale evidence, but it must not silently make
+  // the page less current by dropping the newest tick cited anywhere on it.
+  const previousLatestTick = latestTickId(previousContent);
+  const replacementLatestTick = latestTickId(replacement);
+  if (previousLatestTick != null && (replacementLatestTick == null || replacementLatestTick < previousLatestTick)) {
+    errors.push(`Replacement drops newest tick evidence [tick:#${previousLatestTick}]`);
   }
   return errors;
 }

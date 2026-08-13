@@ -1,11 +1,12 @@
 import { NextResponse } from 'next/server';
 import { getStats, getBotBudget, getLyraSpot } from '@/lib/db';
 import { getSubaccount } from '@/lib/lyra';
+import { cachedJsonRoute } from '@/lib/response-cache';
 
 export const dynamic = 'force-dynamic';
 const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
 
-export async function GET() {
+async function getStatsResponse() {
   try {
     const stats = getStats() as Record<string, unknown> || {};
     const budget = getBotBudget();
@@ -26,4 +27,12 @@ export async function GET() {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+export function GET(request: Request) {
+  return cachedJsonRoute(request, 'stats', getStatsResponse, {
+    freshMs: 20_000,
+    staleMs: 2 * 60_000,
+    browserMaxAgeSeconds: 10,
+  });
 }

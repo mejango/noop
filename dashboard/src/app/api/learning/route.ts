@@ -13,6 +13,7 @@ import {
   hasTable,
 } from '@/lib/db';
 import { getTradeHistory } from '@/lib/lyra';
+import { cachedJsonRoute } from '@/lib/response-cache';
 
 export const dynamic = 'force-dynamic';
 
@@ -511,7 +512,7 @@ function deriveClosedTradeCampaigns(orders: TradeOrder[], now = Date.now()): Pen
   return campaigns.sort((a, b) => new Date(b.closed_at).getTime() - new Date(a.closed_at).getTime());
 }
 
-export async function GET() {
+async function getLearningResponse() {
   try {
     const hasTradeReviewsTable = hasTable('trade_reviews');
     const hasTradeLessonsTable = hasTable('trade_lessons');
@@ -739,4 +740,12 @@ export async function GET() {
       status: null,
     }, { status: 500 });
   }
+}
+
+export function GET(request: Request) {
+  return cachedJsonRoute(request, 'learning', getLearningResponse, {
+    freshMs: 2 * 60_000,
+    staleMs: 10 * 60_000,
+    browserMaxAgeSeconds: 60,
+  });
 }

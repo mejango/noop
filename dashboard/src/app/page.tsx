@@ -776,31 +776,6 @@ function quantizeScatterDots<T extends HeatmapDot>(dots: T[], range: string): T[
         .slice(0, target);
 }
 
-function rangeToWindow(range: string) {
-  const now = Date.now();
-  const hour = 60 * 60 * 1000;
-  const day = 24 * hour;
-  const durationMs = (() => {
-    switch (range) {
-      case '1h': return hour;
-      case '6h': return 6 * hour;
-      case '24h': return 24 * hour;
-      case '3d': return 3 * day;
-      case '6.2d': return Math.round(6.2 * day);
-      case '7d': return 7 * day;
-      case '14d': return 14 * day;
-      case '30d': return 30 * day;
-      case '90d': return 90 * day;
-      case '365d': return 365 * day;
-      default: return 14 * day;
-    }
-  })();
-  return {
-    from: new Date(now - durationMs).toISOString(),
-    to: new Date(now).toISOString(),
-  };
-}
-
 function rangeFromRequestUrl(url: string | null, fallback: string): string {
   if (!url) return fallback;
   try {
@@ -833,11 +808,7 @@ export default function OverviewPage() {
     dataUrl: accountDataUrl,
     settledUrl: accountSettledUrl,
   } = usePolling<AccountData>(accountUrl, emptyAccount, 60_000);
-  const pnlWindow = useMemo(() => rangeToWindow(range), [range]);
-  const pnlQuery = useMemo(
-    () => `/api/pnl-report?range=${encodeURIComponent(range)}&from=${encodeURIComponent(pnlWindow.from)}&to=${encodeURIComponent(pnlWindow.to)}`,
-    [pnlWindow.from, pnlWindow.to, range]
-  );
+  const pnlQuery = `/api/pnl-report?range=${encodeURIComponent(range)}`;
   const {
     data: pnlReport,
     error: pnlError,

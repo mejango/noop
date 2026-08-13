@@ -49,6 +49,7 @@ interface WikiRepairPreview {
 }
 
 type DiffLine = { type: 'same' | 'add' | 'remove'; line: string };
+type AdminSessionState = 'checking' | 'locked' | 'unlocked';
 
 interface WikiSummary {
   current: number;
@@ -93,6 +94,22 @@ const STATUS_META: Record<WikiPageStatus, { label: string; className: string; do
   unreviewed: { label: 'unreviewed', className: 'text-gray-400 border-white/10 bg-white/5', dot: 'bg-gray-500' },
   missing: { label: 'missing', className: 'text-red-300 border-red-500/25 bg-red-500/10', dot: 'bg-red-400' },
 };
+
+async function readApiJson(response: Response): Promise<Record<string, unknown>> {
+  const raw = await response.text();
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    const detail = raw.trim().replace(/\s+/g, ' ').slice(0, 300);
+    if (!response.ok && detail.toLowerCase() === 'upstream error') {
+      throw new Error('The repair service was temporarily unavailable. Nothing was changed; try again.');
+    }
+    throw new Error(response.ok
+      ? 'The server returned an unreadable response. Nothing was changed.'
+      : `Repair request failed (${response.status})${detail ? `: ${detail}` : ''}`);
+  }
+}
 
 function timeAgo(ts: string): string {
   const parsed = new Date(ts).getTime();
@@ -186,7 +203,8 @@ export default function WikiBrowser() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
   const [searching, setSearching] = useState(false);
-  const [writeToken, setWriteToken] = useState('');
+  const [adminSession, setAdminSession] = useState<AdminSessionState>('checking');
+  const [adminPassphrase, setAdminPassphrase] = useState('');
   const [repairPreview, setRepairPreview] = useState<WikiRepairPreview | null>(null);
   const [repairBusy, setRepairBusy] = useState<'preview' | 'apply' | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
@@ -204,8 +222,13 @@ export default function WikiBrowser() {
       .catch(() => {}), []);
 
   useEffect(() => {
-    setWriteToken(sessionStorage.getItem('noop-write-token') || '');
     refreshPages();
+    fetch('/api/admin/session', { cache: 'no-store' })
+      .then(async (response) => {
+        const data = await readApiJson(response);
+        setAdminSession(data.authenticated === true ? 'unlocked' : 'locked');
+      })
+      .catch(() => setAdminSession('locked'));
   }, [refreshPages]);
 
   const selectedMeta = useMemo(
@@ -248,38 +271,46 @@ export default function WikiBrowser() {
     setLoading(false);
   }, []);
 
-  const persistWriteToken = useCallback((token: string) => {
-    setWriteToken(token);
-    if (token) sessionStorage.setItem('noop-write-token', token);
-    else sessionStorage.removeItem('noop-write-token');
-  }, []);
+  const ensureAdminSession = useCallback(async () => {
+    if (adminSession === 'unlocked') return;
+    if (!adminPassphrase.trim()) throw new Error('Enter the admin passphrase to generate a repair.');
+    const response = await fetch('/api/admin/session', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ passphrase: adminPassphrase }),
+    });
+    const data = await readApiJson(response);
+    if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : `Admin login failed (${response.status})`);
+    setAdminPassphrase('');
+    setAdminSession('unlocked');
+  }, [adminPassphrase, adminSession]);
 
   const generateRepairDiff = useCallback(async () => {
-    if (!selectedPage || !writeToken) {
-      setRepairError('Enter the admin write token to generate a repair.');
-      return;
-    }
+    if (!selectedPage) return;
     setRepairBusy('preview');
     setRepairError(null);
     setRepairNotice(null);
     try {
+      await ensureAdminSession();
       const response = await fetch('/api/wiki/repair', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-noop-write-token': writeToken },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action: 'preview', pagePath: selectedPage }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error([data.error, ...(data.validationErrors || [])].filter(Boolean).join(': '));
-      setRepairPreview(data as WikiRepairPreview);
+      const data = await readApiJson(response);
+      if (response.status === 401) setAdminSession('locked');
+      const validationErrors = Array.isArray(data.validationErrors) ? data.validationErrors : [];
+      if (!response.ok) throw new Error([data.error, ...validationErrors].filter(Boolean).join(': '));
+      setRepairPreview(data as unknown as WikiRepairPreview);
     } catch (error) {
       setRepairError(error instanceof Error ? error.message : 'Failed to generate AI diff');
     } finally {
       setRepairBusy(null);
     }
-  }, [selectedPage, writeToken]);
+  }, [ensureAdminSession, selectedPage]);
 
   const applyRepair = useCallback(async () => {
-    if (!selectedPage || !repairPreview || !writeToken) return;
+    if (!selectedPage || !repairPreview) return;
     if (!window.confirm(`Apply this AI repair to ${selectedPage}? A second AI will validate it before anything is written.`)) return;
     setRepairBusy('apply');
     setRepairError(null);
@@ -287,11 +318,13 @@ export default function WikiBrowser() {
     try {
       const response = await fetch('/api/wiki/repair', {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-noop-write-token': writeToken },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action: 'apply', ...repairPreview }),
       });
-      const data = await response.json();
-      if (!response.ok) throw new Error([data.error, ...(data.remainingIssues || [])].filter(Boolean).join(': '));
+      const data = await readApiJson(response);
+      if (response.status === 401) setAdminSession('locked');
+      const remainingIssues = Array.isArray(data.remainingIssues) ? data.remainingIssues : [];
+      if (!response.ok) throw new Error([data.error, ...remainingIssues].filter(Boolean).join(': '));
       setRepairPreview(null);
       await Promise.all([refreshPages(), loadPage(selectedPage)]);
       setRepairNotice(`Applied and independently validated. ${data.resolvedCount} finding${data.resolvedCount === 1 ? '' : 's'} cleared.`);
@@ -300,7 +333,7 @@ export default function WikiBrowser() {
     } finally {
       setRepairBusy(null);
     }
-  }, [loadPage, refreshPages, repairPreview, selectedPage, writeToken]);
+  }, [loadPage, refreshPages, repairPreview, selectedPage]);
 
   const handleSearch = useCallback(async () => {
     if (searchQuery.trim().length < 2) return;
@@ -406,17 +439,23 @@ export default function WikiBrowser() {
                     <p className="text-[10px] uppercase tracking-wider text-red-300">Validation issues</p>
                     {selectedMeta.issues.map((issue) => <p key={issue} className="mt-1 text-[10px] text-red-200/80">{issue}</p>)}
                     <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-red-500/10 pt-2">
-                      <input
-                        type="password"
-                        value={writeToken}
-                        onChange={(event) => persistWriteToken(event.target.value)}
-                        placeholder="Admin write token"
-                        aria-label="Admin write token"
-                        className="min-w-0 flex-1 border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-white placeholder-gray-600 focus:border-juice-orange/50 focus:outline-none"
-                      />
+                      {adminSession === 'unlocked' ? (
+                        <span className="min-w-0 flex-1 text-[10px] text-emerald-300">Admin session unlocked for this browser</span>
+                      ) : (
+                        <input
+                          type="password"
+                          value={adminPassphrase}
+                          onChange={(event) => setAdminPassphrase(event.target.value)}
+                          onKeyDown={(event) => event.key === 'Enter' && void generateRepairDiff()}
+                          placeholder="Admin passphrase (once per 12h)"
+                          aria-label="Admin passphrase"
+                          autoComplete="current-password"
+                          className="min-w-0 flex-1 border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-white placeholder-gray-600 focus:border-juice-orange/50 focus:outline-none"
+                        />
+                      )}
                       <button
                         onClick={generateRepairDiff}
-                        disabled={!pageDetail || repairBusy !== null}
+                        disabled={!pageDetail || repairBusy !== null || adminSession === 'checking'}
                         className="border border-juice-orange/30 bg-juice-orange/10 px-2 py-1 text-[10px] text-juice-orange transition-colors hover:bg-juice-orange/20 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         {repairBusy === 'preview' ? 'Generating diff…' : repairPreview ? 'Regenerate AI diff' : 'Generate AI diff'}
