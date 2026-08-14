@@ -27,7 +27,7 @@ export default function RootLayout({
     <html lang="en" className="dark">
       <body className={`${spaceMono.variable} font-mono antialiased bg-juice-dark text-white min-h-screen`}>
         <Nav />
-        <main className="max-w-7xl mx-auto px-3 py-4 md:px-6 md:py-6">
+        <main className="w-full px-3 py-4 md:px-6 md:py-6 xl:px-8 2xl:px-10">
           {children}
         </main>
         <AdvisorDrawer />

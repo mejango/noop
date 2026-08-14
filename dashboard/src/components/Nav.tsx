@@ -70,7 +70,7 @@ export default function Nav() {
 
   return (
     <nav className="border-b border-white/10 bg-juice-dark/80 backdrop-blur-md py-3">
-      <div className="max-w-7xl mx-auto px-3 md:px-6 flex items-center justify-between gap-3">
+      <div className="w-full px-3 md:px-6 xl:px-8 2xl:px-10 flex items-center justify-between gap-3">
         <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
         <div className="flex items-center gap-2 md:gap-4 text-xs md:text-sm flex-wrap justify-end">
           <span className="font-semibold">
