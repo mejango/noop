@@ -7968,6 +7968,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('Unresolved episodes must be classified under Experimental Indicators'));
     assert.ok(wikiLibSource.includes('Learning-owned strategy page adds perishable tick evidence'));
     assert.ok(wikiLibSource.includes('Learning-owned strategy page retains expired live tick evidence'));
+    assert.ok(wikiLibSource.includes('getAddedPerishableStrategyClaims'));
+    assert.ok(wikiLibSource.includes('Learning-owned strategy page adds perishable live-state claims'));
     assert.ok(wikiRepairRouteSource.includes('isUnsupportedStructuredMarkerIssue'));
     assert.ok(wikiRepairRouteSource.includes('no page content changes required'));
     assert.ok(wikiRepairRouteSource.includes('Deterministic cleanup; no content changes required'));
@@ -7987,6 +7989,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('Remove every literal #NNN placeholder'));
     assert.ok(wikiRepairRouteSource.includes('must never be compensated for by adding a different provenance category'));
     assert.ok(wikiRepairRouteSource.includes('loss audit requires confirmed review provenance only'));
+    assert.ok(wikiRepairRouteSource.includes('remove all spot amounts, observation dates, momentum readings'));
+    assert.ok(wikiRepairRouteSource.includes('Do not copy the newer values from protection/convexity.md'));
     assert.ok(wikiRepairRouteSource.includes('never replace [task:#NNN] with wording such as'));
     assert.ok(wikiRepairRouteSource.includes("Strategy pages are durable Learning-owned views"));
     assert.ok(wikiRepairRouteSource.includes('Do not add skew history, values, observations, analysis, or evidence'));

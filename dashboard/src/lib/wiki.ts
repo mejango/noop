@@ -284,6 +284,22 @@ function findNumberedMetadataTask(content: string, taskNumber: number): string {
   ))?.[1] || '';
 }
 
+function getAddedPerishableStrategyClaims(
+  previousContent: string,
+  replacementContent: string,
+): string[] {
+  const previousLines = new Set(
+    previousContent.split('\n').map(normalizeProse).filter(Boolean),
+  );
+  return replacementContent.split('\n').filter((line) => {
+    const normalized = normalizeProse(line);
+    if (!normalized || previousLines.has(normalized)) return false;
+    if (!/\b(?:spot|call[_ ]score|put[_ ]score|harvest\s+gate|accumulation\s+gate|momentum)\b/i.test(line)) return false;
+    if (!/\b(?:current(?:ly)?|latest|live[- ]state|status\s+as\s+of|as\s+of\s+\d{4}-\d{2}-\d{2})\b/i.test(line)) return false;
+    return /\$\s*[\d,]+|\b\d+(?:\.\d+)?%|\b(?:open|closed|marginal|neutral|upward|downward|accelerating|decelerating)\b/i.test(line);
+  }).map((line) => normalizeProse(line).slice(0, 180));
+}
+
 export function validateWikiReplacement(args: {
   pagePath: string;
   previousContent: string;
@@ -471,6 +487,12 @@ export function validateWikiReplacement(args: {
     if (retainedExpiredTickIds.length > 0) {
       errors.push(
         `Learning-owned strategy page retains expired live tick evidence: ${retainedExpiredTickIds.map((tickId) => `[tick:#${tickId}]`).join(', ')}`,
+      );
+    }
+    const addedPerishableClaims = getAddedPerishableStrategyClaims(previousContent, replacement);
+    if (addedPerishableClaims.length > 0) {
+      errors.push(
+        `Learning-owned strategy page adds perishable live-state claims: ${addedPerishableClaims.slice(0, 2).join(' | ')}`,
       );
     }
   }
