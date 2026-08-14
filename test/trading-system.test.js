@@ -7991,7 +7991,9 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes("Strategy pages are durable Learning-owned views"));
     assert.ok(wikiRepairRouteSource.includes('Do not add skew history, values, observations, analysis, or evidence'));
     assert.ok(wikiRepairRouteSource.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED BEFORE HUMAN REVIEW'));
-    assert.ok(wikiRepairRouteSource.includes('proposal = await proposeRepair(state, { rejectedProposal, errors })'));
+    assert.ok(wikiRepairRouteSource.includes('normalizeSupportedPlaceholderMarkers'));
+    assert.ok(wikiRepairRouteSource.includes('/`?\\[(tick|order|review):#NNN\\]`?(?:\\s+marker)?/gi'));
+    assert.ok(wikiRepairRouteSource.includes('await proposeRepair(state, { rejectedProposal, errors })'));
     assert.ok(wikiBrowserSource.includes('Generate AI diff'));
     assert.ok(wikiBrowserSource.includes("repairPreview.proposedContent"));
     assert.ok(wikiBrowserSource.includes("'Copy latest'"));

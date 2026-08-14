@@ -47,6 +47,16 @@ type RepairCorrection = {
   errors: string[];
 };
 
+function normalizeSupportedPlaceholderMarkers(proposal: RepairProposal): RepairProposal {
+  return {
+    ...proposal,
+    content: proposal.content.replace(
+      /`?\[(tick|order|review):#NNN\]`?(?:\s+marker)?/gi,
+      (_marker, markerType: string) => `${markerType.toLowerCase()} marker`,
+    ),
+  };
+}
+
 function pageSpecificRepairInstructions(state: WikiPageState): string {
   if (state.pagePath === 'indicators/leading.md' && state.issues.some((issue) => (
     /(?:never\s+recorded|not\s+recorded|resolution\s+(?:unknown|missing))/i.test(issue)
@@ -271,11 +281,13 @@ export async function POST(request: Request) {
           contextHash: state.contextHash,
         });
       }
-      let proposal = await proposeRepair(state);
+      let proposal = normalizeSupportedPlaceholderMarkers(await proposeRepair(state));
       let errors = validateProposal(state, proposal);
       if (errors.length > 0) {
         const rejectedProposal = proposal;
-        proposal = await proposeRepair(state, { rejectedProposal, errors });
+        proposal = normalizeSupportedPlaceholderMarkers(
+          await proposeRepair(state, { rejectedProposal, errors }),
+        );
         errors = validateProposal(state, proposal);
       }
       if (errors.length > 0) {
