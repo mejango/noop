@@ -7,6 +7,12 @@ const {
   SELL_CALL_EDGE_REFERENCE_DTE,
   SELL_CALL_EDGE_DTE_EXPONENT,
 } = require('./call-score');
+const {
+  BUY_PUT_EDGE_REFERENCE_DTE,
+  BUY_PUT_EDGE_DTE_EXPONENT,
+  BUY_PUT_EDGE_MIN_DTE,
+  BUY_PUT_EDGE_MAX_DTE,
+} = require('./put-score');
 
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
@@ -519,6 +525,21 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_sell_call_edge_snapshots_timestamp
     ON sell_call_edge_snapshots(timestamp);
+
+  CREATE TABLE IF NOT EXISTS buy_put_edge_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL UNIQUE,
+    instrument_name TEXT NOT NULL,
+    raw_score REAL NOT NULL,
+    edge_score REAL NOT NULL,
+    ask_price REAL,
+    delta REAL,
+    dte REAL,
+    spot_price REAL,
+    metadata TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_buy_put_edge_snapshots_timestamp
+    ON buy_put_edge_snapshots(timestamp);
   CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument_ts ON options_snapshots(instrument_name, timestamp);
 
   CREATE TABLE IF NOT EXISTS decision_outcomes (
@@ -761,7 +782,9 @@ const stmts = {
     SELECT
       MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
         AND delta <= -0.02 AND delta >= -0.12
-        THEN ask_delta_value END) as best_put_score,
+        AND expiry IS NOT NULL
+        AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
+        THEN ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) END) as best_put_score,
       MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
         AND delta >= 0.04 AND delta <= 0.12
         AND expiry IS NOT NULL
@@ -772,19 +795,23 @@ const stmts = {
   `),
 
   getBestPutDetail: db.prepare(`
-    SELECT instrument_name, delta, ask_price, strike, expiry
+    SELECT instrument_name, delta, ask_price, strike, expiry,
+      ask_delta_value as raw_score,
+      ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) as edge_score
     FROM options_snapshots
     WHERE timestamp > @since
       AND (option_type = 'P' OR instrument_name LIKE '%-P')
       AND delta <= -0.02 AND delta >= -0.12
-      AND ask_delta_value = @score
+      AND expiry IS NOT NULL
+      AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
+      AND abs((ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT})) - @score) < 0.000000000001
     LIMIT 1
   `),
 
   getBuyPutScoreSamples: db.prepare(`
     SELECT
       timestamp,
-      MAX(ask_delta_value) as score
+      MAX(ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT})) as score
     FROM options_snapshots
     WHERE timestamp > @since
       AND timestamp < @before
@@ -808,7 +835,8 @@ const stmts = {
       ask_price,
       strike,
       expiry,
-      ask_delta_value as score,
+      ask_delta_value as raw_score,
+      ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) as score,
       ((expiry - strftime('%s', timestamp)) / 86400.0) as dte
     FROM options_snapshots
     WHERE timestamp > @since
@@ -821,7 +849,7 @@ const stmts = {
       AND expiry IS NOT NULL
       AND ((expiry - strftime('%s', timestamp)) / 86400.0) >= @min_dte
       AND ((expiry - strftime('%s', timestamp)) / 86400.0) <= @max_dte
-    ORDER BY ask_delta_value DESC
+    ORDER BY score DESC
     LIMIT 1
   `),
 
@@ -1607,6 +1635,23 @@ const stmts = {
       metadata = excluded.metadata
   `),
 
+  insertBuyPutEdgeSnapshot: db.prepare(`
+    INSERT INTO buy_put_edge_snapshots (
+      timestamp, instrument_name, raw_score, edge_score, ask_price, delta, dte, spot_price, metadata
+    ) VALUES (
+      @timestamp, @instrument_name, @raw_score, @edge_score, @ask_price, @delta, @dte, @spot_price, @metadata
+    )
+    ON CONFLICT(timestamp) DO UPDATE SET
+      instrument_name = excluded.instrument_name,
+      raw_score = excluded.raw_score,
+      edge_score = excluded.edge_score,
+      ask_price = excluded.ask_price,
+      delta = excluded.delta,
+      dte = excluded.dte,
+      spot_price = excluded.spot_price,
+      metadata = excluded.metadata
+  `),
+
   insertDecisionOutcome: db.prepare(`
     INSERT OR IGNORE INTO decision_outcomes (observation_id, horizon_hours, due_at)
     VALUES (@observation_id, @horizon_hours, @due_at)
@@ -1941,6 +1986,8 @@ const getBestScores = (windowDays = 7) => {
       strike: bestPutDetail.strike,
       expiry: bestPutDetail.expiry,
       instrument: bestPutDetail.instrument_name,
+      raw_score: bestPutDetail.raw_score,
+      edge_score: bestPutDetail.edge_score,
     } : null,
     bestCallDetail: bestCallDetail ? {
       delta: bestCallDetail.delta,
@@ -1956,8 +2003,8 @@ const getBuyPutScoreSamples = ({
   before,
   minDelta = -0.12,
   maxDelta = -0.02,
-  minDte = 45,
-  maxDte = 75,
+  minDte = BUY_PUT_EDGE_MIN_DTE,
+  maxDte = BUY_PUT_EDGE_MAX_DTE,
 }) => stmts.getBuyPutScoreSamples.all({
   since,
   before,
@@ -1971,8 +2018,8 @@ const getBestBuyPutScoreDetail = ({
   before,
   minDelta = -0.12,
   maxDelta = -0.02,
-  minDte = 45,
-  maxDte = 75,
+  minDte = BUY_PUT_EDGE_MIN_DTE,
+  maxDte = BUY_PUT_EDGE_MAX_DTE,
 }) => stmts.getBestBuyPutScoreDetail.get({
   since,
   before,
@@ -2130,6 +2177,25 @@ const insertSellCallEdgeSnapshot = (snapshot = {}) => {
     raw_score: rawScore,
     edge_score: edgeScore,
     bid_price: toNum(snapshot.bid_price),
+    delta: toNum(snapshot.delta),
+    dte: toNum(snapshot.dte),
+    spot_price: toNum(snapshot.spot_price),
+    metadata: snapshot.metadata
+      ? (typeof snapshot.metadata === 'string' ? snapshot.metadata : JSON.stringify(snapshot.metadata))
+      : null,
+  });
+};
+
+const insertBuyPutEdgeSnapshot = (snapshot = {}) => {
+  const rawScore = toNum(snapshot.raw_score);
+  const edgeScore = toNum(snapshot.edge_score);
+  if (!snapshot.instrument_name || !(rawScore > 0) || !(edgeScore > 0)) return null;
+  return stmts.insertBuyPutEdgeSnapshot.run({
+    timestamp: snapshot.timestamp || new Date().toISOString(),
+    instrument_name: snapshot.instrument_name,
+    raw_score: rawScore,
+    edge_score: edgeScore,
+    ask_price: toNum(snapshot.ask_price),
     delta: toNum(snapshot.delta),
     dte: toNum(snapshot.dte),
     spot_price: toNum(snapshot.spot_price),
@@ -2831,6 +2897,7 @@ module.exports = {
   getOrdersInRange,
   insertCandidateObservations,
   insertSellCallEdgeSnapshot,
+  insertBuyPutEdgeSnapshot,
   evaluateDueDecisionOutcomes,
   insertRuleDecision,
   refreshPositionLifecycle,

@@ -15,6 +15,15 @@ const {
   SELL_CALL_EDGE_DTE_EXPONENT,
   normalizeSellCallScore,
 } = require('../bot/call-score');
+const {
+  BUY_PUT_EDGE_REFERENCE_DTE,
+  BUY_PUT_EDGE_DTE_EXPONENT,
+  BUY_PUT_EDGE_MIN_DTE,
+  BUY_PUT_EDGE_MAX_DTE,
+  getBuyPutDteNormalizationFactor,
+  normalizeBuyPutScore,
+  getBuyPutPriceForEdgeScore,
+} = require('../bot/put-score');
 
 let passed = 0, failed = 0;
 const test = (name, fn) => {
@@ -42,7 +51,7 @@ const SCRIPT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'script.js'), '
 const CALL_EXPIRATION_RANGE = [5, 12];
 const CALL_DELTA_RANGE = [0.04, 0.12];
 const PUT_DELTA_RANGE = [-0.12, -0.02];
-const BUY_PUT_ADVISORY_DTE_RANGE = [45, 75];
+const BUY_PUT_ADVISORY_DTE_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
 const PUT_ROLL_DTE_THRESHOLD = 25;
 const PUT_MONETIZATION_PROFIT_THRESHOLD = 1000;
 const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
@@ -1181,6 +1190,31 @@ describe('finiteOrNull', () => {
     assert.ok(SCRIPT_SOURCE.includes('const edgeScore = normalizeSellCallScore(rawScore, numericDte);'));
     assert.ok(!SCRIPT_SOURCE.includes('classifySellCallResearchBand'));
   });
+
+  test('buy-put edge removes the expiry-roll bias from raw delta per dollar', () => {
+    assert.strictEqual(normalizeBuyPutScore(0.004, BUY_PUT_EDGE_REFERENCE_DTE), 0.004);
+    assert.ok(normalizeBuyPutScore(0.004, 45) < 0.004);
+    assert.ok(normalizeBuyPutScore(0.004, 78) > 0.004);
+    assert.strictEqual(normalizeBuyPutScore(0, 60), 0);
+    assert.strictEqual(normalizeBuyPutScore(0.004, 0), 0);
+    assert.ok(Math.abs(
+      getBuyPutDteNormalizationFactor(78)
+      - Math.pow(78 / BUY_PUT_EDGE_REFERENCE_DTE, BUY_PUT_EDGE_DTE_EXPONENT)
+    ) < 1e-12);
+  });
+
+  test('buy-put edge target price is the exact inverse of normalized score', () => {
+    for (const dte of [45, 60, 78]) {
+      const delta = 0.08;
+      const targetEdge = 0.0045;
+      const price = getBuyPutPriceForEdgeScore(delta, targetEdge, dte);
+      assert.ok(price > 0);
+      const roundTrip = normalizeBuyPutScore(delta / price, dte);
+      assert.ok(Math.abs(roundTrip - targetEdge) < 1e-12);
+    }
+    assert.strictEqual(getBuyPutPriceForEdgeScore(0, 0.0045, 60), null);
+    assert.strictEqual(getBuyPutPriceForEdgeScore(0.08, 0, 60), null);
+  });
 });
 
 // ============================================================================
@@ -1458,7 +1492,7 @@ describe('Fresh-best buy-put advisory review', () => {
     assert.strictEqual(working.requiresDecision, false);
   });
 
-  test('advisory candidate filter enforces 45-75 DTE buy-put discipline', () => {
+  test('advisory candidate filter enforces 45-78 DTE buy-put discipline', () => {
     const filtered = filterAdvisoryBuyPutCandidates([
       { option_type: 'P', delta: -0.08, dte: 60, ask_price: 20 },
       { option_type: 'P', delta: -0.08, dte: 20, ask_price: 2 },
@@ -1542,8 +1576,9 @@ describe('Standing rulebook coverage requirements', () => {
   });
 
   test('advisor prompt anchors buy-put edge to spread IV skew OI and shock payoff', () => {
-    assert.ok(SCRIPT_SOURCE.includes('PUT edge gate:'));
-    assert.ok(SCRIPT_SOURCE.includes('Raw buy-put score is the price primitive, not the whole edge'));
+    assert.ok(SCRIPT_SOURCE.includes('PUT composite selector:'));
+    assert.ok(SCRIPT_SOURCE.includes('PUT EDGE is the price primitive'));
+    assert.ok(SCRIPT_SOURCE.includes('(DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}'));
     assert.ok(SCRIPT_SOURCE.includes('Do not treat higher delta as a standalone buy-put advantage'));
     assert.ok(SCRIPT_SOURCE.includes('30/40/50% drawdown payoff'));
     assert.ok(SCRIPT_SOURCE.includes('For buy_put, include min_edge_score only when you want an explicit spread/IV/skew/OI/shock-payoff floor'));
@@ -4285,7 +4320,7 @@ describe('Resting sell-call entry live revalidation', () => {
   test('open-order maintenance wires sell-call revalidation before stale fill', () => {
     assert.ok(SCRIPT_SOURCE.includes('validateRestingSellCallEntryOrder'));
     assert.ok(SCRIPT_SOURCE.includes('resting sell_call no longer satisfies active rule'));
-    assert.ok(SCRIPT_SOURCE.includes('order_limit_score'));
+    assert.ok(SCRIPT_SOURCE.includes('order CALL EDGE'));
     assert.ok(SCRIPT_SOURCE.includes('await manageOpenOrders(tickerMap, positions, instruments, spotPrice)'));
   });
 });
@@ -4310,7 +4345,8 @@ describe('Resting buy-put entry live revalidation', () => {
     if (hasExplicitBuyPutValueSignal(rawValueSignal) && !valueSignal) {
       return { valid: false, reason: 'unknown_value_signal' };
     }
-    const score = Math.abs(delta) > 0 ? Math.abs(delta) / orderLimitPrice : 0;
+    const rawScore = Math.abs(delta) > 0 ? Math.abs(delta) / orderLimitPrice : 0;
+    const score = normalizeBuyPutScore(rawScore, dte);
     if (criteria.min_score != null && score < criteria.min_score) {
       return { valid: false, reason: 'min_score', score };
     }
@@ -4417,7 +4453,7 @@ describe('Resting buy-put entry live revalidation', () => {
   test('open-order maintenance wires buy-put revalidation before stale fill', () => {
     assert.ok(SCRIPT_SOURCE.includes('validateRestingBuyPutEntryOrder'));
     assert.ok(SCRIPT_SOURCE.includes('resting buy_put no longer satisfies active rule'));
-    assert.ok(SCRIPT_SOURCE.includes('order_limit_score'));
+    assert.ok(SCRIPT_SOURCE.includes('order PUT EDGE'));
   });
 
   test('resting buy-put entries can flow through entry scan for repricing', () => {
@@ -6398,7 +6434,7 @@ describe('Entry candidate filtering: all criteria enforced', () => {
   });
 
   test('DTE out of range → rejected', () => {
-    const dte = 30; // Too short (range is 45-75)
+    const dte = 30; // Too short (strategy range is 45-78)
     const range = [45, 75];
     const inRange = dte >= range[0] && dte <= range[1];
     assert.strictEqual(inRange, false, `DTE ${dte} should be out of range [${range}]`);
@@ -8148,6 +8184,46 @@ describe('Sell-call DTE-normalized edge chart', () => {
     assert.ok(chartDbSource.includes('sample_times AS MATERIALIZED'));
     assert.ok(chartDbSource.includes('CROSS JOIN options_snapshots snapshots'));
     assert.ok(chartDbSource.includes('LIMIT @point_limit'));
+  });
+});
+
+describe('Buy-put DTE-normalized edge chart', () => {
+  const botDbSource = fs.readFileSync(path.join(__dirname, '..', 'bot', 'db.js'), 'utf8');
+  const chartDbSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'db.ts'), 'utf8');
+  const chartRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'chart', 'route.ts'), 'utf8');
+  const overviewSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'page.tsx'), 'utf8');
+
+  test('persists normalized put edge telemetry on every eligible market evaluation', () => {
+    assert.ok(botDbSource.includes('CREATE TABLE IF NOT EXISTS buy_put_edge_snapshots'));
+    assert.ok(botDbSource.includes('insertBuyPutEdgeSnapshot'));
+    assert.ok(SCRIPT_SOURCE.includes('recordBuyPutEdgeSnapshotSafe({'));
+    assert.ok(SCRIPT_SOURCE.includes('raw_score: entryBestBuyPutEdge.raw_score'));
+    assert.ok(SCRIPT_SOURCE.includes('edge_score: entryBestBuyPutEdge.edge_score'));
+    assert.ok(chartDbSource.includes('const BUY_PUT_EDGE_REFERENCE_DTE = 60'));
+    assert.ok(chartDbSource.includes('const BUY_PUT_EDGE_DTE_EXPONENT = 0.8'));
+    assert.ok(chartDbSource.includes('raw_score * pow(dte / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) AS edge_score'));
+  });
+
+  test('serves and renders distinct raw and dotted normalized put series', () => {
+    assert.ok(chartDbSource.includes('getBuyPutEdgeOverTime'));
+    assert.ok(chartRouteSource.includes('buyPutEdge'));
+    assert.ok(overviewSource.includes('PUT RAW'));
+    assert.ok(overviewSource.includes('PUT EDGE'));
+    assert.ok(overviewSource.includes('dataKey="putEdge"'));
+    assert.ok(overviewSource.includes('NO ELIGIBLE'));
+  });
+
+  test('keeps put edge sparse when no eligible 45-78 DTE quote exists', () => {
+    const edgeFunction = chartDbSource.slice(
+      chartDbSource.indexOf('export function getBuyPutEdgeOverTime'),
+      chartDbSource.indexOf('export function getSellCallEdgeOverTime'),
+    );
+    assert.ok(edgeFunction.includes("tableExists('buy_put_edge_snapshots')"));
+    assert.ok(edgeFunction.includes("tableExists('candidate_observations')"));
+    assert.ok(edgeFunction.includes('dte BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}'));
+    assert.ok(edgeFunction.includes('MAX(edge_score) AS edge_score'));
+    assert.ok(!edgeFunction.includes('FROM options_snapshots'));
+    assert.ok(!edgeFunction.includes('last_value'));
   });
 });
 

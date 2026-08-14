@@ -13,7 +13,7 @@
  * (1) Put Accumulation (Long Puts)
  *   • Targets: out-of-the-money ETH puts
  *     – Delta between -0.08 and -0.02
- *     – 45–75 days to expiry
+ *     – 45–78 days to expiry
  *     – Strike < 0.8 × current index price
  *   • Entry Conditions:
  *     – Standard Entry: buy best option if medium-term ≠ upward AND short-term ≠ upward
@@ -111,6 +111,15 @@ const {
   SELL_CALL_EDGE_DTE_EXPONENT,
   normalizeSellCallScore,
 } = require('./bot/call-score');
+const {
+  BUY_PUT_EDGE_REFERENCE_DTE,
+  BUY_PUT_EDGE_DTE_EXPONENT,
+  BUY_PUT_EDGE_MIN_DTE,
+  BUY_PUT_EDGE_MAX_DTE,
+  getBuyPutDteNormalizationFactor,
+  normalizeBuyPutScore,
+  getBuyPutPriceForEdgeScore,
+} = require('./bot/put-score');
 
 const encoder = new AbiCoder();
 
@@ -306,9 +315,9 @@ const BOT_DATA_PATH = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'bo
 const PERIOD = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 
 // Trading parameters - PUTS
-const PUT_EXPIRATION_RANGE = [45, 78];
+const PUT_EXPIRATION_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
 const PUT_DELTA_RANGE = [-0.12, -0.02]; // Negative delta for puts
-const BUY_PUT_ADVISORY_DTE_RANGE = [45, 75];
+const BUY_PUT_ADVISORY_DTE_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
 const ADVISORY_OPTION_VALUE_WINDOW_DAYS = 6.2;
 const BUY_PUT_URGENT_SCORE_NUDGE = 1.005;
 const BUY_PUT_PATIENT_SCORE_NUDGE = 1.02;
@@ -326,8 +335,8 @@ const BUY_PUT_RECENT_VALUE_MIN_ROLLING_BEST_PCT = 70;
 const BUY_PUT_EDGE_BASE_SCORE = 100;
 const BUY_PUT_EDGE_PREFERRED_SCORE = 115;
 const BUY_PUT_EDGE_STRONG_SCORE = 135;
-const BUY_PUT_EDGE_RAW_SCORE_GOOD = 0.0036;
-const BUY_PUT_EDGE_RAW_SCORE_STRONG = 0.0042;
+const BUY_PUT_EDGE_SCORE_GOOD = 0.0036;
+const BUY_PUT_EDGE_SCORE_STRONG = 0.0042;
 const BUY_PUT_EDGE_CANDIDATE_SPREAD_GOOD = 0.055;
 const BUY_PUT_EDGE_CANDIDATE_SPREAD_STRONG = 0.046;
 const BUY_PUT_EDGE_MARKET_SPREAD_GOOD = 0.12;
@@ -1669,6 +1678,7 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
   const bidDeltaValue = bidPrice == 0 ? 0 : bidPrice / Math.abs(delta);
   const expirySeconds = Number(instrument?.option_details?.expiry);
   const dte = computeDteAt(expirySeconds);
+  const putEdgeScore = normalizeBuyPutScore(askDeltaValue, dte);
   const callEdgeScore = normalizeSellCallScore(bidDeltaValue, dte);
 
   return {
@@ -1677,6 +1687,7 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
       delta,
       askDeltaValue,
       bidDeltaValue,
+      putEdgeScore,
       callEdgeScore,
       dte,
       askPrice,
@@ -1694,14 +1705,16 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
 const summarizeBestCandidate = (candidate, type) => {
   if (!candidate?.details) return null;
   return {
-    score: type === 'put' ? Number(candidate.details.askDeltaValue || 0) : Number(candidate.details.callEdgeScore || 0),
+    score: type === 'put' ? Number(candidate.details.putEdgeScore || 0) : Number(candidate.details.callEdgeScore || 0),
     detail: {
       delta: Number(candidate.details.delta ?? 0),
       price: type === 'put' ? Number(candidate.details.askPrice ?? 0) : Number(candidate.details.bidPrice ?? 0),
       strike: Number(candidate.option_details?.strike ?? 0),
       expiry: Number(candidate.option_details?.expiry ?? 0),
       instrument: candidate.instrument_name || null,
-      raw_score: type === 'call' ? Number(candidate.details.bidDeltaValue || 0) : null,
+      raw_score: type === 'put'
+        ? Number(candidate.details.askDeltaValue || 0)
+        : Number(candidate.details.bidDeltaValue || 0),
       dte: candidate.details.dte ?? null,
     },
   };
@@ -1717,15 +1730,16 @@ const floorOptionPriceCents = (value) => {
   return Math.max(0.01, Math.floor((numeric + 1e-9) * 100) / 100);
 };
 
-const getBuyPutEntryPricing = ({ askPrice, absDelta, minScore = null, targetScore = null }) => {
+const getBuyPutEntryPricing = ({ askPrice, absDelta, dte, minScore = null, targetScore = null }) => {
   const liveAsk = Number(askPrice) || 0;
   const delta = Math.abs(Number(absDelta) || 0);
-  const liveScore = liveAsk > 0 && delta > 0 ? delta / liveAsk : 0;
+  const liveRawScore = liveAsk > 0 && delta > 0 ? delta / liveAsk : 0;
+  const liveScore = normalizeBuyPutScore(liveRawScore, dte);
   const min = Number(minScore ?? 0);
   const target = Number(targetScore ?? 0);
   const requiredScore = Math.max(min > 0 ? min : 0, target > 0 ? target : 0);
   const thresholdPrice = requiredScore > 0 && delta > 0
-    ? floorOptionPriceCents(delta / requiredScore)
+    ? floorOptionPriceCents(getBuyPutPriceForEdgeScore(delta, requiredScore, dte))
     : null;
 
   let limitPrice = liveAsk > 0 ? liveAsk : null;
@@ -1735,9 +1749,12 @@ const getBuyPutEntryPricing = ({ askPrice, absDelta, minScore = null, targetScor
     priceSource = 'score_threshold';
   }
 
-  const plannedScore = limitPrice > 0 && delta > 0 ? delta / limitPrice : 0;
+  const plannedRawScore = limitPrice > 0 && delta > 0 ? delta / limitPrice : 0;
+  const plannedScore = normalizeBuyPutScore(plannedRawScore, dte);
   return {
+    liveRawScore,
     liveScore,
+    plannedRawScore,
     plannedScore,
     limitPrice,
     thresholdPrice,
@@ -1920,6 +1937,7 @@ const computePutShockPayoffMultiples = ({ strike, spotPrice, entryPrice }) => {
 
 const classifyBuyPutEdge = ({
   score,
+  rawScore = null,
   dte,
   strike,
   spotPrice,
@@ -1933,7 +1951,9 @@ const classifyBuyPutEdge = ({
   marketContext = null,
 } = {}) => {
   const numericScore = Number(score);
+  const numericRawScore = Number(rawScore ?? score);
   const numericDte = Number(dte);
+  const normalizationFactor = getBuyPutDteNormalizationFactor(numericDte);
   const numericAsk = Number(askPrice);
   const numericBid = Number(bidPrice);
   const numericMark = Number(markPrice);
@@ -1962,34 +1982,32 @@ const classifyBuyPutEdge = ({
   let multiplier = 1;
   let scoreBand = 'unknown';
   if (hasScore) {
-    if (numericScore >= BUY_PUT_EDGE_RAW_SCORE_STRONG) {
-      scoreBand = 'strong_raw_score';
+    if (numericScore >= BUY_PUT_EDGE_SCORE_STRONG) {
+      scoreBand = 'strong_put_edge';
       multiplier *= 1.16;
-      reasons.push('raw put score is strong');
-    } else if (numericScore >= BUY_PUT_EDGE_RAW_SCORE_GOOD) {
-      scoreBand = 'good_raw_score';
+      reasons.push('DTE-normalized PUT EDGE is strong');
+    } else if (numericScore >= BUY_PUT_EDGE_SCORE_GOOD) {
+      scoreBand = 'good_put_edge';
       multiplier *= 1.08;
-      reasons.push('raw put score is good');
+      reasons.push('DTE-normalized PUT EDGE is good');
     } else {
-      scoreBand = 'weak_raw_score';
+      scoreBand = 'weak_put_edge';
       multiplier *= 0.88;
-      reasons.push('raw put score is weak');
+      reasons.push('DTE-normalized PUT EDGE is weak');
     }
   }
 
   let dteBucket = 'unknown';
   if (Number.isFinite(numericDte)) {
     if (numericDte >= BUY_PUT_EDGE_DTE_GOOD && numericDte <= BUY_PUT_ADVISORY_DTE_RANGE[1]) {
-      dteBucket = 'longer_68_75';
-      multiplier *= 1.08;
-      reasons.push('longer DTE inside the buy-put range improves budget durability');
+      dteBucket = 'longer_68_78';
+      reasons.push('longer DTE is already accounted for continuously by PUT EDGE');
     } else if (numericDte >= BUY_PUT_EDGE_DTE_MIN_OK) {
       dteBucket = 'middle_55_68';
-      reasons.push('middle DTE is acceptable for protection');
+      reasons.push('middle DTE is already accounted for continuously by PUT EDGE');
     } else {
       dteBucket = 'early_45_55';
-      multiplier *= 0.9;
-      reasons.push('45-55 DTE needs stronger price quality because time decay is nearer');
+      reasons.push('nearer DTE is discounted continuously by PUT EDGE');
     }
   }
 
@@ -2116,7 +2134,12 @@ const classifyBuyPutEdge = ({
     selection_multiplier: Number(multiplier.toFixed(4)),
     selection_score: edgeScore,
     edge_components: {
-      raw_score: roundForAdvisory(numericScore, 6),
+      raw_score: roundForAdvisory(numericRawScore, 6),
+      put_edge_score: roundForAdvisory(numericScore, 6),
+      dte: roundForAdvisory(numericDte, 4),
+      reference_dte: BUY_PUT_EDGE_REFERENCE_DTE,
+      dte_exponent: BUY_PUT_EDGE_DTE_EXPONENT,
+      normalization_factor: roundForAdvisory(normalizationFactor, 6),
       candidate_spread_pct: roundForAdvisory(candidateSpreadPct != null ? candidateSpreadPct * 100 : null, 2),
       market_spread_pct: roundForAdvisory(marketSpread != null ? marketSpread * 100 : null, 2),
       candidate_iv_pct: roundForAdvisory(candidateIv != null ? candidateIv * 100 : null, 2),
@@ -2154,9 +2177,11 @@ const getBestCurrentBuyPutCandidate = (tickerMap = {}, nowMs = Date.now(), marke
     if (!(delta >= PUT_DELTA_RANGE[0] && delta <= PUT_DELTA_RANGE[1])) continue;
     if (!(askPrice > 0)) continue;
 
-    const score = Math.abs(delta) / askPrice;
+    const rawScore = Math.abs(delta) / askPrice;
+    const score = normalizeBuyPutScore(rawScore, dte);
     const research = classifyBuyPutEdge({
       score,
+      rawScore,
       dte,
       strike: parsed.strike,
       spotPrice,
@@ -2183,10 +2208,37 @@ const getBestCurrentBuyPutCandidate = (tickerMap = {}, nowMs = Date.now(), marke
         expiry: Math.floor(parsed.expiry.getTime() / 1000),
         dte,
         score,
+        raw_score: rawScore,
+        edge_score: score,
         selection_score: selectionScore,
         research,
       };
     }
+  }
+  return best;
+};
+
+const getBestCurrentBuyPutEdgeCandidate = (tickerMap = {}, nowMs = Date.now()) => {
+  let best = null;
+  for (const [name, ticker] of Object.entries(tickerMap || {})) {
+    const parsed = parseAdvisoryOptionInstrument(name);
+    if (!parsed || parsed.optionType !== 'P') continue;
+    const dte = computeDteAt(parsed.expiry, nowMs);
+    if (!(dte >= BUY_PUT_ADVISORY_DTE_RANGE[0] && dte <= BUY_PUT_ADVISORY_DTE_RANGE[1])) continue;
+    const delta = Number(ticker?.option_pricing?.d);
+    const askPrice = Number(ticker?.a);
+    if (!(delta >= PUT_DELTA_RANGE[0] && delta <= PUT_DELTA_RANGE[1]) || !(askPrice > 0)) continue;
+    const rawScore = Math.abs(delta) / askPrice;
+    const edgeScore = normalizeBuyPutScore(rawScore, dte);
+    if (!(edgeScore > 0) || (best && best.edge_score >= edgeScore)) continue;
+    best = {
+      instrument: name,
+      raw_score: rawScore,
+      edge_score: edgeScore,
+      ask_price: askPrice,
+      delta,
+      dte,
+    };
   }
   return best;
 };
@@ -2602,7 +2654,7 @@ const buildRollingOptionValueContext = ({
       : BUY_PUT_PATIENT_SCORE_NUDGE;
   const targetScore = currentScore > 0 ? currentScore * scoreNudge : null;
   const suggestedLimitPrice = currentPut && targetScore > 0
-    ? floorOptionPriceCents(Math.abs(currentPut.delta) / targetScore)
+    ? floorOptionPriceCents(getBuyPutPriceForEdgeScore(Math.abs(currentPut.delta), targetScore, currentPut.dte))
     : null;
   const executionStyle = repricingLagSignal
     ? 'spot_lag_near_live_limit'
@@ -2618,7 +2670,8 @@ const buildRollingOptionValueContext = ({
       delta_range: PUT_DELTA_RANGE,
       dte_range: BUY_PUT_ADVISORY_DTE_RANGE,
       raw_score: 'abs(delta) / ask_price',
-      edge_score: 'raw score adjusted for spread quality, IV/skew, OI trend, DTE durability, and 30/40/50% drawdown payoff multiples',
+      edge_score: `raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}`,
+      composite_selection_score: 'PUT EDGE adjusted for spread quality, IV/skew, OI trend, and 30/40/50% drawdown payoff multiples',
     },
     sell_call_filters: {
       delta_range: CALL_DELTA_RANGE,
@@ -2637,6 +2690,8 @@ const buildRollingOptionValueContext = ({
       trend_24h_pct: computeScoreTrendPct(priorSamples, currentScore, 24),
       current_detail: currentPut ? {
         instrument: currentPut.instrument,
+        raw_score: roundForAdvisory(currentPut.raw_score, 6),
+        put_edge_score: roundForAdvisory(currentPut.edge_score, 6),
         delta: roundForAdvisory(currentPut.delta, 4),
         ask_price: roundForAdvisory(currentPut.ask_price, 4),
         bid_price: roundForAdvisory(currentPut.bid_price, 4),
@@ -2671,6 +2726,8 @@ const buildRollingOptionValueContext = ({
         strike: Number(priorBestDetail.strike),
         expiry: Number(priorBestDetail.expiry),
         dte: roundForAdvisory(Number(priorBestDetail.dte), 1),
+        raw_score: roundForAdvisory(Number(priorBestDetail.raw_score), 6),
+        put_edge_score: roundForAdvisory(Number(priorBestDetail.score), 6),
       } : null,
       samples: priorScores.length,
     },
@@ -2784,11 +2841,11 @@ const formatRollingOptionValueContext = (context) => {
   const callMarket = call.market_context || {};
   return [
     `Buy-put filters: delta ${JSON.stringify(context.buy_put_filters?.delta_range)}; DTE ${JSON.stringify(context.buy_put_filters?.dte_range)}; raw_score=${context.buy_put_filters?.raw_score}; edge_score=${context.buy_put_filters?.edge_score}.`,
-    `Current PUT raw score: ${put.current_score ?? 'n/a'}${detail ? ` (${detail.instrument}, delta=${detail.delta}, ask=$${detail.ask_price}, spread=${detail.spread_pct ?? 'n/a'}%, DTE=${detail.dte})` : ''}.`,
-    `Prior ${context.window_days}d best PUT score: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (${prior.instrument} at ${prior.timestamp})` : ''}.`,
+    `Current PUT EDGE: ${put.current_score ?? 'n/a'}${detail ? ` (raw=${detail.raw_score ?? 'n/a'}, ${detail.instrument}, delta=${detail.delta}, ask=$${detail.ask_price}, spread=${detail.spread_pct ?? 'n/a'}%, DTE=${detail.dte})` : ''}.`,
+    `Prior ${context.window_days}d best PUT EDGE: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (raw=${prior.raw_score ?? 'n/a'}, ${prior.instrument} at ${prior.timestamp})` : ''}.`,
     `Current PUT vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${put.is_strict_fresh_best ? 'yes' : 'no'}; samples=${put.samples}.`,
     `PUT score trend: 1h=${put.trend_1h_pct ?? 'n/a'}%, 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
-    `PUT edge gate: recommendation=${putResearch.recommendation || 'n/a'}; preferred=${putResearch.preferred ? 'yes' : 'no'}; edge_score=${putResearch.selection_score ?? 'n/a'}; dte_bucket=${putResearch.dte_bucket || 'n/a'}; score_band=${putResearch.score_band || 'n/a'}; warnings=${[
+    `PUT composite selector: recommendation=${putResearch.recommendation || 'n/a'}; preferred=${putResearch.preferred ? 'yes' : 'no'}; selection_score=${putResearch.selection_score ?? 'n/a'}; dte_bucket=${putResearch.dte_bucket || 'n/a'}; score_band=${putResearch.score_band || 'n/a'}; warnings=${[
       putResearch.spread_caution ? 'spread' : null,
       putResearch.iv_caution ? 'iv' : null,
       putResearch.skew_caution ? 'skew' : null,
@@ -6964,6 +7021,16 @@ const recordSellCallEdgeSnapshotSafe = (snapshot) => {
   }
 };
 
+const recordBuyPutEdgeSnapshotSafe = (snapshot) => {
+  if (!db || typeof db.insertBuyPutEdgeSnapshot !== 'function' || !snapshot) return null;
+  try {
+    return db.insertBuyPutEdgeSnapshot(snapshot);
+  } catch (e) {
+    console.log(`DB: buy-put edge snapshot write failed: ${e.message}`);
+    return null;
+  }
+};
+
 const getCandidateOptionType = (candidate, criteria = {}) => (
   criteria.option_type
   || candidate?.instrument?.option_details?.option_type
@@ -7010,6 +7077,7 @@ const buildCandidateObservationRows = ({
       score_threshold_price: candidate?.scoreThresholdPrice ?? null,
       candidate_limit_price: candidate?.candidateLimitPrice ?? null,
       live_score: candidate?.liveScore ?? null,
+      live_raw_score: candidate?.liveRawScore ?? null,
       research_reason: research?.reason || null,
       min_edge_score: criteria.min_edge_score ?? null,
       edge_components: research?.edge_components || null,
@@ -7047,7 +7115,7 @@ const buildCandidateObservationRows = ({
       depth: (bidAmount || 0) + (askAmount || 0),
       implied_vol: ticker?.option_pricing?.i ?? ticker?.details?.impliedVol ?? null,
       open_interest: ticker?.stats?.oi ?? ticker?.open_interest ?? null,
-      raw_score: candidate?.score ?? null,
+      raw_score: candidate?.rawScore ?? candidate?.score ?? null,
       selection_score: candidate?.selectionScore ?? candidate?.score ?? null,
       score_band: research?.score_band || null,
       dte_bucket: research?.dte_bucket || null,
@@ -7732,17 +7800,21 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
       ? Number(advisorLimitPrice)
       : bestAsk;
   const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
-  const plannedScore = Math.abs(scoreDelta) > 0 && limitPrice > 0
+  const triggerDte = Number(triggerData?.dte);
+  const plannedRawScore = Math.abs(scoreDelta) > 0 && limitPrice > 0
     ? Math.abs(scoreDelta) / limitPrice
     : null;
+  const plannedScore = plannedRawScore > 0 && triggerDte > 0
+    ? normalizeBuyPutScore(plannedRawScore, triggerDte)
+    : plannedRawScore;
 
   const fmt = (value, digits = 6) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
   return [
     'Buy-put value confirmation context:',
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(Number(triggerData?.dte), 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
-    `- Planned execution limit: ${fmtPrice(limitPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit; live_ask_score=${fmt(liveScore)}.`,
-    `- Thresholds: min_score=${fmt(minScore)}, target_score=${fmt(targetScore)}. For patient maker bids, planned_score at our limit is the economic gate; live_ask_score may be below threshold because we are not willing to lift the ask.`,
+    `- Planned execution limit: ${fmtPrice(limitPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned PUT_EDGE=${fmt(plannedScore)} using trigger_delta, trigger_dte, and planned limit; live PUT_EDGE=${fmt(liveScore)}.`,
+    `- Thresholds: min_score=${fmt(minScore)}, target_score=${fmt(targetScore)}. For patient maker bids, planned PUT EDGE at our limit is the economic gate; live PUT EDGE may be below threshold because we are not willing to lift the ask.`,
     `- Composite edge context: edge_score=${fmt(edgeScore, 2)}, recommendation=${buyPutResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, candidate_iv_pct:${fmt(edgeComponents.candidate_iv_pct, 2)}, market_put_iv_pct:${fmt(edgeComponents.market_put_iv_pct, 2)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, oi_24h:${fmt(edgeComponents.market_oi_delta_24h_pct, 2)}, shock40:${fmt(edgeComponents.shock_payoff_multiple_40pct, 2)}x}.`,
     `- value_signal=${currentValueSignal || 'n/a'}, required_value_signal=${requiredValueSignal || 'n/a'}. ${isStandingPatientBid ? 'This is a standing patient bid: no spike signal is active, but the bid is still valid if planned_score meets threshold and budget/risk gates remain valid.' : 'A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.'}`,
     `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there as our market; do not reject as "not achievable" merely because it is not immediately marketable.`,
@@ -8101,7 +8173,8 @@ const validateRestingBuyPutEntryOrder = ({
   const delta = Number(ticker?.option_pricing?.d) || 0;
   const absDelta = Math.abs(delta);
   const strike = Number(instrument?.option_details?.strike || instrumentName.split('-')?.[2] || 0) || 0;
-  const orderLimitScore = absDelta > 0 ? absDelta / orderLimitPrice : 0;
+  const orderLimitRawScore = absDelta > 0 ? absDelta / orderLimitPrice : 0;
+  const orderLimitScore = normalizeBuyPutScore(orderLimitRawScore, dte);
   const orderAmount = Math.max(0, Number(order?.amount || 0));
   const orderValue = orderLimitPrice * orderAmount;
   const reasons = [];
@@ -8163,7 +8236,7 @@ const validateRestingBuyPutEntryOrder = ({
 
     const minScore = Number(criteria.min_score ?? 0);
     if (minScore > 0 && orderLimitScore + 1e-12 < minScore) {
-      reasons.push(`rule ${rule.id}: order_limit_score ${orderLimitScore.toFixed(6)} below min_score ${minScore.toFixed(6)}`);
+      reasons.push(`rule ${rule.id}: order PUT EDGE ${orderLimitScore.toFixed(6)} below min_score ${minScore.toFixed(6)}`);
       continue;
     }
 
@@ -8174,7 +8247,7 @@ const validateRestingBuyPutEntryOrder = ({
       targetScore = contextTargetScore;
     }
     if (targetScore != null && orderLimitScore + 1e-12 < targetScore) {
-      reasons.push(`rule ${rule.id}: order_limit_score ${orderLimitScore.toFixed(6)} below target_score ${targetScore.toFixed(6)}`);
+      reasons.push(`rule ${rule.id}: order PUT EDGE ${orderLimitScore.toFixed(6)} below target_score ${targetScore.toFixed(6)}`);
       continue;
     }
 
@@ -8199,16 +8272,18 @@ const validateRestingBuyPutEntryOrder = ({
       valid: true,
       ruleId: rule.id,
       score: orderLimitScore,
+      rawScore: orderLimitRawScore,
       delta,
       dte,
       orderLimitPrice,
-      reason: `rule ${rule.id} still satisfied (order_limit_score=${orderLimitScore.toFixed(6)}, delta=${delta.toFixed(4)}, dte=${dte.toFixed(2)})`,
+      reason: `rule ${rule.id} still satisfied (raw_score=${orderLimitRawScore.toFixed(6)}, PUT_EDGE=${orderLimitScore.toFixed(6)}, delta=${delta.toFixed(4)}, dte=${dte.toFixed(2)})`,
     };
   }
 
   return {
     valid: false,
     score: orderLimitScore,
+    rawScore: orderLimitRawScore,
     delta,
     dte,
     orderLimitPrice,
@@ -8856,6 +8931,24 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
     const sellCallMarketContext = buildLiveSellCallMarketContext(tickerMap, Date.now(), {
       market_oi_delta_24h_pct: entryMarketOiDelta24hPct,
     });
+    const entryBestBuyPutEdge = getBestCurrentBuyPutEdgeCandidate(tickerMap, Date.now());
+    if (entryBestBuyPutEdge) {
+      recordBuyPutEdgeSnapshotSafe({
+        timestamp: evaluationTimestamp,
+        instrument_name: entryBestBuyPutEdge.instrument,
+        raw_score: entryBestBuyPutEdge.raw_score,
+        edge_score: entryBestBuyPutEdge.edge_score,
+        ask_price: entryBestBuyPutEdge.ask_price,
+        delta: entryBestBuyPutEdge.delta,
+        dte: entryBestBuyPutEdge.dte,
+        spot_price: spotPrice,
+        metadata: {
+          formula: `raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}`,
+          reference_dte: BUY_PUT_EDGE_REFERENCE_DTE,
+          dte_exponent: BUY_PUT_EDGE_DTE_EXPONENT,
+        },
+      });
+    }
     const entryBestSellCall = getBestCurrentSellCallCandidate(tickerMap, Date.now());
     if (entryBestSellCall) {
       recordSellCallEdgeSnapshotSafe({
@@ -9158,14 +9251,18 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             // Calls still use executable bid premium divided by delta.
             const absDelta = Math.abs(delta);
             let score;
+            let rawScore = null;
             let liveScore = null;
+            let liveRawScore = null;
             let candidateLimitPrice = null;
             let scoreThresholdPrice = null;
             let priceSource = null;
             if (optionType === 'P') {
-              const pricing = getBuyPutEntryPricing({ askPrice, absDelta, minScore, targetScore });
+              const pricing = getBuyPutEntryPricing({ askPrice, absDelta, dte, minScore, targetScore });
               score = pricing.plannedScore;
               liveScore = pricing.liveScore;
+              rawScore = pricing.plannedRawScore;
+              liveRawScore = pricing.liveRawScore;
               candidateLimitPrice = pricing.limitPrice;
               scoreThresholdPrice = pricing.thresholdPrice;
               priceSource = pricing.priceSource;
@@ -9178,6 +9275,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             const buyPutResearch = rule.action === 'buy_put'
               ? classifyBuyPutEdge({
                 score,
+                rawScore,
                 dte,
                 strike,
                 spotPrice,
@@ -9215,7 +9313,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               bidPrice,
               bidAmount,
               score,
+              rawScore,
               liveScore,
+              liveRawScore,
               candidateLimitPrice,
               scoreThresholdPrice,
               priceSource,
@@ -9265,8 +9365,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
-        // Pick best candidate. Sell calls use the DTE-normalized CALL EDGE;
-        // buy puts retain their separate insurance edge calculation.
+        // Pick the best market-quality-adjusted candidate after applying each
+        // side's DTE-normalized price edge.
         candidates.sort((a, b) => {
           const aRank = ['sell_call', 'buy_put'].includes(rule.action) ? (a.selectionScore ?? a.score) : a.score;
           const bRank = ['sell_call', 'buy_put'].includes(rule.action) ? (b.selectionScore ?? b.score) : b.score;
@@ -10293,7 +10393,7 @@ const getMomentumEvidenceDisciplinePrompt = () => [
 const getFreshBestBuyPutDisciplinePrompt = () => [
   'FRESH-BEST BUY-PUT DISCIPLINE:',
   `- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d window using buy-put DTE discipline (${BUY_PUT_ADVISORY_DTE_RANGE[0]}-${BUY_PUT_ADVISORY_DTE_RANGE[1]} DTE). A strict fresh best means the market is offering the best delta-per-dollar protection seen in that window.`,
-  '- Raw buy-put score is the price primitive, not the whole edge. The PUT edge gate adjusts it for candidate spread, market spread, IV/skew, OI trend, DTE durability, and 30/40/50% drawdown payoff multiples.',
+  `- PUT EDGE is the price primitive: (abs(delta) / ask) * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}. The composite selector then adjusts PUT EDGE for candidate spread, market spread, IV/skew, OI trend, and 30/40/50% drawdown payoff multiples.`,
   '- Do not treat higher delta as a standalone buy-put advantage. Delta is a range constraint; tail payoff under severe drawdown and option-market quality decide whether the protection is worth buying.',
   '- Favor tight spreads, lower IV/skew, supportive/rising OI, and useful 40%+ drawdown payoff multiples. Penalize wide books and already-inflated insurance even when spot is falling.',
   '- The spot-lag repricing check catches a different cheap-convexity window: spot has dropped and the put score has locally jumped or moved near the rolling best before asks fully recalibrate.',
@@ -11736,9 +11836,11 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
         && parsed.dte >= BUY_PUT_ADVISORY_DTE_RANGE[0]
         && parsed.dte <= BUY_PUT_ADVISORY_DTE_RANGE[1]
         && askPrice > 0) {
-        const score = Math.abs(delta) / askPrice;
+        const rawScore = Math.abs(delta) / askPrice;
+        const score = normalizeBuyPutScore(rawScore, parsed.dte);
         const research = classifyBuyPutEdge({
           score,
+          rawScore,
           dte: parsed.dte,
           strike: parsed.strike,
           spotPrice,
@@ -11758,6 +11860,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
           bidPrice,
           dte: Math.round(parsed.dte),
           strike: parsed.strike,
+          rawScore,
           score,
           selectionScore: research.selection_score,
           research: research.recommendation,
@@ -11965,7 +12068,7 @@ Rules:
 - Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_edge_score (optional hard buy_put edge floor only), min_bid (for sell_call), market_conditions. For sell_call, include min_score as the CALL EDGE gate and min_bid as the executable premium floor; do not emit min_edge_score. For buy_put, include min_edge_score only when you want an explicit spread/IV/skew/OI/shock-payoff floor in addition to min_score/target_score. For sell_call, market_conditions may only contain spot_price conditions; translate other selectivity into min_score, min_bid, priority, delta_range, or dte_range instead.
 - Exit criteria MUST include: conditions (array of {field, op, value}) and condition_logic ("any" or "all"). Fields: dte, delta, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte. Do not use mark_price as a strategy trigger. For sell_put, include put_exit_intent. For monetize_tail_win, also include min_exit_price or limit_price. For buyback_call, include buyback_intent; set allow_below_profit_floor true only for threat_management.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: roll_protection sell_put and threat_management buyback_call should use preferred_order_type "ioc". Patient monetize_tail_win sell_put and profit_capture buyback_call may use "gtc" or "post_only" as synthetic reduce-only resting exits, with limit_price/min_exit_price/max_buyback_price carrying the price discipline.
-- For buy_put: set option_type "P", negative delta_range (e.g. [-0.12, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. Raw score is abs(delta)/ask and controls price; PUT edge score decides whether that price is good insurance value after spread, IV/skew, OI trend, DTE durability, and 30/40/50% drawdown payoff checks. Do not prefer higher delta by itself; use broad tail-convexity math and market-quality facts. DTE DISCIPLINE: buy puts at 45-75 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 75].
+- For buy_put: set option_type "P", negative delta_range (e.g. [-0.12, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. Raw score is abs(delta)/ask. PUT EDGE = raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT} and controls price/value comparisons; the composite selection score then adjusts PUT EDGE for spread, IV/skew, OI trend, and 30/40/50% drawdown payoff checks. Do not prefer higher delta by itself; use broad tail-convexity math and market-quality facts. DTE DISCIPLINE: buy puts at 45-78 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 78].
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~${PUT_ROLL_DTE_THRESHOLD} only if the book already holds longer-dated long puts. Use put_exit_intent="roll_protection", requires_longer_dated_protection=true, condition dte lte ${PUT_ROLL_DTE_THRESHOLD}. This roll trigger is independent of the ${PUT_MONETIZATION_PROFIT_THRESHOLD}% monetization threshold.
@@ -12125,7 +12228,7 @@ Interpret "Taleb" operationally, not stylistically:
 ${getMomentumEvidenceDisciplinePrompt()}
 
 ## DTE Discipline (Non-Negotiable)
-- Buy puts at 45-75 DTE. Never below 35 DTE. Short-dated puts bleed theta — you're paying for time decay, not convexity. Veto any buy_put rule outside [45, 75].
+- Buy puts at 45-78 DTE. Never below 35 DTE. Short-dated puts bleed theta — you're paying for time decay, not convexity. Veto any buy_put rule outside [45, 78].
 - Roll (sell_put exit) at ~${PUT_ROLL_DTE_THRESHOLD} DTE only when the book already holds longer-dated long puts. When DTE is above ${PUT_ROLL_DTE_THRESHOLD}, only consider monetizing protective puts after executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}%, and only in tranches with retained downside protection.
 - Sell calls at 5-12 DTE. Short-dated calls maximize theta harvesting. Veto any sell_call rule with dte above 14.
 
@@ -13089,7 +13192,7 @@ const runBot = async () => {
           .filter(Boolean);
         const displayPutCandidates = filterValidOptions(enrichedPutCandidates, PUT_DELTA_RANGE[0], PUT_DELTA_RANGE[1]);
         const displayCallCandidates = filterValidOptions(enrichedCallCandidates, CALL_DELTA_RANGE[0], CALL_DELTA_RANGE[1]);
-        const bestCurrentPut = [...displayPutCandidates].sort((a, b) => (b?.details?.askDeltaValue || 0) - (a?.details?.askDeltaValue || 0))[0] || null;
+        const bestCurrentPut = [...displayPutCandidates].sort((a, b) => (b?.details?.putEdgeScore || 0) - (a?.details?.putEdgeScore || 0))[0] || null;
         const bestCurrentCall = [...displayCallCandidates].sort((a, b) => (b?.details?.callEdgeScore || 0) - (a?.details?.callEdgeScore || 0))[0] || null;
         const bestPutSummary = summarizeBestCandidate(bestCurrentPut, 'put');
         const bestCallSummary = summarizeBestCandidate(bestCurrentCall, 'call');

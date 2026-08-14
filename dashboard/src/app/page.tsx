@@ -87,7 +87,7 @@ interface OptionsPoint {
   lyra_spot: number | null;
 }
 
-interface SellCallEdgePoint {
+interface OptionEdgePoint {
   timestamp: string;
   edge_score: number;
 }
@@ -103,6 +103,8 @@ interface OptionDetail {
   strike: number | null;
   expiry: number | null;
   instrument: string | null;
+  dte?: number | null;
+  raw_score?: number | null;
 }
 
 interface BestScores {
@@ -245,10 +247,10 @@ interface TickData {
   strategy: { put_valid: number; call_valid: number };
   current_best_put: number;
   current_best_call: number;
-  best_put_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
-  best_call_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
-  historical_best_put_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
-  historical_best_call_detail: { delta: number | null; price: number | null; strike: number | null; expiry: number | null; instrument: string | null } | null;
+  best_put_detail: OptionDetail | null;
+  best_call_detail: OptionDetail | null;
+  historical_best_put_detail: OptionDetail | null;
+  historical_best_call_detail: OptionDetail | null;
   next_check_minutes: number;
 }
 
@@ -293,7 +295,8 @@ interface SentimentData {
 interface ChartData {
   prices: SpotPrice[];
   options: OptionsPoint[];
-  sellCallEdge: SellCallEdgePoint[];
+  buyPutEdge: OptionEdgePoint[];
+  sellCallEdge: OptionEdgePoint[];
   liquidity: LiquidityPoint[];
   bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
@@ -418,6 +421,7 @@ const emptyStats: Stats = {
 const emptyChart: ChartData = {
   prices: [],
   options: [],
+  buyPutEdge: [],
   sellCallEdge: [],
   liquidity: [],
   bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 7, bestPutDetail: null, bestCallDetail: null },
@@ -1040,6 +1044,7 @@ export default function OverviewPage() {
       momentumVal?: number;
       bestPut?: number | null;
       bestCall?: number | null;
+      putEdge?: number | null;
       callEdge?: number | null;
       bestPutDetail?: OptionDetail;
       bestCallDetail?: OptionDetail;
@@ -1098,8 +1103,9 @@ export default function OverviewPage() {
     }
 
     const makeDetail = (snap: HeatmapSnapshot, isPut: boolean): OptionDetail => {
-      const now = Date.now();
-      const dte = snap.expiry ? Math.max(0, Math.ceil((snap.expiry * 1000 - now) / (1000 * 60 * 60 * 24))) : null;
+      const snapshotMs = new Date(snap.timestamp).getTime();
+      const referenceMs = Number.isFinite(snapshotMs) ? snapshotMs : Date.now();
+      const dte = snap.expiry ? Math.max(0, Math.ceil((snap.expiry * 1000 - referenceMs) / (1000 * 60 * 60 * 24))) : null;
       return {
         delta: snap.delta,
         price: isPut ? snap.ask_price : snap.bid_price,
@@ -1128,6 +1134,11 @@ export default function OverviewPage() {
       rows[idx].callEdge = point.edge_score;
     }
 
+    for (const point of chart.buyPutEdge || []) {
+      const idx = snapToNearest(new Date(point.timestamp).getTime());
+      rows[idx].putEdge = point.edge_score;
+    }
+
     const liveTs = stats.last_price_time ? new Date(stats.last_price_time).getTime() : null;
     if (liveTs && Number.isFinite(liveTs)) {
       const liveRow: Row = {
@@ -1139,8 +1150,9 @@ export default function OverviewPage() {
         mediumDerivative: stats.medium_derivative || undefined,
         shortDerivative: stats.short_derivative || undefined,
         momentumVal: 1,
-        bestPut: latestTick?.current_best_put ?? undefined,
-        bestCall: latestTick?.current_best_call ?? undefined,
+        bestPut: latestTick?.best_put_detail?.raw_score ?? latestTick?.current_best_put ?? undefined,
+        bestCall: latestTick?.best_call_detail?.raw_score ?? latestTick?.current_best_call ?? undefined,
+        putEdge: latestTick?.current_best_put ?? undefined,
         bestPutDetail: latestTick?.best_put_detail
           ? {
               delta: latestTick.best_put_detail.delta,
@@ -1563,7 +1575,7 @@ export default function OverviewPage() {
         <Card title="Options Value" subtitle={`Best (${chart.bestScores.windowDays}d) / Current`} className="flex flex-col overflow-visible">
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
             <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 whitespace-nowrap">PUT</span>
+              <span className="text-xs text-gray-500 whitespace-nowrap">PUT EDGE</span>
               <span className="relative group/pb">
                 <span className="text-red-400 font-medium cursor-help">{Number(displayedBestScores.bestPutScore) > 0 ? Number(displayedBestScores.bestPutScore).toFixed(6) : '--'}</span>
                 {displayedBestScores.bestPutDetail && (
@@ -1581,7 +1593,7 @@ export default function OverviewPage() {
               </span>
               <span className="text-gray-600">/</span>
               <span className="relative group/pc">
-                <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : '--'}</span>
+                <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : 'NO ELIGIBLE'}</span>
                 {latestTick?.best_put_detail && (
                   <div className="absolute left-0 bottom-full mb-1 hidden group-hover/pc:block z-20 pointer-events-none">
                     <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
@@ -1689,7 +1701,14 @@ export default function OverviewPage() {
             />
             ETH L
           </span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT RAW</span>
+          <span className="flex items-center gap-1">
+            <span
+              className="w-3 h-0.5 inline-block"
+              style={{ background: 'repeating-linear-gradient(to right, #fb7185 0 2px, transparent 2px 5px)' }}
+            />
+            PUT EDGE
+          </span>
           <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL RAW</span>
           <span className="flex items-center gap-1">
             <span
@@ -1780,9 +1799,11 @@ export default function OverviewPage() {
                   if (!row) return pinPrice.wrap(null);
                   const bestPut = row.bestPut;
                   const bestCall = row.bestCall;
+                  const putEdge = row.putEdge;
                   const callEdge = row.callEdge;
                   const fmtPut = bestPut != null && Number(bestPut) > 0 ? Number(bestPut).toFixed(6) : 'N/A';
                   const fmtCall = bestCall != null && Number(bestCall) > 0 ? Number(bestCall).toFixed(2) : 'N/A';
+                  const fmtPutEdge = putEdge != null && Number(putEdge) > 0 ? Number(putEdge).toFixed(6) : 'N/A';
                   const fmtCallEdge = callEdge != null && Number(callEdge) > 0 ? Number(callEdge).toFixed(2) : 'N/A';
                   const { windowDays } = chart.bestScores;
                   const { bestPutScore, bestCallScore } = displayedBestScores;
@@ -1793,7 +1814,8 @@ export default function OverviewPage() {
                       <div className="text-xs text-gray-400 mb-1">{formatCompactDateTime(labelTs)}</div>
                       <div className="text-sm" style={{ color: chartColors.primary }}>ETH CG: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
                       {row.lyraSpot != null && <div className="text-sm text-white/50">ETH L: {formatUSD(row.lyraSpot)}</div>}
-                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Value: {fmtPut}{pd ? <span className="text-xs text-gray-400 ml-2">Ask ${Number(pd.price).toFixed(4)}</span> : null}</div>
+                      <div className="text-sm" style={{ color: chartColors.red }}>PUT Raw Score: {fmtPut}{pd ? <span className="text-xs text-gray-400 ml-2">Ask ${Number(pd.price).toFixed(4)}</span> : null}</div>
+                      <div className="text-sm" style={{ color: '#fb7185' }}>PUT Edge Score: {fmtPutEdge}</div>
                       {pd && (
                         <div className="text-xs text-gray-500 pl-2 mb-0.5">
                           Strike ${Number(pd.strike).toFixed(0)} | Delta {Number(pd.delta).toFixed(3)} | DTE {pd.dte ?? 'N/A'}
@@ -1869,6 +1891,7 @@ export default function OverviewPage() {
               />
               {/* PUT/CALL value overlays */}
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
+              <Line yAxisId="putVal" type="stepAfter" dataKey="putEdge" stroke="#fb7185" strokeDasharray="2 4" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="callVal" type="stepAfter" dataKey="callEdge" stroke={chartColors.blue} strokeDasharray="2 4" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} />
 
@@ -2995,7 +3018,7 @@ export default function OverviewPage() {
               <tr className="text-xs text-gray-500 border-b border-white/5">
                 <th className="text-left py-2 px-3 font-medium">Time</th>
                 <th className="text-right py-2 px-3 font-medium">Price</th>
-                <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.red }}>PUT Now / Best</th>
+                <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.red }}>PUT EDGE Now / Best</th>
                 <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.secondary }}>CALL Now / Best</th>
                 <th className="text-right py-2 px-3 font-medium">Instruments</th>
                 <th className="text-right py-2 px-3 font-medium">Valid</th>
@@ -3021,7 +3044,7 @@ export default function OverviewPage() {
                     </td>
                     <td className="py-1.5 px-3 text-right tabular-nums text-xs">
                       <span className="relative inline-block group/pn">
-                        <span style={{ color: chartColors.red }} className="cursor-help">{Number(d.current_best_put ?? 0) > 0 ? Number(d.current_best_put).toFixed(6) : '--'}</span>
+                        <span style={{ color: chartColors.red }} className="cursor-help">{Number(d.current_best_put ?? 0) > 0 ? Number(d.current_best_put).toFixed(6) : 'NO ELIGIBLE'}</span>
                         {d.best_put_detail && (
                           <div className="absolute right-0 top-full mt-1 hidden group-hover/pn:block z-20 pointer-events-none">
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">

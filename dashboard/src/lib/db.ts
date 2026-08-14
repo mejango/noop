@@ -17,6 +17,10 @@ const MEASUREMENT_WINDOW_DAYS = 6.2;
 // parity test keeps these values aligned with bot/call-score.js.
 const SELL_CALL_EDGE_REFERENCE_DTE = 8.5;
 const SELL_CALL_EDGE_DTE_EXPONENT = 0.12;
+const BUY_PUT_EDGE_REFERENCE_DTE = 60;
+const BUY_PUT_EDGE_DTE_EXPONENT = 0.8;
+const BUY_PUT_EDGE_MIN_DTE = 45;
+const BUY_PUT_EDGE_MAX_DTE = 78;
 
 function getPutBudgetPortfolioValue(snapshot: {
   spot_price: number;
@@ -134,7 +138,9 @@ function prepareAll(d: Database.Database) {
       SELECT
         MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
           AND delta <= -0.02 AND delta >= -0.12
-          THEN ask_delta_value END) as best_put_score,
+          AND expiry IS NOT NULL
+          AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
+          THEN ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) END) as best_put_score,
         MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
           AND delta >= 0.04 AND delta <= 0.12
           AND expiry IS NOT NULL
@@ -145,12 +151,16 @@ function prepareAll(d: Database.Database) {
     `),
 
     getBestPutDetail: d.prepare(`
-      SELECT instrument_name, delta, ask_price, strike, expiry
+      SELECT instrument_name, delta, ask_price, strike, expiry,
+        ask_delta_value as raw_score,
+        ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) as edge_score
       FROM options_snapshots
       WHERE timestamp > ?
         AND (option_type = 'P' OR instrument_name LIKE '%-P')
         AND delta <= -0.02 AND delta >= -0.12
-        AND ask_delta_value = ?
+        AND expiry IS NOT NULL
+        AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
+        AND abs((ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT})) - ?) < 0.000000000001
       LIMIT 1
     `),
 
@@ -736,6 +746,70 @@ export function getOptionsCoverage(since: string) {
 
 export function getBestOptionsOverTime(since: string) {
   return getStmts().getBestOptionsOverTime.all(since);
+}
+
+export function getBuyPutEdgeOverTime(since: string, bucketMs = 0) {
+  const database = getDb();
+  const tableExists = (name: string) => Boolean(database.prepare(`
+    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1
+  `).get(name));
+  const sources: string[] = [];
+
+  // Dedicated telemetry records the best executable PUT EDGE on every market
+  // evaluation, including evaluations where no buy-put rule is active.
+  if (tableExists('buy_put_edge_snapshots')) {
+    sources.push(`
+      SELECT
+        timestamp,
+        raw_score * pow(dte / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) AS edge_score
+      FROM buy_put_edge_snapshots
+      WHERE timestamp > @since
+        AND raw_score > 0
+        AND dte BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
+    `);
+  }
+  // Historical rule telemetry predates the dedicated series. raw_score remains
+  // immutable so the current normalization can be recomputed consistently.
+  if (tableExists('candidate_observations')) {
+    sources.push(`
+      SELECT
+        observed_at AS timestamp,
+        raw_score * pow(dte / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) AS edge_score
+      FROM candidate_observations
+      WHERE observed_at > @since
+        AND action = 'buy_put'
+        AND raw_score > 0
+        AND dte BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
+    `);
+  }
+  if (sources.length === 0) return [];
+
+  const bucketSeconds = bucketMs > 0 ? Math.max(1, Math.floor(bucketMs / 1000)) : 0;
+  const bucketExpression = bucketSeconds > 0
+    ? `CAST(CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds AS INTEGER) * @bucket_seconds`
+    : `CAST(strftime('%s', timestamp) AS INTEGER)`;
+
+  return database.prepare(`
+    WITH source AS (
+      ${sources.join('\nUNION ALL\n')}
+    ), per_tick AS (
+      SELECT timestamp, MAX(edge_score) AS edge_score
+      FROM source
+      GROUP BY timestamp
+    ), bucketed AS (
+      SELECT ${bucketExpression} AS bucket_epoch, AVG(edge_score) AS edge_score
+      FROM per_tick
+      GROUP BY bucket_epoch
+    )
+    SELECT
+      strftime('%Y-%m-%dT%H:%M:%SZ', bucket_epoch, 'unixepoch') AS timestamp,
+      edge_score
+    FROM bucketed
+    ORDER BY bucket_epoch ASC
+  `).all({ since, bucket_seconds: bucketSeconds }) as {
+    timestamp: string;
+    edge_score: number;
+  }[];
 }
 
 export function getSellCallEdgeOverTime(since: string, bucketMs = 0) {
