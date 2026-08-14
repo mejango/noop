@@ -8059,11 +8059,28 @@ describe('Learning bootstrap diagnostics', () => {
 
 describe('Dashboard range loading UX', () => {
   const overviewSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'page.tsx'), 'utf8');
+  const dashboardRangesSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'dashboard-ranges.ts'), 'utf8');
   const pollingHookSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'hooks.ts'), 'utf8');
   const responseCacheSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'response-cache.ts'), 'utf8');
   const chartRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'chart', 'route.ts'), 'utf8');
+  const accountRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'lyra', 'account', 'route.ts'), 'utf8');
+  const pnlRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'pnl-report', 'route.ts'), 'utf8');
   const learningRouteSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'app', 'api', 'learning', 'route.ts'), 'utf8');
   const lyraSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'lyra.ts'), 'utf8');
+
+  test('every chart endpoint uses the canonical duration for every dashboard range', () => {
+    const expectedRanges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d', '365d'];
+    for (const range of expectedRanges) {
+      assert.ok(dashboardRangesSource.includes(`'${range}'`), `missing dashboard range ${range}`);
+    }
+    assert.ok(dashboardRangesSource.includes('satisfies Record<DashboardRange, number>'));
+    assert.ok(dashboardRangesSource.includes("'1y': '365d'"));
+    assert.ok(dashboardRangesSource.includes("all: '365d'"));
+    assert.ok(overviewSource.includes('const ranges = DASHBOARD_RANGES'));
+    assert.ok(chartRouteSource.includes("dashboardRangeMs(range, '14d')"));
+    assert.ok(accountRouteSource.includes("dashboardRangeMs(range, '30d')"));
+    assert.ok(pnlRouteSource.includes("dashboardRangeMs(range, '30d')"));
+  });
 
   test('range changes keep stale data visible with explicit progress feedback', () => {
     assert.ok(overviewSource.includes('chartRangeLoading && merged.length > 0'));

@@ -2,21 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getPositions, getCollaterals } from '@/lib/lyra';
 import { getOrderTradesSince } from '@/lib/db';
 import { cachedJsonRoute } from '@/lib/response-cache';
+import { dashboardRangeMs } from '@/lib/dashboard-ranges';
 
 export const dynamic = 'force-dynamic';
-
-const RANGE_MS: Record<string, number> = {
-  '1h': 60 * 60 * 1000,
-  '6h': 6 * 60 * 60 * 1000,
-  '24h': 24 * 60 * 60 * 1000,
-  '3d': 3 * 24 * 60 * 60 * 1000,
-  '6.2d': 6.2 * 24 * 60 * 60 * 1000,
-  '7d': 7 * 24 * 60 * 60 * 1000,
-  '14d': 14 * 24 * 60 * 60 * 1000,
-  '30d': 30 * 24 * 60 * 60 * 1000,
-  '90d': 90 * 24 * 60 * 60 * 1000,
-  '365d': 365 * 24 * 60 * 60 * 1000,
-};
 
 function normalizeSpotPrice(value: unknown): number {
   const n = Number(value);
@@ -26,7 +14,7 @@ function normalizeSpotPrice(value: unknown): number {
 async function getAccountResponse(request: NextRequest) {
   try {
     const range = request.nextUrl.searchParams.get('range') || '30d';
-    const rangeMs = RANGE_MS[range] || RANGE_MS['30d'];
+    const rangeMs = dashboardRangeMs(range, '30d');
     const since = new Date(Date.now() - rangeMs).toISOString();
 
     const [positions, collaterals] = await Promise.all([

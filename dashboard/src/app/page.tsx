@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, momentumColor, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
+import { DASHBOARD_RANGES } from '@/lib/dashboard-ranges';
 import Card from '@/components/Card';
 import { Bot, User } from 'lucide-react';
 import {
@@ -475,7 +476,7 @@ const emptyPnlReport: PnlReportData = {
   orders: [],
 };
 const emptyAccount: AccountData = { collaterals: [], positions: [], trades: [] };
-const ranges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d', '365d'] as const;
+const ranges = DASHBOARD_RANGES;
 
 const CHART_MARGINS = { top: 10, right: 10, left: 10, bottom: 18 };
 const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 18 };

@@ -1,19 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getOrderCashflowTotalsBefore, getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange } from '@/lib/db';
 import { cachedJsonRoute } from '@/lib/response-cache';
+import { dashboardRangeMs } from '@/lib/dashboard-ranges';
 
 export const dynamic = 'force-dynamic';
-
-const RANGE_MS: Record<string, number> = {
-  '24h': 24 * 60 * 60 * 1000,
-  '3d': 3 * 24 * 60 * 60 * 1000,
-  '7d': 7 * 24 * 60 * 60 * 1000,
-  '14d': 14 * 24 * 60 * 60 * 1000,
-  '30d': 30 * 24 * 60 * 60 * 1000,
-  '90d': 90 * 24 * 60 * 60 * 1000,
-  '180d': 180 * 24 * 60 * 60 * 1000,
-  '1y': 365 * 24 * 60 * 60 * 1000,
-};
 
 type SnapshotRow = {
   timestamp: string;
@@ -54,9 +44,10 @@ function resolveWindow(req: NextRequest) {
   const range = searchParams.get('range') || '30d';
   const now = Date.now();
   const to = parseDateParam(searchParams.get('to'), now);
+  const durationMs = dashboardRangeMs(range, '30d');
   const from = searchParams.get('from')
-    ? parseDateParam(searchParams.get('from'), to.getTime() - RANGE_MS[range] || to.getTime() - RANGE_MS['30d'])
-    : new Date(to.getTime() - (RANGE_MS[range] || RANGE_MS['30d']));
+    ? parseDateParam(searchParams.get('from'), to.getTime() - durationMs)
+    : new Date(to.getTime() - durationMs);
   if (from > to) return { range, from: to, to: from };
   return { range, from, to };
 }

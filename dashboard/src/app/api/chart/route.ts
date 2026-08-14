@@ -7,6 +7,7 @@ import {
 } from '@/lib/db';
 import { CHART_ROW_LIMITS } from '@/lib/limits';
 import { cachedJsonRoute } from '@/lib/response-cache';
+import { dashboardRangeMs } from '@/lib/dashboard-ranges';
 
 export const dynamic = 'force-dynamic';
 
@@ -145,20 +146,7 @@ function downsampleLiquidity(rows: Record<string, any>[], bucketMs: number): Rec
 function getChartResponse(request: NextRequest) {
   try {
     const range = request.nextUrl.searchParams.get('range') || '14d';
-    const rangeMs: Record<string, number> = {
-      '1h': 60 * 60 * 1000,
-      '6h': 6 * 60 * 60 * 1000,
-      '24h': 24 * 60 * 60 * 1000,
-      '3d': 3 * 24 * 60 * 60 * 1000,
-      '6.2d': 6.2 * 24 * 60 * 60 * 1000,
-      '7d': 7 * 24 * 60 * 60 * 1000,
-      '14d': 14 * 24 * 60 * 60 * 1000,
-      '30d': 30 * 24 * 60 * 60 * 1000,
-      '90d': 90 * 24 * 60 * 60 * 1000,
-      '365d': 365 * 24 * 60 * 60 * 1000,
-      'all': 365 * 24 * 60 * 60 * 1000,
-    };
-    const ms = rangeMs[range] || rangeMs['14d'];
+    const ms = dashboardRangeMs(range, '14d');
     const since = new Date(Date.now() - ms).toISOString();
     const bestScores = getBestScores();
     const bucketMs = BUCKET_MS[range] || 0;
