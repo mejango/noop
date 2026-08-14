@@ -401,6 +401,13 @@ export function validateWikiReplacement(args: {
   if (placeholderMarkerTypes.length > 0) {
     errors.push(`Replacement retains placeholder source markers: ${placeholderMarkerTypes.join(', ')}`);
   }
+  const unsupportedProvenanceRequirements = Array.from(getProvenanceRequirementTypes(replacement))
+    .filter((type) => !SUPPORTED_NUMERIC_MARKER_TYPES.has(type));
+  if (unsupportedProvenanceRequirements.length > 0) {
+    errors.push(
+      `Replacement retains unsupported provenance requirements: ${unsupportedProvenanceRequirements.join(', ')}`,
+    );
+  }
 
   const uncertainArtifactAnchors = getUncertainArtifactAnchors(validationIssues);
   uncertainArtifactAnchors.forEach((anchor) => {
