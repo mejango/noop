@@ -1,7 +1,7 @@
-// Run: node src/lib/expiry-settlement.test.js
+// Run: node scripts/expiry-settlement.test.js
 const ts = require('typescript');
 const fs = require('fs');
-const src = fs.readFileSync(__dirname + '/expiry-settlement.ts', 'utf8');
+const src = fs.readFileSync(__dirname + '/../src/lib/expiry-settlement.ts', 'utf8');
 const js = ts.transpileModule(src, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
 const m = { exports: {} }; new Function('module', 'exports', js)(m, m.exports);
 const { deriveExpirySettlements } = m.exports;
