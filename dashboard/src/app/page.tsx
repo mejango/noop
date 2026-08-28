@@ -340,6 +340,7 @@ interface PnlReportData {
     orderCount: number;
     hasBaseline: boolean;
     bucketMs: number;
+    insuredExternalEth?: number;
   };
   summary: {
     openingValue: number;
@@ -1986,7 +1987,9 @@ export default function OverviewPage() {
                     periodPutRevenue: 'Put Exits',
                     periodPutExpenses: 'Put Buys',
                     periodCallExpenses: 'Call Buybacks',
-                    portfolioValueUsd: 'Portfolio USD',
+                    portfolioValueUsd: Number(pnlReport.meta.insuredExternalEth ?? 0) > 0
+                      ? `Portfolio USD (incl. ${Number(pnlReport.meta.insuredExternalEth).toFixed(4)} off-platform ETH)`
+                      : 'Portfolio USD',
                   };
                   const numericValue = typeof value === 'number' ? value : Number(value ?? 0);
                   const key = name ?? '';

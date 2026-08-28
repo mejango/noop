@@ -71,6 +71,13 @@ function signedCashflow(action: string, totalValue: number | null | undefined): 
   }
 }
 
+// Portfolio value = Derive subaccount value + the off-platform ETH the put budget insures.
+// The insurance budget is sized on that combined base, so the equity line must show the same base.
+const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
+
+const insuredPortfolioValue = (row: { portfolio_value_usd?: number; spot_price?: number } | null | undefined) =>
+  Number(row?.portfolio_value_usd ?? 0) + PUT_INSURED_EXTERNAL_ETH * Number(row?.spot_price ?? 0);
+
 const isCallAction = (a: string) => a === 'sell_call' || a === 'buyback_call' || a === 'settle_call';
 const isPutAction = (a: string) => a === 'buy_put' || a === 'sell_put' || a === 'settle_put';
 
@@ -159,7 +166,7 @@ function getPnlResponse(req: NextRequest) {
     const portfolioSeries = rawSnapshots.map((row) => ({
       timestamp: row.timestamp,
       ts: new Date(row.timestamp).getTime(),
-      portfolioValue: Number(row.portfolio_value_usd ?? 0),
+      portfolioValue: insuredPortfolioValue(row),
       unrealizedPnl: Number(row.total_unrealized_pnl ?? 0),
       realizedTotal: Number(row.total_realized_pnl ?? 0),
       spotPrice: Number(row.spot_price ?? 0),
@@ -171,7 +178,7 @@ function getPnlResponse(req: NextRequest) {
       ? [{
           timestamp: fromIso,
           ts: from.getTime(),
-          portfolioValue: Number(opening.portfolio_value_usd ?? 0),
+          portfolioValue: insuredPortfolioValue(opening),
           unrealizedPnl: Number(opening.total_unrealized_pnl ?? 0),
           realizedTotal: Number(opening.total_realized_pnl ?? 0),
           spotPrice: Number(opening.spot_price ?? 0),
@@ -180,7 +187,7 @@ function getPnlResponse(req: NextRequest) {
         }, ...portfolioSeries]
       : portfolioSeries;
 
-    let peak = opening ? Number(opening.portfolio_value_usd ?? 0) : 0;
+    let peak = opening ? insuredPortfolioValue(opening) : 0;
     let highWatermark = peak;
     let lowWatermark = peak;
     let maxDrawdown = 0;
@@ -290,8 +297,8 @@ function getPnlResponse(req: NextRequest) {
       bucketMap.set(key, bucket);
     }
 
-    const openingValue = Number(opening?.portfolio_value_usd ?? 0);
-    const closingValue = Number(closing?.portfolio_value_usd ?? openingValue);
+    const openingValue = insuredPortfolioValue(opening);
+    const closingValue = closing ? insuredPortfolioValue(closing) : openingValue;
     const openingUnrealized = Number(opening?.total_unrealized_pnl ?? 0);
     const closingUnrealized = Number(closing?.total_unrealized_pnl ?? openingUnrealized);
     const openingSpot = Number(opening?.spot_price ?? 0);
@@ -311,6 +318,7 @@ function getPnlResponse(req: NextRequest) {
         orderCount: orders.length,
         hasBaseline: Boolean(opening),
         bucketMs,
+        insuredExternalEth: PUT_INSURED_EXTERNAL_ETH,
       },
       summary: {
         openingValue,
