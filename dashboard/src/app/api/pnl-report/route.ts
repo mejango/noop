@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getOrderCashflowTotalsBefore, getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange } from '@/lib/db';
+import { getOrderCashflowTotalsBefore, getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange, getSpotPrices } from '@/lib/db';
+import { deriveExpirySettlements } from '@/lib/expiry-settlement';
 import { cachedJsonRoute } from '@/lib/response-cache';
 import { dashboardRangeMs } from '@/lib/dashboard-ranges';
 
@@ -61,11 +62,17 @@ function signedCashflow(action: string, totalValue: number | null | undefined): 
       return value;
     case 'buy_put':
     case 'buyback_call':
+    case 'settle_call':
       return -value;
+    case 'settle_put':
+      return value;
     default:
       return 0;
   }
 }
+
+const isCallAction = (a: string) => a === 'sell_call' || a === 'buyback_call' || a === 'settle_call';
+const isPutAction = (a: string) => a === 'buy_put' || a === 'sell_put' || a === 'settle_put';
 
 function cashflowParts(action: string, totalValue: number | null | undefined) {
   const value = Number(totalValue ?? 0);
@@ -87,7 +94,10 @@ function cashflowParts(action: string, totalValue: number | null | undefined) {
     case 'buy_put':
       return { ...zero, expenses: value, putExpenses: value };
     case 'buyback_call':
+    case 'settle_call':
       return { ...zero, expenses: value, callExpenses: value };
+    case 'settle_put':
+      return { ...zero, revenue: value, putRevenue: value };
     default:
       return zero;
   }
@@ -125,14 +135,23 @@ function getPnlResponse(req: NextRequest) {
 
     const rawSnapshots = getPortfolioSnapshotsInRange(fromIso, toIso) as SnapshotRow[];
     const baseline = getPortfolioSnapshotBefore(fromIso) as SnapshotRow | undefined;
-    const orders = (getOrdersInRange(fromIso, toIso) as OrderRow[])
-      .filter(o => o.success === 1 && Number(o.filled_amount ?? 0) > 0);
-    const openingCashflow = getOrderCashflowTotalsBefore(fromIso) || {
-      revenue: 0,
-      expenses: 0,
-      profit: 0,
-      order_count: 0,
-    };
+    // Expiry settlements (forced buyback of ITM short calls, ITM long put payout) are not bot orders,
+    // so synthesize them from full order history + spot at expiry.
+    const allOrders = getOrdersInRange('1970-01-01T00:00:00.000Z', toIso) as OrderRow[];
+    const spotRows = getSpotPrices('1970-01-01T00:00:00.000Z', 100000) as Array<{ timestamp: string; price: number }>;
+    const settlements = deriveExpirySettlements(allOrders, spotRows, to.getTime()) as unknown as OrderRow[];
+    const orders = [...allOrders, ...settlements]
+      .filter(o => o.success === 1 && Number(o.filled_amount ?? 0) > 0 && o.timestamp >= fromIso)
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const openingCashflow = { ...(getOrderCashflowTotalsBefore(fromIso) || { revenue: 0, expenses: 0, profit: 0, order_count: 0 }) };
+    for (const s of settlements) {
+      if (s.timestamp >= fromIso) continue;
+      const parts = cashflowParts(s.action, s.total_value);
+      openingCashflow.revenue += parts.revenue;
+      openingCashflow.expenses += parts.expenses;
+      openingCashflow.profit += signedCashflow(s.action, s.total_value);
+      openingCashflow.order_count += 1;
+    }
 
     const opening = baseline ?? rawSnapshots[0] ?? null;
     const closing = rawSnapshots[rawSnapshots.length - 1] ?? opening;
@@ -178,9 +197,9 @@ function getPnlResponse(req: NextRequest) {
 
     const netTradeCashflow = orders.reduce((sum, order) => sum + signedCashflow(order.action, order.total_value), 0);
     const putNetCashflow = orders.reduce((sum, order) =>
-      sum + (order.action === 'buy_put' || order.action === 'sell_put' ? signedCashflow(order.action, order.total_value) : 0), 0);
+      sum + (isPutAction(order.action) ? signedCashflow(order.action, order.total_value) : 0), 0);
     const callNetCashflow = orders.reduce((sum, order) =>
-      sum + (order.action === 'sell_call' || order.action === 'buyback_call' ? signedCashflow(order.action, order.total_value) : 0), 0);
+      sum + (isCallAction(order.action) ? signedCashflow(order.action, order.total_value) : 0), 0);
 
     const actionMap = new Map<string, { action: string; count: number; grossValue: number; cashflow: number; filledAmount: number }>();
     for (const order of orders) {
@@ -265,8 +284,8 @@ function getPnlResponse(req: NextRequest) {
       bucket.putExpenses += parts.putExpenses;
       bucket.callRevenue += parts.callRevenue;
       bucket.callExpenses += parts.callExpenses;
-      if (order.action === 'buy_put' || order.action === 'sell_put') bucket.putCashflow += cashflow;
-      if (order.action === 'sell_call' || order.action === 'buyback_call') bucket.callCashflow += cashflow;
+      if (isPutAction(order.action)) bucket.putCashflow += cashflow;
+      if (isCallAction(order.action)) bucket.callCashflow += cashflow;
       bucket.orderCount += 1;
       bucketMap.set(key, bucket);
     }

@@ -4085,7 +4085,7 @@ Campaign:
 - Premium closed: $${effectivePremiumClosed.toFixed(4)}
 - Spot at open: ${campaign.spot_open != null ? `$${campaign.spot_open}` : 'N/A'}
 - Spot at close: ${spotAtClose != null ? `$${spotAtClose}` : 'N/A'}
-- Expiry settlement value: ${expirySettlementValue != null ? `$${expirySettlementValue.toFixed(4)}` : 'N/A'}
+- Expiry settlement value: ${expirySettlementValue != null ? `$${expirySettlementValue.toFixed(4)}${expirySettlementValue > 0 && campaign.action_family === 'short_call_campaign' ? ' (forced buyback at expiry: call expired ITM, paid intrinsic, already included in realized cashflow)' : ''}` : 'N/A'}
 - Spot range while open: ${whileOpen.length > 0 ? `$${Math.min(...whileOpen.map(p => p.price)).toFixed(2)} -> $${Math.max(...whileOpen.map(p => p.price)).toFixed(2)}` : 'N/A'}
 - Spot range after close but before expiry: ${afterCloseBeforeExpiry.length > 0 ? `$${Math.min(...afterCloseBeforeExpiry.map(p => p.price)).toFixed(2)} -> $${Math.max(...afterCloseBeforeExpiry.map(p => p.price)).toFixed(2)}` : 'N/A'}
 - Post-expiry spot context (not valid for option payoff evaluation): ${postExpiryContext.length > 0 ? `$${Math.min(...postExpiryContext.map(p => p.price)).toFixed(2)} -> $${Math.max(...postExpiryContext.map(p => p.price)).toFixed(2)}` : 'N/A'}
