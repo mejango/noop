@@ -795,8 +795,10 @@ export default function OverviewPage() {
   const [range, setRange] = useState<string>('14d');
   const [posSort, setPosSort] = useState<{ key: string; asc: boolean }>({ key: 'instrument_name', asc: true });
   const mobile = useIsMobile();
-  const margins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
   const primaryYAxisWidth = mobile ? 45 : 70;
+  const baseMargins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
+  // Reserve the portfolio axis gutter on every chart so timestamps line up.
+  const margins = { ...baseMargins, right: baseMargins.right + primaryYAxisWidth };
   const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
   const chartUrl = `/api/chart?range=${encodeURIComponent(range)}`;
   const {
@@ -1013,7 +1015,7 @@ export default function OverviewPage() {
   // Shared X-axis tick formatter
   const xTickFormatter = useCallback((ts: number) => {
     const d = new Date(ts);
-    return chartRange === '1h' || chartRange === '6h'
+    return chartRange === '1h' || chartRange === '6h' || chartRange === '24h'
       ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }, [chartRange]);
@@ -1389,12 +1391,30 @@ export default function OverviewPage() {
   }, [callHeatmap, chartRange, putHeatmap]);
 
   // Shared X-axis domain from main chart's time range
-  const xDomain = useMemo(() =>
-    merged.length > 0
-      ? [merged[0].ts, merged[merged.length - 1].ts]
-      : [0, 1],
-    [merged]
-  );
+  const xDomain = useMemo(() => {
+    if (merged.length === 0) return [0, 1];
+    const start = merged[0].ts;
+    // A single sample still needs a nonzero shared time span.
+    return [start, Math.max(start + 1, merged[merged.length - 1].ts)];
+  }, [merged]);
+
+  const xTicks = useMemo(() => {
+    const count = mobile ? 3 : 5;
+    return Array.from({ length: count }, (_, i) =>
+      xDomain[0] + (xDomain[1] - xDomain[0]) * i / (count - 1)
+    );
+  }, [mobile, xDomain]);
+  const timeAxis = {
+    dataKey: 'ts',
+    type: 'number' as const,
+    scale: 'time' as const,
+    domain: xDomain,
+    allowDataOverflow: true,
+    ticks: xTicks,
+    interval: 0,
+    padding: { left: 0, right: 0 },
+    tickFormatter: xTickFormatter,
+  };
 
   const priceDomain = useMemo<[number, number]>(() => {
     const values = merged.flatMap((row) => [row.price, row.lyraSpot]).filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
@@ -1764,12 +1784,7 @@ export default function OverviewPage() {
           <div {...pinPrice.containerProps} className="w-full min-w-0 overflow-hidden">
           <ResponsiveContainer width="100%" height={mobile ? 300 : 500}>
             <ComposedChart data={merged} margin={margins}>
-              <XAxis
-                dataKey="ts"
-                type="number"
-                domain={xDomain}
-                allowDataOverflow
-                tickFormatter={xTickFormatter}
+              <XAxis {...timeAxis}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
               />
@@ -1940,13 +1955,8 @@ export default function OverviewPage() {
       {pnlChartData.length > 0 && (
         <Card title="P&L" subtitle={pnlCoverageLabel ?? `${range} trade flow`}>
           <ResponsiveContainer width="100%" height={320}>
-            <ComposedChart data={pnlChartData} margin={margins} barGap={0} barCategoryGap="25%">
-              <XAxis
-                dataKey="ts"
-                type="number"
-                domain={xDomain}
-                allowDataOverflow
-                tickFormatter={xTickFormatter}
+            <ComposedChart data={pnlChartData} margin={baseMargins} barGap={0} barCategoryGap="25%">
+              <XAxis {...timeAxis}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
               />
@@ -2051,17 +2061,26 @@ export default function OverviewPage() {
           };
 
           const leftPad = margins.left + primaryYAxisWidth;
+          const cellPosition = (i: number) => {
+            const span = xDomain[1] - xDomain[0] || 1;
+            const start = Math.max(xDomain[0], data[i].ts);
+            const end = Math.min(xDomain[1], data[i + 1]?.ts ?? xDomain[1]);
+            return {
+              left: `${(start - xDomain[0]) / span * 100}%`,
+              width: `${Math.max(0, end - start) / span * 100}%`,
+            };
+          };
 
           return (
             <div style={{ paddingLeft: leftPad, paddingRight: margins.right }}>
               <div className="relative" style={{ height: 28 }}>
                 <span className="absolute right-full pr-1 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 whitespace-nowrap">medium term</span>
-                <div className="flex overflow-hidden h-full">
+                <div className="relative overflow-hidden h-full">
                   {data.map((d, i) => (
                     <div
                       key={i}
-                      className="flex-1"
-                      style={{ background: momentumBarColorMedium(d.momentum, d.mediumDerivative) }}
+                      className="absolute h-full"
+                      style={{ ...cellPosition(i), background: momentumBarColorMedium(d.momentum, d.mediumDerivative) }}
                       onMouseEnter={(e) => onCellEnter(i, e)}
                       onMouseMove={(e) => onCellMove(i, e)}
                       onMouseLeave={() => { if (!pinned) setHover(null); }}
@@ -2072,12 +2091,12 @@ export default function OverviewPage() {
               </div>
               <div className="relative -mt-px" style={{ height: 28 }}>
                 <span className="absolute right-full pr-1 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 whitespace-nowrap">short term</span>
-                <div className="flex overflow-hidden h-full">
+                <div className="relative overflow-hidden h-full">
                   {data.map((d, i) => (
                     <div
                       key={i}
-                      className="flex-1"
-                      style={{ background: momentumBarColorShort(d.shortMomentum, d.shortDerivative) }}
+                      className="absolute h-full"
+                      style={{ ...cellPosition(i), background: momentumBarColorShort(d.shortMomentum, d.shortDerivative) }}
                       onMouseEnter={(e) => onCellEnter(i, e)}
                       onMouseMove={(e) => onCellMove(i, e)}
                       onMouseLeave={() => { if (!pinned) setHover(null); }}
@@ -2128,19 +2147,13 @@ export default function OverviewPage() {
             <MomentumTooltipBar data={momentumData} />
             {/* Time axis */}
             <div style={{ paddingLeft: margins.left + primaryYAxisWidth, paddingRight: margins.right }}>
-              <div className="flex justify-between mt-1">
-                {(() => {
-                  const tickCount = mobile ? 4 : 6;
-                  const len = momentumData.length;
-                  if (len === 0) return null;
-                  const ticks: number[] = [];
-                  for (let i = 0; i < tickCount; i++) {
-                    ticks.push(momentumData[Math.round(i * (len - 1) / (tickCount - 1))].ts);
-                  }
-                  return ticks.map((ts, i) => (
-                    <span key={i} className="text-[10px] text-gray-500">{xTickFormatter(ts)}</span>
-                  ));
-                })()}
+              <div className="relative mt-1 h-4">
+                {xTicks.map((ts, i) => (
+                  <span key={ts} className="absolute text-[10px] text-gray-500 whitespace-nowrap"
+                    style={{ left: `${i / (xTicks.length - 1) * 100}%`, transform: 'translateX(-50%)' }}>
+                    {xTickFormatter(ts)}
+                  </span>
+                ))}
               </div>
             </div>
           </div>
@@ -2278,7 +2291,7 @@ export default function OverviewPage() {
             <div {...pinLiquidity.containerProps}>
             <ResponsiveContainer width="100%" height={200}>
               <ComposedChart data={chartData} margin={margins} barGap={0} barCategoryGap={0}>
-                <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+                <XAxis {...timeAxis} stroke={chartAxis.stroke} tick={chartAxis.tick} />
                 <YAxis
                   yAxisId="tvl"
                   domain={['auto', 'auto']}
@@ -2442,7 +2455,7 @@ export default function OverviewPage() {
                 </div>
                 <ResponsiveContainer width="100%" height={70}>
                   <ComposedChart data={filteredSentiment} margin={{ ...margins, bottom: 0 }}>
-                    <XAxis dataKey="ts" type="number" domain={xDomain} hide />
+                    <XAxis {...timeAxis} hide />
                     <YAxis
                       {...chartAxis}
                       tickFormatter={(v: number) => `${v.toFixed(3)}%`}
@@ -2478,7 +2491,7 @@ export default function OverviewPage() {
                 </div>
                 <ResponsiveContainer width="100%" height={80}>
                   <ComposedChart data={filteredSentiment} margin={{ ...margins, bottom: 0 }}>
-                    <XAxis dataKey="ts" type="number" domain={xDomain} hide />
+                    <XAxis {...timeAxis} hide />
                     <YAxis
                       {...chartAxis}
                       tickFormatter={(v: number) => `${v.toFixed(1)}%`}
@@ -2516,7 +2529,7 @@ export default function OverviewPage() {
                 </div>
                 <ResponsiveContainer width="100%" height={80}>
                   <ComposedChart data={filteredSentiment} margin={margins}>
-                    <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} {...chartAxis} />
+                    <XAxis {...timeAxis} {...chartAxis} />
                     <YAxis
                       {...chartAxis}
                       tickFormatter={(v: number) => v.toFixed(2)}
@@ -2554,7 +2567,7 @@ export default function OverviewPage() {
                 </div>
                 <ResponsiveContainer width="100%" height={70}>
                   <ComposedChart data={filteredSentiment} margin={margins}>
-                    <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} {...chartAxis} />
+                    <XAxis {...timeAxis} {...chartAxis} />
                     <YAxis
                       {...chartAxis}
                       tickFormatter={(v: number) => v >= 1000 ? `${(v / 1000).toFixed(0)}K` : String(Math.round(v))}
@@ -2597,11 +2610,7 @@ export default function OverviewPage() {
           <div {...pinPut.containerProps}>
           <ResponsiveContainer width="100%" height={360}>
             <ScatterChart margin={margins}>
-              <XAxis
-                dataKey="ts"
-                type="number"
-                domain={xDomain}
-                tickFormatter={xTickFormatter}
+              <XAxis {...timeAxis}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
               />
@@ -2676,11 +2685,7 @@ export default function OverviewPage() {
           <div {...pinCall.containerProps}>
           <ResponsiveContainer width="100%" height={360}>
             <ScatterChart margin={margins}>
-              <XAxis
-                dataKey="ts"
-                type="number"
-                domain={xDomain}
-                tickFormatter={xTickFormatter}
+              <XAxis {...timeAxis}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
               />
@@ -2756,7 +2761,7 @@ export default function OverviewPage() {
           <div {...pinPutMQ.containerProps}>
           <ResponsiveContainer width="100%" height={300}>
             <ScatterChart margin={margins}>
-              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <XAxis {...timeAxis} stroke={chartAxis.stroke} tick={chartAxis.tick} />
               <YAxis
                 dataKey="absDelta"
                 name="Delta"
@@ -2830,7 +2835,7 @@ export default function OverviewPage() {
           <div {...pinCallMQ.containerProps}>
           <ResponsiveContainer width="100%" height={300}>
             <ScatterChart margin={margins}>
-              <XAxis dataKey="ts" type="number" domain={xDomain} tickFormatter={xTickFormatter} stroke={chartAxis.stroke} tick={chartAxis.tick} />
+              <XAxis {...timeAxis} stroke={chartAxis.stroke} tick={chartAxis.tick} />
               <YAxis
                 dataKey="absDelta"
                 name="Delta"
