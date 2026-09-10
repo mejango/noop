@@ -13,7 +13,7 @@ const helperSource = source.slice(
 function loadHelpers(post, env = { OPENAI_API_KEY: 'test-key' }) {
   const context = vm.createContext({ axios: { post }, process: { env }, console: { log() {} } });
   vm.runInContext(`${helperSource}\nthis.api = {
-    callOpenAI, getAnthropicResponseText, OPENAI_STRATEGY_MODEL,
+    callOpenAI, getAnthropicResponseText, getAnthropicResponseFailure, OPENAI_STRATEGY_MODEL,
     OPENAI_CONFIRMATION_MODEL, ANTHROPIC_STRATEGY_MODEL, ANTHROPIC_SONNET_MODEL,
   };`, context);
   return context.api;
@@ -74,4 +74,56 @@ test('Claude reads text after thinking blocks and rejects truncated answers', ()
   assert.equal(api.getAnthropicResponseText({ stop_reason: 'max_tokens', content }), '');
   assert.equal(api.getAnthropicResponseText(undefined), '');
   assert.equal(api.getAnthropicResponseText({ stop_reason: 'end_turn', content: [content[0]] }), '');
+});
+
+test('Claude failure diagnostics distinguish truncation, refusal, and empty text', () => {
+  const api = loadHelpers();
+  assert.equal(api.getAnthropicResponseFailure({ stop_reason: 'max_tokens', usage: { output_tokens: 256 } }),
+    'truncated response (max_tokens; output_tokens=256)');
+  assert.match(api.getAnthropicResponseFailure({ stop_reason: 'refusal' }), /stop_reason=refusal/);
+  assert.match(api.getAnthropicResponseFailure({ stop_reason: 'end_turn' }), /empty text response/);
+});
+
+function loadMakerHelpers() {
+  const context = vm.createContext({
+    normalizeBuyPutScore: require('../bot/put-score').normalizeBuyPutScore,
+  });
+  for (const name of [
+    'parseMaybeJsonObject', 'getInstrumentPriceStep', 'roundToStep', 'getStepDecimals',
+    'normalizePriceToStep', 'avoidRoundNumberRestingPrice', 'computePostOnlyRetryPrice',
+    'formatBuyPutConfirmationContext',
+  ]) {
+    const start = source.indexOf(`const ${name} =`);
+    assert.ok(start >= 0, `Missing production helper ${name}`);
+    const end = source.indexOf('\n};', start) + 3;
+    vm.runInContext(source.slice(start, end), context);
+  }
+  return vm.runInContext('({ computePostOnlyRetryPrice, formatBuyPutConfirmationContext })', context);
+}
+
+test('screenshot scenario supplies a cheaper maker bid within the approved cap', () => {
+  const api = loadMakerHelpers();
+  const ticker = { b: 12.8, a: 13.28, option_pricing: { d: -0.1 } };
+  const instrument = { option_details: { option_type: 'P' }, price_step: 0.1 };
+  const plan = api.computePostOnlyRetryPrice('buy', ticker, instrument, 13.28);
+  assert.ok(plan.retryPrice > 0 && plan.retryPrice < 13.28);
+  assert.ok(3.38 * plan.retryPrice < 45);
+  assert.ok(Math.abs(plan.retryPrice * 10 - Math.round(plan.retryPrice * 10)) < 1e-9);
+  const prompt = api.formatBuyPutConfirmationContext({
+    action: { action: 'buy_put', amount: 3.38, rule_criteria: { min_score: 0.001 } },
+    triggerData: { delta: -0.1, dte: 78, target_score: 0.001 },
+    ticker, currentPrice: 13.28, advisorLimitPrice: 13.28, instrument,
+  });
+  assert.ok(prompt.includes(`Computed post_only bid on this book: $${plan.retryPrice.toFixed(4)}`));
+  assert.ok(prompt.includes('maximum price, not an exact required fill price'));
+  assert.ok(prompt.includes('Keep all value, budget, margin, and live-data checks'));
+});
+
+test('a rising ask cannot raise a post-only buy retry above its approved price', () => {
+  const api = loadMakerHelpers();
+  const instrument = { price_step: 0.1 };
+  const plan = api.computePostOnlyRetryPrice('buy', { b: 14, a: 15 }, instrument, 13.28);
+  assert.ok(plan.retryPrice <= 13.28);
+  assert.equal(api.computePostOnlyRetryPrice('buy', { a: 0 }, instrument, 13.28), null);
+  assert.equal(api.computePostOnlyRetryPrice('buy', { a: 0.1 }, instrument, 0.1), null);
 });

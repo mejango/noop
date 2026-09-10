@@ -6031,6 +6031,14 @@ const getAnthropicResponseText = (data) => {
   return (data.content || []).filter(block => block.type === 'text').map(block => block.text).join('');
 };
 
+const getAnthropicResponseFailure = (data) => {
+  const stopReason = data?.stop_reason || 'missing';
+  const outputTokens = data?.usage?.output_tokens ?? 'unknown';
+  if (stopReason === 'max_tokens') return `truncated response (max_tokens; output_tokens=${outputTokens})`;
+  if (stopReason !== 'end_turn') return `incomplete response (stop_reason=${stopReason}; output_tokens=${outputTokens})`;
+  return `empty text response (stop_reason=end_turn; output_tokens=${outputTokens})`;
+};
+
 const getAnthropicErrorMessage = (error) => {
   const apiMessage = error?.response?.data?.error?.message;
   if (apiMessage) return apiMessage;
@@ -7799,7 +7807,7 @@ const isPatientBuybackThresholdMisclassification = (reason) => {
   return oldAdvisorLimitWording || patientBidWording;
 };
 
-const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice }) => {
+const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice, instrument }) => {
   if (action?.action !== 'buy_put') return '';
   const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
   const triggerScore = Number(triggerData?.score);
@@ -7834,6 +7842,9 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   const plannedScore = plannedRawScore > 0 && triggerDte > 0
     ? normalizeBuyPutScore(plannedRawScore, triggerDte)
     : plannedRawScore;
+  const makerPlan = instrument && Number(ticker?.a) > 0 && limitPrice > 0
+    ? computePostOnlyRetryPrice('buy', ticker, instrument, limitPrice)
+    : null;
 
   const fmt = (value, digits = 6) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
@@ -7845,6 +7856,10 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     `- Composite edge context: edge_score=${fmt(edgeScore, 2)}, recommendation=${buyPutResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, candidate_iv_pct:${fmt(edgeComponents.candidate_iv_pct, 2)}, market_put_iv_pct:${fmt(edgeComponents.market_put_iv_pct, 2)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, oi_24h:${fmt(edgeComponents.market_oi_delta_24h_pct, 2)}, shock40:${fmt(edgeComponents.shock_payoff_multiple_40pct, 2)}x}.`,
     `- value_signal=${currentValueSignal || 'n/a'}, required_value_signal=${requiredValueSignal || 'n/a'}. ${isStandingPatientBid ? 'This is a standing patient bid: no spike signal is active, but the bid is still valid if planned_score meets threshold and budget/risk gates remain valid.' : 'A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.'}`,
     `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there as our market; do not reject as "not achievable" merely because it is not immediately marketable.`,
+    '- BUY LIMIT CONTRACT: The approved buy limit is a maximum price, not an exact required fill price. A lower tick-aligned bid preserves the contract, reduces premium outlay, and improves PUT EDGE at unchanged delta/DTE. If the limit equals or crosses the ask, the executor can lower a post_only bid below the fresh ask without raising the approved cap. Do not reject solely for crossing at the reference limit or demand a separate advisory approval for a cheaper bid. Keep all value, budget, margin, and live-data checks.',
+    makerPlan
+      ? `- Computed post_only bid on this book: ${fmtPrice(makerPlan.retryPrice)}, below live ask ${fmtPrice(makerPlan.askPrice)} and no higher than approved cap ${fmtPrice(limitPrice)}; venue tick=${fmtPrice(makerPlan.step)}. If the remaining checks pass, confirm with order_type="post_only" and this limit_price. The executor refreshes the book before placement; a fill is not guaranteed.`
+      : '- No computed maker bid is available from the supplied live book/instrument; do not invent a tick or executable price.',
     '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
     '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit. Edge context helps identify stale/wide/overpriced insurance, but it does not replace the explicit min_score/target_score price contract.',
   ].join('\n');
@@ -10536,7 +10551,7 @@ const formatConfirmationLearningContext = (action, recentTradeReviews = [], acti
   ].join('\n');
 };
 
-const getConfirmationJsonOnlyPrompt = () => 'Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after.';
+const getConfirmationJsonOnlyPrompt = () => 'Return EXACTLY one single-line JSON object. No markdown fences. No prose before or after. Keep reasoning to at most 40 words; name the decisive execution fact without restating the full analysis.';
 
 const normalizePreferredOrderType = (action, preferredOrderType) => {
   if (typeof preferredOrderType !== 'string') return null;
@@ -10568,13 +10583,17 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
     return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
   }
 
-  if (askPrice <= 0) return null;
+  if (askPrice <= 0 || !(Number(attemptedPrice) > 0)) return null;
   const belowAsk = askPrice - step;
   const candidate = belowAsk > 0
     ? normalizePriceToStep(belowAsk, step, 'down')
     : normalizePriceToStep(askPrice * 0.99, step, 'down');
-  const retryPrice = avoidRoundNumberRestingPrice(direction, candidate, step);
-  return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
+  // A refreshed ask must never make a buy retry exceed the approved bid.
+  const cappedCandidate = normalizePriceToStep(Math.min(candidate, Number(attemptedPrice)), step, 'down');
+  const retryPrice = avoidRoundNumberRestingPrice(direction, cappedCandidate, step);
+  return retryPrice > 0 && retryPrice < askPrice && retryPrice <= Number(attemptedPrice)
+    ? { retryPrice, bidPrice, askPrice, step }
+    : null;
 };
 
 const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc', tickerMap = {}, pendingActionId = null, executionContext = {}) => {
@@ -11098,6 +11117,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         ticker,
         currentPrice,
         advisorLimitPrice: advisorEntryLimitPrice,
+        instrument: instruments.find((instrument) => instrument.instrument_name === action.instrument_name),
       });
       const sellCallConfirmationPrompt = formatSellCallConfirmationContext({
         action,
@@ -11200,7 +11220,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
         const anthropicResp = await axios.post('https://api.anthropic.com/v1/messages', {
           model: ANTHROPIC_SONNET_MODEL,
           thinking: { type: 'disabled' },
-          max_tokens: 256,
+          max_tokens: 1024,
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
 ${getConfirmationScopePrompt()}
 ${getSharedActionPolicyPrompt()}
@@ -11221,7 +11241,8 @@ ${getConfirmationJsonOnlyPrompt()}`,
         });
         const anthropicText = getAnthropicResponseText(anthropicResp.data);
         if (!anthropicText.trim()) {
-          anthropicFailure = 'empty response';
+          anthropicFailure = getAnthropicResponseFailure(anthropicResp.data);
+          console.log(`⚠️ Sonnet confirmation failed: ${anthropicFailure}`);
         } else {
           anthropicVote = extractConfirmationVote(anthropicText);
           if (!anthropicVote) {
