@@ -3569,6 +3569,7 @@ Output ONLY this JSON:
 
       const response = await axios.post('https://api.anthropic.com/v1/messages', {
         model: ANTHROPIC_SONNET_MODEL,
+        thinking: { type: 'disabled' },
         max_tokens: 512,
         messages: [{ role: 'user', content: reviewPrompt }],
       }, {
@@ -3580,7 +3581,7 @@ Output ONLY this JSON:
         timeout: 30000,
       });
 
-      const resultText = response.data?.content?.[0]?.text || '';
+      const resultText = getAnthropicResponseText(response.data);
       const result = extractJSON(resultText);
       if (result && result.status && result.verdict) {
         db.updateHypothesisVerdict(hyp.id, {
@@ -3641,6 +3642,7 @@ Output JSON:
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
+      thinking: { type: 'disabled' },
       max_tokens: 500,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -3652,7 +3654,7 @@ Output JSON:
       timeout: 45000,
     });
 
-    const text = response.data?.content?.[0]?.text || '';
+    const text = getAnthropicResponseText(response.data);
     const result = extractJSON(text);
     if (result && result.new_lessons) {
       for (const lesson of (result.new_lessons || [])) {
@@ -4109,6 +4111,7 @@ Output JSON only:
 
         const response = await axios.post('https://api.anthropic.com/v1/messages', {
           model: ANTHROPIC_SONNET_MODEL,
+          thinking: { type: 'disabled' },
           max_tokens: 700,
           messages: [{ role: 'user', content: reviewPrompt }],
         }, {
@@ -4120,7 +4123,7 @@ Output JSON only:
           timeout: 30000,
         });
 
-        const text = response.data?.content?.[0]?.text || '';
+        const text = getAnthropicResponseText(response.data);
         const result = extractJSON(text);
         if (!result?.status || !result?.summary) {
           console.log(`🧾 Trade review parse failed for ${campaign.instrument_name}`);
@@ -4313,6 +4316,7 @@ Output JSON only:
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
+      thinking: { type: 'disabled' },
       max_tokens: 1800,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -4324,7 +4328,7 @@ Output JSON only:
       timeout: TRADE_LESSON_SYNTHESIS_TIMEOUT_MS,
     });
 
-    const text = response.data?.content?.[0]?.text || '';
+    const text = getAnthropicResponseText(response.data);
     const result = extractJSON(text);
     const definitions = new Map(TRADE_LESSON_TAXONOMY.map((definition) => [definition.lesson_key, definition]));
     const seenKeys = new Set();
@@ -4949,6 +4953,7 @@ Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(
 
   const response = await axios.post('https://api.anthropic.com/v1/messages', {
     model: ANTHROPIC_SONNET_MODEL,
+    thinking: { type: 'disabled' },
     max_tokens: 8192,
     messages: [{ role: 'user', content: prompt }],
   }, {
@@ -4960,7 +4965,7 @@ Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(
     timeout: 180000,
   });
 
-  const text = response.data?.content?.[0]?.text || '';
+  const text = getAnthropicResponseText(response.data);
   const pageRegex = /<wiki_page\s+path="([^"]+)">([\s\S]*?)<\/wiki_page>/g;
   let match;
   let writeCount = 0;
@@ -5093,6 +5098,7 @@ If no pages need updating, output: <no_updates/>`;
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
+      thinking: { type: 'disabled' },
       max_tokens: 4096,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -5104,7 +5110,7 @@ If no pages need updating, output: <no_updates/>`;
       timeout: 180000,
     });
 
-    const text = response.data?.content?.[0]?.text || '';
+    const text = getAnthropicResponseText(response.data);
 
     if (text.includes('<no_updates/>')) {
       const meta = readWikiMeta();
@@ -5419,6 +5425,7 @@ Assign page_to_fix to the page whose content should change. For a cross-page con
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
+      thinking: { type: 'disabled' },
       max_tokens: 1800,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -5430,7 +5437,7 @@ Assign page_to_fix to the page whose content should change. For a cross-page con
       timeout: 180000,
     });
 
-    const text = response.data?.content?.[0]?.text || '';
+    const text = getAnthropicResponseText(response.data);
     const lintMatch = text.match(/<lint_result>([\s\S]*?)<\/lint_result>/);
     let result = null;
     try {
@@ -5923,7 +5930,7 @@ Use this wiki context to:
       timeout: 120000,
     });
 
-    const text = response.data?.content?.[0]?.text || '';
+    const text = getAnthropicResponseText(response.data);
 
     // Extract journal entries
     const regex = /<journal\s+type="(observation|hypothesis|regime_note)">([\s\S]*?)<\/journal>/g;
@@ -5979,12 +5986,19 @@ Use this wiki context to:
 };
 
 // ─── OpenAI API Helper ───────────────────────────────────────────────────────
-const callOpenAI = async (systemPrompt, userPrompt, { maxTokens = 2048, timeout = 30000, model = 'gpt-4o' } = {}) => {
+const OPENAI_STRATEGY_MODEL = process.env.OPENAI_STRATEGY_MODEL || 'gpt-6-astra';
+const OPENAI_CONFIRMATION_MODEL = process.env.OPENAI_CONFIRMATION_MODEL || 'gpt-5.6-terra';
+
+// maxTokens includes both reasoning and visible output for these models.
+const callOpenAI = async (systemPrompt, userPrompt, {
+  maxTokens = 16384, timeout = 120000, model = OPENAI_STRATEGY_MODEL, reasoningEffort = 'medium',
+} = {}) => {
   if (!process.env.OPENAI_API_KEY) return null;
   try {
     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
       model,
-      max_tokens: maxTokens,
+      max_completion_tokens: maxTokens,
+      reasoning_effort: reasoningEffort,
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
@@ -5996,15 +6010,26 @@ const callOpenAI = async (systemPrompt, userPrompt, { maxTokens = 2048, timeout 
       },
       timeout,
     });
-    return response.data?.choices?.[0]?.message?.content || '';
+    const choice = response.data?.choices?.[0];
+    if (choice?.finish_reason !== 'stop') {
+      console.log(`⚠️ OpenAI ${model}: incomplete response (${choice?.finish_reason || 'missing choice'})`);
+      return null;
+    }
+    return choice.message?.content || '';
   } catch (e) {
     console.log(`⚠️ OpenAI API call failed: ${e.message}`);
     return null;
   }
 };
 
-const ANTHROPIC_SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
-const ANTHROPIC_OPUS_MODEL = process.env.ANTHROPIC_OPUS_MODEL || 'claude-opus-4-8';
+const ANTHROPIC_SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
+const ANTHROPIC_STRATEGY_MODEL = process.env.ANTHROPIC_STRATEGY_MODEL || 'claude-fable-5-1';
+
+// Thinking blocks can precede text; never interpret them as the final answer.
+const getAnthropicResponseText = (data) => {
+  if (data?.stop_reason !== 'end_turn') return '';
+  return (data.content || []).filter(block => block.type === 'text').map(block => block.text).join('');
+};
 
 const getAnthropicErrorMessage = (error) => {
   const apiMessage = error?.response?.data?.error?.message;
@@ -6070,10 +6095,12 @@ const callAnthropicWithMinuteBoundaryRetry = async ({
   timeout = 120000,
   spreadAfterBoundary = false,
   maxServerErrorRetries = 2,
+  thinking = { type: 'disabled' },
 }) => {
   const attemptCall = () => axios.post('https://api.anthropic.com/v1/messages', {
     model,
     max_tokens: maxTokens,
+    thinking,
     system,
     messages,
   }, {
@@ -6922,7 +6949,7 @@ ${JSON.stringify(wikiSignals || null, null, 2)}
 Return JSON only. Synthesize market characteristics for a downstream strategist; do not include trading recommendations.`;
 
   try {
-    const text = await callOpenAI(systemPrompt, userPrompt, { maxTokens: 1200, timeout: 45000, model: 'gpt-4o' });
+    const text = await callOpenAI(systemPrompt, userPrompt, { maxTokens: 8192, timeout: 120000, model: OPENAI_STRATEGY_MODEL });
     if (!text) return null;
     const parsed = extractJSON(text);
     if (!parsed || typeof parsed !== 'object') return null;
@@ -11172,6 +11199,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
       try {
         const anthropicResp = await axios.post('https://api.anthropic.com/v1/messages', {
           model: ANTHROPIC_SONNET_MODEL,
+          thinking: { type: 'disabled' },
           max_tokens: 256,
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
 ${getConfirmationScopePrompt()}
@@ -11191,7 +11219,7 @@ ${getConfirmationJsonOnlyPrompt()}`,
           },
           timeout: 15000,
         });
-        const anthropicText = anthropicResp.data?.content?.[0]?.text || '';
+        const anthropicText = getAnthropicResponseText(anthropicResp.data);
         if (!anthropicText.trim()) {
           anthropicFailure = 'empty response';
         } else {
@@ -11232,7 +11260,7 @@ REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash 
 ${getConfirmationJsonOnlyPrompt()}
 Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, "limit_price": <number or null>, "reasoning": "..." }`,
           confirmPrompt,
-          { maxTokens: 256, timeout: 15000, model: 'gpt-4o-mini' }
+          { maxTokens: 512, timeout: 15000, model: OPENAI_CONFIRMATION_MODEL, reasoningEffort: 'none' }
         );
         if (codexText) {
           codexVote = extractConfirmationVote(codexText);
@@ -11939,9 +11967,9 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
     console.log(`📋 Advisory Step 0 failed (non-fatal): ${e.message}`);
   }
 
-  // ── Step 1: Primary Advisor (Claude Opus, Spitznagel temperament) ───────────
+  // ── Step 1: Primary Advisor (Claude Fable 5.1, Spitznagel temperament) ───────────
 
-  console.log('📋 Advisory Step 1: Primary advisor (Claude Opus)...');
+  console.log('📋 Advisory Step 1: Primary advisor (Claude Fable 5.1)...');
 
   const primarySystemPrompt = `You are a senior options strategist with Mark Spitznagel's temperament. Your philosophy:
 - Arithmetic discipline above all: every trade must have positive expected value in crash scenarios
@@ -12164,20 +12192,21 @@ Use the Mandelbrot archive as descriptive market-structure context. It highlight
 
 Produce your trading agenda JSON now.`;
 
-  const advisoryAnthropicModel = ANTHROPIC_OPUS_MODEL;
+  const advisoryAnthropicModel = ANTHROPIC_STRATEGY_MODEL;
 
   let primaryAgenda = null;
   try {
     const primaryResponse = await callAnthropicWithMinuteBoundaryRetry({
       label: 'Advisory Step 1',
       model: advisoryAnthropicModel,
-      maxTokens: 4096,
+      maxTokens: 16384,
+      thinking: { type: 'adaptive' },
       system: primarySystemPrompt,
       messages: [{ role: 'user', content: primaryUserPrompt }],
       timeout: 120000,
     });
 
-    const primaryText = primaryResponse.data?.content?.[0]?.text || '';
+    const primaryText = getAnthropicResponseText(primaryResponse.data);
     try {
       primaryAgenda = extractJSON(primaryText);
       if (primaryAgenda) {
@@ -12279,7 +12308,7 @@ Output JSON only:
   "additions": []
 }`;
 
-    const talebText = await callOpenAI(talebSystem, talebPrompt, { maxTokens: 2048, timeout: 60000 });
+    const talebText = await callOpenAI(talebSystem, talebPrompt, { maxTokens: 16384, timeout: 120000, model: OPENAI_STRATEGY_MODEL });
     if (talebText) {
       secondOpinion = parseTalebSecondOpinion(talebText);
       if (secondOpinion) {
@@ -12420,7 +12449,7 @@ Synthesize the final agenda now.`;
       spreadAfterBoundary: true,
     });
 
-    const synthesisText = synthesisResponse.data?.content?.[0]?.text || '';
+    const synthesisText = getAnthropicResponseText(synthesisResponse.data);
     try {
       const synthesized = extractJSON(synthesisText);
       if (synthesized) {
@@ -12490,7 +12519,7 @@ Return the full repaired agenda JSON.`,
         }],
         timeout: 60000,
       });
-      const repairedText = repairResponse.data?.content?.[0]?.text || '';
+      const repairedText = getAnthropicResponseText(repairResponse.data);
       const repairedAgenda = extractJSON(repairedText);
       if (repairedAgenda) {
         const previousAgenda = finalAgenda || {};
