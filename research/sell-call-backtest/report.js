@@ -1,6 +1,7 @@
 'use strict';
 
 const { round } = require('./utils');
+const strategyFacts = require('../../bot/strategy-facts.json');
 
 function summarizeModelArtifacts(artifacts = []) {
   return artifacts.map((artifact) => ({
@@ -36,8 +37,8 @@ function buildReport({ data, examples, results, options = {} }) {
   const compactResults = results.map(compactResult);
   const baseline = compactResults.find((result) => result.policy === 'no_call');
   return {
-    schema_version: 1,
-    engine: 'sell-call-walk-forward-backtest-v1',
+    schema_version: 2,
+    engine: 'sell-call-walk-forward-backtest-v2',
     computed_at: new Date().toISOString(),
     isolation: 'offline/read-only; shares the pure production call-score function without loading the live bot runtime or writing to the database',
     historical_window: data.window,
@@ -56,9 +57,10 @@ function buildReport({ data, examples, results, options = {} }) {
     limitations: [
       'Historical top-of-book quotes cannot prove that a maker order would have filled.',
       'Bid/ask mode assumes an immediately executable sale at bid and repurchase at ask.',
-      'With quoted depth enabled, zero or missing bid depth blocks entry; disabling it explicitly assumes unlimited entry liquidity.',
+      'With quoted depth enabled, entries and non-settlement exits are capped by bid and ask depth respectively; zero or missing depth blocks fills.',
+      'Unfilled terminal positions remain marked in NAV. Trades and win rates count completed entries, not partial exit fills; trade_log includes partially closed entries with closed=false.',
       'Hourly sampling can miss intrahour fills, adverse excursions, and exact expiry prints.',
-      'The current-edge baseline shares the production DTE-normalized score and defaults to a minimum edge of 65; it does not reproduce all live execution and risk gates.',
+      `The current-edge baseline shares the production DTE-normalized score and defaults to a minimum edge of ${strategyFacts.sell_call_fallback_min_score}; it does not reproduce all live execution and risk gates.`,
       'Margin is a configurable approximation, not a reconstruction of venue liquidation state.',
       'Results are research estimates and must remain out of live execution until shadow validation succeeds.',
     ],
@@ -96,8 +98,9 @@ function renderMarkdown(report) {
     lines.push(result.description || 'No description.');
     lines.push('');
     lines.push(result.config.useQuotedDepth
-      ? 'Entry liquidity: capped by quoted bid depth; zero or unknown depth blocks entry.'
-      : 'Entry liquidity: quoted depth ignored; unlimited entry liquidity assumed.');
+      ? 'Liquidity: entries capped by bid depth, non-settlement exits capped by ask depth; zero or unknown depth blocks fills.'
+      : 'Liquidity: quoted depth ignored; unlimited entry and exit liquidity assumed.');
+    lines.push(`Completed trades: ${result.trades}; exit fills: ${result.exit_fills}; open positions: ${result.open_positions} (${result.open_contracts} contracts); unrealized call P&L: ${money(result.unrealized_call_pnl)}.`);
     lines.push('');
     lines.push(`Premium received: ${money(result.total_premium_received)}; fees: ${money(result.total_fees)}; max margin: ${money(result.max_margin_used)}; return on max margin: ${percentage(result.return_on_max_margin)}.`);
     if (result.model_versions?.length) {

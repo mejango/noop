@@ -34,6 +34,8 @@ By default, `research:correlate` scans all available history, ranks the top 8 ca
 
 Entry spot and strike distance use the latest recorded spot at or before the candidate timestamp. Market features and their changes use completed hours ending before that timestamp. A bounded `--days` run loads the extra preceding hours needed for those features, without adding those warm-up observations to the candidate sample. Reports record these timing conventions and counts of sampled hours, sampled timestamps, and candidates missing prior context.
 
+When the snapshot includes `quote_received_at`, forward option outcomes use that receipt time rather than the batch envelope timestamp. Older exports without that column retain their recorded timestamp semantics.
+
 The `profit-correlation-v2` report is not directly comparable with older reports that used whole candidate-hour market aggregates or selected the best quotes from anywhere in that hour. Regenerate those reports before using their feature recommendations.
 
 Interpretation:

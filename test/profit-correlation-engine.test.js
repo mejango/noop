@@ -150,3 +150,23 @@ test('a midhour candidate cutoff still loads complete prior-hour context', (t) =
   assert.equal(report.actions.sell_call.candidates_scanned, 12);
   assert.equal(feature(report, 'market_best_call_score').bucket.low_threshold, 80);
 });
+
+test('receipt timestamps prevent a pre-horizon quote from becoming a forward outcome', (t) => {
+  const db = fixture(t);
+  if (!db.prepare('PRAGMA table_info(options_snapshots)').all().some((column) => column.name === 'quote_received_at')) {
+    db.exec('ALTER TABLE options_snapshots ADD COLUMN quote_received_at TEXT');
+  }
+  addSpot(db, '2026-09-10T10:00:00.000Z', 2000);
+  addQuote(db, '2026-09-10T10:00:00.000Z', 'ENTRY', 10, 11);
+  addQuote(db, '2026-09-10T11:00:01.000Z', 'ENTRY', 4, 5, 0.5);
+  db.exec(`UPDATE options_snapshots SET quote_received_at = '2026-09-10T10:59:59.000Z'
+    WHERE timestamp = '2026-09-10T11:00:01.000Z'`);
+  const withoutForwardReceipt = buildProfitCorrelationReport(db, options());
+  assert.equal(withoutForwardReceipt.actions.sell_call.horizons['1'].overall.samples, 0);
+  addQuote(db, '2026-09-10T11:01:01.000Z', 'ENTRY', 5, 6, 0.5);
+  db.exec(`UPDATE options_snapshots SET quote_received_at = '2026-09-10T11:01:00.000Z'
+    WHERE timestamp = '2026-09-10T11:01:01.000Z'`);
+  const withForwardReceipt = buildProfitCorrelationReport(db, options());
+  assert.equal(withForwardReceipt.actions.sell_call.horizons['1'].overall.samples, 1);
+  assert.equal(withForwardReceipt.actions.sell_call.horizons['1'].overall.mean_return, 0.4);
+});

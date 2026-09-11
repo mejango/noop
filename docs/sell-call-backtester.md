@@ -97,13 +97,15 @@ The simulator maintains cash, ETH collateral, short-call liabilities, exposure, 
 
 The default `bid_ask` execution mode sells at the historical bid and buys back at the historical ask. This is deliberately conservative for crossing orders, but top-of-book history cannot establish whether a hypothetical maker order would have filled. `midpoint` and `mark` modes are sensitivity analyses, not execution claims.
 
-Entries are capped by finite, positive quoted bid depth by default. Zero, missing, or invalid depth prevents an entry. `--ignore-depth` explicitly assumes unlimited entry liquidity for sensitivity analysis; each result records `config.useQuotedDepth`, and the Markdown backtest report states the active assumption. Exit quantities are not capped by quoted ask depth.
+Entries are capped by finite, positive quoted bid depth by default. Non-settlement exits are capped by quoted ask depth, with partial fills reducing position quantity, allocated entry fees, and reserved margin proportionally. Zero, missing, or invalid depth prevents a fill. `--ignore-depth` explicitly assumes unlimited entry and exit liquidity for sensitivity analysis; each result records `config.useQuotedDepth`, and the Markdown report states the active assumption. Expiry settlement does not require order-book depth.
+
+Any unfilled balance at the end of the replay remains open and marked in NAV using the existing liability estimate. Reports distinguish realized and unrealized call P&L and expose the remaining contracts and margin. Partial exit fills are grouped by entry in `trade_log`; `closed=false` identifies an incompletely closed entry, and `exit_fills` preserves each fill. Trade counts and win rates include completed entries only. Holding time is quantity-weighted across exit fills, preserving reserved-margin-day accounting. The version 2 report schema records these distinctions.
 
 ## Limitations
 
 - Margin is configurable and approximate; historical venue liquidation state cannot be reconstructed exactly.
 - Hourly sampling may miss intrahour fills and adverse excursions.
 - The current-edge baseline shares the production score and defaults, but does not reproduce all live execution and risk gates.
-- Missing pre-expiry quotes force an approximate intrinsic-value close at the end of the test.
+- Missing quotes leave the position marked at the existing liability estimate; explicit depth-ignored simulations retain approximate intrinsic-value closes when a close quote is missing.
 - Model comparisons must be judged across multiple market regimes and effective timestamp groups, not raw option-row counts.
 - Backtest results remain research artifacts until a challenger also succeeds in live shadow mode.

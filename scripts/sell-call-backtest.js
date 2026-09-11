@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+const strategyFacts = require('../bot/strategy-facts.json');
 const {
   buildLabeledExamples,
   buildReport,
@@ -33,8 +34,8 @@ function usage() {
     '  --policies=no_call,raw_score,current_edge,learned_walk_forward',
     '  --starting-eth=5 --starting-cash=0',
     '  --execution=bid_ask|midpoint|mark',
-    '  --ignore-depth                Assume unlimited entry liquidity (default: require quoted bid depth)',
-    '  --min-bid=4 --min-raw-score=65 --min-edge=65',
+    '  --ignore-depth                Assume unlimited entry/exit liquidity (default: require quoted depth)',
+    `  --min-bid=${strategyFacts.sell_call_fallback_min_bid} --min-raw-score=65 --min-edge=${strategyFacts.sell_call_fallback_min_score}`,
     '  --fee-bps=0 --settlement-fee-bps=0',
     '  --exposure-cap=0.45 --margin-rate=0.15 --margin-budget-pct=0.45',
     '  --profit-capture-pct=0.80 --stop-loss-multiple=3 --max-hold-hours=168',
@@ -119,7 +120,7 @@ function main() {
         minRawScore: parseNumber(args['min-raw-score'], 65),
       }),
       current_edge: () => makeCurrentEdgePolicy({
-        minBid: parseNumber(args['min-bid'], 4),
+        minBid: parseNumber(args['min-bid'], undefined),
         minEdge: parseNumber(args['min-edge'], undefined),
       }),
       learned_walk_forward: () => makeLearnedPolicy(examples, {

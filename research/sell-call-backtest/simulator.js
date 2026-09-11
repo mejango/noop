@@ -61,32 +61,44 @@ function portfolioNav(account, positions, frame, execution) {
 
 function closePosition({ account, position, frame, config, reason, forcedPrice = null, settlement = false }) {
   const quote = frame.quotes.get(position.instrument_name);
+  const quantity = settlement || !config.useQuotedDepth
+    ? position.quantity
+    : floorAmount(Math.min(position.quantity, Math.max(0, finite(quote?.ask_amount) ?? 0)), config.amountStep);
+  if (!(quantity > 0)) return null;
+  const fraction = quantity / position.quantity;
+  const entryGross = position.entry_gross * fraction;
+  const entryFee = position.entry_fee * fraction;
+  const marginReserved = position.margin_reserved * fraction;
   let closePrice = forcedPrice;
   let approximate = false;
   if (closePrice == null) closePrice = priceForExecution(quote, 'buy', config.execution);
+  if (!settlement && config.useQuotedDepth && !(closePrice > 0)) return null;
   if (closePrice == null || closePrice < 0) {
     closePrice = Math.max(Number(frame.spot_price || 0) - position.strike, 0);
     approximate = true;
   }
-  const closeGross = closePrice * position.quantity;
+  const closeGross = closePrice * quantity;
   const closeFee = feeFor(closeGross, settlement ? config.settlementFeeBps : config.feeBps);
   account.cash -= closeGross + closeFee;
-  const pnl = position.entry_gross - closeGross - position.entry_fee - closeFee;
+  const pnl = entryGross - closeGross - entryFee - closeFee;
   return {
     instrument_name: position.instrument_name,
     opened_at: position.opened_at,
     closed_at: frame.timestamp,
-    quantity: position.quantity,
+    quantity,
+    remaining_quantity: Math.max(0, round(position.quantity - quantity, 12)),
     strike: position.strike,
     expiry: new Date(position.expiry_ms).toISOString(),
     entry_price: position.entry_price,
     close_price: closePrice,
-    entry_gross: position.entry_gross,
+    entry_gross: entryGross,
     close_gross: closeGross,
-    fees: position.entry_fee + closeFee,
+    entry_fee: entryFee,
+    exit_fee: closeFee,
+    fees: entryFee + closeFee,
     pnl,
-    return_on_premium: position.entry_gross > 0 ? pnl / position.entry_gross : null,
-    margin_reserved: position.margin_reserved,
+    return_on_premium: entryGross > 0 ? pnl / entryGross : null,
+    margin_reserved: marginReserved,
     holding_hours: (frame.timestamp_ms - position.opened_at_ms) / HOUR_MS,
     reason,
     tail_loss: closePrice > position.entry_price * 2,
@@ -97,13 +109,42 @@ function closePosition({ account, position, frame, config, reason, forcedPrice =
   };
 }
 
+// Keep one trade per entry so partial fills do not inflate trade counts or wins.
+function summarizeExitFills(fills) {
+  const byEntry = new Map();
+  for (const fill of fills) {
+    const key = `${fill.instrument_name}:${fill.opened_at}`;
+    let trade = byEntry.get(key);
+    if (!trade) {
+      trade = { ...fill, exit_fills: [] };
+      for (const field of ['quantity', 'entry_gross', 'close_gross', 'entry_fee', 'exit_fee', 'fees', 'pnl', 'margin_reserved', 'holding_hours']) trade[field] = 0;
+      byEntry.set(key, trade);
+    }
+    for (const field of ['quantity', 'entry_gross', 'close_gross', 'entry_fee', 'exit_fee', 'fees', 'pnl', 'margin_reserved']) trade[field] += fill[field];
+    trade.holding_hours += fill.holding_hours * fill.quantity;
+    trade.closed_at = fill.closed_at;
+    trade.reason = fill.reason;
+    trade.remaining_quantity = fill.remaining_quantity;
+    trade.tail_loss = trade.tail_loss || fill.tail_loss;
+    trade.approximate_exit = trade.approximate_exit || fill.approximate_exit;
+    trade.exit_fills.push(fill);
+  }
+  return [...byEntry.values()].map((trade) => ({
+    ...trade,
+    closed: trade.remaining_quantity === 0,
+    close_price: trade.close_gross / trade.quantity,
+    return_on_premium: trade.entry_gross > 0 ? trade.pnl / trade.entry_gross : null,
+    holding_hours: trade.holding_hours / trade.quantity,
+  }));
+}
+
 function runBacktest(frames = [], policy, rawConfig = {}) {
   if (!Array.isArray(frames) || frames.length === 0) throw new Error('cannot backtest without historical frames');
   if (!policy || typeof policy.select !== 'function') throw new Error('policy must implement select()');
   const config = normalizeConfig(rawConfig);
   const account = { cash: config.startingCash, eth: config.startingEth };
   const positions = [];
-  const trades = [];
+  const exitFills = [];
   const equity = [];
   let totalPremium = 0;
   let totalFees = 0;
@@ -136,6 +177,8 @@ function runBacktest(frames = [], policy, rawConfig = {}) {
         reason = 'stop_loss';
       } else if (config.maxHoldHours && frame.timestamp_ms - position.opened_at_ms >= config.maxHoldHours * HOUR_MS) {
         reason = 'max_hold';
+      } else if (isFinalFrame) {
+        reason = 'end_of_backtest';
       }
       if (!reason) continue;
       const trade = closePosition({
@@ -147,9 +190,14 @@ function runBacktest(frames = [], policy, rawConfig = {}) {
         forcedPrice: settlementPrice,
         settlement,
       });
-      totalFees += trade.fees - position.entry_fee;
-      trades.push(trade);
-      positions.splice(index, 1);
+      if (!trade) continue;
+      totalFees += trade.exit_fee;
+      exitFills.push(trade);
+      position.quantity = trade.remaining_quantity;
+      position.entry_gross -= trade.entry_gross;
+      position.entry_fee -= trade.entry_fee;
+      position.margin_reserved -= trade.margin_reserved;
+      if (position.quantity === 0) positions.splice(index, 1);
     }
 
     const openExposure = positions.reduce((sum, position) => sum + position.quantity, 0);
@@ -221,30 +269,19 @@ function runBacktest(frames = [], policy, rawConfig = {}) {
   }
 
   const finalFrame = frames[frames.length - 1];
-  for (let index = positions.length - 1; index >= 0; index--) {
-    const position = positions[index];
-    const expired = finalFrame.timestamp_ms >= position.expiry_ms;
-    const trade = closePosition({
-      account,
-      position,
-      frame: finalFrame,
-      config,
-      reason: expired ? 'expiry' : 'end_of_backtest',
-      forcedPrice: expired ? Math.max(finalFrame.spot_price - position.strike, 0) : null,
-      settlement: expired,
-    });
-    totalFees += trade.fees - position.entry_fee;
-    trades.push(trade);
-    positions.splice(index, 1);
-  }
-  const endingNav = account.cash + account.eth * finalFrame.spot_price;
+  // Final-frame liquidity was already consumed once above. Unfilled inventory
+  // remains marked in NAV instead of being recorded as another fictitious fill.
+  const endingNav = portfolioNav(account, positions, finalFrame, config.execution);
+  const endingMargin = positions.reduce((sum, position) => sum + position.margin_reserved, 0);
   if (equity.length === 0 || equity[equity.length - 1].timestamp !== finalFrame.timestamp) {
-    equity.push({ timestamp: finalFrame.timestamp, nav: endingNav, spot_price: finalFrame.spot_price, cash: account.cash, open_positions: 0, margin_used: 0 });
+    equity.push({ timestamp: finalFrame.timestamp, nav: endingNav, spot_price: finalFrame.spot_price, cash: account.cash, open_positions: positions.length, margin_used: endingMargin });
   } else {
-    equity[equity.length - 1] = { ...equity[equity.length - 1], nav: endingNav, cash: account.cash, open_positions: 0, margin_used: 0 };
+    equity[equity.length - 1] = { ...equity[equity.length - 1], nav: endingNav, cash: account.cash, open_positions: positions.length, margin_used: endingMargin };
   }
   const baselineEndingNav = config.startingCash + config.startingEth * finalFrame.spot_price;
-  const wins = trades.filter((trade) => trade.pnl > 0).length;
+  const trades = summarizeExitFills(exitFills);
+  const closedTrades = trades.filter((trade) => trade.closed);
+  const wins = closedTrades.filter((trade) => trade.pnl > 0).length;
   const realizedPnl = trades.reduce((sum, trade) => sum + trade.pnl, 0);
   return {
     policy: policy.name,
@@ -260,17 +297,22 @@ function runBacktest(frames = [], policy, rawConfig = {}) {
     eth_baseline_return: round((baselineEndingNav / startingNav) - 1, 8),
     overlay_pnl: round(endingNav - baselineEndingNav, 6),
     realized_call_pnl: round(realizedPnl, 6),
+    unrealized_call_pnl: round(endingNav - baselineEndingNav - realizedPnl, 6),
+    open_positions: positions.length,
+    open_contracts: round(positions.reduce((sum, position) => sum + position.quantity, 0), 12),
+    ending_margin_used: round(endingMargin, 6),
     total_premium_received: round(totalPremium, 6),
     total_fees: round(totalFees, 6),
     max_margin_used: round(maxMarginUsed, 6),
     return_on_max_margin: maxMarginUsed > 0 ? round(realizedPnl / maxMarginUsed, 8) : null,
     max_drawdown: round(maxDrawdown(equity), 8),
-    trades: trades.length,
+    trades: closedTrades.length,
+    exit_fills: exitFills.length,
     wins,
-    win_rate: trades.length > 0 ? round(wins / trades.length, 8) : null,
+    win_rate: closedTrades.length > 0 ? round(wins / closedTrades.length, 8) : null,
     tail_losses: trades.filter((trade) => trade.tail_loss).length,
     approximate_exits: trades.filter((trade) => trade.approximate_exit).length,
-    average_holding_hours: round(mean(trades.map((trade) => trade.holding_hours)), 4),
+    average_holding_hours: round(mean(closedTrades.map((trade) => trade.holding_hours)), 4),
     trade_log: trades,
     equity_curve: equity,
     model_artifacts: typeof policy.getArtifacts === 'function' ? policy.getArtifacts() : [],

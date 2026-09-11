@@ -6,6 +6,7 @@
 
 const assert = require('assert');
 const Database = require('better-sqlite3');
+const strategyFacts = require('../bot/strategy-facts.json');
 const {
   SELL_CALL_EDGE_REFERENCE_DTE,
   SELL_CALL_EDGE_DTE_EXPONENT,
@@ -124,10 +125,15 @@ describe('current edge compatibility', () => {
 
   test('uses the production default floor and ranks by normalized score', () => {
     const policy = makeCurrentEdgePolicy();
-    const atFloor = { instrument_name: 'AT_FLOOR', raw_score: 65, dte: 8.5, bid_price: 4 };
+    const atFloor = {
+      instrument_name: 'AT_FLOOR',
+      raw_score: strategyFacts.sell_call_fallback_min_score,
+      dte: SELL_CALL_EDGE_REFERENCE_DTE,
+      bid_price: strategyFacts.sell_call_fallback_min_bid,
+    };
     assert.strictEqual(policy.select({ candidates: [atFloor] }).candidate, atFloor);
-    assert.strictEqual(policy.select({ candidates: [{ ...atFloor, raw_score: 64.99 }] }), null);
-    assert.strictEqual(policy.select({ candidates: [{ ...atFloor, bid_price: 3.99 }] }), null);
+    assert.strictEqual(policy.select({ candidates: [{ ...atFloor, raw_score: atFloor.raw_score - 0.01 }] }), null);
+    assert.strictEqual(policy.select({ candidates: [{ ...atFloor, bid_price: atFloor.bid_price - 0.01 }] }), null);
     const shorter = { ...atFloor, instrument_name: 'SHORTER', raw_score: 89, dte: 5 };
     const longer = { ...atFloor, instrument_name: 'LONGER', raw_score: 90, dte: 12 };
     assert.strictEqual(policy.select({ candidates: [longer, shorter] }).candidate, shorter);
@@ -604,7 +610,109 @@ describe('portfolio replay', () => {
       results: [result],
     });
     assert.strictEqual(report.results[0].config.useQuotedDepth, false);
-    assert.match(renderMarkdown(report), /quoted depth ignored; unlimited entry liquidity assumed/);
+    assert.match(renderMarkdown(report), /quoted depth ignored; unlimited entry and exit liquidity assumed/);
+  });
+
+  function exitDepthFrames(exits) {
+    const start = Date.UTC(2026, 0, 1, 0);
+    const expiry = Math.floor((start + 8 * 24 * HOUR_MS) / 1000);
+    return framesFrom([
+      { timestampMs: start, spot: 2000, options: [option({ expiry })] },
+      ...exits.map(({ depth, ask = 1 }, index) => {
+        const quote = option({ expiry, bid: 0.5, ask, askAmount: depth });
+        if (depth === undefined) delete quote.ask_amount;
+        return { timestampMs: start + (index + 1) * HOUR_MS, spot: 2000, options: [quote] };
+      }),
+    ]);
+  }
+
+  test('zero, missing, or invalid ask depth blocks exits and preserves marked terminal exposure', () => {
+    for (const depth of [0, null, undefined, -1, NaN, Infinity, 'unknown']) {
+      const result = runBacktest(exitDepthFrames([{ depth }]), makeRawScorePolicy(), { startingEth: 1 });
+      assert.strictEqual(result.trades, 0, `unexpected closed trade for ask depth ${depth}`);
+      assert.strictEqual(result.exit_fills, 0);
+      assert.strictEqual(result.realized_call_pnl, 0);
+      assert.strictEqual(result.open_positions, 1);
+      assert.strictEqual(result.open_contracts, 0.45);
+      assert.strictEqual(result.ending_margin_used, 135);
+      assert.strictEqual(result.unrealized_call_pnl, 4.05);
+      assert.strictEqual(result.ending_nav, 2004.05);
+      assert.strictEqual(result.equity_curve.at(-1).open_positions, 1);
+      assert.strictEqual(result.equity_curve.at(-1).margin_used, 135);
+    }
+  });
+
+  test('a terminal partial exit consumes ask depth once and keeps the unfilled balance', () => {
+    const result = runBacktest(exitDepthFrames([{ depth: 0.1 }]), makeRawScorePolicy(), { startingEth: 1 });
+    assert.strictEqual(result.trades, 0);
+    assert.strictEqual(result.wins, 0);
+    assert.strictEqual(result.win_rate, null);
+    assert.strictEqual(result.exit_fills, 1);
+    assert.strictEqual(result.trade_log.length, 1);
+    assert.strictEqual(result.trade_log[0].closed, false);
+    assert.strictEqual(result.trade_log[0].quantity, 0.1);
+    assert.strictEqual(result.trade_log[0].remaining_quantity, 0.35);
+    assert.strictEqual(result.open_contracts, 0.35);
+    assert.strictEqual(result.ending_margin_used, 105);
+    assert.strictEqual(result.realized_call_pnl, 0.9);
+    assert.strictEqual(result.unrealized_call_pnl, 3.15);
+    assert.strictEqual(result.ending_nav, 2004.05);
+  });
+
+  test('missing or zero buyback prices cannot create a synthetic default exit despite reported depth', () => {
+    for (const ask of [null, 0]) {
+      const result = runBacktest(exitDepthFrames([{ depth: 10, ask }]), makeRawScorePolicy(), { startingEth: 1 });
+      assert.strictEqual(result.exit_fills, 0);
+      assert.strictEqual(result.realized_call_pnl, 0);
+      assert.strictEqual(result.open_contracts, 0.45);
+    }
+  });
+
+  test('partial exits allocate fees and margin once and count one completed trade', () => {
+    const result = runBacktest(exitDepthFrames([{ depth: 0.1 }, { depth: 0.35, ask: 1.5 }]), makeRawScorePolicy(), {
+      startingEth: 1, feeBps: 100,
+    });
+    assert.strictEqual(result.trades, 1);
+    assert.strictEqual(result.wins, 1);
+    assert.strictEqual(result.exit_fills, 2);
+    assert.strictEqual(result.trade_log.length, 1);
+    assert.strictEqual(result.trade_log[0].closed, true);
+    assert.strictEqual(result.trade_log[0].exit_fills.length, 2);
+    assert.ok(Math.abs(result.trade_log[0].quantity - 0.45) < 1e-12);
+    assert.ok(Math.abs(result.trade_log[0].entry_fee - 0.045) < 1e-12);
+    assert.ok(Math.abs(result.trade_log[0].margin_reserved - 135) < 1e-12);
+    assert.strictEqual(result.realized_call_pnl, 3.82375);
+    assert.strictEqual(result.total_fees, 0.05125);
+    assert.strictEqual(result.ending_nav, 2003.82375);
+    assert.strictEqual(result.unrealized_call_pnl, 0);
+    assert.strictEqual(result.open_contracts, 0);
+    assert.strictEqual(result.ending_margin_used, 0);
+    assert.strictEqual(result.average_holding_hours, 1.7778);
+  });
+
+  test('ignoring depth explicitly permits a full exit without quoted ask size', () => {
+    const result = runBacktest(exitDepthFrames([{ depth: null }]), makeRawScorePolicy(), {
+      startingEth: 1, useQuotedDepth: false,
+    });
+    assert.strictEqual(result.trades, 1);
+    assert.strictEqual(result.exit_fills, 1);
+    assert.strictEqual(result.open_contracts, 0);
+    assert.strictEqual(result.realized_call_pnl, 4.05);
+  });
+
+  test('expiry settles the remaining quantity after a partial buyback without requiring depth', () => {
+    const frames = exitDepthFrames([{ depth: 0.1 }]);
+    const expiryMs = frames[0].options[0].expiry * 1000;
+    frames.push({ timestamp: new Date(expiryMs).toISOString(), timestamp_ms: expiryMs, spot_price: 2300, quotes: new Map(), candidates: [] });
+    const result = runBacktest(frames, makeRawScorePolicy(), { startingEth: 1 });
+    assert.strictEqual(result.trades, 1);
+    assert.strictEqual(result.exit_fills, 2);
+    assert.strictEqual(result.trade_log[0].reason, 'expiry');
+    assert.strictEqual(result.trade_log[0].exit_fills[1].quantity, 0.35);
+    assert.strictEqual(result.trade_log[0].exit_fills[1].close_price, 100);
+    assert.strictEqual(result.realized_call_pnl, -30.6);
+    assert.strictEqual(result.ending_nav, 2269.4);
+    assert.strictEqual(result.open_contracts, 0);
   });
 
   test('accounts for entry premium and an executable profit-capture buyback', () => {

@@ -712,6 +712,9 @@ function getCandidateSql(action, sinceIso, sampleMode, topPerHour) {
 }
 
 function prepareOutcomeQueries(db) {
+  const hasReceiptTime = db.prepare('PRAGMA table_info(options_snapshots)').all()
+    .some((column) => column.name === 'quote_received_at');
+  const quoteTime = hasReceiptTime ? 'COALESCE(quote_received_at, timestamp)' : 'timestamp';
   return {
     priorSpot: db.prepare(`
       SELECT timestamp, price
@@ -721,12 +724,12 @@ function prepareOutcomeQueries(db) {
       LIMIT 1
     `),
     futureQuote: db.prepare(`
-      SELECT timestamp, bid_price, ask_price, mark_price, delta, ask_delta_value, bid_delta_value
+      SELECT ${quoteTime} AS timestamp, bid_price, ask_price, mark_price, delta, ask_delta_value, bid_delta_value
       FROM options_snapshots
       WHERE instrument_name = @instrument_name
-        AND timestamp >= @due_at
-        AND timestamp < @until
-      ORDER BY timestamp ASC
+        AND ${quoteTime} >= @due_at
+        AND ${quoteTime} < @until
+      ORDER BY ${quoteTime} ASC
       LIMIT 1
     `),
     futureSpot: db.prepare(`
@@ -739,14 +742,15 @@ function prepareOutcomeQueries(db) {
       LIMIT 1
     `),
     priorOption: db.prepare(`
-      SELECT timestamp, bid_price, ask_price, mark_price, delta, ask_delta_value, bid_delta_value,
+      SELECT ${quoteTime} AS timestamp, bid_price, ask_price, mark_price, delta, ask_delta_value, bid_delta_value,
         ask_amount, bid_amount, implied_vol, open_interest,
         CASE WHEN ask_price > 0 AND bid_price > 0 AND mark_price > 0 THEN (ask_price - bid_price) / mark_price END as spread_pct,
         COALESCE(ask_amount, 0) + COALESCE(bid_amount, 0) as depth
       FROM options_snapshots
       WHERE instrument_name = @instrument_name
         AND timestamp <= @before
-      ORDER BY timestamp DESC
+        AND ${quoteTime} <= @before
+      ORDER BY ${quoteTime} DESC
       LIMIT 1
     `),
   };

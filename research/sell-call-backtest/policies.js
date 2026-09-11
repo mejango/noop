@@ -2,6 +2,7 @@
 
 const { HOUR_MS } = require('./utils');
 const { trainOutcomeModels, predictOutcome } = require('./models');
+const strategyFacts = require('../../bot/strategy-facts.json');
 const {
   SELL_CALL_EDGE_REFERENCE_DTE,
   SELL_CALL_EDGE_DTE_EXPONENT,
@@ -111,8 +112,8 @@ function makeRawScorePolicy(options = {}) {
 }
 
 function makeCurrentEdgePolicy(options = {}) {
-  const minBid = Number(options.minBid ?? 4);
-  const minEdge = Number(options.minEdge ?? 65);
+  const minBid = Number(options.minBid ?? strategyFacts.sell_call_fallback_min_bid);
+  const minEdge = Number(options.minEdge ?? strategyFacts.sell_call_fallback_min_score);
   return {
     name: 'current_edge',
     description: `Production DTE-normalized CALL EDGE with bid >= ${minBid} and edge >= ${minEdge}`,
