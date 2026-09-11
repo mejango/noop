@@ -220,3 +220,38 @@ test('CLI rebuild uses the production aggregation implementation', () => {
   assert.deepEqual(snapshot(), before);
   assert.match(result.stdout, /funding_rates_hourly/);
 });
+
+test('bounded repair scans only indexed raw timestamp ranges', () => {
+  seedAll();
+  const executed = [];
+  const traced = new Proxy(db, { get(target, key) {
+    if (key === 'prepare') return sql => {
+      const statement = target.prepare(sql);
+      return new Proxy(statement, { get(stmt, method) {
+        if (['all', 'run', 'get'].includes(method)) return (...parameters) => {
+          executed.push({ sql, parameters });
+          return stmt[method](...parameters);
+        };
+        const value = stmt[method];
+        return typeof value === 'function' ? value.bind(stmt) : value;
+      } });
+    };
+    const value = target[key];
+    return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  createHourlyRollups(traced).rebuild({ from: HOUR, to: NEXT_HOUR });
+  const rawRangeQueries = executed.filter(({ sql }) => sql.startsWith('SELECT DISTINCT strftime'));
+  assert.equal(rawRangeQueries.length, 4);
+  for (const { sql, parameters } of rawRangeQueries) {
+    const plans = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...parameters);
+    assert.ok(plans.some(row => /SEARCH .*USING .*INDEX.*timestamp>\? AND timestamp<\?/.test(row.detail)), JSON.stringify(plans));
+    assert.ok(!plans.some(row => /SCAN (spot_prices|options_snapshots|onchain_data|funding_rates)/.test(row.detail)));
+  }
+});
+
+test('repair CLI defaults to brief lock waits and validates explicit timeout bounds', () => {
+  assert.equal(parseArguments(['--db', '/tmp/example.db', '--busy-timeout-ms', '0'])['busy-timeout-ms'], 0);
+  assert.equal(parseArguments(['--db', '/tmp/example.db', '--busy-timeout-ms=250'])['busy-timeout-ms'], 250);
+  assert.throws(() => parseArguments(['--db', '/tmp/example.db', '--busy-timeout-ms', '5001']), /between 0 and 5000/);
+  assert.throws(() => parseArguments(['--db', '/tmp/example.db', '--busy-timeout-ms', 'NaN']), /between 0 and 5000/);
+});

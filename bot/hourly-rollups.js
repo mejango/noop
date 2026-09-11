@@ -101,14 +101,22 @@ function createHourlyRollups(db) {
   const deleteHour = Object.fromEntries(Object.keys(RAW_TABLES).map(table => [
     table, db.prepare(`DELETE FROM ${table} WHERE hour = ?`),
   ]));
+  // Separate bounded SQL keeps range repair on timestamp/hour indexes. An
+  // optional `@start IS NULL OR ...` forces SQLite to scan the entire raw table.
+  function rangeStatements(prefix, column, lower, upper, suffix = '') {
+    return {
+      all: db.prepare(`${prefix}${suffix}`),
+      from: db.prepare(`${prefix} WHERE ${column} >= @${lower}${suffix}`),
+      to: db.prepare(`${prefix} WHERE ${column} < @${upper}${suffix}`),
+      range: db.prepare(`${prefix} WHERE ${column} >= @${lower} AND ${column} < @${upper}${suffix}`),
+    };
+  }
   const deleteRange = Object.fromEntries(Object.keys(RAW_TABLES).map(table => [
-    table, db.prepare(`DELETE FROM ${table}
-      WHERE (@from IS NULL OR hour >= @from) AND (@to IS NULL OR hour < @to)`),
+    table, rangeStatements(`DELETE FROM ${table}`, 'hour', 'from', 'to'),
   ]));
   const rawHours = Object.fromEntries(Object.entries(RAW_TABLES).map(([table, rawTable]) => [
-    table, db.prepare(`SELECT DISTINCT strftime('%Y-%m-%dT%H:00:00Z', timestamp) AS hour
-      FROM ${rawTable} WHERE (@start IS NULL OR timestamp >= @start)
-        AND (@end IS NULL OR timestamp < @end) ORDER BY hour`),
+    table, rangeStatements(`SELECT DISTINCT strftime('%Y-%m-%dT%H:00:00Z', timestamp) AS hour FROM ${rawTable}`,
+      'timestamp', 'start', 'end', ' ORDER BY hour'),
   ]));
 
   function refreshSpotHour(timestamp) {
@@ -188,10 +196,12 @@ function createHourlyRollups(db) {
   const rebuildTransaction = db.transaction(({ from, to }) => {
     const bounds = { from, to, start: from?.slice(0, 19) ?? null, end: to?.slice(0, 19) ?? null };
     const counts = {};
+    const mode = from == null ? (to == null ? 'all' : 'to') : (to == null ? 'from' : 'range');
+    const parameters = mode === 'all' ? [] : [bounds];
     for (const table of Object.keys(RAW_TABLES)) {
-      const hours = rawHours[table].all(bounds);
+      const hours = rawHours[table][mode].all(...parameters);
       if (hours.some(row => !row.hour)) throw new Error(`Cannot rebuild ${table}: invalid raw timestamps`);
-      deleteRange[table].run(bounds);
+      deleteRange[table][mode].run(...parameters);
       let count = 0;
       for (const { hour } of hours) {
         if (table === 'spot_prices_hourly') count += refreshSpotHour(hour);
