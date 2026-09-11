@@ -19,11 +19,21 @@ This implements the findings in [the V2 audit](v2-strategy-data-audit-2026-09-11
 | 16: research lookahead | Features use completed prior hours and timestamp-bounded inputs. Historical selection cannot choose a later quote from the same hour. | Correlation and backtest regressions |
 | 17: unlimited unknown liquidity | Zero or missing quoted depth does not produce a simulated fill. Partial exits preserve the remainder and allocate costs without inventing terminal liquidity. | Actual backtest simulator tests |
 | 18: stale baseline/report crash | The current-strategy baseline shares the production call score/defaults. Historical alternatives are named separately. Report metadata uses each table's real time column. | Correlation report smoke and backtest tests |
-| 19: divergent rollups | Live writes and rebuilds use one atomic aggregate implementation. Open interest is a latest-per-instrument stock, IV is observation-weighted, and unknown data remains null. | `bot/hourly-rollups.js`, live-versus-rebuild native SQLite tests |
+| 19: divergent rollups | Live writes and rebuilds use one atomic aggregate implementation. Open interest is a latest-per-instrument stock, IV is observation-weighted, and unknown data remains null. Bot/dashboard OI reads also share this stock interpretation and use completed hours. | `bot/hourly-rollups.js`, `bot/open-interest.js`, native SQLite parity and OI regressions |
 | 20: wrong option enum | Call-premium queries use `C` and the configured comparable DTE/delta cohort. | Bot and dashboard data tests |
 | 21: copied test policy | Tests load production modules or actual selected production declarations. A mutation probe verifies that disabling a real gate breaks the tests. | `test/helpers/load-production.js`, `npm run test:mutation` |
 
 Lifecycle projections now rebuild affected instruments incrementally. Candidate evidence retains the rule snapshot, shared policy version/configuration, quote source, receipt timestamp and known quote age. Historical rows are not retroactively assigned provenance that was never captured.
+
+## Follow-up read and collection fixes
+
+The post-rollout check found a remaining OI read query that summed repeated snapshots even though stored hourly rollups had been corrected. Bot and dashboard now select each observed instrument's latest value in each completed UTC hour. A latest unknown value makes the total unknown; zero remains a known value. The current OI scoring input requires the previous completed hour and its exact 24-hour baseline, so stale or missing hours cannot masquerade as a current change. Future candidate enrichment preserves true zero OI. The observed instrument population can still change; this series does not establish exchange-wide OI coverage.
+
+A read-only production probe over 29 completed hours took 55 ms and used the existing timestamp index. All 29 hours were incomplete under the corrected definition, so their OI input is unavailable. Historical nulls are not guessed to be zero or rewritten; a valid future 24-hour baseline must accumulate before this input can affect scoring again.
+
+The same check found that the funding collector expected an array while the documented V2 response uses `result.tickers`, and consumers still defaulted to `ETHUSDT` although collection targets Derive `ETH-PERP`. Collection now reads the [official V2 slim ticker](https://github.com/derivexyz/derive-py/blob/e662f36f6b1ab326e97e595f131a1fa5cf6376a8/api/openapi.json)'s hourly `f` rate, and queries consistently select that exchange and symbol. Historical-window summaries accept the actual hourly row shape and preserve unknown values. An unauthenticated live public ticker request confirmed the response shape and successfully produced an ETH-PERP funding observation. These changes correct future collection and read calculations; they add no schema, invoke no backfill, and rewrite no historical records.
+
+All 21 original findings have forward fixes or safeguards. Full historical accounting remains incomplete: external fills, fees, settlements, transfers and valuation coverage need authoritative reconciliation before returns or drawdowns can be published. Existing finalized outcome labels, old rollups and previously generated research results remain unchanged. Operational partitioning, an established off-host backup schedule, equivalent exit/account-input provenance, and scheduled full lifecycle verification remain follow-up work.
 
 ## Execution recovery
 
@@ -65,7 +75,7 @@ Raw evidence remains append-only in V2. Partitioning operational reads across ar
 
 ## Validation and deployment boundary
 
-With Node 20, install both locked dependency sets (`npm ci` and `npm --prefix dashboard ci`). The default `npm test` runs production-function trading tests, model/API tests, execution and policy regressions, native SQLite/rollup/observation tests, dashboard reporting tests and the backtest simulator suite. Dashboard production build, TypeScript/lint and a compiled P&L route smoke test are also checked. Tests use temporary data and mocked venue responses; no live order is submitted. The integrated verification passed 797 tests, plus the mutation probe and compiled-route smoke test.
+With Node 20, install both locked dependency sets (`npm ci` and `npm --prefix dashboard ci`). The default `npm test` runs production-function trading tests, model/API tests, execution and policy regressions, native SQLite/rollup/observation tests, dashboard reporting tests and the backtest simulator suite. Dashboard production build, TypeScript/lint and a compiled P&L route smoke test are also checked. Tests use temporary data and mocked venue responses; no live order is submitted. The follow-up verification passed 824 tests, the dashboard production build (including TypeScript/lint), and the compiled-route smoke test. The integrated suite also verifies that disabling a real production gate fails its regressions.
 
 Read-only Railway inspection confirmed the active deployment was `7864bc9`, using the bundled `Dockerfile`, one replica and an `ON_FAILURE` restart policy. SQLite and a read-only venue query agreed on both open zero-fill orders. One old local put limit was $7.60 while its venue maker order was $7.50; the stored reservation was conservative, and the upgrade does not require guessing a fill.
 

@@ -2,6 +2,8 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import { BOT_CONFIG } from './strategy-config';
 import { getEconomicHistory as readEconomicHistory } from '../../../bot/economic-events';
+import { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } from '../../../bot/open-interest';
+import { FUNDING_EXCHANGE, FUNDING_SYMBOL } from '../../../bot/funding-rates';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
@@ -363,14 +365,7 @@ function prepareAll(d: Database.Database) {
       ORDER BY hour ASC
     `),
 
-    getOpenInterestHourly: d.prepare(`
-      SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-             SUM(open_interest) as value
-      FROM options_snapshots
-      WHERE timestamp > ? AND open_interest IS NOT NULL AND open_interest > 0
-      GROUP BY hour
-      ORDER BY hour ASC
-    `),
+    getOpenInterestHourly: d.prepare(HOURLY_OPEN_INTEREST_SQL),
 
     getImpliedVolHourly: d.prepare(`
       SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
@@ -386,25 +381,25 @@ function prepareAll(d: Database.Database) {
     getFundingRates: d.prepare(`
       SELECT timestamp, exchange, symbol, rate
       FROM funding_rates
-      WHERE timestamp > ? AND symbol = ?
+      WHERE timestamp > ? AND symbol = ? AND exchange = '${FUNDING_EXCHANGE}'
       ORDER BY timestamp ASC
     `),
 
     getFundingRatesLatest: d.prepare(`
       SELECT rate, timestamp FROM funding_rates
-      WHERE symbol = ? ORDER BY timestamp DESC LIMIT 1
+      WHERE symbol = ? AND exchange = '${FUNDING_EXCHANGE}' ORDER BY timestamp DESC LIMIT 1
     `),
 
     getFundingRatesHourly: d.prepare(`
       SELECT hour as timestamp, avg_rate as rate
       FROM funding_rates_hourly
-      WHERE hour > ? AND symbol = ?
+      WHERE hour > ? AND symbol = ? AND exchange = '${FUNDING_EXCHANGE}'
       ORDER BY hour ASC
     `),
 
     getFundingRateAvg24h: d.prepare(`
       SELECT AVG(rate) as avg_rate FROM funding_rates
-      WHERE symbol = ? AND timestamp > ?
+      WHERE symbol = ? AND exchange = '${FUNDING_EXCHANGE}' AND timestamp > ?
     `),
 
     getOptionsSkew: d.prepare(`
@@ -1200,8 +1195,8 @@ export function getOptionsDepthHourly(since: string) {
   return getStmts().getOptionsDepthHourly.all(since) as { hour: string; value: number | null }[];
 }
 
-export function getOpenInterestHourly(since: string) {
-  return getStmts().getOpenInterestHourly.all(since) as { hour: string; value: number | null }[];
+export function getOpenInterestHourly(since: string, nowMs = Date.now()) {
+  return getStmts().getOpenInterestHourly.all(openInterestHourBounds(since, nowMs)) as { hour: string; value: number | null }[];
 }
 
 export function getImpliedVolHourly(since: string) {
@@ -1245,7 +1240,7 @@ export function getLiquidityHourly_rollup(since: string) {
 
 // ─── Market Sentiment ───────────────────────────────────────────────────────
 
-export function getFundingRates(since: string, symbol = 'ETHUSDT') {
+export function getFundingRates(since: string, symbol = FUNDING_SYMBOL) {
   try {
     return getStmts().getFundingRates.all(since, symbol) as {
       timestamp: string; exchange: string; symbol: string; rate: number;
@@ -1253,7 +1248,7 @@ export function getFundingRates(since: string, symbol = 'ETHUSDT') {
   } catch { return []; }
 }
 
-export function getFundingRatesHourlySeries(since: string, symbol = 'ETHUSDT') {
+export function getFundingRatesHourlySeries(since: string, symbol = FUNDING_SYMBOL) {
   try {
     return getStmts().getFundingRatesHourly.all(since, symbol) as {
       timestamp: string; rate: number;
@@ -1261,13 +1256,13 @@ export function getFundingRatesHourlySeries(since: string, symbol = 'ETHUSDT') {
   } catch { return []; }
 }
 
-export function getFundingRateLatest(symbol = 'ETHUSDT') {
+export function getFundingRateLatest(symbol = FUNDING_SYMBOL) {
   try {
     return getStmts().getFundingRatesLatest.get(symbol) as { rate: number; timestamp: string } | undefined;
   } catch { return undefined; }
 }
 
-export function getFundingRateAvg24h(symbol = 'ETHUSDT') {
+export function getFundingRateAvg24h(symbol = FUNDING_SYMBOL) {
   try {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     return (getStmts().getFundingRateAvg24h.get(symbol, since) as { avg_rate: number | null })?.avg_rate ?? null;

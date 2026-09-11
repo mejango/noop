@@ -116,7 +116,7 @@ const SERIES_DEFS = [
   },
   {
     name: 'open_interest',
-    description: 'Total open interest across tracked instruments',
+    description: 'Latest OI per observed instrument in completed hours; coverage can change',
     extract: (db, since) => db.getOpenInterestHourly(since),
   },
   {
@@ -126,7 +126,7 @@ const SERIES_DEFS = [
   },
   {
     name: 'funding_rate',
-    description: 'Binance ETH perps funding rate (positive=longs pay, negative=shorts pay)',
+    description: 'Derive ETH-PERP hourly funding rate (positive=longs pay, negative=shorts pay)',
     extract: (db, since) => {
       if (!db.getFundingRatesHourly) return [];
       return db.getFundingRatesHourly(since).map(r => ({

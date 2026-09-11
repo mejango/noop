@@ -3,6 +3,8 @@ const path = require('path');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const DB_PATH = process.env.NOOP_DB_PATH || path.join(DATA_DIR, 'noop.db');
 const { createHourlyRollups } = require('./hourly-rollups');
+const { FUNDING_EXCHANGE, FUNDING_SYMBOL } = require('./funding-rates');
+const { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } = require('./open-interest');
 const fs = require('fs');
 const {
   SELL_CALL_EDGE_REFERENCE_DTE,
@@ -1338,13 +1340,7 @@ const stmts = {
     GROUP BY hour ORDER BY hour ASC
   `),
 
-  getOpenInterestHourly: db.prepare(`
-    SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
-           SUM(open_interest) as value
-    FROM options_snapshots
-    WHERE timestamp > @since AND open_interest IS NOT NULL AND open_interest > 0
-    GROUP BY hour ORDER BY hour ASC
-  `),
+  getOpenInterestHourly: db.prepare(HOURLY_OPEN_INTEREST_SQL),
 
   getImpliedVolHourly: db.prepare(`
     SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
@@ -1388,19 +1384,19 @@ const stmts = {
     SELECT strftime('%Y-%m-%dT%H:00:00Z', timestamp) as hour,
            AVG(rate) as avg_rate
     FROM funding_rates
-    WHERE timestamp > @since AND symbol = @symbol
+    WHERE timestamp > @since AND symbol = @symbol AND exchange = '${FUNDING_EXCHANGE}'
     GROUP BY hour ORDER BY hour ASC
   `),
 
   // Market sentiment queries (funding, skew, OI, quality)
   getFundingRateLatest: db.prepare(`
     SELECT rate, timestamp FROM funding_rates
-    WHERE symbol = @symbol ORDER BY timestamp DESC LIMIT 1
+    WHERE symbol = @symbol AND exchange = '${FUNDING_EXCHANGE}' ORDER BY timestamp DESC LIMIT 1
   `),
 
   getFundingRateAvg24h: db.prepare(`
     SELECT AVG(rate) as avg_rate FROM funding_rates
-    WHERE symbol = @symbol AND timestamp > @since
+    WHERE symbol = @symbol AND exchange = '${FUNDING_EXCHANGE}' AND timestamp > @since
   `),
 
   getOptionsSkew: db.prepare(`
@@ -2012,7 +2008,7 @@ const getBestPutDvHourly = (since) => stmts.getBestPutDvHourly.all({ since });
 const getBestCallDvHourly = (since) => stmts.getBestCallDvHourly.all({ since });
 const getOptionsSpreadHourly = (since) => stmts.getOptionsSpreadHourly.all({ since });
 const getOptionsDepthHourly = (since) => stmts.getOptionsDepthHourly.all({ since });
-const getOpenInterestHourly = (since) => stmts.getOpenInterestHourly.all({ since });
+const getOpenInterestHourly = (since, nowMs = Date.now()) => stmts.getOpenInterestHourly.all(openInterestHourBounds(since, nowMs));
 const getImpliedVolHourly = (since) => stmts.getImpliedVolHourly.all({ since });
 
 const insertOrder = (data) => {
@@ -2438,19 +2434,19 @@ const insertFundingRates = (rates) => {
   insert(rates);
 };
 
-const getFundingRatesHourly = (since, symbol = 'ETHUSDT') => {
+const getFundingRatesHourly = (since, symbol = FUNDING_SYMBOL) => {
   return stmts.getFundingRatesHourly.all({ since, symbol });
 };
 
-const getFundingRates = (since, symbol = 'ETHUSDT') => {
+const getFundingRates = (since, symbol = FUNDING_SYMBOL) => {
   return getFundingRatesHourly(since, symbol);
 };
 
-const getFundingRateLatest = (symbol = 'ETHUSDT') => {
+const getFundingRateLatest = (symbol = FUNDING_SYMBOL) => {
   try { return stmts.getFundingRateLatest.get({ symbol }); } catch { return null; }
 };
 
-const getFundingRateAvg24h = (symbol = 'ETHUSDT') => {
+const getFundingRateAvg24h = (symbol = FUNDING_SYMBOL) => {
   try {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     return stmts.getFundingRateAvg24h.get({ symbol, since })?.avg_rate ?? null;

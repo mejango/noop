@@ -110,10 +110,8 @@ test('actual dashboard DB getters use C quotes and bounded historical observatio
   const previous = process.env.DATA_DIR;
   process.env.DATA_DIR = fixtureDir;
   const bot = require('../bot/db');
-  bot.close();
   if (previous == null) delete process.env.DATA_DIR; else process.env.DATA_DIR = previous;
-  const Database = require('better-sqlite3');
-  const db = new Database(path.join(fixtureDir, 'noop.db'));
+  const db = bot.db;
   const now = new Date().toISOString();
   db.prepare('INSERT INTO options_snapshots (timestamp,instrument_name,option_type,bid_price) VALUES (?,?,?,?)').run(now, 'ETH-20261225-4000-C', 'C', 12.5);
   db.prepare('INSERT INTO spot_prices (timestamp,price) VALUES (?,?)').run('2026-03-06T07:59:00.000Z', 2500);
@@ -121,11 +119,24 @@ test('actual dashboard DB getters use C quotes and bounded historical observatio
   const dashboard = loadTs('dashboard/src/lib/db.ts', {
     'better-sqlite3': function() { return db; },
     '../../../bot/economic-events': require('../bot/economic-events'),
+    '../../../bot/open-interest': require('../bot/open-interest'),
+    '../../../bot/funding-rates': require('../bot/funding-rates'),
     './strategy-config': { BOT_CONFIG: require('../bot/config.json'), CONFIG_PATH: path.join(root, 'bot/config.json') },
   }, { process: { env: { DATA_DIR: fixtureDir }, cwd: () => root } });
   assert.equal(dashboard.getAvgCallPremium7d()[0].avg_premium, 12.5);
   assert.equal(dashboard.getSpotPricesAtOrBefore(['2026-03-06T08:00:00.000Z'], 15 * 60_000)[0].price, 2500);
   assert.equal(dashboard.getSpotPricesAtOrBefore(['2026-03-06T09:00:00.000Z'], 15 * 60_000).length, 0);
+  const insertOi = db.prepare('INSERT INTO options_snapshots (timestamp,instrument_name,open_interest) VALUES (?,?,?)');
+  insertOi.run('2026-03-06T10:01:00Z', 'ETH-20261127-1600-P', 100);
+  insertOi.run('2026-03-06T10:31:00Z', 'ETH-20261127-1600-P', 120);
+  insertOi.run('2026-03-06T10:32:00Z', 'ETH-20261127-1500-P', 30);
+  insertOi.run('2026-03-06T11:01:00Z', 'ETH-20261127-1600-P', 500);
+  const since = '2026-03-06T10:00:00Z';
+  const nowMs = Date.parse('2026-03-06T11:30:00Z');
+  const changes = db.prepare('SELECT total_changes() AS count').get().count;
+  assert.deepEqual(Array.from(dashboard.getOpenInterestHourly(since, nowMs), row => ({ ...row })), [{ hour: '2026-03-06T10:00:00Z', value: 150 }]);
+  assert.deepEqual(dashboard.getOpenInterestHourly(since, nowMs), bot.getOpenInterestHourly(since, nowMs));
+  assert.equal(db.prepare('SELECT total_changes() AS count').get().count, changes);
   db.close();
   fs.rmSync(fixtureDir, { recursive: true, force: true });
 });

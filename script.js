@@ -131,6 +131,7 @@ const {
   getBuyPutPriceForEdgeScore,
 } = require('./bot/put-score');
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
+const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
 
 const encoder = new AbiCoder();
 
@@ -1629,17 +1630,8 @@ const fetchFundingRates = async () => {
     const response = await axios.post(API_URL.GET_TICKERS, {
       instrument_type: 'perp', currency: 'ETH',
     }, { timeout: 5000 });
-    const raw = response.data?.result;
-    const tickers = Array.isArray(raw) ? raw : [];
-    const ethPerp = tickers.find(t => t.instrument_name === 'ETH-PERP');
-    if (ethPerp?.funding_rate_info?.funding_rate != null) {
-      return [{
-        timestamp: new Date().toISOString(),
-        exchange: 'derive',
-        symbol: 'ETH-PERP',
-        rate: Number(ethPerp.funding_rate_info.funding_rate),
-      }];
-    }
+    if (response.data?.error) return [];
+    return fundingRatesFromTickerResult(response.data?.result, new Date().toISOString());
   } catch (e) {
     console.log(`⚠️ Derive funding rate failed: ${e.message}`);
   }
@@ -1693,7 +1685,7 @@ const enrichCandidateFromTicker = (instrument, ticker, spotPrice) => {
   const bidAmount = Number(ticker.B);
   const markPrice = Number(ticker.M) || null;
   const indexPrice = Number(ticker.I) || spotPrice || null;
-  const openInterest = Number(ticker.stats?.oi) || null;
+  const openInterest = getTickerOpenInterest(ticker);
   const impliedVol = Number(ticker.option_pricing?.i) || null;
 
   const askDeltaValue = askPrice == 0 ? 0 : Math.abs(delta) / askPrice;
@@ -1839,21 +1831,27 @@ const getTickerSpreadPct = (ticker) => {
   return bid != null && ask != null && mark > 0 ? (ask - bid) / mark : null;
 };
 
-const getLatestHourlyDeltaPct = (rows = [], lookbackHours = 24) => {
-  const sorted = (rows || [])
-    .map((row) => ({ hour: row.hour || row.timestamp, value: finiteOrNull(row.value ?? row.total_oi) }))
-    .filter((row) => row.hour && row.value != null && row.value > 0)
-    .sort((a, b) => new Date(a.hour).getTime() - new Date(b.hour).getTime());
-  if (sorted.length < 2) return null;
-  const latest = sorted[sorted.length - 1];
-  const cutoffMs = new Date(latest.hour).getTime() - lookbackHours * 60 * 60 * 1000;
-  let prior = null;
-  for (const row of sorted) {
-    if (new Date(row.hour).getTime() <= cutoffMs) prior = row;
-    else break;
-  }
-  if (!prior || !(prior.value > 0)) return null;
-  return ((latest.value - prior.value) / prior.value) * 100;
+const getLatestHourlyDeltaPct = (rows = [], lookbackHours = 24, nowMs = Date.now()) => {
+  if (!Array.isArray(rows) || !Number.isFinite(nowMs)
+    || !Number.isInteger(lookbackHours) || lookbackHours <= 0) return null;
+  const hourMs = 60 * 60 * 1000;
+  const latestHourMs = Math.floor(nowMs / hourMs) * hourMs - hourMs;
+  // Both endpoints must be the requested completed hours. Skipping an unknown
+  // endpoint would turn an older observation into an apparently current trend.
+  const valueAt = (timestampMs) => {
+    const matches = rows.filter((row) => row && new Date(row.hour || row.timestamp).getTime() === timestampMs);
+    if (matches.length !== 1) return null;
+    const row = matches[0];
+    const raw = Object.prototype.hasOwnProperty.call(row, 'value') ? row.value : row.total_oi;
+    if (typeof raw !== 'number' && typeof raw !== 'string') return null;
+    const value = finiteOrNull(raw);
+    return value != null && value >= 0 ? value : null;
+  };
+  const latest = valueAt(latestHourMs);
+  const prior = valueAt(latestHourMs - lookbackHours * hourMs);
+  if (latest == null || !(prior > 0)) return null;
+  const change = ((latest - prior) / prior) * 100;
+  return Number.isFinite(change) ? change : null;
 };
 
 const buildLiveSellCallMarketContext = (tickerMap = {}, nowMs = Date.now(), extra = {}) => {
@@ -6241,15 +6239,7 @@ const summarizeSentimentWindowForLLM = (windowLabel, sentiment) => {
     ? +((((currentOI - firstOI) / firstOI) * 100).toFixed(1))
     : null;
 
-  const fundingRows = Array.isArray(sentiment?.fundingRates) ? sentiment.fundingRates : [];
-  const fundingCurrent = fundingRows.length > 0 ? Number(fundingRows[fundingRows.length - 1].rate) : null;
-  const fundingAvg = fundingRows.length > 0
-    ? +(fundingRows.reduce((sum, row) => sum + Number(row.rate || 0), 0) / fundingRows.length).toFixed(6)
-    : null;
-  let fundingTrend = 'unknown';
-  if (fundingCurrent != null && fundingAvg != null) {
-    fundingTrend = fundingCurrent > fundingAvg ? 'rising' : fundingCurrent < fundingAvg ? 'declining' : 'stable';
-  }
+  const funding = summarizeFundingRates(sentiment?.fundingRates);
 
   const marketQuality = Array.isArray(sentiment?.marketQuality) ? sentiment.marketQuality : [];
   const marketQualitySummary = marketQuality.map(row => ({
@@ -6262,12 +6252,7 @@ const summarizeSentimentWindowForLLM = (windowLabel, sentiment) => {
 
   return {
     window: windowLabel,
-    funding_rate: {
-      current: fundingCurrent,
-      avg: fundingAvg,
-      trend: fundingTrend,
-      samples: fundingRows.length,
-    },
+    funding_rate: funding,
     options_skew: {
       current_pct: currentSkewPct,
       avg_pct: avgSkewPct,
@@ -6311,7 +6296,7 @@ const summarizeSentimentForAdvisor = (sentimentWindows) => {
       : null;
 
     lines.push(
-      `${label}: funding ${row.funding_rate.current != null ? row.funding_rate.current : 'n/a'} vs avg ${row.funding_rate.avg != null ? row.funding_rate.avg : 'n/a'} (${row.funding_rate.trend}), ` +
+      `${label}: funding ${row.funding_rate.current != null ? row.funding_rate.current : 'n/a'} vs avg ${row.funding_rate.avg != null ? row.funding_rate.avg : 'n/a'} (${row.funding_rate.trend}; Derive ETH-PERP hourly rate), ` +
       `skew ${row.options_skew.current_pct != null ? `${formatSignedPct(row.options_skew.current_pct, 2)} current` : 'n/a'} vs ${row.options_skew.avg_pct != null ? `${formatSignedPct(row.options_skew.avg_pct, 2)} avg` : 'n/a'} (${row.options_skew.direction}), ` +
       `OI ${row.aggregate_oi.current != null ? row.aggregate_oi.current : 'n/a'} (${row.aggregate_oi.change_pct != null ? formatSignedPct(row.aggregate_oi.change_pct, 1) : 'n/a'}), ` +
       `put mkt ${putQuality ? `spread ${putQuality.avg_spread_pct ?? 'n/a'}%, iv ${putQuality.avg_iv_pct ?? 'n/a'}%, depth ${putQuality.avg_depth ?? 'n/a'}` : 'n/a'}, ` +
@@ -12847,7 +12832,7 @@ const runBot = async () => {
           if (fundingRates.length > 0) {
             db.insertFundingRates(fundingRates);
             const latest = fundingRates[fundingRates.length - 1];
-            console.log(`📈 Funding rate: ${(latest.rate * 100).toFixed(4)}% (${latest.exchange} ${latest.symbol})`);
+            console.log(`📈 Hourly funding rate: ${(latest.rate * 100).toFixed(4)}% (${latest.exchange} ${latest.symbol})`);
           }
         } catch (e) { console.log('DB: funding rate write failed:', e.message); }
       }

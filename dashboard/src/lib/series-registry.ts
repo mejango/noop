@@ -79,7 +79,7 @@ const SERIES: SeriesConfig[] = [
   },
   {
     name: 'open_interest',
-    description: 'Total open interest across tracked instruments',
+    description: 'Latest OI per observed instrument in completed hours; coverage can change',
     category: 'options',
     extract: (since) => getOpenInterestHourly(since),
   },
@@ -91,7 +91,7 @@ const SERIES: SeriesConfig[] = [
   },
   {
     name: 'funding_rate',
-    description: 'Binance ETH perps funding rate (positive=longs pay, negative=shorts pay)',
+    description: 'Derive ETH-PERP hourly funding rate (positive=longs pay, negative=shorts pay)',
     category: 'macro',
     extract: (since) => {
       const rows = getFundingRates(since);

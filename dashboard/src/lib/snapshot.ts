@@ -293,7 +293,7 @@ async function _buildUncached() {
         }
 
         return {
-          _description: 'funding_rate from Binance perps. options_skew = put IV - call IV in pct points. positive skew = downside fear.',
+          _description: 'funding_rate is the Derive ETH-PERP hourly rate. options_skew = put IV - call IV in pct points. positive skew = downside fear.',
           funding_rate: {
             current: fundingLatest?.rate ?? null,
             avg_24h: fundingAvg,
