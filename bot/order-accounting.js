@@ -73,6 +73,50 @@ function noteSubmission(db, submissionId, result, definitive = false) {
     .run(status, JSON.stringify(result), submissionId);
 }
 
+function validateSubmissionReceipt({ db, submissionId, action, instrumentName, amount, price, orderType, record, trades, totalValue }) {
+  const submission = executionStore(db).prepare('SELECT * FROM execution_submissions WHERE id=?').get(submissionId);
+  if (!submission || !['unknown', 'acknowledged'].includes(submission.status)) {
+    throw new Error('Submission already accounted or missing; refusing duplicate fill accounting');
+  }
+  const request = JSON.parse(submission.request_json);
+  const direction = action.startsWith('buy') ? 'buy' : 'sell';
+  if (request.nonce == null || request.subaccount_id == null
+    || request.instrument_name !== instrumentName || request.direction !== direction
+    || Number(request.amount) !== Number(amount) || Number(request.limit_price) !== Number(price)
+    || request.time_in_force !== orderType || request.action !== action) {
+    throw new Error('Submitted order terms are incomplete or conflict with local accounting');
+  }
+  if (record.nonce == null || record.subaccount_id == null
+    || String(record.nonce) !== String(request.nonce)
+    || String(record.subaccount_id) !== String(request.subaccount_id)
+    || record.instrument_name !== request.instrument_name || record.direction !== request.direction
+    || record.amount == null || Number(record.amount) !== Number(request.amount)
+    || record.limit_price == null || Number(record.limit_price) !== Number(request.limit_price)) {
+    throw new Error('Order receipt identity/nonce/terms are incomplete or conflict with signed submission');
+  }
+  if (submission.response_json) {
+    const response = JSON.parse(submission.response_json);
+    const acknowledged = response?.result?.order || response?.result || response?.order || response;
+    if (acknowledged?.order_id && acknowledged.order_id !== record.order_id) {
+      throw new Error('Order receipt identity conflicts with saved acknowledgement');
+    }
+  }
+  const ids = new Set();
+  for (const trade of trades) {
+    if (!trade?.trade_id || ids.has(String(trade.trade_id)) || trade.order_id !== record.order_id
+      || trade.subaccount_id == null || String(trade.subaccount_id) !== String(request.subaccount_id)
+      || trade.instrument_name !== request.instrument_name || trade.direction !== request.direction) {
+      throw new Error('Trade receipt identity is missing, duplicated, or conflicts with signed submission');
+    }
+    ids.add(String(trade.trade_id));
+  }
+  if (Number(record.filled_amount) > 0
+    && (record.average_price == null || record.average_price === '' || !Number.isFinite(Number(record.average_price))
+      || Math.abs(totalValue - Number(record.filled_amount) * Number(record.average_price)) > 1e-6)) {
+    throw new Error('Trade receipts conflict with cumulative order value');
+  }
+}
+
 function accountInitialReceipt({ db, botData, action, instrumentName, amount, price, orderType,
   pendingActionId, instrument = {}, spotPrice, order, record, trades = [], exitIntent = null, approvedLimitPrice = price, submissionId = null }) {
   const state = receiptState(record, { instrument_name: instrumentName, amount, direction: action.startsWith('buy') ? 'buy' : 'sell' });
@@ -95,6 +139,7 @@ function accountInitialReceipt({ db, botData, action, instrumentName, amount, pr
       : { zeroFill: true, action, instrumentName, amount, price, orderType, orderId: record.order_id };
   commit(db, botData, () => {
     if (submissionId != null) {
+      validateSubmissionReceipt({ db, submissionId, action, instrumentName, amount, price, orderType, record, trades, totalValue });
       const changed = executionStore(db).prepare("UPDATE execution_submissions SET status='accounted' WHERE id=? AND status IN ('unknown','acknowledged')").run(submissionId).changes;
       if (changed !== 1) throw new Error('Submission already accounted or missing; refusing duplicate fill accounting');
     }

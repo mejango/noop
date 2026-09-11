@@ -504,9 +504,11 @@ test('an unknown submission persists its request and blocks another executor sen
 test('acknowledged submission is released only when its fill accounting transaction commits', async (t) => {
   const state = runtime(t);
   const accounting = require('../bot/order-accounting');
-  const submissionId = accounting.beginSubmission(state.db, null, { instrument_name: putName, nonce: 'fixture-nonce' });
-  const record = venueOrder({ filled_amount: '1', average_price: '10' });
-  const order = { result: { order: record, trades: [{ trade_amount: '1', trade_price: '10' }] } };
+  const submissionId = accounting.beginSubmission(state.db, null, { instrument_name: putName, nonce: 'fixture-nonce',
+    subaccount_id: 7, direction: 'buy', amount: 5, limit_price: 10, time_in_force: 'gtc', action: 'buy_put' });
+  const record = venueOrder({ nonce: 'fixture-nonce', subaccount_id: 7, filled_amount: '1', average_price: '10' });
+  const order = { result: { order: record, trades: [{ trade_id: 'trade-1', order_id: record.order_id,
+    subaccount_id: 7, instrument_name: putName, direction: 'buy', trade_amount: '1', trade_price: '10' }] } };
   accounting.noteSubmission(state.db, submissionId, order);
   const payload = {
     db: state.db, botData: state.botData, action: 'buy_put', instrumentName: putName,
@@ -755,3 +757,33 @@ test('an open history row cannot recover an order whose current status is unavai
   assert.equal(state.db.db.prepare('SELECT status FROM execution_submissions WHERE id = ?').get(payload.submissionId).status, 'unknown');
   assert.equal(orders(state).length, 0);
 });
+
+for (const [name, alter] of [
+  ['wrong nonce', payload => { payload.record.nonce = 'wrong'; }],
+  ['missing nonce', payload => { delete payload.record.nonce; }],
+  ['wrong account', payload => { payload.record.subaccount_id = '999'; }],
+  ['missing account', payload => { delete payload.record.subaccount_id; }],
+  ['wrong order price', payload => { payload.record.limit_price = '11'; }],
+  ['missing instrument', payload => { delete payload.record.instrument_name; }],
+  ['wrong trade order', payload => { payload.trades[0].order_id = 'other-order'; }],
+  ['wrong trade account', payload => { payload.trades[0].subaccount_id = '999'; }],
+  ['missing trade identity', payload => { delete payload.trades[0].trade_id; }],
+  ['duplicate trade identity', payload => { payload.trades.push({ ...payload.trades[0] }); payload.record.filled_amount = '2'; }],
+  ['conflicting cumulative value', payload => { payload.record.average_price = '11'; }],
+]) {
+  test(`live initial receipt with ${name} preserves its durable recovery block`, (t) => {
+    const { state, payload: recovery } = recoveryFixture(t);
+    const accounting = require('../bot/order-accounting');
+    const payload = { db: state.db, botData: state.botData, action: 'buy_put', instrumentName: putName,
+      amount: 5, price: 10, orderType: 'gtc', pendingActionId: null, instrument: instrument(), spotPrice: 2000,
+      record: recovery.order, trades: recovery.trades, submissionId: recovery.submissionId };
+    alter(payload);
+    payload.order = { result: { order: payload.record, trades: payload.trades } };
+    accounting.noteSubmission(state.db, recovery.submissionId, payload.order);
+    assert.throws(() => accounting.accountInitialReceipt(payload), /identity|nonce|terms|value/i);
+    assert.equal(state.db.loadBotState().put_net_bought, 0);
+    assert.equal(state.db.getOpenRestingOrders().length, 0);
+    assert.equal(orders(state).length, 0);
+    assert.throws(() => accounting.assertNoUnresolvedSubmission(state.db), /accounting recovery/);
+  });
+}
