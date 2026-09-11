@@ -125,6 +125,9 @@ const encoder = new AbiCoder();
 
 // SQLite database (loaded via bot/index.js or standalone)
 const db = global.__noopDb || null;
+const { createEconomicStore, syncV2Trades } = require('./bot/economic-events');
+const { observationUniverse, missingExpiryDates } = require('./bot/observations');
+const economicStore = db?.db ? createEconomicStore(db.db) : null;
 if (db) {
   console.log('SQLite database connected');
 } else {
@@ -1640,7 +1643,10 @@ const fetchTickersByExpiry = async (expiryDate) => {
       console.error(`No tickers found for expiry ${expiryDate}`);
       return {};
     }
-    return response.data.result.tickers;
+    const receivedAt = new Date().toISOString();
+    return Object.fromEntries(Object.entries(response.data.result.tickers).map(([name, ticker]) => (
+      [name, { ...ticker, quote_received_at: receivedAt, quote_source: 'derive-v2/get_tickers' }]
+    )));
   } catch (error) {
     const status = error.response?.status;
     console.error(`Error fetching tickers for expiry ${expiryDate}: ${error.message} | status: ${status || 'N/A'}${status === 429 ? ' (RATE LIMITED)' : ''}`);
@@ -12745,6 +12751,34 @@ Return the full repaired agenda JSON.`,
 
 // ─── Bot Loop ────────────────────────────────────────────────────────────────
 
+let lastEconomicSyncAt = 0;
+const syncEconomicEvidence = async (now = Date.now()) => {
+  if (!economicStore || now - lastEconomicSyncAt < 15 * 60 * 1000) return;
+  lastEconomicSyncAt = now;
+  economicStore.recordExposure(String(PUT_INSURED_EXTERNAL_ETH), now);
+  const lastCovered = economicStore.latestCoverage(SUBACCOUNT_ID, 'trades');
+  const from = lastCovered ? Math.max(0, Date.parse(lastCovered) - 60000) : 0;
+  try {
+    const result = await syncV2Trades({
+      store: economicStore, accountId: SUBACCOUNT_ID, from, to: now,
+      post: async (body) => {
+        const wallet = createWallet();
+        const timestamp = Date.now();
+        const signature = await signMessage(wallet, timestamp);
+        const response = await axios.post(API_URL.GET_TRADE_HISTORY, body, {
+          headers: { 'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS, 'X-LyraTimestamp': String(timestamp), 'X-LyraSignature': signature },
+          timeout: 15000,
+        });
+        if (response.data?.error) throw new Error(stringifyApiError(response.data.error));
+        return response.data?.result;
+      },
+    });
+    console.log(`Accounting evidence: reconciled ${result.count} venue trades (${result.inserted} new)`);
+  } catch (error) {
+    console.log(`Accounting evidence incomplete: ${error.message}`);
+  }
+};
+
 const runBot = async () => {
   try {
   const now = Date.now();
@@ -12804,16 +12838,21 @@ const runBot = async () => {
     }
     console.log(`📊 Ticker map contains ${Object.keys(tickerMap).length} instruments`);
 
-    // Fetch position tickers for exit monitoring
+    // Continue observing held and evaluated contracts even after they become ITM
+    // or leave the entry window. This universe never authorizes a new trade.
     const positions = await fetchPositions();
-    if (positions.length > 0) {
-      const posExpiries = [...new Set(positions.map(p => p.instrument_name.split('-')[1]))];
-      const missing = posExpiries.filter(exp => !expiryDates.includes(exp));
-      if (missing.length > 0) {
-        const results = await Promise.all(missing.map(e => fetchTickersByExpiry(e)));
-        for (const tickers of results)
-          for (const [name, data] of Object.entries(tickers))
-            tickerMap[name] = data;
+    const pendingObservationSymbols = db?.getObservationInstruments
+      ? db.getObservationInstruments(new Date().toISOString()) : [];
+    const observedInstruments = observationUniverse({
+      instruments, candidates: allCandidates, positions, pendingSymbols: pendingObservationSymbols,
+    });
+    const fetchedExpiryDates = new Set(expiryDates);
+    const observationExpiries = missingExpiryDates(observedInstruments, fetchedExpiryDates);
+    if (observationExpiries.length > 0) {
+      const results = await Promise.all(observationExpiries.map(e => fetchTickersByExpiry(e)));
+      for (let i = 0; i < results.length; i++) {
+        if (Object.keys(results[i]).length) fetchedExpiryDates.add(observationExpiries[i]);
+        Object.assign(tickerMap, results[i]);
       }
     }
 
@@ -12823,7 +12862,7 @@ const runBot = async () => {
         // Extract ALL unique expiry dates from the full instruments array
         const allExpiryDates = [...new Set(instruments.map(i => i.instrument_name.split('-')[1]))];
         // Find expiries not already fetched in tickerMap
-        const missingExpiries = allExpiryDates.filter(exp => !expiryDates.includes(exp));
+        const missingExpiries = allExpiryDates.filter(exp => !fetchedExpiryDates.has(exp));
         console.log(`📊 OI: ${allExpiryDates.length} total expiries, ${missingExpiries.length} need fetching`);
 
         // Fetch tickers for missing expiries
@@ -12839,6 +12878,7 @@ const runBot = async () => {
         for (const tickers of extraTickerResults) {
           for (const [name, data] of Object.entries(tickers)) {
             oiTickerMap[name] = data;
+            tickerMap[name] = data;
           }
         }
 
@@ -12851,8 +12891,7 @@ const runBot = async () => {
         let counted = 0;
 
         // Collect OI + IV skew from full ticker map in a single pass
-        let putIvSum = 0, putIvCount = 0;
-        let callIvSum = 0, callIvCount = 0;
+        const observedPutIvs = [], observedCallIvs = [];
 
         for (const [name, ticker] of Object.entries(oiTickerMap)) {
           const oi = Number(ticker.stats?.oi) || 0;
@@ -12887,18 +12926,17 @@ const runBot = async () => {
           const absDelta = Math.abs(delta);
 
           if (isPut && absDelta >= 0.02 && absDelta <= 0.12) {
-            putIvSum += iv;
-            putIvCount++;
+            observedPutIvs.push({ expiry: name.split('-')[1], delta, impliedVol: iv });
           } else if (isCall && absDelta >= 0.04 && absDelta <= 0.12) {
-            callIvSum += iv;
-            callIvCount++;
+            observedCallIvs.push({ expiry: name.split('-')[1], delta, impliedVol: iv });
           }
         }
 
         const totalOI = putOI + callOI;
         const pcRatio = callOI > 0 ? putOI / callOI : null;
-        const avgPutIv = putIvCount > 0 ? putIvSum / putIvCount : null;
-        const avgCallIv = callIvCount > 0 ? callIvSum / callIvCount : null;
+        const matchedIv = require('./bot/option-market-quality').computeMatchedPutCallSkew(observedPutIvs, observedCallIvs);
+        const avgPutIv = matchedIv.putIv;
+        const avgCallIv = matchedIv.callIv;
 
         db.insertOISnapshot({
           timestamp: tickTimestamp,
@@ -13149,15 +13187,21 @@ const runBot = async () => {
       sendTelegram(`❌ *Trading system error*: ${error.message}`);
     }
 
-    // SQLite: persist options snapshots (candidates only — heatmap/chart data)
+    await syncEconomicEvidence(Date.now());
+
+    // Persist the observation universe, independently of entry eligibility.
     if (db) {
       try {
-        const allOptions = [...(putCandidates || []), ...(callCandidates || [])].map(inst => {
+        const allOptions = observedInstruments.map(inst => {
           const ticker = tickerMap[inst.instrument_name];
           return ticker ? enrichCandidateFromTicker(inst, ticker, spotPrice) : null;
         }).filter(Boolean);
         if (allOptions.length > 0) {
-          db.insertOptionsSnapshotBatch(allOptions, tickTimestamp);
+          // The snapshot is available only once its component quotes have arrived.
+          // Receipt timestamps remain attached to quotes for execution freshness.
+          const receivedTimes = observedInstruments.map(inst => Date.parse(tickerMap[inst.instrument_name]?.quote_received_at)).filter(Number.isFinite);
+          const snapshotAt = receivedTimes.length ? new Date(Math.max(...receivedTimes)).toISOString() : tickTimestamp;
+          db.insertOptionsSnapshotBatch(allOptions, snapshotAt);
         }
       } catch (e) { console.log('DB: options snapshot write failed:', e.message); }
 
@@ -13172,14 +13216,13 @@ const runBot = async () => {
         const realizedData = db.getRealizedPnL();
 
         // Portfolio value = subaccount_value from Derive API (includes collateral + positions mark-to-market)
-        // Fallback to collateral-only if subaccount API unavailable
-        let portfolioValue = usdcBal + (ethBal * spotPrice);
-        try {
-          const sub = await fetchSubaccount();
-          if (sub && sub.subaccount_value > 0) {
-            portfolioValue = sub.subaccount_value;
-          }
-        } catch { /* use fallback */ }
+        // A collateral-only value is not account equity. Preserve a gap if the
+        // venue valuation is unavailable; zero/negative valid equity stays visible.
+        const valuation = await fetchSubaccount();
+        if (valuation?.subaccount_value == null || !Number.isFinite(Number(valuation.subaccount_value))) {
+          throw new Error('Portfolio valuation unavailable; snapshot deferred');
+        }
+        const portfolioValue = Number(valuation.subaccount_value);
 
         db.insertPortfolioSnapshot({
           timestamp: tickTimestamp,
@@ -13405,6 +13448,9 @@ const runBot = async () => {
 
   botData.lastCheck = now;
   persistCycleState();
+  if (process.connected && typeof process.send === 'function') {
+    try { process.send({ type: 'bot_heartbeat', at: Date.now() }, () => {}); } catch { /* supervisor detects missing heartbeats */ }
+  }
 
   // Schedule next run
   setTimeout(runBotWithWatchdog, checkInterval);
