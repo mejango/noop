@@ -9919,7 +9919,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
 // ─── LLM-Driven Trading: Open Order Management ──────────────────────────────
 
-const getRestingExitInvalidReason = ({ order, tracked, activeRules = [], positions = [], tickerMap = {}, spotPrice = 0 }) => {
+const getRestingExitInvalidReason = ({ order, tracked, activeRules = [], positions = [], instruments = [], tickerMap = {}, spotPrice = 0 }) => {
   const action = tracked?.action || inferActionFromOpenOrder(order);
   if (!isReduceOnlyExitAction(action)) return null;
   const position = getCloseablePositionForExit(action, order.instrument_name, positions);
@@ -9957,7 +9957,19 @@ const getRestingExitInvalidReason = ({ order, tracked, activeRules = [], positio
     if (action === 'buyback_call' && ((cap > 0 && limit > cap + 1e-9) || (explicitLimit > 0 && limit > explicitLimit + 1e-9))) continue;
     if (action === 'sell_put' && ((floor > 0 && limit < floor - 1e-9) || (explicitLimit > 0 && limit < explicitLimit - 1e-9))) continue;
     if (!getBuybackCaptureGate(rule, criteria, plannedValues).allowed) continue;
-    if (!getSellPutProtectionGate(rule, plannedValues, { criteria, position, positions, plannedSellAmount: remaining }).allowed) continue;
+    if (action === 'sell_put') {
+      // A standing floor is the desired sale price, not evidence that the hedge
+      // still has a tail win. Reuse submission policy for fresh value proof and
+      // the remaining tranche after fills or any other position-size changes.
+      const validation = validateFinalOrderPolicy({
+        action, instrumentName: order.instrument_name, price: limit, amount: remaining,
+        orderType: tracked?.order_type || 'gtc', criteria, ticker,
+        instrument: instruments.find(instrument => instrument.instrument_name === order.instrument_name),
+        positions, spotPrice: Number(ticker.I) > 0 ? Number(ticker.I) : spotPrice,
+        policy: getFinalOrderPolicy(), now: Date.now(),
+      });
+      if (!validation.allowed) continue;
+    }
     return null;
   }
   return 'resting exit no longer satisfies active exit intent, bounds, or protection requirements';
@@ -10092,7 +10104,7 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
       }
     }
 
-    const invalidRestingExitReason = getRestingExitInvalidReason({ order, tracked, activeRules, positions, tickerMap, spotPrice });
+    const invalidRestingExitReason = getRestingExitInvalidReason({ order, tracked, activeRules, positions, instruments, tickerMap, spotPrice });
 
     if (isStale || isOrphaned || invalidRestingEntryReason || invalidRestingExitReason) {
       const reason = invalidRestingEntryReason || invalidRestingExitReason
