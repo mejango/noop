@@ -65,7 +65,7 @@ Raw evidence remains append-only in V2. Partitioning operational reads across ar
 
 ## Validation and deployment boundary
 
-The default `npm test` runs production-function trading tests, model/API tests, execution and policy regressions, native SQLite/rollup/observation tests, dashboard reporting tests and the backtest simulator suite. Dashboard production build, TypeScript/lint and a compiled P&L route smoke test are also checked. Tests use temporary data and mocked venue responses; no live order is submitted.
+With Node 20, install both locked dependency sets (`npm ci` and `npm --prefix dashboard ci`). The default `npm test` runs production-function trading tests, model/API tests, execution and policy regressions, native SQLite/rollup/observation tests, dashboard reporting tests and the backtest simulator suite. Dashboard production build, TypeScript/lint and a compiled P&L route smoke test are also checked. Tests use temporary data and mocked venue responses; no live order is submitted. The integrated verification passed 797 tests, plus the mutation probe and compiled-route smoke test.
 
 Read-only Railway inspection confirmed the active deployment was `7864bc9`, using the bundled `Dockerfile`, one replica and an `ON_FAILURE` restart policy. SQLite and a read-only venue query agreed on both open zero-fill orders. One old local put limit was $7.60 while its venue maker order was $7.50; the stored reservation was conservative, and the upgrade does not require guessing a fill.
 
