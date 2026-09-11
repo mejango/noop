@@ -1,8 +1,21 @@
 {
-  "put_delta_range": [-0.12, -0.02],
-  "put_dte_range": [45, 78],
-  "call_delta_range": [0.04, 0.12],
-  "call_dte_range": [5, 12],
+  "policy_version": "v2-2026-09-11",
+  "put_delta_range": [
+    -0.12,
+    -0.02
+  ],
+  "put_dte_range": [
+    45,
+    78
+  ],
+  "call_delta_range": [
+    0.04,
+    0.12
+  ],
+  "call_dte_range": [
+    5,
+    12
+  ],
   "sell_call_fallback_min_bid": 4,
   "sell_call_fallback_min_score": 65,
   "put_roll_dte_threshold": 25,

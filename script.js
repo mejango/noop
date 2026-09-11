@@ -7164,6 +7164,14 @@ const buildCandidateObservationRows = ({
     const isSelected = Boolean(selectedName && candidate?.name === selectedName);
     const metadata = {
       ...(context || {}),
+      policy_version: STRATEGY_FACTS.policy_version,
+      strategy_config: BOT_CONFIG,
+      rule_snapshot: { id: rule.id, action: rule.action, criteria },
+      quote_received_at: ticker.quote_received_at || null,
+      quote_source: ticker.quote_source || null,
+      quote_age_ms: Number.isFinite(Date.parse(ticker.quote_received_at))
+        && Date.parse(observedAt) >= Date.parse(ticker.quote_received_at)
+        ? Date.parse(observedAt) - Date.parse(ticker.quote_received_at) : null,
       price_source: candidate?.priceSource || null,
       score_threshold_price: candidate?.scoreThresholdPrice ?? null,
       candidate_limit_price: candidate?.candidateLimitPrice ?? null,

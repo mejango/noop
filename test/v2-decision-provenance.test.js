@@ -1,0 +1,20 @@
+'use strict';
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {loadProduction}=require('./helpers/load-production');
+const {buildCandidateObservationRows}=loadProduction(['buildCandidateObservationRows']);
+const facts=require('../bot/strategy-facts.json');
+const config=require('../bot/config.json');
+test('production decision evidence retains exact rule/config and individual quote provenance',()=>{
+ const criteria={min_score:65,conditions:[{field:'spot_price',op:'gte',value:2000}]};
+ const candidates=[{name:'ETH-20260918-3000-C',ticker:{b:'8',a:'9',quote_received_at:'2026-09-11T10:00:00.000Z',quote_source:'derive-v2/get_tickers'}}];
+ const [row]=buildCandidateObservationRows({candidates,rule:{id:7,action:'sell_call'},criteria,tickTimestamp:'2026-09-11T10:00:03.000Z'});
+ assert.equal(row.metadata.policy_version,facts.policy_version);
+ assert.deepEqual(row.metadata.strategy_config,config);
+ assert.deepEqual(row.metadata.rule_snapshot,{id:7,action:'sell_call',criteria});
+ assert.equal(row.metadata.quote_age_ms,3000);
+ assert.equal(row.metadata.quote_source,'derive-v2/get_tickers');
+ const [unknown]=buildCandidateObservationRows({candidates:[{name:'ETH-20260918-3000-C'}],rule:{id:8,action:'sell_call'}});
+ assert.equal(unknown.metadata.quote_age_ms,null);
+ assert.equal(unknown.metadata.quote_received_at,null);
+});
