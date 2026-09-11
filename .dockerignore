@@ -1,0 +1,54 @@
+# Install dependencies and build Next.js inside the target Linux image.
+**/node_modules
+**/.next
+**/.cache
+**/.turbo
+**/coverage
+**/*.tsbuildinfo
+dashboard/out
+dashboard/build
+dashboard/.vercel
+
+# Git metadata and isolated development work.
+**/.git
+**/.audit-work
+**/.worktrees
+**/.worktree
+**/.codex
+**/.agents
+**/.DS_Store
+**/*.log
+tmp
+.tmp
+
+# Runtime data, database backups, and SQLite sidecars.
+**/data
+**/archive
+**/backups
+**/*.db
+**/*.db-*
+**/*.db.*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite.*
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.sqlite3.*
+**/price_history.json
+**/bot_data.json
+knowledge/.history
+knowledge/.meta.json
+
+# Local environment settings and key material must not enter build context.
+**/.env
+**/.env.*
+**/.private_key.txt
+**/private_key*.txt
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.keystore
+**/.ssh
+**/id_rsa
+**/id_ed25519
