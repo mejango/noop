@@ -62,6 +62,7 @@ async function confirm(overrides = {}) {
       const checked = await executionContext.validateOrder({ price: args[3], amount: args[2] });
       validationResults.push(checked);
       if (!checked.allowed) return { failed: true, reason: checked.reason };
+      if (overrides.executionResult) return overrides.executionResult;
       submitted.push({ price: args[3], amount: args[2], bounds: executionContext.approvedBounds });
       return { resting: true, price: args[3] };
     },
@@ -108,6 +109,14 @@ test('execution revalidation catches a later outage after initial confirmation p
   assert.equal(result.submitted.length, 0);
   assert.equal(result.validationResults[0].code, 'margin_unavailable');
   assert.equal(result.updates.at(-1).status, 'failed');
+});
+
+test('pre-send execution failure clears confirmed status without claiming a submission', async () => {
+  const result = await confirm({ executionResult: { failed: true, reason: 'positions unavailable' } });
+  assert.equal(result.submitted.length, 0);
+  assert.ok(result.updates.some(update => update.status === 'confirmed'));
+  assert.equal(result.updates.at(-1).status, 'failed');
+  assert.equal(result.updates.at(-1).execution_result, 'positions unavailable');
 });
 
 test('changed or withdrawn rule cannot execute after reviewers finish', async () => {

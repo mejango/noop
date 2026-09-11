@@ -208,6 +208,24 @@ function statusRuntime(post) {
   });
 }
 
+test('resting exit position-read failure returns a terminal pre-send failure', async (t) => {
+  let submitted = 0;
+  const state = runtime(t, {
+    fetchPositions: async (options) => {
+      assert.equal(options.throwOnError, true);
+      throw new Error('positions unavailable');
+    },
+    placeOrder: async () => { submitted++; throw new Error('must not submit'); },
+  });
+  const result = await state.executeOrder('buyback_call', callName, 1, 2, [instrument(callName)], 2500, 'post_only');
+  assert.equal(result.failed, true);
+  assert.match(result.reason, /positions unavailable/);
+  assert.equal(submitted, 0);
+  assert.equal(orders(state).length, 1);
+  assert.equal(orders(state)[0].success, 0);
+  assert.match(orders(state)[0].reason, /positions unavailable/);
+});
+
 for (const missingAsException of [false, true]) {
   test(`missing direct order and unavailable history remain unknown (${missingAsException ? 'HTTP exception' : 'API response'})`, async () => {
     const state = statusRuntime(async (url) => {
