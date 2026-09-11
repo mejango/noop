@@ -382,7 +382,7 @@ interface PnlReportData {
     count: number;
     grossValue: number;
     cashflow: number;
-    filledAmount: number;
+    filledAmount: number | null;
   }>;
   orders: Array<{
     id: number;

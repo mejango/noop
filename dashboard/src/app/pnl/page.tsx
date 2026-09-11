@@ -90,7 +90,7 @@ type Report = {
     count: number;
     grossValue: number;
     cashflow: number;
-    filledAmount: number;
+    filledAmount: number | null;
   }>;
   orders: Array<{
     id: number | string;
@@ -483,7 +483,7 @@ export default function PnlReportPage() {
                       <td className="py-2 pr-3 text-right tabular-nums">{row.count}</td>
                       <td className="py-2 pr-3 text-right tabular-nums">{formatUSD(row.grossValue)}</td>
                       <td className={`py-2 pr-3 text-right tabular-nums ${row.cashflow >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>{fmtSignedUsd(row.cashflow)}</td>
-                      <td className="py-2 text-right tabular-nums">{row.filledAmount.toFixed(2)}</td>
+                      <td className="py-2 text-right tabular-nums">{row.filledAmount == null ? '--' : row.filledAmount.toFixed(2)}</td>
                     </tr>
                   ))}
                   {report.actionBreakdown.length === 0 && !loading && (

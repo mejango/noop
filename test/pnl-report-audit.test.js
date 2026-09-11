@@ -243,7 +243,7 @@ test('current external ETH insurance settings cannot rewrite historical persiste
   assert.equal(report.series.buckets[0].endPortfolioValue, 10_000);
   assert.equal(report.meta.valuationScope, 'derive_subaccount');
   assert.equal(report.meta.insuredExternalEth, 0);
-  assert.match(report.meta.externalHoldingsUnavailableReason, /historical.*unavailable/i);
+  assert.match(report.meta.externalHoldingsUnavailableReason, /current insurance setting is not applied to historical balances/i);
 });
 
 test('recorded settlement cashflow replaces estimates even with unknown filled amount', async (t) => {
@@ -292,4 +292,11 @@ test('settlements before the report window contribute only to opening recorded c
   assert.equal(report.summary.netTradeCashflow, 0);
   assert.equal(report.orders.length, 0);
   assert.equal(report.settlementEstimates.length, 0);
+});
+
+
+test('settlement action totals preserve unknown quantities instead of displaying zero fills', async () => {
+  const report = await routeFixture({ events: [recordedSettlement()] }).report();
+  assert.equal(report.actionBreakdown[0].filledAmount, null);
+  assert.match(report.meta.externalHoldingsUnavailableReason, /excluded from this account report/);
 });

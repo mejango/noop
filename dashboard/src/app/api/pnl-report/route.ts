@@ -242,7 +242,7 @@ function getPnlResponse(req: NextRequest) {
     const callNetCashflow = orders.reduce((sum, order) =>
       sum + (isCallAction(order.action) ? signedCashflow(order.action, order.total_value, order.actual_cashflow_usd) : 0), 0);
 
-    const actionMap = new Map<string, { action: string; count: number; grossValue: number; cashflow: number; filledAmount: number }>();
+    const actionMap = new Map<string, { action: string; count: number; grossValue: number; cashflow: number; filledAmount: number | null }>();
     for (const order of orders) {
       const existing = actionMap.get(order.action) || {
         action: order.action,
@@ -254,7 +254,10 @@ function getPnlResponse(req: NextRequest) {
       existing.count += 1;
       existing.grossValue += Number(order.total_value ?? 0);
       existing.cashflow += signedCashflow(order.action, order.total_value, order.actual_cashflow_usd);
-      existing.filledAmount += Number(order.filled_amount ?? order.intended_amount ?? 0);
+      const filledAmount = order.filled_amount ?? order.intended_amount;
+      existing.filledAmount = existing.filledAmount == null || filledAmount == null || !Number.isFinite(Number(filledAmount))
+        ? null
+        : existing.filledAmount + Number(filledAmount);
       actionMap.set(order.action, existing);
     }
 
@@ -353,7 +356,7 @@ function getPnlResponse(req: NextRequest) {
         bucketMs,
         insuredExternalEth: 0,
         valuationScope: 'derive_subaccount',
-        externalHoldingsUnavailableReason: 'Historical external ETH holdings are unavailable and are excluded from reported balances.',
+        externalHoldingsUnavailableReason: 'External insured holdings are excluded from this account report; the current insurance setting is not applied to historical balances.',
         performanceAvailable: false,
         performanceUnavailableReason: PERFORMANCE_UNAVAILABLE_REASON,
         settlementEstimateCount: settlementEstimates.length,
