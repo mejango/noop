@@ -98,6 +98,14 @@ function createEconomicStore(db) {
   if (!db.prepare('PRAGMA table_info(economic_coverage)').all().some(column => column.name === 'evidence_reference')) {
     db.exec('ALTER TABLE economic_coverage ADD COLUMN evidence_reference TEXT');
   }
+  db.exec(`CREATE TABLE IF NOT EXISTS economic_tracking_start (
+    account_id TEXT PRIMARY KEY, started_at TEXT NOT NULL
+  )`);
+  const startTracking = (accountId, startedAt) => {
+    const account = accountIdentity(accountId);
+    db.prepare('INSERT OR IGNORE INTO economic_tracking_start (account_id,started_at) VALUES (?,?)').run(account,iso(startedAt));
+    return db.prepare('SELECT started_at FROM economic_tracking_start WHERE account_id=?').get(account).started_at;
+  };
   const keys = ['event_id','account_id','event_type','timestamp','instrument_name','currency','amount','cashflow_usd','realized_pnl_usd','fee_usd','source','raw_json'];
   const insert = db.prepare(`INSERT INTO economic_events (${keys.join(',')}) VALUES (${keys.map(k => `@${k}`).join(',')})`);
   const get = db.prepare('SELECT * FROM economic_events WHERE event_id = ?');
@@ -143,8 +151,8 @@ function createEconomicStore(db) {
     const last = db.prepare('SELECT external_eth FROM exposure_history WHERE account_id=? ORDER BY effective_at DESC LIMIT 1').get(String(accountId));
     if (last?.external_eth !== amount) db.prepare('INSERT INTO exposure_history VALUES (?,?,?,?)').run(String(accountId),iso(effectiveAt),amount,source);
   }
-  function latestCoverage(accountId, dataset) {
-    const start = iso(0);
+  function latestCoverage(accountId, dataset, from = 0) {
+    const start = iso(from);
     let cursor = start;
     const rows = db.prepare('SELECT from_timestamp,to_timestamp FROM economic_coverage WHERE account_id=? AND dataset=? AND complete=1 ORDER BY from_timestamp').all(accountIdentity(accountId),dataset);
     for (const row of rows) {
@@ -171,7 +179,7 @@ function createEconomicStore(db) {
     return coversRange(db.prepare(`SELECT * FROM economic_coverage WHERE account_id=? AND dataset='trades'
       AND complete=1 AND from_timestamp<=? AND to_timestamp>=?`).all(accountIdentity(accountId),iso(to),iso(from)),from,to);
   }
-  return { recordEvents, recordBatch, recordExposure, latestCoverage, getTradeSyncWork, saveTradeSyncWork, tradeRangeCovered };
+  return { recordEvents, recordBatch, recordExposure, startTracking, latestCoverage, getTradeSyncWork, saveTradeSyncWork, tradeRangeCovered };
 }
 function paginationInteger(value, field) {
   if ((typeof value !== 'number' && (typeof value !== 'string' || !/^\d+$/.test(value)))

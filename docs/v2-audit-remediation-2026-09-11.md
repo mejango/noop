@@ -1,6 +1,6 @@
 # V2 audit remediation — 2026-09-11
 
-This implements the findings in [the V2 audit](v2-strategy-data-audit-2026-09-11.md), starting from production-code commit `7864bc9`. Work was integrated in an isolated V2 checkout; the existing V3 worktree was not edited. The audit describes the old code. This document describes the resulting behavior.
+This implements the findings in [the V2 audit](v2-strategy-data-audit-2026-09-11.md), starting from production-code commit `7864bc9`. Work was integrated in an isolated V2 checkout; the existing V3 worktree was not edited. The audit describes the old code. This document describes the resulting behavior. Historical rebuilds are deferred: the rollout preserves existing observations, finalized outcome labels and portfolio history. New tables/columns support future operation; explicit repair tools remain opt-in.
 
 | Audit findings | Result | Principal implementation / regression coverage |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ Receipt fields and pagination were checked against the official [V2 generated sc
 
 ## Economic history
 
-The bot progressively imports V2 account trade history on a bounded schedule, retaining pagination progress and coverage evidence. Events retain decimal source values and raw venue records. For trade events, `amount` is contract quantity; `cashflow_usd` is signed premium; `fee_usd` and `realized_pnl_usd` are separate nullable venue facts. Transfer `amount` is a signed quantity of its stated currency. These records are separate from the strategy's order-intent and spend tables.
+Automatic V2 trade-evidence collection begins at a durable account-specific boundary recorded before the upgraded process can trade. It resumes from that boundary after restart, on a bounded schedule with pagination progress and coverage evidence. It does not automatically import older history. Events retain decimal source values and raw venue records. For trade events, `amount` is contract quantity; `cashflow_usd` is signed premium; `fee_usd` and `realized_pnl_usd` are separate nullable venue facts. Transfer `amount` is a signed quantity of its stated currency. These records are separate from the strategy's order-intent and spend tables.
 
 Actual settlement and capital-flow exports can be imported without inventing completeness:
 
@@ -49,7 +49,7 @@ Returns and drawdowns remain unavailable until reconciled capital flows and suit
 
 ## Derived-data repair and archives
 
-Create and retain a verified database snapshot before historical repair. Work on an explicit copy first:
+Historical repair is not part of startup or this rollout. Any later proposal must identify the affected rows, show before/after results on a copy, quantify the reporting benefit, and include verification and rollback. Before deciding whether to apply a repair, compare its results on an explicit copy of a verified snapshot:
 
 ```sh
 node scripts/archive-v2-data.js --db /explicit/path/noop.db --out /explicit/archive/noop-2026-09-11.db
@@ -59,7 +59,7 @@ node bot/repair-decision-outcomes.js --db /explicit/copy/noop.db
 
 The archive tool uses SQLite's backup mechanism so committed WAL data is included, verifies the copy, and writes a checksum/provenance manifest. It refuses overwrite and never prunes raw source rows. Keep dated snapshots off the operational volume and verify a restore periodically. Schedule archives in the deployment's backup system; repository code alone does not establish an off-host backup.
 
-Rebuilds use retained raw evidence and replace derived hourly buckets atomically. A range may be specified with `--from` and `--to` at UTC hour boundaries; it is inclusive/exclusive. Rebuilding a period whose raw evidence has already been removed cannot recover it. The outcome repair reconsiders incomplete labels; it cannot recover observations that were never recorded.
+Rebuilds use retained raw evidence and replace derived hourly buckets atomically. A range may be specified with `--from` and `--to` at UTC hour boundaries; it is inclusive/exclusive. Rebuilding a period whose raw evidence has already been removed cannot recover it. The explicit outcome repair reconsiders incomplete labels; it cannot recover observations that were never recorded. Normal processing of already-pending observations continues, but startup does not reopen finalized historical labels.
 
 Raw evidence remains append-only in V2. Partitioning operational reads across archived databases would require a tested query/migration layer; deleting old rows before that exists would break outcome and research reproducibility. The archive manifest provides a restore baseline for that later storage migration.
 
@@ -69,4 +69,4 @@ With Node 20, install both locked dependency sets (`npm ci` and `npm --prefix da
 
 Read-only Railway inspection confirmed the active deployment was `7864bc9`, using the bundled `Dockerfile`, one replica and an `ON_FAILURE` restart policy. SQLite and a read-only venue query agreed on both open zero-fill orders. One old local put limit was $7.60 while its venue maker order was $7.50; the stored reservation was conservative, and the upgrade does not require guessing a fill.
 
-The pre-upgrade SQLite backup `/data/backups/v2-pre-audit-2026-09-11T19-16-23-605Z.db` passed integrity verification (2,778,013,696 bytes, SHA256 `9cdb608e6122036712de2abde4743219c06bcf22d50b763b69ab61ded04f30fc`). Its manifest is beside it. Same-volume backup is not off-host disaster recovery. Production rollout status and subsequent service checks are recorded separately from local tests. Historical event completeness still depends on authoritative venue records, and no historical profitability claim follows from these software tests.
+The pre-upgrade SQLite backup `/data/backups/v2-pre-audit-2026-09-11T19-16-23-605Z.db` passed integrity verification (2,778,013,696 bytes, SHA256 `9cdb608e6122036712de2abde4743219c06bcf22d50b763b69ab61ded04f30fc`). Its manifest is beside it. Same-volume backup is not off-host disaster recovery. Production rollout status and subsequent service checks are recorded separately from local tests. No live historical rebuild has been performed. Historical event completeness still depends on authoritative venue records, and no historical profitability claim follows from these software tests.

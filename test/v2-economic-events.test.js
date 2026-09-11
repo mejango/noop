@@ -203,3 +203,22 @@ test('official V2 trade identity and final settlement fields are required',async
  await assert.rejects(syncV2Trades({store,accountId:25923,from,to,post:async()=>({subaccount_id:999,trades:[],num_pages:0})}),/account mismatch/);
  await assert.rejects(syncV2Trades({store,accountId:25923,from,to,post:async()=>({trades:[],num_pages:0})}),/account identity/);
 });
+
+test('automatic ledger tracking begins prospectively and retains its boundary across restarts', async t=>{
+ const {db,store}=harness(t);
+ const start=store.startTracking(25923,from);
+ assert.equal(start,new Date(from).toISOString());
+ const restarted=createEconomicStore(db);
+ assert.equal(restarted.startTracking(25923,to),start);
+ assert.equal(restarted.latestCoverage(25923,'trades',start),null);
+ const requested=[];
+ await syncV2TradesProgressively({store:restarted,accountId:25923,from:start,to,post:async body=>{
+   requested.push(body);return {subaccount_id:25923,trades:[trade()],pagination:{num_pages:1,count:1}};
+ }});
+ assert.equal(requested[0].from_timestamp,Date.parse(start));
+ assert.equal(restarted.latestCoverage(25923,'trades',start),new Date(to).toISOString());
+ assert.equal(restarted.latestCoverage(25923,'trades'),null,'prospective coverage cannot claim epoch history');
+ assert.equal(getEconomicHistory(db,25923,'2026-09-10T00:00:00Z',to).coverage.trades,false);
+ assert.equal(getEconomicHistory(db,25923,start,to).coverage.trades,true);
+ assert.notEqual(restarted.startTracking(7,to),start,'tracking boundaries are account scoped');
+});

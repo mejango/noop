@@ -215,6 +215,9 @@ const CALL_ENTRY_BUFFER_PCT = BOT_CONFIG.CALL_ENTRY_BUFFER_PCT || 0.05;
 const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
 const CALL_BREAKOUT_DERIVATIVES = new Set(['moving', 'slanted', 'steep']);
 const SUBACCOUNT_ID = 25923;
+// The automatic ledger starts before this process can trade and resumes from the
+// same durable boundary after restarts. Older history is an explicit import.
+const ECONOMIC_TRACKING_START = economicStore?.startTracking(SUBACCOUNT_ID, Date.now()) || null;
 
 // ─── Telegram Notifications ──────────────────────────────────────────────────
 const sendTelegram = async (message) => {
@@ -12565,8 +12568,8 @@ const syncEconomicEvidence = async (now = Date.now()) => {
   if (!economicStore || now - lastEconomicSyncAt < 15 * 60 * 1000) return;
   lastEconomicSyncAt = now;
 
-  const lastCovered = economicStore.latestCoverage(SUBACCOUNT_ID, 'trades');
-  const from = lastCovered ? Math.max(0, Date.parse(lastCovered) - 60000) : 0;
+  const lastCovered = economicStore.latestCoverage(SUBACCOUNT_ID, 'trades', ECONOMIC_TRACKING_START);
+  const from = Math.max(Date.parse(ECONOMIC_TRACKING_START), Date.parse(lastCovered || ECONOMIC_TRACKING_START) - 60000);
   try {
     economicStore.recordExposure(SUBACCOUNT_ID, String(PUT_INSURED_EXTERNAL_ETH), now);
     const result = await syncV2TradesProgressively({
