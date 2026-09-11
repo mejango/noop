@@ -657,13 +657,12 @@ try {
 
 // Add explicit completeness without silently changing historic outcome evidence.
 for (const [name, definition] of [
-  ['spot_complete', 'INTEGER NOT NULL DEFAULT 0'],
-  ['quote_complete', 'INTEGER NOT NULL DEFAULT 0'],
+  ['spot_complete', 'INTEGER'],
+  ['quote_complete', 'INTEGER'],
   ['last_checked_at', 'TEXT'],
 ]) addColumnIfMissing('decision_outcomes', name, definition);
 
 db.exec(`
-  CREATE TABLE IF NOT EXISTS data_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS lifecycle_dirty_instruments (instrument_name TEXT PRIMARY KEY);
   CREATE INDEX IF NOT EXISTS idx_orders_instrument ON orders(instrument_name, timestamp);
   CREATE TRIGGER IF NOT EXISTS lifecycle_order_insert AFTER INSERT ON orders
@@ -679,39 +678,15 @@ db.exec(`
     INSERT OR IGNORE INTO lifecycle_dirty_instruments VALUES (OLD.instrument_name);
   END;
 `);
-db.transaction(() => {
-  if (!db.prepare('SELECT 1 FROM data_migrations WHERE name = ?').get('v2-observation-completeness-lifecycle-1')) {
-    db.exec(`
-      UPDATE decision_outcomes SET
-        spot_complete = CASE WHEN future_spot_at IS NOT NULL AND future_spot > 0 THEN 1 ELSE 0 END,
-        quote_complete = CASE WHEN future_quote_at IS NOT NULL AND (
-          ((SELECT action FROM candidate_observations WHERE id = observation_id) IN ('sell_call', 'sell_put') AND future_ask > 0)
-          OR ((SELECT action FROM candidate_observations WHERE id = observation_id) IN ('buy_put', 'buyback_call') AND future_bid >= 0)
-        ) THEN 1 ELSE 0 END;
-      UPDATE decision_outcomes SET status = 'pending', evaluated_at = NULL
-        WHERE status IN ('evaluated', 'missing') AND (spot_complete = 0 OR quote_complete = 0);
-      INSERT OR IGNORE INTO lifecycle_dirty_instruments
-        SELECT DISTINCT instrument_name FROM orders WHERE instrument_name IS NOT NULL;
-      INSERT OR IGNORE INTO lifecycle_dirty_instruments SELECT instrument_name FROM position_lifecycle;
-      UPDATE options_snapshots SET option_type = 'C' WHERE lower(option_type) = 'call';
-      UPDATE options_snapshots SET option_type = 'P' WHERE lower(option_type) = 'put';
-      UPDATE candidate_observations SET option_type = 'C' WHERE lower(option_type) = 'call';
-      UPDATE candidate_observations SET option_type = 'P' WHERE lower(option_type) = 'put';
-    `);
-    db.prepare('INSERT INTO data_migrations VALUES (?, ?)').run('v2-observation-completeness-lifecycle-1', new Date().toISOString());
-  }
-})();
+// Historical observations, finalized outcomes, and projections are left intact.
+// Only new/changed orders enter the dirty lifecycle queue automatically.
 // Keep per-contract receipt evidence alongside the cross-sectional frame time.
 addColumnIfMissing('options_snapshots', 'quote_received_at', 'TEXT');
 addColumnIfMissing('options_snapshots', 'quote_source', 'TEXT');
 db.exec(`CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument_receipt
   ON options_snapshots(instrument_name, COALESCE(quote_received_at, timestamp))`);
-db.transaction(() => {
-  if (addColumnIfMissing('portfolio_snapshots', 'gross_options_cashflow', 'REAL')) {
-    // Existing V2 snapshots stored local premium cashflow under the legacy name.
-    db.exec('UPDATE portfolio_snapshots SET gross_options_cashflow = total_realized_pnl');
-  }
-})();
+// New snapshots use the truthful field; historical legacy values are not copied.
+addColumnIfMissing('portfolio_snapshots', 'gross_options_cashflow', 'REAL');
 const hourlyRollups = createHourlyRollups(db);
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
@@ -1474,7 +1449,7 @@ const stmts = {
   getAvgCallPremium7d: db.prepare(`
     SELECT AVG(bid_price) as avg_premium
     FROM options_snapshots
-    WHERE option_type = 'C'
+    WHERE option_type IN ('C', 'call')
       AND timestamp > @since
       AND bid_price > 0
       AND delta BETWEEN 0.04 AND 0.12
@@ -2257,8 +2232,18 @@ const getObservationInstruments = (now = new Date().toISOString(), { quoteWindow
 // historical quote backfill. Keyset paging visits each pending label once.
 const repairDecisionOutcomes = ({ now = new Date().toISOString(), quoteWindowHours = 6, batchSize = 500 } = {}) => {
   if (!(batchSize > 0) || !Number.isInteger(batchSize)) throw new Error('batchSize must be a positive integer');
-  const reopened = db.prepare(`UPDATE decision_outcomes SET status = 'pending', evaluated_at = NULL, last_checked_at = NULL
-    WHERE status IN ('evaluated', 'missing') AND (spot_complete = 0 OR quote_complete = 0)`).run().changes;
+  const reopened = db.transaction(() => {
+    // This historical inference is opt-in through the repair command, never boot.
+    db.exec(`UPDATE decision_outcomes SET
+      spot_complete = CASE WHEN future_spot_at IS NOT NULL AND future_spot > 0 THEN 1 ELSE 0 END,
+      quote_complete = CASE WHEN future_quote_at IS NOT NULL AND (
+        ((SELECT action FROM candidate_observations WHERE id = observation_id) IN ('sell_call', 'sell_put') AND future_ask > 0)
+        OR ((SELECT action FROM candidate_observations WHERE id = observation_id) IN ('buy_put', 'buyback_call') AND future_bid >= 0)
+      ) THEN 1 ELSE 0 END
+      WHERE status IN ('evaluated', 'missing') AND (spot_complete IS NULL OR quote_complete IS NULL)`);
+    return db.prepare(`UPDATE decision_outcomes SET status = 'pending', evaluated_at = NULL, last_checked_at = NULL
+      WHERE status IN ('evaluated', 'missing') AND (spot_complete IS NOT 1 OR quote_complete IS NOT 1)`).run().changes;
+  })();
   let afterId = 0;
   const totals = { reopened, scanned: 0, evaluated: 0, missing: 0, pending: 0 };
   while (true) {
@@ -2277,11 +2262,13 @@ const getDecisionOutcomeCompleteness = () => db.prepare(`
       WHEN c.dte <= 12 THEN '5-12' WHEN c.dte < 45 THEN '12-45'
       WHEN c.dte <= 78 THEN '45-78' ELSE '>78' END AS entry_dte_bucket,
     CASE WHEN o.future_spot IS NULL OR c.strike IS NULL THEN 'unknown'
-      WHEN (c.option_type = 'P' AND o.future_spot < c.strike)
-        OR (c.option_type = 'C' AND o.future_spot > c.strike) THEN 'ITM'
+      WHEN (c.option_type IN ('P', 'put') AND o.future_spot < c.strike)
+        OR (c.option_type IN ('C', 'call') AND o.future_spot > c.strike) THEN 'ITM'
       WHEN o.future_spot = c.strike THEN 'ATM' ELSE 'OTM' END AS future_moneyness,
     COUNT(*) AS observations, SUM(o.spot_complete) AS with_spot,
-    SUM(o.quote_complete) AS with_option_quote
+    SUM(o.quote_complete) AS with_option_quote,
+    SUM(o.spot_complete IS NULL) AS spot_completeness_unknown,
+    SUM(o.quote_complete IS NULL) AS quote_completeness_unknown
   FROM decision_outcomes o JOIN candidate_observations c ON c.id = o.observation_id
   GROUP BY c.option_type, o.horizon_hours, o.status, entry_dte_bucket, future_moneyness
   ORDER BY c.option_type, o.horizon_hours, o.status, entry_dte_bucket, future_moneyness

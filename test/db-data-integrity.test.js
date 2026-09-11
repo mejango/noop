@@ -133,6 +133,9 @@ test('call premium metric uses canonical enum and a stable maturity/delta popula
   far.option_details = { option_type: 'C', expiry: expiry + 60 * 86400, strike: 3000 };
   store.insertOptionsSnapshotBatch([good, deep, far], ts);
   assert.equal(store.getAvgCallPremium7d().avg_premium, 10);
+  db.prepare("UPDATE options_snapshots SET option_type = 'call' WHERE option_type = 'C'").run();
+  assert.equal(store.getAvgCallPremium7d().avg_premium, 10);
+  assert.equal(db.prepare('SELECT option_type FROM options_snapshots LIMIT 1').get().option_type, 'call');
 });
 
 test('repair command requires an explicit existing database', () => {
@@ -142,7 +145,7 @@ test('repair command requires an explicit existing database', () => {
   assert.match(result.stderr, /Explicit --db or DATA_DIR is required/);
 });
 
-test('legacy migration preserves unknown fill value, reopens incomplete outcomes, and runs once', () => {
+test('boot preserves historical evidence and leaves optional repairs explicit', () => {
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'noop-v2-legacy-'));
   const modulePath = path.resolve(__dirname, '../bot/db');
   const run = (code) => {
@@ -151,14 +154,38 @@ test('legacy migration preserves unknown fill value, reopens incomplete outcomes
     return result.stdout.trim();
   };
   try {
-    run(`const s=require(${JSON.stringify(modulePath)}); s.insertRestingOrder({order_id:'legacy',instrument_name:'ETH-20261127-1600-P',action:'buy_put',direction:'buy',amount:5,limit_price:10,filled_amount:2,filled_value:19}); s.insertCandidateObservations([{observed_at:'2026-09-11T10:00:00.000Z',action:'buy_put',instrument_name:'ETH-20261127-1600-P'}],[1]); s.db.exec("UPDATE decision_outcomes SET status='evaluated', future_spot=2000, future_spot_at='2026-09-11T11:00:00.000Z'; DELETE FROM data_migrations; ALTER TABLE resting_orders DROP COLUMN filled_value;"); s.close();`);
-    const migrated = JSON.parse(run(`const s=require(${JSON.stringify(modulePath)}); console.log(JSON.stringify({fill:s.getOpenRestingOrders()[0],outcome:s.db.prepare('SELECT * FROM decision_outcomes').get()})); s.db.exec("UPDATE resting_orders SET filled_value=19"); s.close();`));
+    const before = JSON.parse(run(`const s=require(${JSON.stringify(modulePath)});
+      s.insertRestingOrder({order_id:'legacy',instrument_name:'ETH-20261127-1600-P',action:'buy_put',direction:'buy',amount:5,limit_price:10,filled_amount:2,filled_value:19});
+      s.insertCandidateObservations([{observed_at:'2026-09-11T10:00:00.000Z',action:'buy_put',instrument_name:'ETH-20261127-1600-P',option_type:'P'}],[1]);
+      s.insertSpotPrice(2000,{}, {},'2026-09-11T11:00:00.000Z');
+      s.insertOrder({timestamp:'2026-09-11T10:00:00.000Z',action:'buy_put',success:true,instrument_name:'ETH-20261127-1600-P',filled_amount:1,total_value:10});
+      s.insertPortfolioSnapshot({timestamp:'2026-09-11T10:00:00.000Z',spot_price:2000,total_realized_pnl:42,total_unrealized_pnl:3,portfolio_value_usd:123});
+      s.db.exec("UPDATE decision_outcomes SET status='evaluated',evaluated_at='2026-09-11T11:00:00.000Z',future_spot=2000,future_spot_at='2026-09-11T11:00:00.000Z',error='legacy evidence'; UPDATE candidate_observations SET option_type='put'; INSERT INTO options_snapshots(timestamp,instrument_name,option_type) VALUES ('2026-09-11T10:00:00.000Z','ETH-20260918-3000-C','call'); DELETE FROM lifecycle_dirty_instruments; ALTER TABLE resting_orders DROP COLUMN filled_value; ALTER TABLE decision_outcomes DROP COLUMN spot_complete; ALTER TABLE decision_outcomes DROP COLUMN quote_complete; ALTER TABLE portfolio_snapshots DROP COLUMN gross_options_cashflow;");console.log(JSON.stringify(Object.fromEntries(['spot_prices','options_snapshots','candidate_observations','decision_outcomes','portfolio_snapshots','position_lifecycle','orders'].map(table=>[table,{columns:s.db.prepare('PRAGMA table_info('+table+')').all().map(column=>column.name),rows:s.db.prepare('SELECT * FROM '+table+' ORDER BY id').all()}]))));s.close();`));
+    const migrated = JSON.parse(run(`const s=require(${JSON.stringify(modulePath)});
+      console.log(JSON.stringify({historical:Object.fromEntries(['spot_prices','options_snapshots','candidate_observations','decision_outcomes','portfolio_snapshots','position_lifecycle','orders'].map(table=>[table,s.db.prepare('SELECT * FROM '+table+' ORDER BY id').all()])),fill:s.getOpenRestingOrders()[0],outcome:s.db.prepare('SELECT * FROM decision_outcomes').get(),portfolio:s.getLatestPortfolioSnapshot(),rawType:s.db.prepare('SELECT option_type FROM options_snapshots').get().option_type,candidateType:s.db.prepare('SELECT option_type FROM candidate_observations').get().option_type,dirty:s.db.prepare('SELECT COUNT(*) n FROM lifecycle_dirty_instruments').get().n,normalEvaluation:s.evaluateDueDecisionOutcomes({now:'2026-09-11T18:00:00.000Z'})}));s.db.exec('UPDATE resting_orders SET filled_value=19');s.close();`));
+    for (const [table, prior] of Object.entries(before)) {
+      const originalColumnsAfterBoot = migrated.historical[table].map(row => Object.fromEntries(prior.columns.map(column => [column, row[column]])));
+      assert.deepEqual(originalColumnsAfterBoot, prior.rows, `${table} historical columns changed on boot`);
+    }
     assert.equal(migrated.fill.filled_amount, 2);
     assert.equal(migrated.fill.filled_value, null);
-    assert.equal(migrated.outcome.status, 'pending');
-    assert.equal(migrated.outcome.spot_complete, 1);
-    assert.equal(migrated.outcome.quote_complete, 0);
-    assert.equal(run(`const s=require(${JSON.stringify(modulePath)}); console.log(s.getOpenRestingOrders()[0].filled_value); s.close();`), '19');
+    assert.equal(migrated.outcome.status, 'evaluated');
+    assert.equal(migrated.outcome.evaluated_at, '2026-09-11T11:00:00.000Z');
+    assert.equal(migrated.outcome.future_spot, 2000);
+    assert.equal(migrated.outcome.error, 'legacy evidence');
+    assert.equal(migrated.outcome.spot_complete, null);
+    assert.equal(migrated.outcome.quote_complete, null);
+    assert.equal(migrated.portfolio.total_realized_pnl, 42);
+    assert.equal(migrated.portfolio.portfolio_value_usd, 123);
+    assert.equal(migrated.portfolio.gross_options_cashflow, null);
+    assert.equal(migrated.rawType, 'call');
+    assert.equal(migrated.candidateType, 'put');
+    assert.equal(migrated.dirty, 0);
+    assert.equal(migrated.normalEvaluation.scanned, 0);
+    assert.equal(run(`const s=require(${JSON.stringify(modulePath)});console.log(s.getOpenRestingOrders()[0].filled_value);s.close();`), '19');
+    const explicit = JSON.parse(run(`const s=require(${JSON.stringify(modulePath)});console.log(JSON.stringify(s.repairDecisionOutcomes({now:'2026-09-11T18:00:00.000Z'})));s.close();`));
+    assert.equal(explicit.reopened, 1);
+    assert.equal(explicit.missing, 1);
   } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 });
 
