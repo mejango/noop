@@ -171,7 +171,10 @@ function runBacktest(frames = [], policy, rawConfig = {}) {
       if (candidate) {
         const entryPrice = priceForExecution(candidate, 'sell', config.execution);
         const marginPerContract = Math.max(frame.spot_price * config.marginRate, Number(entryPrice || 0));
-        const quotedDepth = config.useQuotedDepth && candidate.bid_amount > 0 ? candidate.bid_amount : Infinity;
+        // Unknown or empty depth cannot establish executable entry liquidity.
+        const quotedDepth = config.useQuotedDepth
+          ? Math.max(0, finite(candidate.bid_amount) ?? 0)
+          : Infinity;
         const quantity = floorAmount(Math.min(
           exposureAvailable,
           config.maxContracts,

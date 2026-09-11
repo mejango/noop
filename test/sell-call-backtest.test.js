@@ -13,25 +13,29 @@ const {
 } = require('../bot/call-score');
 const {
   HOUR_MS,
-  CURRENT_EDGE_CONFIG,
+  HISTORICAL_COMPOSITE_EDGE_CONFIG,
   RAW_EQUIVALENT_CONFIG,
   analyzeRolloverDiscontinuity,
   attachTrailingDteBenchmarks,
   buildEconomicExamples,
   buildEconomicPredictionTape,
   buildLabeledExamples,
+  buildReport,
   constantMaturityPoint,
   currentEdgeScore,
   edgeVariantScore,
   enrichFrames,
   generateVariantConfigs,
+  historicalCompositeEdgeScore,
   loadHistoricalFrames,
   makeDteNormalizedRawPolicy,
+  makeCurrentEdgePolicy,
   makeEconomicValuePolicy,
   makeNoCallPolicy,
   makeRawScorePolicy,
   normalizeDteScore,
   normalizeLinearDteScore,
+  renderMarkdown,
   runBacktest,
   scoreSimpleCall,
   splitChronologicalFrames,
@@ -103,7 +107,33 @@ function framesFrom(definitions) {
 }
 
 describe('current edge compatibility', () => {
-  test('reproduces the hard-coded multiplicative score', () => {
+  test('uses the production score across the strategy DTE window', () => {
+    for (const dte of [5, 6.5, 8.5, 10, 12]) {
+      const candidate = {
+        raw_score: 75,
+        dte,
+        bid_price: 7.5,
+        spread_pct: 0.09,
+        features: { market_avg_spread: 0.12, score_trend_24h_pct: 5 },
+      };
+      const edge = currentEdgeScore(candidate);
+      assert.strictEqual(edge.score, normalizeSellCallScore(candidate.raw_score, dte));
+      assert.strictEqual(edge.multiplier, edge.score / candidate.raw_score);
+    }
+  });
+
+  test('uses the production default floor and ranks by normalized score', () => {
+    const policy = makeCurrentEdgePolicy();
+    const atFloor = { instrument_name: 'AT_FLOOR', raw_score: 65, dte: 8.5, bid_price: 4 };
+    assert.strictEqual(policy.select({ candidates: [atFloor] }).candidate, atFloor);
+    assert.strictEqual(policy.select({ candidates: [{ ...atFloor, raw_score: 64.99 }] }), null);
+    assert.strictEqual(policy.select({ candidates: [{ ...atFloor, bid_price: 3.99 }] }), null);
+    const shorter = { ...atFloor, instrument_name: 'SHORTER', raw_score: 89, dte: 5 };
+    const longer = { ...atFloor, instrument_name: 'LONGER', raw_score: 90, dte: 12 };
+    assert.strictEqual(policy.select({ candidates: [longer, shorter] }).candidate, shorter);
+  });
+
+  test('retains the historical composite for factor-tuning comparisons', () => {
     const candidate = {
       raw_score: 75,
       dte: 8,
@@ -118,7 +148,7 @@ describe('current edge compatibility', () => {
       },
     };
     const expectedMultiplier = 1.05 * 1.02 * 1.08 * 1.18 * 1.12 * 1.1 * 1.05 * 1.04 * 1.08;
-    const edge = currentEdgeScore(candidate);
+    const edge = historicalCompositeEdgeScore(candidate);
     assert.ok(Math.abs(edge.multiplier - expectedMultiplier) < 1e-12);
     assert.ok(Math.abs(edge.score - 75 * expectedMultiplier) < 1e-9);
   });
@@ -145,11 +175,11 @@ describe('isolated edge tuning', () => {
     assert.strictEqual(tuned.multiplier, 1);
   });
 
-  test('unit factor weights reproduce the current composite edge', () => {
-    const current = currentEdgeScore(candidate);
-    const tuned = edgeVariantScore(candidate, CURRENT_EDGE_CONFIG);
-    assert.ok(Math.abs(tuned.score - current.score) < 1e-10);
-    assert.ok(Math.abs(tuned.multiplier - current.multiplier) < 1e-10);
+  test('unit factor weights reproduce the historical composite edge', () => {
+    const historical = historicalCompositeEdgeScore(candidate);
+    const tuned = edgeVariantScore(candidate, HISTORICAL_COMPOSITE_EDGE_CONFIG);
+    assert.ok(Math.abs(tuned.score - historical.score) < 1e-10);
+    assert.ok(Math.abs(tuned.multiplier - historical.multiplier) < 1e-10);
   });
 
   test('chronological split leaves a final non-overlapping holdout', () => {
@@ -168,7 +198,7 @@ describe('isolated edge tuning', () => {
     const second = generateVariantConfigs(100, 42);
     assert.deepStrictEqual(first, second);
     assert.deepStrictEqual(first[0], RAW_EQUIVALENT_CONFIG);
-    assert.deepStrictEqual(first[1], CURRENT_EDGE_CONFIG);
+    assert.deepStrictEqual(first[1], HISTORICAL_COMPOSITE_EDGE_CONFIG);
     assert.strictEqual(new Set(first.map(JSON.stringify)).size, first.length);
   });
 });
@@ -532,6 +562,51 @@ describe('models and leakage controls', () => {
 });
 
 describe('portfolio replay', () => {
+  function depthFrames(bidAmount) {
+    const start = Date.UTC(2026, 0, 1, 0);
+    const expiry = Math.floor((start + 8 * 24 * HOUR_MS) / 1000);
+    const entry = option({ expiry, bid: 10, ask: 11 });
+    if (bidAmount === undefined) delete entry.bid_amount;
+    else entry.bid_amount = bidAmount;
+    return framesFrom([
+      { timestampMs: start, spot: 2000, options: [entry] },
+      { timestampMs: start + HOUR_MS, spot: 2000, options: [option({ expiry, bid: 0.8, ask: 1, mark: 0.9 })] },
+    ]);
+  }
+
+  test('zero, missing, or invalid bid depth prevents entries by default', () => {
+    for (const depth of [0, null, undefined, -1, NaN, Infinity, 'unknown']) {
+      const result = runBacktest(depthFrames(depth), makeRawScorePolicy());
+      assert.strictEqual(result.config.useQuotedDepth, true);
+      assert.strictEqual(result.trades, 0, `unexpected fill for depth ${depth}`);
+      assert.strictEqual(result.realized_call_pnl, 0);
+      assert.strictEqual(result.total_premium_received, 0);
+    }
+  });
+
+  test('finite quoted bid depth caps the filled quantity and resulting P&L', () => {
+    const result = runBacktest(depthFrames(0.05), makeRawScorePolicy());
+    assert.strictEqual(result.trades, 1);
+    assert.strictEqual(result.trade_log[0].quantity, 0.05);
+    assert.strictEqual(result.realized_call_pnl, 0.45);
+  });
+
+  test('ignoring quoted depth is explicit and disclosed in JSON and Markdown', () => {
+    const frames = depthFrames(null);
+    const result = runBacktest(frames, makeRawScorePolicy(), { useQuotedDepth: false });
+    assert.strictEqual(result.config.useQuotedDepth, false);
+    assert.strictEqual(result.trades, 1);
+    assert.strictEqual(result.trade_log[0].quantity, 2.25);
+    assert.strictEqual(result.realized_call_pnl, 20.25);
+    const report = buildReport({
+      data: { frames, window: { from: frames[0].timestamp, to: frames.at(-1).timestamp }, cadence_hours: 1 },
+      examples: [],
+      results: [result],
+    });
+    assert.strictEqual(report.results[0].config.useQuotedDepth, false);
+    assert.match(renderMarkdown(report), /quoted depth ignored; unlimited entry liquidity assumed/);
+  });
+
   test('accounts for entry premium and an executable profit-capture buyback', () => {
     const start = Date.UTC(2026, 0, 1, 0);
     const expiry = Math.floor((start + 8 * 24 * HOUR_MS) / 1000);

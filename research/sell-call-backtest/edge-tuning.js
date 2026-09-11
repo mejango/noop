@@ -18,16 +18,16 @@ const FACTOR_NAMES = Object.freeze([
 ]);
 
 const ZERO_WEIGHTS = Object.freeze(Object.fromEntries(FACTOR_NAMES.map((name) => [name, 0])));
-const CURRENT_WEIGHTS = Object.freeze(Object.fromEntries(FACTOR_NAMES.map((name) => [name, 1])));
+const HISTORICAL_COMPOSITE_WEIGHTS = Object.freeze(Object.fromEntries(FACTOR_NAMES.map((name) => [name, 1])));
 const RAW_EQUIVALENT_CONFIG = Object.freeze({
   min_bid: 4,
   min_edge: 65,
   weights: ZERO_WEIGHTS,
 });
-const CURRENT_EDGE_CONFIG = Object.freeze({
+const HISTORICAL_COMPOSITE_EDGE_CONFIG = Object.freeze({
   min_bid: 4,
   min_edge: 80,
-  weights: CURRENT_WEIGHTS,
+  weights: HISTORICAL_COMPOSITE_WEIGHTS,
 });
 
 function normalizeVariantConfig(config = {}) {
@@ -176,7 +176,7 @@ function generateVariantConfigs(count = 2500, seed = 20260809) {
     configs.push(normalized);
   };
   add(RAW_EQUIVALENT_CONFIG);
-  add(CURRENT_EDGE_CONFIG);
+  add(HISTORICAL_COMPOSITE_EDGE_CONFIG);
   for (const factor of FACTOR_NAMES) {
     for (const weight of [0.5, 1, 1.5, 2]) {
       add({ min_bid: 4, min_edge: 65, weights: { ...ZERO_WEIGHTS, [factor]: weight } });
@@ -250,7 +250,7 @@ function tuneEdgeVariants(frames, options = {}) {
 
   const namedConfigs = [
     ['raw_score_incumbent', RAW_EQUIVALENT_CONFIG],
-    ['current_edge', CURRENT_EDGE_CONFIG],
+    ['historical_composite_edge', HISTORICAL_COMPOSITE_EDGE_CONFIG],
     ['tuned_edge_preselected', winner.config],
   ];
   const holdout = namedConfigs.map(([name, config]) => ({
@@ -280,7 +280,7 @@ function tuneEdgeVariants(frames, options = {}) {
     }])),
     simulation_config: simulationConfig,
     incumbent: { name: 'raw_score', config: normalizeVariantConfig(RAW_EQUIVALENT_CONFIG) },
-    current_edge: { config: normalizeVariantConfig(CURRENT_EDGE_CONFIG) },
+    historical_composite_edge: { config: normalizeVariantConfig(HISTORICAL_COMPOSITE_EDGE_CONFIG) },
     selected_variant: winner,
     development_leaderboard: development.slice(0, Math.max(1, Number(options.leaderboardSize || 20))),
     holdout,
@@ -295,8 +295,8 @@ function tuneEdgeVariants(frames, options = {}) {
 }
 
 module.exports = {
-  CURRENT_EDGE_CONFIG,
-  CURRENT_WEIGHTS,
+  HISTORICAL_COMPOSITE_EDGE_CONFIG,
+  HISTORICAL_COMPOSITE_WEIGHTS,
   FACTOR_NAMES,
   RAW_EQUIVALENT_CONFIG,
   ZERO_WEIGHTS,

@@ -1,12 +1,12 @@
 # Sell-Call Backtester
 
-The sell-call backtester is an offline, read-only research component. Nothing in the live bot imports it, and it never writes to the trading database.
+The sell-call backtester is an offline, read-only research component. Nothing in the live bot imports it, and it never writes to the trading database. It shares the pure production call-score function without loading the live bot runtime.
 
 It compares four policies over the same chronological option-chain replay:
 
 - `no_call`: ETH and cash without a call overlay
 - `raw_score`: highest eligible `bid / abs(delta)` candidate
-- `current_edge`: the current hard-coded composite CALL EDGE formula
+- `current_edge`: the production CALL EDGE formula, `bid / abs(delta) * (8.5 / DTE)^0.12`, with default minimum bid 4 and edge 65
 - `learned_walk_forward`: regularized expected-capture and tail-loss models retrained only from outcomes available before each replay timestamp
 
 ## Run
@@ -33,7 +33,7 @@ Use `--help` for execution, portfolio, label, and learning controls.
 
 ## Tune CALL EDGE without test leakage
 
-The separate edge tuner searches deterministic strengths for each existing CALL EDGE factor and its entry thresholds. It treats raw score as the incumbent and divides history chronologically into train, validation, and a final untouched holdout. The winning formula is selected using train and validation only; the holdout is opened once after selection.
+The separate edge tuner searches deterministic strengths for the historical July composite CALL EDGE factors and entry thresholds. Its `historical_composite_edge` baseline preserves that formula and its floor of 80; it is not the current production score. The tuner treats raw score as its incumbent and divides history chronologically into train, validation, and a final untouched holdout. The winning formula is selected using train and validation only; the holdout is opened once after selection.
 
 ```sh
 DB_PATH=/private/tmp/noop-research.db npm run research:tune:call-edge -- --days=all --search-count=2500
@@ -44,7 +44,7 @@ Outputs default to:
 - `data/sell-call-edge-tuning.json`
 - `data/sell-call-edge-tuning.md`
 
-The tuner does not edit or import the live scoring path. A tuned formula remains a research challenger until it repeats out of sample and in shadow execution.
+The tuner does not edit or load the live bot runtime. A tuned formula remains a research challenger until it repeats out of sample and in shadow execution.
 
 ## Learn economic call value from realized paths
 
@@ -67,7 +67,7 @@ Outputs default to:
 - `data/economic-call-value-study.md`
 - `data/economic-call-value-models.json`
 
-Value/risk gates are generated from the chronological training window, selected on validation, and evaluated once on the final holdout. Entries near every fold boundary are purged so a position can follow its normal exit policy rather than being artificially closed at the split. Promotion requires a material holdout P&L improvement, no worse P&L per margin-day, and no worse realized or tail losses. The component has no live-bot import.
+Value/risk gates are generated from the chronological training window, selected on validation, and evaluated once on the final holdout. Entries near every fold boundary are purged so a position can follow its normal exit policy rather than being artificially closed at the split. Promotion requires a material holdout P&L improvement, no worse P&L per margin-day, and no worse realized or tail losses. The component does not load the live bot runtime.
 
 ## Study weekly DTE rollover normalization
 
@@ -83,7 +83,7 @@ An exponent of zero is exactly raw score. Larger exponents progressively remove 
 DB_PATH=/private/tmp/noop-research.db npm run research:analyze:call-dte -- --days=all
 ```
 
-This remains separate from the live chart and selector until the backtest and shadow evidence justify a production change.
+Production now uses exponent 0.12. The study remains available for evaluating alternative exponents separately from the live chart and selector.
 
 ## Leakage controls
 
@@ -97,11 +97,13 @@ The simulator maintains cash, ETH collateral, short-call liabilities, exposure, 
 
 The default `bid_ask` execution mode sells at the historical bid and buys back at the historical ask. This is deliberately conservative for crossing orders, but top-of-book history cannot establish whether a hypothetical maker order would have filled. `midpoint` and `mark` modes are sensitivity analyses, not execution claims.
 
+Entries are capped by finite, positive quoted bid depth by default. Zero, missing, or invalid depth prevents an entry. `--ignore-depth` explicitly assumes unlimited entry liquidity for sensitivity analysis; each result records `config.useQuotedDepth`, and the Markdown backtest report states the active assumption. Exit quantities are not capped by quoted ask depth.
+
 ## Limitations
 
 - Margin is configurable and approximate; historical venue liquidation state cannot be reconstructed exactly.
 - Hourly sampling may miss intrahour fills and adverse excursions.
-- The current-edge baseline reproduces the production multipliers, while rolling score trend and OI change are reconstructed from the sampled historical frames.
+- The current-edge baseline shares the production score and defaults, but does not reproduce all live execution and risk gates.
 - Missing pre-expiry quotes force an approximate intrinsic-value close at the end of the test.
 - Model comparisons must be judged across multiple market regimes and effective timestamp groups, not raw option-row counts.
 - Backtest results remain research artifacts until a challenger also succeeds in live shadow mode.

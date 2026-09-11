@@ -2,10 +2,28 @@
 
 const { HOUR_MS } = require('./utils');
 const { trainOutcomeModels, predictOutcome } = require('./models');
+const {
+  SELL_CALL_EDGE_REFERENCE_DTE,
+  SELL_CALL_EDGE_DTE_EXPONENT,
+  normalizeSellCallScore,
+} = require('../../bot/call-score');
 
-const CURRENT_EDGE_VERSION = 'sell-call-edge-2026-07-08';
+const CURRENT_EDGE_VERSION = `sell-call-edge-dte-${SELL_CALL_EDGE_REFERENCE_DTE}-exponent-${SELL_CALL_EDGE_DTE_EXPONENT}`;
+const HISTORICAL_COMPOSITE_EDGE_VERSION = 'sell-call-edge-2026-07-08';
 
 function currentEdgeScore(candidate) {
+  const rawScore = Number(candidate?.raw_score || 0);
+  const score = normalizeSellCallScore(rawScore, candidate?.dte);
+  return {
+    score,
+    multiplier: rawScore > 0 ? score / rawScore : 0,
+    reasons: score > 0 ? ['dte_normalization'] : [],
+    version: CURRENT_EDGE_VERSION,
+  };
+}
+
+// Retained for comparisons with the historical factor-tuning challenger.
+function historicalCompositeEdgeScore(candidate) {
   const rawScore = Number(candidate?.raw_score || 0);
   if (!(rawScore > 0)) return { score: 0, multiplier: 0, reasons: [] };
   const dte = Number(candidate.dte);
@@ -58,7 +76,7 @@ function currentEdgeScore(candidate) {
     score: rawScore * multiplier,
     multiplier,
     reasons,
-    version: CURRENT_EDGE_VERSION,
+    version: HISTORICAL_COMPOSITE_EDGE_VERSION,
   };
 }
 
@@ -94,10 +112,10 @@ function makeRawScorePolicy(options = {}) {
 
 function makeCurrentEdgePolicy(options = {}) {
   const minBid = Number(options.minBid ?? 4);
-  const minEdge = Number(options.minEdge ?? 80);
+  const minEdge = Number(options.minEdge ?? 65);
   return {
     name: 'current_edge',
-    description: `Current hard-coded CALL EDGE with bid >= ${minBid} and edge >= ${minEdge}`,
+    description: `Production DTE-normalized CALL EDGE with bid >= ${minBid} and edge >= ${minEdge}`,
     select({ candidates }) {
       const ranked = candidates
         .filter((candidate) => candidate.bid_price >= minBid)
@@ -207,8 +225,10 @@ function makeLearnedPolicy(examples, options) {
 
 module.exports = {
   CURRENT_EDGE_VERSION,
+  HISTORICAL_COMPOSITE_EDGE_VERSION,
   WalkForwardLearnedPolicy,
   currentEdgeScore,
+  historicalCompositeEdgeScore,
   makeCurrentEdgePolicy,
   makeLearnedPolicy,
   makeNoCallPolicy,

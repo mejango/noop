@@ -332,24 +332,23 @@ function analyzeInteractions(samples, features, minSamples) {
 }
 
 function getCoverage(db) {
-  const tables = ['options_snapshots', 'spot_prices', 'onchain_data', 'funding_rates', 'candidate_observations', 'decision_outcomes'];
+  const tables = [
+    ['options_snapshots', 'timestamp'],
+    ['spot_prices', 'timestamp'],
+    ['onchain_data', 'timestamp'],
+    ['funding_rates', 'timestamp'],
+    ['candidate_observations', 'observed_at'],
+    ['decision_outcomes', 'due_at'],
+  ];
   const coverage = {};
   const tableExists = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?");
-  for (const table of tables) {
+  for (const [table, timestampColumn] of tables) {
     if (!tableExists.get(table)) {
       coverage[table] = { exists: false };
       continue;
     }
-    const row = db.prepare(`SELECT MIN(timestamp) as first_timestamp, MAX(timestamp) as last_timestamp, COUNT(*) as rows FROM ${table}`).get();
-    if (table === 'candidate_observations') {
-      const c = db.prepare('SELECT MIN(observed_at) as first_timestamp, MAX(observed_at) as last_timestamp, COUNT(*) as rows FROM candidate_observations').get();
-      coverage[table] = { exists: true, ...c };
-    } else if (table === 'decision_outcomes') {
-      const c = db.prepare('SELECT MIN(due_at) as first_timestamp, MAX(due_at) as last_timestamp, COUNT(*) as rows FROM decision_outcomes').get();
-      coverage[table] = { exists: true, ...c };
-    } else {
-      coverage[table] = { exists: true, ...row };
-    }
+    const row = db.prepare(`SELECT MIN(${timestampColumn}) as first_timestamp, MAX(${timestampColumn}) as last_timestamp, COUNT(*) as rows FROM ${table}`).get();
+    coverage[table] = { exists: true, ...row };
   }
   return coverage;
 }
@@ -550,10 +549,6 @@ function loadMarketHourly(db, sinceIso) {
   return market;
 }
 
-function getMarketValue(marketByHour, hour, key) {
-  return finite(marketByHour.get(hour)?.[key]);
-}
-
 function addMarketFeatures(features, marketByHour, hour, lookbackHours) {
   const current = marketByHour.get(hour) || {};
   const keys = [
@@ -659,7 +654,11 @@ function getTopHourCandidateStatement(db, action, sinceIso) {
   const { select, params } = getCandidateSelect(action, sinceIso);
   const sql = `
     SELECT *, ROW_NUMBER() OVER (ORDER BY raw_score DESC, depth DESC) as candidate_rank
-    FROM (${select} AND timestamp >= @hour_start AND timestamp < @hour_end)
+    FROM (${select} AND timestamp = (
+      SELECT MIN(timestamp) FROM options_snapshots
+      WHERE timestamp >= @hour_start AND timestamp < @hour_end
+        AND (@since IS NULL OR timestamp >= @since)
+    ))
     WHERE raw_score IS NOT NULL
     ORDER BY raw_score DESC, depth DESC
     LIMIT @top_per_hour
@@ -670,7 +669,7 @@ function getTopHourCandidateStatement(db, action, sinceIso) {
   };
 }
 
-function* iterateCandidates(db, action, opts, marketByHour) {
+function* iterateCandidates(db, action, opts) {
   if (opts.sampleMode === 'all-candidates') {
     const candidateQuery = getAllCandidatesSql(action, opts.sinceIso);
     for (const row of db.prepare(candidateQuery.sql).iterate(candidateQuery.params)) {
@@ -680,9 +679,16 @@ function* iterateCandidates(db, action, opts, marketByHour) {
   }
 
   const { stmt, baseParams } = getTopHourCandidateStatement(db, action, opts.sinceIso);
-  const hours = [...marketByHour.keys()].sort();
-  for (const hour of hours) {
-    const hourStart = hour;
+  const hours = db.prepare(`
+    SELECT DISTINCT strftime('%Y-%m-%dT%H:00:00Z', timestamp) AS hour
+    FROM options_snapshots
+    WHERE (@since IS NULL OR timestamp >= @since)
+    ORDER BY hour ASC
+  `).iterate({ since: opts.sinceIso });
+  for (const { hour } of hours) {
+    // Raw timestamps use milliseconds. A Z-only lower bound incorrectly drops
+    // the exact boundary because '.000Z' sorts before 'Z'.
+    const hourStart = addHours(hour, 0);
     const hourEnd = addHours(hour, 1);
     const rows = stmt.all({
       ...baseParams,
@@ -707,6 +713,13 @@ function getCandidateSql(action, sinceIso, sampleMode, topPerHour) {
 
 function prepareOutcomeQueries(db) {
   return {
+    priorSpot: db.prepare(`
+      SELECT timestamp, price
+      FROM spot_prices
+      WHERE timestamp <= @observed_at AND price BETWEEN 100 AND 20000
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `),
     futureQuote: db.prepare(`
       SELECT timestamp, bid_price, ask_price, mark_price, delta, ask_delta_value, bid_delta_value
       FROM options_snapshots
@@ -774,7 +787,7 @@ function addOptionDeltaFeatures(features, row, cfg, queries, lookbackHours) {
 
 function buildFeatures(row, action, marketByHour, queries, lookbackHours) {
   const cfg = ACTION_CONFIG[action];
-  const spot = getMarketValue(marketByHour, row.hour, 'spot_price');
+  const spot = finite(row.spot_price);
   const strike = finite(row.strike);
   const delta = finite(row.delta);
   const features = {
@@ -790,12 +803,14 @@ function buildFeatures(row, action, marketByHour, queries, lookbackHours) {
     implied_vol: finite(row.implied_vol),
     open_interest: finite(row.open_interest),
   };
-  addMarketFeatures(features, marketByHour, row.hour, lookbackHours);
+  // A candidate can occur anywhere within its hour. Only the previous hour's
+  // completed aggregates existed then; the candidate hour contains future data.
+  addMarketFeatures(features, marketByHour, priorHour(row.hour, 1), lookbackHours);
   addOptionDeltaFeatures(features, row, cfg, queries, lookbackHours);
   return features;
 }
 
-function buildOutcome(row, action, horizonHours, cfg, queries, quoteWindowHours, marketByHour) {
+function buildOutcome(row, action, horizonHours, cfg, queries, quoteWindowHours) {
   const dueAt = addHours(row.observed_at, horizonHours);
   const until = addHours(dueAt, quoteWindowHours);
   const quote = queries.futureQuote.get({
@@ -811,7 +826,7 @@ function buildOutcome(row, action, horizonHours, cfg, queries, quoteWindowHours,
   const pnl = action === 'sell_call'
     ? entryPrice - futureExitPrice
     : futureExitPrice - entryPrice;
-  const currentSpot = getMarketValue(marketByHour, row.hour, 'spot_price');
+  const currentSpot = finite(row.spot_price);
   const futureSpot = finite(spot?.price);
   return {
     horizon_hours: horizonHours,
@@ -888,7 +903,7 @@ function analyzeAction(samplesByHorizon, action, minSamples) {
 
 function normalizeOptions(options = {}) {
   const days = options.days === 'all' || options.days == null ? null : Number(options.days);
-  const sinceIso = days && days > 0 ? addHours(new Date().toISOString(), -days * 24) : null;
+  const sinceIso = days && days > 0 ? addHours(toIso(Date.now()), -days * 24) : null;
   const actions = Array.isArray(options.actions) && options.actions.length
     ? options.actions.filter((action) => ACTION_CONFIG[action])
     : Object.keys(ACTION_CONFIG);
@@ -909,7 +924,12 @@ function normalizeOptions(options = {}) {
 function buildProfitCorrelationReport(db, options = {}) {
   const opts = normalizeOptions(options);
   const startedAt = new Date().toISOString();
-  const marketByHour = loadMarketHourly(db, opts.sinceIso);
+  // Warm up complete prior-hour features even when the candidate window starts
+  // midhour. Loading from the candidate cutoff would create a partial aggregate.
+  const marketSince = opts.sinceIso
+    ? addHours(toHour(opts.sinceIso), -1 - Math.max(0, ...opts.lookbackHours))
+    : null;
+  const marketByHour = loadMarketHourly(db, marketSince);
   const queries = prepareOutcomeQueries(db);
   const coverage = getCoverage(db);
   const actions = {};
@@ -919,13 +939,22 @@ function buildProfitCorrelationReport(db, options = {}) {
     const samplesByHorizon = Object.fromEntries(opts.horizonsHours.map((h) => [String(h), []]));
     let candidatesScanned = 0;
     let candidatesWithAnyOutcome = 0;
-    for (const row of iterateCandidates(db, action, opts, marketByHour)) {
+    let candidatesWithoutPriorSpot = 0;
+    let candidatesWithoutPriorMarketHour = 0;
+    const sampledHours = new Set();
+    const sampledTimestamps = new Set();
+    for (const row of iterateCandidates(db, action, opts)) {
       if (opts.maxSamples && candidatesScanned >= opts.maxSamples) break;
       candidatesScanned++;
+      sampledHours.add(row.hour);
+      sampledTimestamps.add(row.observed_at);
+      row.spot_price = finite(queries.priorSpot.get({ observed_at: row.observed_at })?.price);
+      if (row.spot_price == null) candidatesWithoutPriorSpot++;
+      if (!marketByHour.has(priorHour(row.hour, 1))) candidatesWithoutPriorMarketHour++;
       const features = buildFeatures(row, action, marketByHour, queries, opts.lookbackHours);
       let hadOutcome = false;
       for (const horizon of opts.horizonsHours) {
-        const outcome = buildOutcome(row, action, horizon, cfg, queries, opts.quoteWindowHours, marketByHour);
+        const outcome = buildOutcome(row, action, horizon, cfg, queries, opts.quoteWindowHours);
         if (!outcome) continue;
         hadOutcome = true;
         samplesByHorizon[String(horizon)].push({
@@ -944,6 +973,10 @@ function buildProfitCorrelationReport(db, options = {}) {
       ...analyzeAction(samplesByHorizon, action, opts.minSamples),
       candidates_scanned: candidatesScanned,
       candidates_with_any_outcome: candidatesWithAnyOutcome,
+      sampled_hours: sampledHours.size,
+      sampled_timestamps: sampledTimestamps.size,
+      candidates_without_prior_spot: candidatesWithoutPriorSpot,
+      candidates_without_prior_market_hour: candidatesWithoutPriorMarketHour,
     };
   }
 
@@ -951,7 +984,7 @@ function buildProfitCorrelationReport(db, options = {}) {
     meta: {
       computed_at: new Date().toISOString(),
       started_at: startedAt,
-      engine: 'profit-correlation-v1',
+      engine: 'profit-correlation-v2',
       days: opts.days,
       sample_mode: opts.sampleMode,
       top_per_hour: opts.sampleMode === 'top-hour' ? opts.topPerHour : null,
@@ -960,6 +993,9 @@ function buildProfitCorrelationReport(db, options = {}) {
       lookback_hours: opts.lookbackHours,
       min_samples: opts.minSamples,
       quote_window_hours: opts.quoteWindowHours,
+      candidate_sampling: opts.sampleMode === 'top-hour' ? 'first_snapshot_per_hour' : 'all_snapshots',
+      market_feature_timing: 'previous_completed_hour',
+      entry_spot_timing: 'latest_at_or_before_observation',
       note: 'Historical research only. Reconstructed candidates are sampled from options_snapshots and should be validated before changing live trading gates.',
       coverage,
     },
@@ -973,6 +1009,7 @@ function renderMarkdownReport(report) {
   lines.push('');
   lines.push(`Computed: ${report.meta.computed_at}`);
   lines.push(`Window: ${report.meta.days}; sample mode: ${report.meta.sample_mode}`);
+  lines.push(`Candidate timing: ${report.meta.candidate_sampling}; market features: ${report.meta.market_feature_timing}; entry spot: ${report.meta.entry_spot_timing}.`);
   lines.push('');
   for (const actionReport of Object.values(report.actions)) {
     lines.push(`## ${actionReport.action}`);
@@ -980,6 +1017,7 @@ function renderMarkdownReport(report) {
     lines.push(actionReport.description);
     lines.push('');
     lines.push(`Candidates scanned: ${actionReport.candidates_scanned}; with outcome: ${actionReport.candidates_with_any_outcome}`);
+    lines.push(`Sampled hours: ${actionReport.sampled_hours}; timestamps: ${actionReport.sampled_timestamps}; without prior spot: ${actionReport.candidates_without_prior_spot}; without prior market hour: ${actionReport.candidates_without_prior_market_hour}.`);
     lines.push('');
     for (const horizon of Object.values(actionReport.horizons)) {
       lines.push(`### ${horizon.horizon_hours}h`);

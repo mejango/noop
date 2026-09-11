@@ -39,7 +39,7 @@ function buildReport({ data, examples, results, options = {} }) {
     schema_version: 1,
     engine: 'sell-call-walk-forward-backtest-v1',
     computed_at: new Date().toISOString(),
-    isolation: 'offline/read-only; no live bot imports or database writes',
+    isolation: 'offline/read-only; shares the pure production call-score function without loading the live bot runtime or writing to the database',
     historical_window: data.window,
     cadence_hours: data.cadence_hours,
     frames: data.frames.length,
@@ -56,8 +56,9 @@ function buildReport({ data, examples, results, options = {} }) {
     limitations: [
       'Historical top-of-book quotes cannot prove that a maker order would have filled.',
       'Bid/ask mode assumes an immediately executable sale at bid and repurchase at ask.',
+      'With quoted depth enabled, zero or missing bid depth blocks entry; disabling it explicitly assumes unlimited entry liquidity.',
       'Hourly sampling can miss intrahour fills, adverse excursions, and exact expiry prints.',
-      'The current-edge baseline uses the production multipliers with market trend and OI reconstructed from sampled historical frames.',
+      'The current-edge baseline shares the production DTE-normalized score and defaults to a minimum edge of 65; it does not reproduce all live execution and risk gates.',
       'Margin is a configurable approximation, not a reconstruction of venue liquidation state.',
       'Results are research estimates and must remain out of live execution until shadow validation succeeds.',
     ],
@@ -93,6 +94,10 @@ function renderMarkdown(report) {
     lines.push(`## ${result.policy}`);
     lines.push('');
     lines.push(result.description || 'No description.');
+    lines.push('');
+    lines.push(result.config.useQuotedDepth
+      ? 'Entry liquidity: capped by quoted bid depth; zero or unknown depth blocks entry.'
+      : 'Entry liquidity: quoted depth ignored; unlimited entry liquidity assumed.');
     lines.push('');
     lines.push(`Premium received: ${money(result.total_premium_received)}; fees: ${money(result.total_fees)}; max margin: ${money(result.max_margin_used)}; return on max margin: ${percentage(result.return_on_max_margin)}.`);
     if (result.model_versions?.length) {

@@ -33,6 +33,8 @@ function usage() {
     '  --policies=no_call,raw_score,current_edge,learned_walk_forward',
     '  --starting-eth=5 --starting-cash=0',
     '  --execution=bid_ask|midpoint|mark',
+    '  --ignore-depth                Assume unlimited entry liquidity (default: require quoted bid depth)',
+    '  --min-bid=4 --min-raw-score=65 --min-edge=65',
     '  --fee-bps=0 --settlement-fee-bps=0',
     '  --exposure-cap=0.45 --margin-rate=0.15 --margin-budget-pct=0.45',
     '  --profit-capture-pct=0.80 --stop-loss-multiple=3 --max-hold-hours=168',
@@ -118,7 +120,7 @@ function main() {
       }),
       current_edge: () => makeCurrentEdgePolicy({
         minBid: parseNumber(args['min-bid'], 4),
-        minEdge: parseNumber(args['min-edge'], 80),
+        minEdge: parseNumber(args['min-edge'], undefined),
       }),
       learned_walk_forward: () => makeLearnedPolicy(examples, {
         minBid: parseNumber(args['min-bid'], 4),

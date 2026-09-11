@@ -87,7 +87,6 @@ function main() {
   fs.mkdirSync(path.dirname(markdownPath), { recursive: true });
 
   const db = new Database(dbPath, { readonly: true, fileMustExist: true });
-  db.pragma('journal_mode = WAL');
   db.pragma('busy_timeout = 5000');
 
   const started = Date.now();
