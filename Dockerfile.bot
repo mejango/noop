@@ -12,6 +12,7 @@ RUN npm ci --production
 # Copy bot and script files
 COPY bot/ ./bot/
 COPY script.js ./
+COPY scripts/archive-v2-data.js scripts/import-economic-events.js ./scripts/
 
 # Data directory (Railway volume mount point)
 ENV DATA_DIR=/data

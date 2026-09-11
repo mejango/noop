@@ -24,7 +24,7 @@ Store and serve data at decreasing resolution as the requested range grows:
 
 ### Implementation Approach
 
-1. **Rollup tables** — `spot_prices_hourly`, `options_hourly`, and `onchain_hourly` store pre-aggregated OHLC/avg/count per hour bucket. Phase 2 adds `_4h` and `_daily`.
+1. **Rollup tables** — `spot_prices_hourly`, `options_hourly`, `onchain_hourly`, and `funding_rates_hourly` store pre-aggregated OHLC/avg/count per hour bucket. Phase 2 adds `_4h` and `_daily`.
 
 2. **Rollup on write** — When the bot inserts new data, it also upserts into the current hourly bucket atomically.
 
@@ -37,7 +37,7 @@ Store and serve data at decreasing resolution as the requested range grows:
 
 5. **Retain raw data** — Never delete raw rows. They're needed for correlation engine accuracy and historical audits. Just don't serve them for large time ranges.
 
-6. **Backfill** — Run `node bot/backfill-hourly.js` once to populate rollup tables from existing raw data. The script is idempotent (safe to re-run).
+6. **Backfill** — Run `node bot/backfill-hourly.js --db /explicit/path/noop.db` once to populate rollup tables from existing raw data. The script is idempotent (safe to re-run).
 
 ### What Gets Aggregated
 
@@ -57,4 +57,8 @@ For each hourly bucket, store:
 
 ### Migration Path
 
-Rollup tables can be backfilled from existing raw data via `node bot/backfill-hourly.js`. The schema change is additive (new tables, no changes to existing ones), so it's safe to deploy incrementally.
+Rollup tables can be backfilled from existing raw data via `node bot/backfill-hourly.js --db /explicit/path/noop.db`. The schema change is additive (new tables, no changes to existing ones), so it's safe to deploy incrementally.
+
+### Verified archives and repair
+
+Use the [V2 remediation runbook](docs/v2-audit-remediation-2026-09-11.md) for immutable SQLite archives, rollup rebuilds and outcome repair. Raw evidence is retained; offline snapshot archives do not change operational query coverage. Live ingestion and rebuilds use `bot/hourly-rollups.js`: option averages are weighted by valid observations, and open interest sums each instrument's latest observation within the bucket, never repeated snapshots.
