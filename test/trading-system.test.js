@@ -2087,11 +2087,8 @@ describe('Telegram order lifecycle notifications', () => {
     assert.ok(message.includes('Status: open'));
   });
 
-  test('resting-order reconciliation sends lifecycle notifications', () => {
-    assert.ok(SCRIPT_SOURCE.includes("action: tracked.action"));
-    assert.ok(SCRIPT_SOURCE.includes("filledAmt + 1e-9 < Number(tracked.amount) ? 'partial_fill' : 'executed'"));
-    assert.ok(SCRIPT_SOURCE.includes("stage: 'posted'"));
-  });
+  // Actual reconciliation notifications and duplicate suppression are exercised
+  // through production executeOrder/manageOpenOrders in execution-audit.test.js.
 });
 
 // ============================================================================

@@ -2977,7 +2977,8 @@ function encodeTradeData(order, assetAddress, optionSubId) {
 }
 
 // Place order function
-const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, reduceOnly = true, timeInForce = 'ioc', instrument = null) => {
+const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, reduceOnly = true, timeInForce = 'ioc', instrument = null, beforeSend = null) => {
+  let limitPriceString = String(price);
   try {
     const wallet = createWallet();
     const timestamp = Date.now(); // Current UTC timestamp in ms
@@ -2986,7 +2987,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     const orderPrice = normalizeOrderPriceForVenue(price, instrument, direction);
     const step = orderPrice.step;
     const limitPrice = orderPrice.price;
-    const limitPriceString = limitPrice.toFixed(getStepDecimals(step));
+    limitPriceString = limitPrice.toFixed(getStepDecimals(step));
 
     const order = {
         instrument_name: name,
@@ -3034,6 +3035,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         ]))
     ).serialized;
 
+    if (beforeSend) beforeSend(order);
     const response = await axios.post(
       API_URL.PLACE_ORDER,
       order,
@@ -3053,12 +3055,12 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         return { zero_fill_rejected: true, error: errMsg };
       }
       // Detect post_only rejection (would cross the book)
-      if (timeInForce === 'post_only' && (errMsg.includes('post_only') || errMsg.includes('cross') || errMsg.includes('reject'))) {
+      if (timeInForce === 'post_only' && /(?:post[_ -]?only.*(?:cross|would|take))|(?:(?:cross|would).*post[_ -]?only)/i.test(errMsg)) {
         console.log(`📋 post_only rejected for ${name}: would cross the book`);
         return { rejected_post_only: true, error: errMsg };
       }
       console.error(`Error placing limit order for ${name}:`, errMsg);
-      return { placement_error: errMsg };
+      return { placement_error: errMsg, definitive_rejection: [-32600, -32602].includes(Number(response.data.error?.code)) };
     }
     // Check for cancelled IOC (cancel_reason in response indicates immediate cancel)
     const orderResult = extractOrderRecord(response.data?.result || response.data) || response.data?.result || response.data;
@@ -3073,7 +3075,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     // Detect post_only rejection from HTTP error
     if (timeInForce === 'post_only' && errBody) {
       const errStr = typeof errBody === 'string' ? errBody : JSON.stringify(errBody);
-      if (errStr.includes('post_only') || errStr.includes('cross') || errStr.includes('reject')) {
+      if (/(?:post[_ -]?only.*(?:cross|would|take))|(?:(?:cross|would).*post[_ -]?only)/i.test(errStr)) {
         console.log(`📋 post_only rejected for ${name}: would cross the book`);
         return { rejected_post_only: true, error: errStr };
       }
@@ -3108,7 +3110,8 @@ const fetchOpenOrders = async (options = {}) => {
     });
     // Defensive: result could be array directly, or { orders: [...] }, or { result: { orders: [...] } }
     const raw = response.data?.result;
-    const orders = Array.isArray(raw) ? raw : (raw?.orders || []);
+    const orders = Array.isArray(raw) ? raw : raw?.orders;
+    if (response.data?.error || !Array.isArray(orders)) throw new Error('Open order state unavailable');
     return orders.map(o => ({
       order_id: o.order_id,
       instrument_name: o.instrument_name,
@@ -3187,31 +3190,32 @@ const ordersRoughlyMatch = (tracked, exchange) => {
 };
 
 const fetchOrderHistoryRecord = async (orderId) => {
-  try {
-    const wallet = createWallet();
-    const timestamp = Date.now();
-    const signature = await signMessage(wallet, timestamp);
+  const wallet = createWallet();
+  const timestamp = Date.now();
+  const signature = await signMessage(wallet, timestamp);
+  const seen = new Set();
+  for (let page = 1; page <= 100; page++) {
     const response = await axios.post(API_URL.GET_ORDER_HISTORY, {
-      subaccount_id: SUBACCOUNT_ID,
-      from_timestamp: Date.now() - (7 * 24 * 60 * 60 * 1000),
-      page: 1,
-      page_size: 100,
+      subaccount_id: SUBACCOUNT_ID, from_timestamp: 0, page, page_size: 100,
     }, {
-      headers: {
-        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(),
-        'X-LyraSignature': signature,
-      },
+      headers: { 'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(), 'X-LyraSignature': signature },
       timeout: 10000,
     });
-    const records = extractOrderRecords(response.data?.result || response.data);
-    return records.find((record) => record.order_id === orderId) || null;
-  } catch (error) {
-    const errBody = error.response?.data;
-    const bodyStr = errBody ? (typeof errBody === 'string' ? errBody.slice(0, 300) : JSON.stringify(errBody).slice(0, 300)) : 'no body';
-    console.error(`❌ fetchOrderHistoryRecord ${orderId} failed: ${error.message} | status: ${error.response?.status || 'N/A'} | body: ${bodyStr}`);
-    return null;
+    if (response.data?.error) throw new Error(`Order history unavailable: ${stringifyApiError(response.data.error)}`);
+    const payload = response.data?.result;
+    if (!payload || (!Array.isArray(payload) && !Array.isArray(payload.orders))) {
+      throw new Error('Malformed order history response');
+    }
+    const records = extractOrderRecords(payload);
+    const found = records.find((record) => record.order_id === orderId);
+    if (found) return found;
+    if (records.length < 100) return null;
+    const pageKey = records.map(record => record.order_id).join(',');
+    if (seen.has(pageKey)) throw new Error('Order history pagination did not advance');
+    seen.add(pageKey);
   }
+  throw new Error('Order history scan incomplete; reconciliation required');
 };
 
 // Fetch a specific order's final status from Derive (for fill reconciliation)
@@ -3239,22 +3243,16 @@ const fetchOrderStatus = async (orderId) => {
         const historyRecord = await fetchOrderHistoryRecord(orderId);
         if (historyRecord) {
           return {
-            order_id: historyRecord.order_id,
+            ...historyRecord,
+          order_id: historyRecord.order_id,
             order_status: historyRecord.order_status,
             amount: Number(historyRecord.amount || 0),
-            filled_amount: Number(historyRecord.filled_amount || 0),
-            average_price: Number(historyRecord.average_price || 0),
+            filled_amount: historyRecord.filled_amount,
+            average_price: historyRecord.average_price,
             cancel_reason: historyRecord.cancel_reason || null,
           };
         }
-        return {
-          order_id: orderId,
-          order_status: 'cancelled',
-          amount: 0,
-          filled_amount: 0,
-          average_price: 0,
-          cancel_reason: 'venue_missing',
-        };
+        return null; // Missing history is uncertainty, not proof of cancellation.
       }
       console.error(`❌ fetchOrderStatus ${orderId} venue error: ${stringifyApiError(errBody)}`);
       return null;
@@ -3269,11 +3267,12 @@ const fetchOrderStatus = async (orderId) => {
       }
     }
     return {
+      ...raw,
       order_id: raw.order_id,
       order_status: raw.order_status, // 'open'|'filled'|'cancelled'|'expired'
       amount: Number(raw.amount || 0),
-      filled_amount: Number(raw.filled_amount || 0),
-      average_price: Number(raw.average_price || 0),
+      filled_amount: raw.filled_amount,
+      average_price: raw.average_price,
       cancel_reason: raw.cancel_reason || null,
     };
   } catch (error) {
@@ -3285,22 +3284,16 @@ const fetchOrderStatus = async (orderId) => {
       const historyRecord = await fetchOrderHistoryRecord(orderId);
       if (historyRecord) {
         return {
+          ...historyRecord,
           order_id: historyRecord.order_id,
           order_status: historyRecord.order_status,
           amount: Number(historyRecord.amount || 0),
-          filled_amount: Number(historyRecord.filled_amount || 0),
-          average_price: Number(historyRecord.average_price || 0),
+          filled_amount: historyRecord.filled_amount,
+          average_price: historyRecord.average_price,
           cancel_reason: historyRecord.cancel_reason || null,
         };
       }
-      return {
-        order_id: orderId,
-        order_status: 'cancelled',
-        amount: 0,
-        filled_amount: 0,
-        average_price: 0,
-        cancel_reason: 'venue_missing',
-      };
+      return null; // Missing history is uncertainty, not proof of cancellation.
     }
     console.error(`❌ fetchOrderStatus ${orderId} failed: ${error.message} | status: ${error.response?.status || 'N/A'} | body: ${bodyStr}`);
     return null;
@@ -3340,7 +3333,7 @@ const cancelOrder = async (orderId, instrumentName) => {
 };
 
 // Fetch current open positions from Derive
-const fetchPositions = async () => {
+const fetchPositions = async (options = {}) => {
   try {
     const wallet = createWallet();
     const timestamp = Date.now();
@@ -3356,7 +3349,11 @@ const fetchPositions = async () => {
       timeout: 10000,
     });
     const raw = response.data?.result;
-    const positions = Array.isArray(raw) ? raw : (raw?.positions || []);
+    const positions = Array.isArray(raw) ? raw : raw?.positions;
+    if (response.data?.error || !Array.isArray(positions) || positions.some(position =>
+      !position?.instrument_name || position.amount == null || position.amount === '' || !Number.isFinite(Number(position.amount)))) {
+      throw new Error('Position state unavailable or malformed');
+    }
     return positions
       .filter(p => Math.abs(Number(p.amount)) > 0)
       .map(p => ({
@@ -3373,6 +3370,7 @@ const fetchPositions = async () => {
       }));
   } catch (e) {
     console.log('📋 Failed to fetch positions:', e.message);
+    if (options.throwOnError) throw e;
     return [];
   }
 };
@@ -8188,7 +8186,7 @@ const validateRestingBuyPutEntryOrder = ({
   const strike = Number(instrument?.option_details?.strike || instrumentName.split('-')?.[2] || 0) || 0;
   const orderLimitRawScore = absDelta > 0 ? absDelta / orderLimitPrice : 0;
   const orderLimitScore = normalizeBuyPutScore(orderLimitRawScore, dte);
-  const orderAmount = Math.max(0, Number(order?.amount || 0));
+  const orderAmount = Math.max(0, Number(order?.amount || 0) - Number(order?.filled_amount || 0));
   const orderValue = orderLimitPrice * orderAmount;
   const reasons = [];
 
@@ -8397,7 +8395,7 @@ const getSyntheticReduceOnlyPreflight = ({ action, instrumentName, amount, order
 const summarizeReservedEntryCapacity = (restingOrders) => {
   return restingOrders.reduce((acc, order) => {
     if (order.action === 'buy_put') {
-      acc.putBudget += (Number(order.amount) || 0) * (Number(order.limit_price) || 0);
+      acc.putBudget += Math.max(0, (Number(order.amount) || 0) - (Number(order.filled_amount) || 0)) * (Number(order.limit_price) || 0);
     }
     return acc;
   }, { putBudget: 0 });
@@ -8405,7 +8403,7 @@ const summarizeReservedEntryCapacity = (restingOrders) => {
 
 const restingOrderNeedsAdjustment = (restingOrder, desiredPrice, desiredQty, instrument) => {
   const currentPrice = Number(restingOrder?.limit_price) || 0;
-  const currentQty = Number(restingOrder?.amount) || 0;
+  const currentQty = Math.max(0, (Number(restingOrder?.amount) || 0) - (Number(restingOrder?.filled_amount) || 0));
   const amountStep = instrument?.options?.amount_step || 0.01;
   const priceStep = getInstrumentPriceStep(instrument, desiredPrice);
   const priceDelta = Math.abs(currentPrice - desiredPrice);
@@ -9626,20 +9624,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             });
             continue;
           }
-          db.updateRestingOrder(existingResting.order_id, 'cancelled', existingResting.filled_amount || 0);
-          if (existingResting.pending_action_id) {
-            db.updatePendingAction(existingResting.pending_action_id, {
-              status: 'cancelled',
-              executed_at: new Date().toISOString(),
-              execution_result: {
-                orderId: existingResting.order_id,
-                orderStatus: 'cancelled',
-                filledAmount: existingResting.filled_amount || 0,
-                cancelReason: 'resting entry order adjusted to refreshed rule target',
-              },
-            });
-          }
-          openRestingEntryOrders = openRestingEntryOrders.filter(order => order.order_id !== existingResting.order_id);
+          console.log(`📋 Replacement waits for terminal fill reconciliation of ${existingResting.order_id}`);
+          continue;
         } else {
           const sameActionResting = openRestingEntryOrders.find(order => order.action === rule.action);
           if (sameActionResting) {
@@ -9708,20 +9694,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               });
               continue;
             }
-            db.updateRestingOrder(sameActionResting.order_id, 'cancelled', sameActionResting.filled_amount || 0);
-            if (sameActionResting.pending_action_id) {
-              db.updatePendingAction(sameActionResting.pending_action_id, {
-                status: 'cancelled',
-                executed_at: new Date().toISOString(),
-                execution_result: {
-                  orderId: sameActionResting.order_id,
-                  orderStatus: 'cancelled',
-                  filledAmount: sameActionResting.filled_amount || 0,
-                  cancelReason: `replaced by ${signal} buy-put opportunity`,
-                },
-              });
-            }
-            openRestingEntryOrders = openRestingEntryOrders.filter(order => order.order_id !== sameActionResting.order_id);
+            console.log(`📋 Replacement waits for terminal fill reconciliation of ${sameActionResting.order_id}`);
+          continue;
           }
         }
 
@@ -9937,106 +9911,87 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
 // ─── LLM-Driven Trading: Open Order Management ──────────────────────────────
 
+const getRestingExitInvalidReason = ({ order, tracked, activeRules = [], positions = [], tickerMap = {}, spotPrice = 0 }) => {
+  const action = tracked?.action || inferActionFromOpenOrder(order);
+  if (!isReduceOnlyExitAction(action)) return null;
+  const position = getCloseablePositionForExit(action, order.instrument_name, positions);
+  const remaining = Math.max(0, Number(order.amount) - Number(order.filled_amount || 0));
+  if (!position || remaining > Number(position.amount) + 1e-9) return 'resting exit exceeds live closeable position';
+  const rules = activeRules.filter(rule => rule.rule_type === 'exit'
+    && rule.action === action && rule.instrument_name === order.instrument_name);
+  const ticker = tickerMap[order.instrument_name];
+  if (!ticker) return 'resting exit cannot be revalidated without a current quote';
+  const liveValues = getRuleEvaluationValues(position, ticker, spotPrice, action);
+  const limit = Number(order.limit_price);
+  const entry = Number(position.avg_entry_price);
+  if (!(limit > 0) || !(entry > 0)) return 'resting exit has unavailable price economics';
+  const plannedValues = { ...liveValues, execution_price: limit,
+    unrealized_pnl_pct: (action === 'buyback_call' ? (entry - limit) : (limit - entry)) / entry * 100 };
+  const parsedRules = rules.map(rule => ({ rule, criteria: parseMaybeJsonObject(rule.criteria) }));
+  // A triggered urgent exit supersedes a passive quote even when both watchers exist.
+  for (const { rule, criteria } of parsedRules) {
+    const intent = getSyntheticExitIntent(action, {}, criteria);
+    if (['threat_management', 'roll_protection'].includes(intent)
+      && Array.isArray(criteria.conditions) && criteria.conditions.length > 0
+      && evaluateConditions(criteria.conditions, criteria.condition_logic || 'all', liveValues)) {
+      return 'triggered urgent exit supersedes resting exit';
+    }
+  }
+  for (const { rule, criteria } of parsedRules) {
+    const intent = getSyntheticExitIntent(action, {}, criteria);
+    if (!isSyntheticRestingExitIntentAllowed(action, {}, criteria)) continue;
+    if (tracked?.exit_intent && tracked.exit_intent !== intent) continue;
+    if (!Array.isArray(criteria.conditions) || criteria.conditions.length === 0
+      || !evaluateConditions(criteria.conditions, criteria.condition_logic || 'all', plannedValues)) continue;
+    const explicitLimit = Number(rule.limit_price || criteria.limit_price || 0);
+    const cap = Number(criteria.max_buyback_price || 0);
+    const floor = Number(criteria.min_exit_price || 0);
+    if (action === 'buyback_call' && ((cap > 0 && limit > cap + 1e-9) || (explicitLimit > 0 && limit > explicitLimit + 1e-9))) continue;
+    if (action === 'sell_put' && ((floor > 0 && limit < floor - 1e-9) || (explicitLimit > 0 && limit < explicitLimit - 1e-9))) continue;
+    if (!getBuybackCaptureGate(rule, criteria, plannedValues).allowed) continue;
+    if (!getSellPutProtectionGate(rule, plannedValues, { criteria, position, positions, plannedSellAmount: remaining }).allowed) continue;
+    return null;
+  }
+  return 'resting exit no longer satisfies active exit intent, bounds, or protection requirements';
+};
+
 const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spotPrice = 0) => {
   if (process.env.DRY_RUN === '1') return; // No real orders in dry run
   if (!db) return;
+  require('./bot/order-accounting').assertNoUnresolvedSubmission(db);
 
   let openOrders;
   try {
-    openOrders = await fetchOpenOrders();
+    openOrders = await fetchOpenOrders({ throwOnError: true });
   } catch (e) {
     console.log(`📋 Open orders fetch failed: ${e.message}`);
-    return;
+    throw e;
   }
 
-  // ── Fill reconciliation: detect resting orders that have been filled ──────
-  const trackedResting = db.getOpenRestingOrders();
-  if (trackedResting.length > 0) {
-    const exchangeOrderIds = new Set(openOrders.map(o => o.order_id));
-    for (const tracked of trackedResting) {
-      if (!exchangeOrderIds.has(tracked.order_id)) {
-        const matchedOpenOrder = openOrders.find((openOrder) => ordersRoughlyMatch(tracked, openOrder));
-        if (matchedOpenOrder) {
-          console.log(`📋 Re-linked resting order ${tracked.order_id} -> ${matchedOpenOrder.order_id} (${tracked.instrument_name})`);
-          db.updateRestingOrderId(tracked.order_id, matchedOpenOrder.order_id);
-          tracked.order_id = matchedOpenOrder.order_id;
-          tracked.filled_amount = Number(matchedOpenOrder.filled_amount || tracked.filled_amount || 0);
-          continue;
-        }
-        // Order disappeared from open orders → query its final status
-        let finalStatus = null;
-        try {
-          finalStatus = await fetchOrderStatus(tracked.order_id);
-        } catch (e) {
-          console.log(`⚠️ Failed to fetch status for ${tracked.order_id}: ${e.message}`);
-        }
-
-        let filledAmt, fillPrice, status;
-        if (finalStatus) {
-          filledAmt = Number(finalStatus.filled_amount || 0);
-          fillPrice = finalStatus.average_price > 0 ? finalStatus.average_price : tracked.limit_price;
-          status = finalStatus.order_status; // 'filled', 'cancelled', 'expired'
-          console.log(`📋 Order ${tracked.order_id} status: ${status}, filled=${filledAmt}/${tracked.amount} @ $${fillPrice}`);
-        } else {
-          // API failed — skip reconciliation this tick, retry next time
-          console.log(`⚠️ Order ${tracked.order_id} status unknown — skipping, will retry next tick`);
-          continue;
-        }
-
-        const fillValue = filledAmt * fillPrice;
-
-        // Track put budget discipline on fill
-        if (filledAmt > 0) {
-          const isPut = tracked.instrument_name?.endsWith('-P');
-          if (isPut && tracked.direction === 'buy') botData.putNetBought += fillValue;
-          persistCycleState();
-        }
-
-        const dbStatus = status === 'cancelled' || status === 'expired' ? 'cancelled' : 'filled';
-        db.updateRestingOrder(tracked.order_id, dbStatus, filledAmt);
-        if (tracked.pending_action_id) {
-          const actionStatus = filledAmt > 0 ? 'executed' : 'cancelled';
-          db.updatePendingAction(tracked.pending_action_id, {
-            status: actionStatus,
-            executed_at: new Date().toISOString(),
-            execution_result: {
-              orderId: tracked.order_id,
-              orderStatus: status,
-              filledAmount: filledAmt,
-              fillPrice: filledAmt > 0 ? fillPrice : null,
-              note: `Resting order ${status}`,
-            },
-          });
-        }
-        db.insertOrder({
-          action: tracked.action,
-          success: filledAmt > 0,
-          reason: `Resting order ${status} — filled ${filledAmt}/${tracked.amount}${finalStatus?.cancel_reason ? ` (${finalStatus.cancel_reason})` : ''}`,
-          instrument_name: tracked.instrument_name,
-          pending_action_id: tracked.pending_action_id ?? null,
-          strike: null, expiry: null, delta: null,
-          price: fillPrice, intended_amount: tracked.amount,
-          filled_amount: filledAmt, fill_price: filledAmt > 0 ? fillPrice : null,
-          total_value: fillValue, spot_price: null,
-          raw_response: finalStatus ? JSON.stringify(finalStatus) : null,
-        });
-        console.log(`${filledAmt > 0 ? '✅' : '🗑️'} Resting order reconciled: ${tracked.action} ${tracked.instrument_name} — ${status}, filled=${filledAmt} ($${fillValue.toFixed(2)})`);
-        notifyOrderLifecycle({
-          stage: filledAmt > 0
-            ? (filledAmt + 1e-9 < Number(tracked.amount) ? 'partial_fill' : 'executed')
-            : (status === 'expired' ? 'expired' : 'cancelled'),
-          action: tracked.action,
-          instrumentName: tracked.instrument_name,
-          amount: tracked.amount,
-          filledAmount: filledAmt,
-          price: fillPrice,
-          totalValue: filledAmt > 0 ? fillValue : null,
-          orderId: tracked.order_id,
-          status,
-        });
-      }
+  // Unknown venue identity/status stops trading without releasing reserved capacity.
+  let trackedResting = db.getOpenRestingOrders();
+  const byId = new Map();
+  for (const order of openOrders) {
+    if (!order.order_id || byId.has(order.order_id)) throw new Error('Missing/duplicate venue order identity');
+    if (!trackedResting.some(tracked => tracked.order_id === order.order_id)) {
+      throw new Error(`Untracked venue order ${order.order_id}; reconcile before trading`);
     }
+    byId.set(order.order_id, order);
   }
+  for (const tracked of trackedResting) {
+    const live = byId.get(tracked.order_id) || await fetchOrderStatus(tracked.order_id);
+    if (!live) throw new Error(`Order ${tracked.order_id} status unknown; reservations retained`);
+    if (byId.has(tracked.order_id) && !['open', 'untriggered'].includes(live.order_status)) {
+      throw new Error('Terminal order in open-order snapshot; refresh required');
+    }
+    const result = require('./bot/order-accounting').accountRestingObservation({ db, botData, tracked, live });
+    if (result.deltaAmount > 0 || !result.resting) notifyOrderLifecycle({
+      stage: result.resting ? 'partial_fill' : live.filled_amount > 0 ? 'executed' : 'cancelled',
+      action: tracked.action, instrumentName: tracked.instrument_name, amount: tracked.amount,
+      filledAmount: result.deltaAmount, price: result.deltaAmount > 0 ? result.deltaValue / result.deltaAmount : tracked.limit_price,
+      totalValue: result.deltaValue, orderId: tracked.order_id, status: live.order_status });
+  }
+  trackedResting = trackedResting.filter(order => order.status === 'open');
 
   if (openOrders.length === 0) return;
 
@@ -10056,8 +10011,7 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
   }
   let openOrderBuyPutContext = null;
   const hasTrackedRestingBuyPut = openOrders.some((order) => {
-    const tracked = trackedResting.find((item) => item.order_id === order.order_id)
-      || trackedResting.find((item) => ordersRoughlyMatch(item, order));
+    const tracked = trackedResting.find((item) => item.order_id === order.order_id);
     return tracked && inferActionFromOpenOrder(order, tracked) === 'buy_put';
   });
   if (hasTrackedRestingBuyPut) {
@@ -10077,12 +10031,15 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
     });
   }
 
+  if (openOrders.some(order => ['buyback_call', 'sell_put'].includes(inferActionFromOpenOrder(order)))) {
+    positions = await fetchPositions({ throwOnError: true });
+  }
+
   for (const order of openOrders) {
     const ageMs = Date.now() - (order.creation_timestamp || 0);
     const ageHours = ageMs / (1000 * 60 * 60);
     const filled = Number(order.filled_amount || 0);
-    const tracked = trackedResting.find((item) => item.order_id === order.order_id)
-      || trackedResting.find((item) => ordersRoughlyMatch(item, order));
+    const tracked = trackedResting.find((item) => item.order_id === order.order_id);
     const inferredAction = inferActionFromOpenOrder(order, tracked);
 
     // Cancel stale orders (>8h) or orphaned orders
@@ -10127,27 +10084,16 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
       }
     }
 
-    if (isStale || isOrphaned || invalidRestingEntryReason) {
-      const reason = invalidRestingEntryReason
+    const invalidRestingExitReason = getRestingExitInvalidReason({ order, tracked, activeRules, positions, tickerMap, spotPrice });
+
+    if (isStale || isOrphaned || invalidRestingEntryReason || invalidRestingExitReason) {
+      const reason = invalidRestingEntryReason || invalidRestingExitReason
         || (isStale ? `stale (${ageHours.toFixed(1)}h old)` : 'orphaned (no matching active rule)');
       console.log(`🗑️ Cancelling ${order.instrument_name} order ${order.order_id}: ${reason}`);
       const result = await cancelOrder(order.order_id, order.instrument_name);
 
-      // Update our tracking table
-      db.updateRestingOrder(order.order_id, 'cancelled', filled);
-      if (tracked?.pending_action_id) {
-        db.updatePendingAction(tracked.pending_action_id, {
-          status: filled > 0 ? 'executed' : 'cancelled',
-          executed_at: new Date().toISOString(),
-          execution_result: {
-            orderId: order.order_id,
-            orderStatus: 'cancelled',
-            filledAmount: filled,
-            cancelReason: reason,
-            cancelResult: result || null,
-          },
-        });
-      }
+      // A cancellation ACK is not a terminal fill receipt. Reconcile next tick.
+      if (!result) throw new Error(`Cancellation of ${order.order_id} failed; reservation retained`);
     }
   }
 };
@@ -10490,10 +10436,15 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   // Determine direction and reduceOnly from action type
   const policy = getActionPolicy(action);
   const direction = policy?.direction || 'sell';
+  const bound = direction === 'buy' ? executionContext.approvedBounds?.buyCeiling : executionContext.approvedBounds?.sellFloor;
+  const approvedPrice = Number(bound) > 0
+    ? (direction === 'buy' ? Math.min(Number(price), Number(bound)) : Math.max(Number(price), Number(bound)))
+    : Number(price);
+  price = approvedPrice;
   let reduceOnly = Boolean(policy?.reduceOnly);
 
   if (isReduceOnlyExitAction(action) && isRestingOrderType(orderType)) {
-    const livePositions = await fetchPositions();
+    const livePositions = await fetchPositions({ throwOnError: true });
     let openRestingOrders = db ? db.getOpenRestingOrders() : [];
     try {
       const venueOpenOrders = await fetchOpenOrders({ throwOnError: true });
@@ -10599,6 +10550,38 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     price = venuePrice.price;
   }
 
+  const validateSubmission = async (candidatePrice) => {
+    const normalized = normalizeOrderPriceForVenue(candidatePrice, instrument, direction).price;
+    if (!(normalized > 0) || !Number.isFinite(normalized)
+      || (direction === 'buy' && normalized > approvedPrice + 1e-9)
+      || (direction === 'sell' && normalized < approvedPrice - 1e-9)) {
+      throw new Error('Normalized order violates approved price bound');
+    }
+    if (executionContext.validateOrder) {
+      const validation = await executionContext.validateOrder({ price: normalized, amount, ticker });
+      if (validation === false || validation?.allowed === false || validation?.valid === false) {
+        throw new Error(validation?.reason || 'Final execution policy rejected order');
+      }
+    }
+    return normalized;
+  };
+  try { price = await validateSubmission(price); } catch (error) {
+    return { failed: true, reason: error.message };
+  }
+  const accounting = require('./bot/order-accounting');
+  accounting.assertNoUnresolvedSubmission(db);
+  let submissionId = null;
+  const beforeSend = (request) => { submissionId = accounting.beginSubmission(db, pendingActionId, { ...request,
+    account_address: DERIVE_ACCOUNT_ADDRESS, action,
+    exit_intent: getSyntheticExitIntent(action, executionContext.triggerData || {}, executionContext.ruleCriteria || {}),
+    approved_limit_price: approvedPrice }); };
+  const observeSubmission = (receipt) => {
+    const definitive = Boolean(receipt?.zero_fill_rejected || receipt?.rejected_post_only || receipt?.definitive_rejection);
+    accounting.noteSubmission(db, submissionId, receipt, definitive);
+    if (submissionId != null && (!receipt || receipt.placement_error) && !definitive) {
+      throw new Error('Order placement outcome unknown; durable intent retained for reconciliation');
+    }
+  };
   let order;
   try {
     order = await placeOrder(
@@ -10610,14 +10593,18 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       subId,
       reduceOnly,
       orderType,
-      instrument
+      instrument,
+      beforeSend
     );
   } catch (error) {
     console.error(`❌ Error placing ${action} order for ${instrumentName}:`, error.message);
+    if (submissionId != null) throw error;
     const reason = `Order error: ${error.message}`;
     insertExecutionOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice });
     return { failed: true, reason };
   }
+
+  observeSubmission(order);
 
   if (!order) {
     const reason = 'Order placement failed';
@@ -10650,7 +10637,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   if (order.rejected_post_only) {
     let retryTicker = ticker;
     let retryPlan = orderType === 'post_only' ? computePostOnlyRetryPrice(direction, retryTicker, instrument, price) : null;
-    if (orderType === 'post_only' && (!retryPlan || Math.abs(retryPlan.retryPrice - price) <= 1e-9)) {
+    if (orderType === 'post_only') {
       const refreshedRetryTicker = await fetchFreshTickerForInstrument(instrumentName);
       if (refreshedRetryTicker) {
         retryTicker = refreshedRetryTicker;
@@ -10680,7 +10667,10 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     if (orderType === 'post_only' && retryPlan && Math.abs(retryPlan.retryPrice - price) > 1e-9 && retryMarginCheck.allowed) {
       console.log(`📋 post_only rejected: ${action} ${instrumentName} @ $${price} — retrying maker at $${retryPlan.retryPrice} (${initialContext})`);
       let retryOrder = null;
+      submissionId = null;
       try {
+        ticker = retryTicker;
+        retryPlan.retryPrice = await validateSubmission(retryPlan.retryPrice);
         retryOrder = await placeOrder(
           instrumentName,
           amount.toFixed(2),
@@ -10690,12 +10680,14 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
           subId,
           reduceOnly,
           orderType,
-          instrument
+          instrument,
+          beforeSend
         );
       } catch (error) {
         console.error(`❌ Error retrying ${action} order for ${instrumentName}:`, error.message);
       }
 
+      observeSubmission(retryOrder);
       if (retryOrder && !retryOrder.rejected_post_only && !retryOrder.placement_error && !retryOrder.zero_fill_rejected) {
         order = retryOrder;
         price = retryPlan.retryPrice;
@@ -10759,109 +10751,18 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     }
   }
 
-  // Fill accounting from actual trades
-  let filledAmt = 0, avgPx = price, totalValue = 0;
   const orderRecord = extractOrderRecord(order.result || order);
-  notifyOrderLifecycle({
-    stage: 'posted',
-    action,
-    instrumentName,
-    amount,
-    price,
-    orderType,
-    orderId: orderRecord?.order_id || null,
-    status: orderRecord?.order_status || null,
-  });
   const orderTrades = getOrderTrades(order.result || order);
-  if (orderTrades.length) {
-    let totAmt = 0, totVal = 0;
-    for (const t of orderTrades) {
-      const ta = Number(t.trade_amount), tp = Number(t.trade_price);
-      totAmt += ta; totVal += ta * tp;
-    }
-    if (totAmt > 0) { filledAmt = totAmt; avgPx = totVal / totAmt; totalValue = totVal; }
-  }
-
-  // Zero-fill detection: IOC orders that matched nothing
-  if (filledAmt === 0 && orderType === 'ioc') {
-    console.log(`⚠️ Zero fill: ${action} ${instrumentName} @ $${price} [IOC] — no liquidity`);
-    insertExecutionOrder({
-      action, success: false, reason: `Zero fill (IOC) — no matching orders at $${price}`,
-      instrument_name: instrumentName,
-      strike: instrument.option_details?.strike || null,
-      expiry: instrument.option_details?.expiry || null,
-      delta: null, price, intended_amount: amount,
-      filled_amount: 0, fill_price: null,
-      total_value: 0, spot_price: spotPrice,
-      raw_response: order,
-    });
-    notifyOrderLifecycle({
-      stage: 'cancelled',
-      action,
-      instrumentName,
-      amount,
-      price,
-      orderType,
-      orderId: orderRecord?.order_id || null,
-      status: 'zero fill',
-    });
-    return { zeroFill: true, action, instrumentName, amount, price, orderType };
-  }
-
-  // GTC/post-only orders with zero fills are resting on the book — track as open
-  if (filledAmt === 0 && (orderType === 'gtc' || orderType === 'post_only')) {
-    const orderId = orderRecord?.order_id || null;
-    console.log(`📋 Order resting: ${action} ${instrumentName} @ $${price} [${orderType}] orderId=${orderId}`);
-    // Track resting order for fill reconciliation. Do not write a trade row yet:
-    // no fill happened, and P&L/recent-orders views should only count fills.
-    if (db && orderId) {
-      db.insertRestingOrder({
-        order_id: orderId,
-        pending_action_id: pendingActionId,
-        instrument_name: instrumentName,
-        action,
-        direction,
-        amount,
-        limit_price: price,
-      });
-    }
-    return { resting: true, orderId, action, instrumentName, amount, price, orderType };
-  }
-
-  // Track put budget discipline (arithmetic cost commitment)
-  if (action === 'buy_put') {
-    botData.putNetBought += totalValue;
-  }
-  persistCycleState();
-
-  // Log to DB
-  if (db) {
-    const strike = instrument.option_details?.strike || null;
-    const expiry = instrument.option_details?.expiry || null;
-    insertExecutionOrder({
-      action, success: true, reason: `LLM-confirmed ${action} [${orderType}]`,
-      instrument_name: instrumentName, strike, expiry,
-      delta: null, price, intended_amount: amount,
-      filled_amount: filledAmt, fill_price: avgPx,
-      total_value: totalValue, spot_price: spotPrice,
-      raw_response: order,
-    });
-  }
-
-  console.log(`✅ ${action.toUpperCase()}: ${filledAmt} ${instrumentName} @ $${avgPx.toFixed(4)} [${orderType}] | total=$${totalValue.toFixed(4)}`);
-  notifyOrderLifecycle({
-    stage: filledAmt + 1e-9 < amount ? 'partial_fill' : 'executed',
-    action,
-    instrumentName,
-    amount,
-    filledAmount: filledAmt,
-    price: avgPx,
-    totalValue,
-    orderType,
-    orderId: orderRecord?.order_id || null,
-    status: orderRecord?.order_status || null,
+  const result = require('./bot/order-accounting').accountInitialReceipt({
+    db, botData, action, instrumentName, amount, price, orderType, pendingActionId,
+    instrument, spotPrice, order, record: orderRecord, trades: orderTrades,
+    exitIntent: getSyntheticExitIntent(action, executionContext.triggerData || {}, executionContext.ruleCriteria || {}),
+    approvedLimitPrice: approvedPrice, submissionId,
   });
-  return { filledAmt, avgPx, totalValue, order, orderType };
+  notifyOrderLifecycle({ stage: result.resting ? 'posted' : result.filledAmt > 0 ? 'executed' : 'cancelled',
+    action, instrumentName, amount, filledAmount: result.filledAmt || 0, price,
+    totalValue: result.totalValue || 0, orderType, orderId: orderRecord.order_id, status: orderRecord.order_status });
+  return result;
 };
 
 const getFinalOrderPolicy = () => ({
