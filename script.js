@@ -7834,24 +7834,29 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     : Number(advisorLimitPrice) > 0
       ? Number(advisorLimitPrice)
       : bestAsk;
+  const makerPlan = instrument && Number(ticker?.a) > 0 && limitPrice > 0
+    ? computePostOnlyRetryPrice('buy', ticker, instrument, limitPrice)
+    : null;
+  const plannedPrice = makerPlan?.retryPrice ?? limitPrice;
+  const plannedPremium = Number(action?.amount) > 0 && plannedPrice > 0
+    ? Number(action.amount) * plannedPrice
+    : null;
   const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
   const triggerDte = Number(triggerData?.dte);
-  const plannedRawScore = Math.abs(scoreDelta) > 0 && limitPrice > 0
-    ? Math.abs(scoreDelta) / limitPrice
+  const plannedRawScore = Math.abs(scoreDelta) > 0 && plannedPrice > 0
+    ? Math.abs(scoreDelta) / plannedPrice
     : null;
   const plannedScore = plannedRawScore > 0 && triggerDte > 0
     ? normalizeBuyPutScore(plannedRawScore, triggerDte)
     : plannedRawScore;
-  const makerPlan = instrument && Number(ticker?.a) > 0 && limitPrice > 0
-    ? computePostOnlyRetryPrice('buy', ticker, instrument, limitPrice)
-    : null;
 
   const fmt = (value, digits = 6) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
   return [
     'Buy-put value confirmation context:',
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(Number(triggerData?.dte), 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
-    `- Planned execution limit: ${fmtPrice(limitPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned PUT_EDGE=${fmt(plannedScore)} using trigger_delta, trigger_dte, and planned limit; live PUT_EDGE=${fmt(liveScore)}.`,
+    `- Planned execution limit: ${fmtPrice(plannedPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned PUT_EDGE=${fmt(plannedScore)} using trigger_delta, trigger_dte, and planned limit; live PUT_EDGE=${fmt(liveScore)}.`,
+    `- Planned premium outlay (excluding fees): ${fmtPrice(plannedPremium)} for amount=${action?.amount ?? 'n/a'} at the planned execution limit. ${makerPlan ? 'The planned limit, PUT EDGE, and premium above all use the computed post_only bid below.' : 'These are reference-limit economics only; a maker price has not been established.'}`,
     `- Thresholds: min_score=${fmt(minScore)}, target_score=${fmt(targetScore)}. For patient maker bids, planned PUT EDGE at our limit is the economic gate; live PUT EDGE may be below threshold because we are not willing to lift the ask.`,
     `- Composite edge context: edge_score=${fmt(edgeScore, 2)}, recommendation=${buyPutResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, candidate_iv_pct:${fmt(edgeComponents.candidate_iv_pct, 2)}, market_put_iv_pct:${fmt(edgeComponents.market_put_iv_pct, 2)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, oi_24h:${fmt(edgeComponents.market_oi_delta_24h_pct, 2)}, shock40:${fmt(edgeComponents.shock_payoff_multiple_40pct, 2)}x}.`,
     `- value_signal=${currentValueSignal || 'n/a'}, required_value_signal=${requiredValueSignal || 'n/a'}. ${isStandingPatientBid ? 'This is a standing patient bid: no spike signal is active, but the bid is still valid if planned_score meets threshold and budget/risk gates remain valid.' : 'A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.'}`,

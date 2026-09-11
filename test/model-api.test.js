@@ -127,3 +127,33 @@ test('a rising ask cannot raise a post-only buy retry above its approved price',
   assert.equal(api.computePostOnlyRetryPrice('buy', { a: 0 }, instrument, 13.28), null);
   assert.equal(api.computePostOnlyRetryPrice('buy', { a: 0.1 }, instrument, 0.1), null);
 });
+
+test('confirmation economics use the proposed maker price, not the reference cap', () => {
+  const api = loadMakerHelpers();
+  const ticker = { b: 13.4, a: 13.56, option_pricing: { d: -0.1 } };
+  const instrument = { price_step: 0.1 };
+  const plan = api.computePostOnlyRetryPrice('buy', ticker, instrument, 13.56);
+  const normalizeScore = require('../bot/put-score').normalizeBuyPutScore;
+  const prompt = api.formatBuyPutConfirmationContext({
+    action: { action: 'buy_put', amount: 3, rule_criteria: { min_score: 0.001 } },
+    triggerData: { delta: -0.1, dte: 78, target_score: 0.001 },
+    ticker, currentPrice: 13.56, advisorLimitPrice: 13.56, instrument,
+  });
+  assert.ok(prompt.includes(`Planned execution limit: $${plan.retryPrice.toFixed(4)}`));
+  assert.ok(prompt.includes('capped by advisor_limit_price=$13.5600'));
+  assert.ok(prompt.includes(`planned PUT_EDGE=${normalizeScore(0.1 / plan.retryPrice, 78).toFixed(6)}`));
+  assert.ok(prompt.includes(`Planned premium outlay (excluding fees): $${(3 * plan.retryPrice).toFixed(4)}`));
+});
+
+test('missing maker book is explicitly identified as reference-only economics', () => {
+  const api = loadMakerHelpers();
+  const prompt = api.formatBuyPutConfirmationContext({
+    action: { action: 'buy_put', amount: 3 },
+    triggerData: { delta: -0.1, dte: 78 },
+    ticker: {}, currentPrice: 13.56, advisorLimitPrice: 13.56,
+    instrument: { price_step: 0.1 },
+  });
+  assert.ok(prompt.includes('Planned execution limit: $13.5600'));
+  assert.ok(prompt.includes('reference-limit economics only; a maker price has not been established'));
+  assert.ok(prompt.includes('No computed maker bid is available'));
+});
