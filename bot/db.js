@@ -1,7 +1,8 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
-const DB_PATH = path.join(DATA_DIR, 'noop.db');
+const DB_PATH = process.env.NOOP_DB_PATH || path.join(DATA_DIR, 'noop.db');
+const { createHourlyRollups } = require('./hourly-rollups');
 const fs = require('fs');
 const {
   SELL_CALL_EDGE_REFERENCE_DTE,
@@ -183,6 +184,21 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_resting_orders_status ON resting_orders(status);
 `);
 try { db.exec('ALTER TABLE resting_orders ADD COLUMN pending_action_id INTEGER REFERENCES pending_actions(id)'); } catch {}
+const addColumnIfMissing = (table, name, definition) => {
+  if (!db.prepare(`PRAGMA table_info(${table})`).all().some((column) => column.name === name)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    return true;
+  }
+  return false;
+};
+db.transaction(() => {
+  if (addColumnIfMissing('resting_orders', 'filled_value', 'REAL DEFAULT 0')) {
+    db.exec('UPDATE resting_orders SET filled_value = NULL WHERE filled_amount > 0');
+  }
+  addColumnIfMissing('resting_orders', 'exit_intent', 'TEXT');
+  addColumnIfMissing('resting_orders', 'approved_limit_price', 'REAL');
+})();
+
 try {
   const restingActions = db.prepare(`
     SELECT id, execution_result
@@ -638,6 +654,54 @@ try {
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_lessons_key
     ON trade_lessons(lesson_key) WHERE lesson_key IS NOT NULL`);
 } catch {}
+
+// Add explicit completeness without silently changing historic outcome evidence.
+for (const [name, definition] of [
+  ['spot_complete', 'INTEGER NOT NULL DEFAULT 0'],
+  ['quote_complete', 'INTEGER NOT NULL DEFAULT 0'],
+  ['last_checked_at', 'TEXT'],
+]) addColumnIfMissing('decision_outcomes', name, definition);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS data_migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
+  CREATE TABLE IF NOT EXISTS lifecycle_dirty_instruments (instrument_name TEXT PRIMARY KEY);
+  CREATE INDEX IF NOT EXISTS idx_orders_instrument ON orders(instrument_name, timestamp);
+  CREATE TRIGGER IF NOT EXISTS lifecycle_order_insert AFTER INSERT ON orders
+  WHEN NEW.instrument_name IS NOT NULL BEGIN
+    INSERT OR IGNORE INTO lifecycle_dirty_instruments VALUES (NEW.instrument_name);
+  END;
+  CREATE TRIGGER IF NOT EXISTS lifecycle_order_update AFTER UPDATE ON orders BEGIN
+    INSERT OR IGNORE INTO lifecycle_dirty_instruments SELECT OLD.instrument_name WHERE OLD.instrument_name IS NOT NULL;
+    INSERT OR IGNORE INTO lifecycle_dirty_instruments SELECT NEW.instrument_name WHERE NEW.instrument_name IS NOT NULL;
+  END;
+  CREATE TRIGGER IF NOT EXISTS lifecycle_order_delete AFTER DELETE ON orders
+  WHEN OLD.instrument_name IS NOT NULL BEGIN
+    INSERT OR IGNORE INTO lifecycle_dirty_instruments VALUES (OLD.instrument_name);
+  END;
+`);
+db.transaction(() => {
+  if (!db.prepare('SELECT 1 FROM data_migrations WHERE name = ?').get('v2-observation-completeness-lifecycle-1')) {
+    db.exec(`
+      UPDATE decision_outcomes SET
+        spot_complete = CASE WHEN future_spot_at IS NOT NULL AND future_spot > 0 THEN 1 ELSE 0 END,
+        quote_complete = CASE WHEN future_quote_at IS NOT NULL AND (
+          ((SELECT action FROM candidate_observations WHERE id = observation_id) IN ('sell_call', 'sell_put') AND future_ask > 0)
+          OR ((SELECT action FROM candidate_observations WHERE id = observation_id) IN ('buy_put', 'buyback_call') AND future_bid >= 0)
+        ) THEN 1 ELSE 0 END;
+      UPDATE decision_outcomes SET status = 'pending', evaluated_at = NULL
+        WHERE status IN ('evaluated', 'missing') AND (spot_complete = 0 OR quote_complete = 0);
+      INSERT OR IGNORE INTO lifecycle_dirty_instruments
+        SELECT DISTINCT instrument_name FROM orders WHERE instrument_name IS NOT NULL;
+      INSERT OR IGNORE INTO lifecycle_dirty_instruments SELECT instrument_name FROM position_lifecycle;
+      UPDATE options_snapshots SET option_type = 'C' WHERE lower(option_type) = 'call';
+      UPDATE options_snapshots SET option_type = 'P' WHERE lower(option_type) = 'put';
+      UPDATE candidate_observations SET option_type = 'C' WHERE lower(option_type) = 'call';
+      UPDATE candidate_observations SET option_type = 'P' WHERE lower(option_type) = 'put';
+    `);
+    db.prepare('INSERT INTO data_migrations VALUES (?, ?)').run('v2-observation-completeness-lifecycle-1', new Date().toISOString());
+  }
+})();
+const hourlyRollups = createHourlyRollups(db);
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
 
@@ -1324,60 +1388,14 @@ const stmts = {
     ORDER BY timestamp ASC
   `),
 
-  // Hourly rollup upserts
-  upsertSpotHourly: db.prepare(`
-    INSERT INTO spot_prices_hourly (hour, open, high, low, close, avg_price, short_momentum, medium_momentum, count)
-    VALUES (@hour, @price, @price, @price, @price, @price, @short_momentum, @medium_momentum, 1)
-    ON CONFLICT(hour) DO UPDATE SET
-      high = MAX(spot_prices_hourly.high, @price),
-      low = MIN(spot_prices_hourly.low, @price),
-      close = @price,
-      avg_price = (spot_prices_hourly.avg_price * spot_prices_hourly.count + @price) / (spot_prices_hourly.count + 1),
-      short_momentum = @short_momentum,
-      medium_momentum = @medium_momentum,
-      count = spot_prices_hourly.count + 1
-  `),
-
-  upsertOptionsHourly: db.prepare(`
-    INSERT INTO options_hourly (hour, best_put_dv, best_call_dv, avg_spread, avg_depth, avg_iv, total_oi, count)
-    VALUES (@hour, @best_put_dv, @best_call_dv, @avg_spread, @avg_depth, @avg_iv, @total_oi, 1)
-    ON CONFLICT(hour) DO UPDATE SET
-      best_put_dv = MAX(options_hourly.best_put_dv, @best_put_dv),
-      best_call_dv = MAX(options_hourly.best_call_dv, @best_call_dv),
-      avg_spread = (options_hourly.avg_spread * options_hourly.count + @avg_spread) / (options_hourly.count + 1),
-      avg_depth = (options_hourly.avg_depth * options_hourly.count + @avg_depth) / (options_hourly.count + 1),
-      avg_iv = (options_hourly.avg_iv * options_hourly.count + @avg_iv) / (options_hourly.count + 1),
-      total_oi = @total_oi,
-      count = options_hourly.count + 1
-  `),
-
-  upsertOnchainHourly: db.prepare(`
-    INSERT INTO onchain_hourly (hour, dex, tvl, volume, tx_count, avg_magnitude, direction)
-    VALUES (@hour, @dex, @tvl, @volume, @tx_count, @avg_magnitude, @direction)
-    ON CONFLICT(hour, dex) DO UPDATE SET
-      tvl = @tvl,
-      volume = @volume,
-      tx_count = @tx_count,
-      avg_magnitude = (onchain_hourly.avg_magnitude + @avg_magnitude) / 2,
-      direction = @direction
-  `),
-
   // Funding rates
   insertFundingRate: db.prepare(`
     INSERT INTO funding_rates (timestamp, exchange, symbol, rate)
     VALUES (@timestamp, @exchange, @symbol, @rate)
   `),
 
-  getLatestFundingTimestamp: db.prepare(`
-    SELECT MAX(timestamp) as latest FROM funding_rates WHERE exchange = @exchange AND symbol = @symbol
-  `),
-
-  upsertFundingRateHourly: db.prepare(`
-    INSERT INTO funding_rates_hourly (hour, exchange, symbol, avg_rate, count)
-    VALUES (@hour, @exchange, @symbol, @rate, 1)
-    ON CONFLICT(hour, exchange, symbol) DO UPDATE SET
-      avg_rate = (funding_rates_hourly.avg_rate * funding_rates_hourly.count + @rate) / (funding_rates_hourly.count + 1),
-      count = funding_rates_hourly.count + 1
+  hasFundingRate: db.prepare(`
+    SELECT 1 FROM funding_rates WHERE timestamp = @timestamp AND exchange = @exchange AND symbol = @symbol
   `),
 
   getFundingRatesHourly: db.prepare(`
@@ -1445,9 +1463,11 @@ const stmts = {
   getAvgCallPremium7d: db.prepare(`
     SELECT AVG(bid_price) as avg_premium
     FROM options_snapshots
-    WHERE option_type = 'call'
+    WHERE option_type = 'C'
       AND timestamp > @since
       AND bid_price > 0
+      AND delta BETWEEN 0.04 AND 0.12
+      AND (expiry - unixepoch(timestamp)) / 86400.0 BETWEEN 5 AND 12
   `),
 
   // ─── Trading Rules & Pending Actions ────────────────────────────────────────
@@ -1547,8 +1567,8 @@ const stmts = {
 
   // Resting order tracking
   insertRestingOrder: db.prepare(`
-    INSERT OR IGNORE INTO resting_orders (order_id, pending_action_id, instrument_name, action, direction, amount, limit_price)
-    VALUES (@order_id, @pending_action_id, @instrument_name, @action, @direction, @amount, @limit_price)
+    INSERT OR IGNORE INTO resting_orders (order_id, pending_action_id, instrument_name, action, direction, amount, limit_price, filled_amount, filled_value, exit_intent, approved_limit_price)
+    VALUES (@order_id, @pending_action_id, @instrument_name, @action, @direction, @amount, @limit_price, @filled_amount, @filled_value, @exit_intent, @approved_limit_price)
   `),
   getOpenRestingOrders: db.prepare(`
     SELECT ro.*, pa.rule_id AS rule_id
@@ -1557,7 +1577,7 @@ const stmts = {
     WHERE ro.status = 'open'
   `),
   updateRestingOrder: db.prepare(`
-    UPDATE resting_orders SET status = @status, filled_amount = @filled_amount WHERE order_id = @order_id
+    UPDATE resting_orders SET status = @status, filled_amount = @filled_amount, filled_value = @filled_value WHERE order_id = @order_id
   `),
   updateRestingOrderId: db.prepare(`
     UPDATE resting_orders
@@ -1676,7 +1696,8 @@ const stmts = {
     JOIN candidate_observations c ON c.id = o.observation_id
     WHERE o.status = 'pending'
       AND o.due_at <= @now
-    ORDER BY o.due_at ASC
+      AND (@after_id IS NULL OR o.id > @after_id)
+    ORDER BY CASE WHEN @after_id IS NOT NULL THEN o.id END ASC, o.last_checked_at ASC, o.due_at ASC, o.id ASC
     LIMIT @limit
   `),
 
@@ -1686,7 +1707,10 @@ const stmts = {
     WHERE instrument_name = @instrument_name
       AND timestamp >= @due_at
       AND timestamp < @until
-    ORDER BY timestamp ASC
+      AND timestamp <= @now
+      AND ((@action IN ('sell_call', 'sell_put') AND ask_price > 0)
+        OR (@action IN ('buy_put', 'buyback_call') AND bid_price >= 0))
+    ORDER BY timestamp ASC, id ASC
     LIMIT 1
   `),
 
@@ -1695,6 +1719,7 @@ const stmts = {
     FROM spot_prices
     WHERE timestamp >= @due_at
       AND timestamp < @until
+      AND timestamp <= @now
       AND price BETWEEN 100 AND 20000
     ORDER BY timestamp ASC
     LIMIT 1
@@ -1711,6 +1736,9 @@ const stmts = {
   updateDecisionOutcome: db.prepare(`
     UPDATE decision_outcomes SET
       evaluated_at = @evaluated_at,
+      last_checked_at = @last_checked_at,
+      spot_complete = @spot_complete,
+      quote_complete = @quote_complete,
       status = @status,
       future_quote_at = @future_quote_at,
       future_spot_at = @future_spot_at,
@@ -1746,6 +1774,7 @@ const stmts = {
     SELECT id, timestamp, action, instrument_name, strike, expiry, filled_amount, fill_price, total_value, spot_price
     FROM orders
     WHERE success = 1
+      AND instrument_name = @instrument_name
       AND COALESCE(filled_amount, 0) > 0
       AND action IN ('buy_put', 'sell_put', 'sell_call', 'buyback_call')
     ORDER BY timestamp ASC
@@ -1785,7 +1814,7 @@ const stmts = {
 
 // ─── Helper Functions ─────────────────────────────────────────────────────────
 
-const insertSpotPrice = (spotPrice, momentumResult, botData, timestamp) => {
+const insertSpotPrice = db.transaction((spotPrice, momentumResult = {}, botData = {}, timestamp) => {
   const shortMomentum = typeof momentumResult.shortTermMomentum === 'object'
     ? momentumResult.shortTermMomentum : { main: momentumResult.shortTermMomentum };
   const medMomentum = typeof momentumResult.mediumTermMomentum === 'object'
@@ -1805,25 +1834,19 @@ const insertSpotPrice = (spotPrice, momentumResult, botData, timestamp) => {
     seven_day_low: botData.shortTermMomentum?.sevenDayLow || null,
   });
 
-  // Upsert into hourly rollup
-  try {
-    stmts.upsertSpotHourly.run({
-      hour: toHourKey(ts),
-      price: spotPrice,
-      short_momentum: shortMomentum.main || null,
-      medium_momentum: medMomentum.main || null,
-    });
-  } catch (e) { /* rollup failure should not block raw insert */ }
-
+  hourlyRollups.refreshSpotHour(ts);
   return result;
-};
+});
 
 const toNum = (v) => {
   if (v == null || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
-const toHourKey = (ts) => ts.slice(0, 13) + ':00:00Z';
+const normalizeOptionType = (value, instrumentName) => {
+  const type = String(value || instrumentName?.split('-').at(-1) || '').toUpperCase();
+  return type === 'C' || type === 'CALL' ? 'C' : type === 'P' || type === 'PUT' ? 'P' : null;
+};
 
 const insertOptionsSnapshotBatch = (options, timestamp) => {
   const insert = db.transaction((opts) => {
@@ -1833,7 +1856,7 @@ const insertOptionsSnapshotBatch = (options, timestamp) => {
         instrument_name: opt.instrument_name || '',
         strike: toNum(opt.option_details?.strike),
         expiry: opt.option_details?.expiry || null,
-        option_type: opt.option_details?.option_type || (opt.instrument_name?.includes('-P') ? 'P' : 'C'),
+        option_type: normalizeOptionType(opt.option_details?.option_type, opt.instrument_name),
         delta: toNum(opt.details?.delta),
         ask_price: toNum(opt.details?.askPrice),
         bid_price: toNum(opt.details?.bidPrice),
@@ -1847,71 +1870,12 @@ const insertOptionsSnapshotBatch = (options, timestamp) => {
         implied_vol: toNum(opt.details?.impliedVol),
       });
     }
+    hourlyRollups.refreshOptionsHour(timestamp);
   });
   insert(options);
-
-  // Upsert hourly rollup from batch aggregates
-  try {
-    const hour = toHourKey(timestamp);
-    let bestPutDv = 0, bestCallDv = 0;
-    let spreadSum = 0, spreadCount = 0;
-    let depthSum = 0, depthCount = 0;
-    let ivSum = 0, ivCount = 0;
-    let totalOi = 0;
-
-    for (const opt of options) {
-      const delta = toNum(opt.details?.delta);
-      const askDv = toNum(opt.details?.askDeltaValue);
-      const bidDv = toNum(opt.details?.bidDeltaValue);
-      const askPrice = toNum(opt.details?.askPrice);
-      const bidPrice = toNum(opt.details?.bidPrice);
-      const markPrice = toNum(opt.details?.markPrice);
-      const askAmount = toNum(opt.details?.askAmount);
-      const bidAmount = toNum(opt.details?.bidAmount);
-      const iv = toNum(opt.details?.impliedVol);
-      const oi = toNum(opt.details?.openInterest);
-      const isPut = (opt.option_details?.option_type === 'P') || opt.instrument_name?.includes('-P');
-      const isCall = (opt.option_details?.option_type === 'C') || opt.instrument_name?.includes('-C');
-
-      // Best put DV (delta -0.02 to -0.12)
-      if (isPut && delta != null && delta <= -0.02 && delta >= -0.12 && askDv != null && askDv > bestPutDv) {
-        bestPutDv = askDv;
-      }
-      // Best call DV (delta 0.04 to 0.12)
-      if (isCall && delta != null && delta >= 0.04 && delta <= 0.12 && bidDv != null && bidDv > bestCallDv) {
-        bestCallDv = bidDv;
-      }
-      // Spread (within bot's delta range)
-      if (delta != null && ((delta <= -0.02 && delta >= -0.12) || (delta >= 0.04 && delta <= 0.12))) {
-        if (askPrice > 0 && bidPrice > 0 && markPrice > 0) {
-          spreadSum += (askPrice - bidPrice) / markPrice;
-          spreadCount++;
-        }
-        if (askAmount != null && bidAmount != null) {
-          depthSum += askAmount + bidAmount;
-          depthCount++;
-        }
-        if (iv != null) {
-          ivSum += iv;
-          ivCount++;
-        }
-      }
-      if (oi != null && oi > 0) totalOi += oi;
-    }
-
-    stmts.upsertOptionsHourly.run({
-      hour,
-      best_put_dv: bestPutDv,
-      best_call_dv: bestCallDv,
-      avg_spread: spreadCount > 0 ? spreadSum / spreadCount : 0,
-      avg_depth: depthCount > 0 ? depthSum / depthCount : 0,
-      avg_iv: ivCount > 0 ? ivSum / ivCount : 0,
-      total_oi: totalOi,
-    });
-  } catch (e) { /* rollup failure should not block raw insert */ }
 };
 
-const insertOnchainData = (analysis) => {
+const insertOnchainData = db.transaction((analysis) => {
   const flow = analysis.dexLiquidity?.flowAnalysis || {};
   const ts = analysis.timestamp || new Date().toISOString();
 
@@ -1926,26 +1890,8 @@ const insertOnchainData = (analysis) => {
     raw_data: JSON.stringify(analysis),
   });
 
-  // Upsert per-DEX hourly rollup
-  try {
-    const hour = toHourKey(ts);
-    const dexes = analysis.dexLiquidity?.dexes;
-    if (dexes) {
-      for (const [name, dex] of Object.entries(dexes)) {
-        if (dex.error) continue;
-        stmts.upsertOnchainHourly.run({
-          hour,
-          dex: name,
-          tvl: toNum(dex.totalLiquidity) || 0,
-          volume: toNum(dex.totalVolume) || 0,
-          tx_count: toNum(dex.totalTxCount) || 0,
-          avg_magnitude: toNum(flow.magnitude) || 0,
-          direction: flow.direction || null,
-        });
-      }
-    }
-  } catch (e) { /* rollup failure should not block raw insert */ }
-};
+  hourlyRollups.refreshOnchainHour(ts);
+});
 
 const insertSignal = (signalType, details, actedOn = false) => {
   const result = stmts.insertSignal.run({
@@ -2114,7 +2060,7 @@ const insertCandidateObservations = (observations = [], horizons = DECISION_OUTC
         pending_action_id: item.pending_action_id ?? null,
         action: item.action,
         instrument_name: item.instrument_name,
-        option_type: item.option_type || null,
+        option_type: normalizeOptionType(item.option_type, item.instrument_name),
         candidate_rank: item.candidate_rank ?? null,
         selected: item.selected ? 1 : 0,
         decision_status: item.decision_status || null,
@@ -2205,68 +2151,119 @@ const insertBuyPutEdgeSnapshot = (snapshot = {}) => {
   });
 };
 
-const evaluateDueDecisionOutcomes = ({ now = new Date().toISOString(), limit = 500, quoteWindowHours = 6 } = {}) => {
-  const due = stmts.getDueDecisionOutcomes.all({ now, limit });
+const evaluateDueDecisionOutcomes = ({ now = new Date().toISOString(), limit = 500, quoteWindowHours = 6, afterId = null } = {}) => {
+  now = new Date(now).toISOString();
+  if (!(quoteWindowHours > 0) || !Number.isFinite(quoteWindowHours)) throw new Error('quoteWindowHours must be positive');
+  const due = stmts.getDueDecisionOutcomes.all({ now, limit, after_id: afterId });
   let evaluated = 0;
   let missing = 0;
+  let pending = 0;
   const update = db.transaction((items) => {
     for (const row of items) {
       const until = addHoursIso(row.due_at, quoteWindowHours);
       const quote = stmts.getOutcomeFutureQuote.get({
-        instrument_name: row.instrument_name,
-        due_at: row.due_at,
-        until,
+        instrument_name: row.instrument_name, action: row.action,
+        due_at: row.due_at, until, now,
       }) || null;
-      const spot = stmts.getOutcomeFutureSpot.get({
-        due_at: row.due_at,
-        until,
-      }) || null;
-      const path = stmts.getOutcomeSpotPath.get({
-        observed_at: row.observed_at,
-        due_at: row.due_at,
-      }) || {};
+      const spot = stmts.getOutcomeFutureSpot.get({ due_at: row.due_at, until, now }) || null;
+      const path = stmts.getOutcomeSpotPath.get({ observed_at: row.observed_at, due_at: row.due_at }) || {};
       const entryBid = toNum(row.bid_price);
       const entryAsk = toNum(row.ask_price);
       const futureBid = toNum(quote?.bid_price);
       const futureAsk = toNum(quote?.ask_price);
       const futureMark = toNum(quote?.mark_price);
-      const absDelta = Math.abs(toNum(quote?.delta) || toNum(row.delta) || 0);
+      const quoteDelta = toNum(quote?.delta);
+      const absDelta = quoteDelta == null ? null : Math.abs(quoteDelta);
       const isCall = row.action === 'sell_call' || row.option_type === 'C' || row.instrument_name?.endsWith('-C');
       const futureScore = isCall
         ? (toNum(quote?.bid_delta_value) ?? (futureBid != null && absDelta > 0 ? futureBid / absDelta : null))
-        : (toNum(quote?.ask_delta_value) ?? (futureAsk != null && absDelta > 0 ? absDelta / futureAsk : null));
+        : (toNum(quote?.ask_delta_value) ?? (futureAsk > 0 && absDelta != null ? absDelta / futureAsk : null));
       const futureSpot = toNum(spot?.price);
       const entrySpot = toNum(row.spot_price);
       const sellEntryPnl = entryBid != null && futureAsk != null ? entryBid - futureAsk : null;
       const buyEntryPnl = entryAsk != null && futureBid != null ? futureBid - entryAsk : null;
-      const status = quote || spot ? 'evaluated' : 'missing';
+      const spotComplete = futureSpot != null;
+      const quoteComplete = quote != null;
+      const status = spotComplete && quoteComplete ? 'evaluated' : now >= until ? 'missing' : 'pending';
       if (status === 'evaluated') evaluated++;
-      else missing++;
+      else if (status === 'missing') missing++;
+      else pending++;
+      const absent = [!spotComplete && 'spot', !quoteComplete && 'executable option quote'].filter(Boolean);
       stmts.updateDecisionOutcome.run({
         id: row.outcome_id,
-        evaluated_at: now,
+        evaluated_at: status === 'pending' ? null : now,
+        last_checked_at: now,
+        spot_complete: spotComplete ? 1 : 0,
+        quote_complete: quoteComplete ? 1 : 0,
         status,
         future_quote_at: quote?.timestamp || null,
         future_spot_at: spot?.timestamp || null,
         future_spot: futureSpot,
         spot_return: futureSpot != null && entrySpot > 0 ? (futureSpot / entrySpot) - 1 : null,
-        future_bid: futureBid,
-        future_ask: futureAsk,
-        future_mark: futureMark,
-        future_score: futureScore,
+        future_bid: futureBid, future_ask: futureAsk, future_mark: futureMark, future_score: futureScore,
         sell_entry_pnl: sellEntryPnl,
         sell_capture_pct: sellEntryPnl != null && entryBid > 0 ? sellEntryPnl / entryBid : null,
         buy_entry_pnl: buyEntryPnl,
         buy_capture_pct: buyEntryPnl != null && entryAsk > 0 ? buyEntryPnl / entryAsk : null,
-        spot_min: toNum(path.spot_min),
-        spot_max: toNum(path.spot_max),
-        error: status === 'missing' ? `No quote or spot found within ${quoteWindowHours}h after due_at` : null,
+        spot_min: toNum(path.spot_min), spot_max: toNum(path.spot_max),
+        error: absent.length ? `${status === 'pending' ? 'Awaiting' : 'Missing'} ${absent.join(' and ')}; deadline ${until}` : null,
       });
     }
   });
   update(due);
-  return { scanned: due.length, evaluated, missing };
+  return { scanned: due.length, evaluated, missing, pending, lastId: due.at(-1)?.outcome_id ?? afterId };
 };
+
+// Observation collection must survive entry eligibility changes (ITM, delta, DTE).
+// Held instruments are supplied separately by the caller from the live account.
+const getObservationInstruments = (now = new Date().toISOString(), { quoteWindowHours = 6 } = {}) => {
+  const nowMs = new Date(now).getTime();
+  if (!Number.isFinite(nowMs) || !(quoteWindowHours > 0)) throw new Error('Invalid observation horizon');
+  const since = new Date(nowMs - quoteWindowHours * 3600000).toISOString();
+  const rows = db.prepare(`
+    SELECT DISTINCT c.instrument_name, c.expiry
+    FROM decision_outcomes o JOIN candidate_observations c ON c.id = o.observation_id
+    WHERE o.status = 'pending' AND o.due_at > ?
+  `).all(since);
+  return [...new Set(rows.filter((row) => {
+    const expiry = toNum(row.expiry) ?? parseLifecycleInstrument(row.instrument_name).expiry;
+    return expiry == null || expiry * 1000 > nowMs;
+  }).map((row) => row.instrument_name))].sort();
+};
+
+// Explicit repair can reconsider previously terminal incomplete labels after a
+// historical quote backfill. Keyset paging visits each pending label once.
+const repairDecisionOutcomes = ({ now = new Date().toISOString(), quoteWindowHours = 6, batchSize = 500 } = {}) => {
+  if (!(batchSize > 0) || !Number.isInteger(batchSize)) throw new Error('batchSize must be a positive integer');
+  const reopened = db.prepare(`UPDATE decision_outcomes SET status = 'pending', evaluated_at = NULL, last_checked_at = NULL
+    WHERE status IN ('evaluated', 'missing') AND (spot_complete = 0 OR quote_complete = 0)`).run().changes;
+  let afterId = 0;
+  const totals = { reopened, scanned: 0, evaluated: 0, missing: 0, pending: 0 };
+  while (true) {
+    const result = evaluateDueDecisionOutcomes({ now, quoteWindowHours, limit: batchSize, afterId });
+    for (const key of ['scanned', 'evaluated', 'missing', 'pending']) totals[key] += result[key];
+    if (result.scanned < batchSize) break;
+    afterId = result.lastId;
+  }
+  return totals;
+};
+
+// Run on demand for research/migration audits, never on the operational tick.
+const getDecisionOutcomeCompleteness = () => db.prepare(`
+  SELECT c.option_type, o.horizon_hours, o.status,
+    CASE WHEN c.dte IS NULL THEN 'unknown' WHEN c.dte < 5 THEN '<5'
+      WHEN c.dte <= 12 THEN '5-12' WHEN c.dte < 45 THEN '12-45'
+      WHEN c.dte <= 78 THEN '45-78' ELSE '>78' END AS entry_dte_bucket,
+    CASE WHEN o.future_spot IS NULL OR c.strike IS NULL THEN 'unknown'
+      WHEN (c.option_type = 'P' AND o.future_spot < c.strike)
+        OR (c.option_type = 'C' AND o.future_spot > c.strike) THEN 'ITM'
+      WHEN o.future_spot = c.strike THEN 'ATM' ELSE 'OTM' END AS future_moneyness,
+    COUNT(*) AS observations, SUM(o.spot_complete) AS with_spot,
+    SUM(o.quote_complete) AS with_option_quote
+  FROM decision_outcomes o JOIN candidate_observations c ON c.id = o.observation_id
+  GROUP BY c.option_type, o.horizon_hours, o.status, entry_dte_bucket, future_moneyness
+  ORDER BY c.option_type, o.horizon_hours, o.status, entry_dte_bucket, future_moneyness
+`).all();
 
 const insertRuleDecision = (decision = {}) => {
   if (!decision.decision_status) return null;
@@ -2307,8 +2304,15 @@ const parseLifecycleInstrument = (instrumentName) => {
   };
 };
 
-const refreshPositionLifecycle = ({ nowMs = Date.now() } = {}) => {
-  const rows = stmts.getLifecycleOrderRows.all();
+const refreshPositionLifecycle = ({ nowMs = Date.now(), full = false } = {}) => db.transaction(() => {
+  if (!Number.isFinite(nowMs)) throw new Error('Invalid lifecycle timestamp');
+  if (full) db.exec(`INSERT OR IGNORE INTO lifecycle_dirty_instruments SELECT DISTINCT instrument_name FROM orders WHERE instrument_name IS NOT NULL;
+    INSERT OR IGNORE INTO lifecycle_dirty_instruments SELECT instrument_name FROM position_lifecycle;`);
+  const dirty = db.prepare('SELECT instrument_name FROM lifecycle_dirty_instruments ORDER BY instrument_name').all();
+  const rows = dirty.flatMap(({ instrument_name }) => stmts.getLifecycleOrderRows.all({ instrument_name }));
+  // Rebuild only affected instruments; corrections/deletions can remove a family.
+  const remove = db.prepare('DELETE FROM position_lifecycle WHERE instrument_name = ?');
+  for (const row of dirty) remove.run(row.instrument_name);
   const groups = new Map();
   for (const row of rows) {
     const actionFamily = ['sell_call', 'buyback_call'].includes(row.action)
@@ -2375,8 +2379,12 @@ const refreshPositionLifecycle = ({ nowMs = Date.now() } = {}) => {
     }
   });
   upsert([...groups.entries()]);
-  return { refreshed: groups.size };
-};
+  const expired = db.prepare(`UPDATE position_lifecycle SET status = 'expired',
+    closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', expiry, 'unixepoch'), updated_at = datetime('now')
+    WHERE status = 'open' AND expiry * 1000 <= ?`).run(nowMs).changes;
+  db.prepare('DELETE FROM lifecycle_dirty_instruments').run();
+  return { refreshed: groups.size, instruments: dirty.length, expired };
+})();
 
 const getAvgCallPremium7d = () => {
   const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -2402,10 +2410,10 @@ const insertOISnapshot = (data) => {
 
 const insertFundingRates = (rates) => {
   const insert = db.transaction((items) => {
+    const touched = new Map();
     for (const item of items) {
-      // Deduplicate: check if we already have this exact timestamp
-      const latest = stmts.getLatestFundingTimestamp.get({ exchange: item.exchange, symbol: item.symbol });
-      if (latest?.latest && new Date(item.timestamp) <= new Date(latest.latest)) continue;
+      // Deduplicate exact observations while allowing older missing data to arrive.
+      if (stmts.hasFundingRate.get({ timestamp: item.timestamp, exchange: item.exchange, symbol: item.symbol })) continue;
 
       stmts.insertFundingRate.run({
         timestamp: item.timestamp,
@@ -2414,16 +2422,9 @@ const insertFundingRates = (rates) => {
         rate: item.rate,
       });
 
-      // Hourly rollup
-      try {
-        stmts.upsertFundingRateHourly.run({
-          hour: toHourKey(item.timestamp),
-          exchange: item.exchange,
-          symbol: item.symbol,
-          rate: item.rate,
-        });
-      } catch (e) { /* rollup failure should not block raw insert */ }
+      touched.set(JSON.stringify([new Date(item.timestamp).toISOString().slice(0, 13), item.exchange, item.symbol]), item);
     }
+    for (const item of touched.values()) hourlyRollups.refreshFundingHour(item.timestamp, item.exchange, item.symbol);
   });
   insert(rates);
 };
@@ -2739,22 +2740,40 @@ const getLastRejectedAction = (action, instrumentName) => stmts.getLastRejectedA
 
 // ─── Resting Order Helpers ──────────────────────────────────────────────────
 
+const assertRestingFill = (amount, filledAmount, filledValue) => {
+  if (!(amount > 0) || !Number.isFinite(amount) || !Number.isFinite(filledAmount)
+      || filledAmount < 0 || filledAmount > amount + 1e-9) throw new Error('Invalid cumulative resting fill amount');
+  if (filledValue != null && (!Number.isFinite(filledValue) || filledValue < 0
+      || (filledAmount === 0 && filledValue !== 0))) throw new Error('Invalid cumulative resting fill value');
+};
 const insertRestingOrder = (order) => {
-  stmts.insertRestingOrder.run({
+  const filledAmount = order.filled_amount ?? 0;
+  const filledValue = Object.hasOwn(order, 'filled_value') ? order.filled_value : filledAmount === 0 ? 0 : null;
+  assertRestingFill(order.amount, filledAmount, filledValue);
+  return stmts.insertRestingOrder.run({
     order_id: order.order_id,
     pending_action_id: order.pending_action_id ?? null,
-    instrument_name: order.instrument_name,
-    action: order.action,
-    direction: order.direction,
-    amount: order.amount,
-    limit_price: order.limit_price,
+    instrument_name: order.instrument_name, action: order.action, direction: order.direction,
+    amount: order.amount, limit_price: order.limit_price,
+    filled_amount: filledAmount, filled_value: filledValue,
+    exit_intent: order.exit_intent ?? null,
+    approved_limit_price: order.approved_limit_price ?? order.limit_price,
   });
 };
 
 const getOpenRestingOrders = () => stmts.getOpenRestingOrders.all();
 
-const updateRestingOrder = (orderId, status, filledAmount) => {
-  stmts.updateRestingOrder.run({ order_id: orderId, status, filled_amount: filledAmount ?? 0 });
+const updateRestingOrder = (orderId, status, filledAmount, filledValue) => {
+  const existing = db.prepare('SELECT amount, filled_amount, filled_value FROM resting_orders WHERE order_id = ?').get(orderId);
+  if (!existing) throw new Error(`Unknown resting order ${orderId}`);
+  const nextAmount = filledAmount ?? existing.filled_amount;
+  const nextValue = filledValue === undefined
+    ? (nextAmount === existing.filled_amount ? existing.filled_value : null)
+    : filledValue;
+  assertRestingFill(existing.amount, nextAmount, nextValue);
+  if (nextAmount + 1e-9 < existing.filled_amount || (nextValue != null && existing.filled_value != null
+      && nextValue + 1e-9 < existing.filled_value)) throw new Error('Cumulative resting fills cannot decrease');
+  return stmts.updateRestingOrder.run({ order_id: orderId, status, filled_amount: nextAmount, filled_value: nextValue });
 };
 
 const updateRestingOrderId = (oldOrderId, newOrderId) => {
@@ -2782,7 +2801,12 @@ const insertPortfolioSnapshot = (snapshot) => {
 
 const getPortfolioHistory = (since) => stmts.getPortfolioHistory.all({ since });
 const getLatestPortfolioSnapshot = () => stmts.getLatestPortfolioSnapshot.get() || null;
-const getRealizedPnL = () => stmts.getRealizedPnL.get() || {};
+const getGrossOptionsCashflow = () => {
+  const totals = stmts.getRealizedPnL.get() || {};
+  return { ...totals, gross_options_cashflow: totals.net_realized_pnl ?? null };
+};
+// Compatibility alias; this legacy field is gross premium cashflow, not realized profit.
+const getRealizedPnL = getGrossOptionsCashflow;
 
 // ─── Bot State Helpers ────────────────────────────────────────────────────────
 
@@ -2899,6 +2923,9 @@ module.exports = {
   insertSellCallEdgeSnapshot,
   insertBuyPutEdgeSnapshot,
   evaluateDueDecisionOutcomes,
+  getObservationInstruments,
+  repairDecisionOutcomes,
+  getDecisionOutcomeCompleteness,
   insertRuleDecision,
   refreshPositionLifecycle,
   insertJournalEntry,
@@ -2964,5 +2991,6 @@ module.exports = {
   getPortfolioHistory,
   getLatestPortfolioSnapshot,
   getRealizedPnL,
+  getGrossOptionsCashflow,
   close,
 };
