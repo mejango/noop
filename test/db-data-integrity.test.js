@@ -184,3 +184,15 @@ test('quote receipts after their availability envelope reject the whole raw batc
   assert.throws(() => store.insertOptionsSnapshotBatch([quote(name, { quoteReceivedAt: '2026-09-11T11:00:01.000Z' })], due), /Quote receipt/);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM options_snapshots').get().n, 0);
 });
+
+test('portfolio storage preserves unknown profit and truthful gross cashflow separately', () => {
+  store.insertPortfolioSnapshot({ timestamp: now, spot_price: 2000, usdc_balance: 0, eth_balance: 0,
+    positions_json: [], total_unrealized_pnl: null, total_realized_pnl: null,
+    gross_options_cashflow: 123, portfolio_value_usd: -5 });
+  const row = store.getLatestPortfolioSnapshot();
+  assert.equal(row.total_realized_pnl, null);
+  assert.equal(row.total_unrealized_pnl, null);
+  assert.equal(row.gross_options_cashflow, 123);
+  assert.equal(row.portfolio_value_usd, -5);
+  assert.equal(row.usdc_balance, 0);
+});

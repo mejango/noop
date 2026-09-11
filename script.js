@@ -138,6 +138,7 @@ const encoder = new AbiCoder();
 const db = global.__noopDb || null;
 const { createEconomicStore, syncV2TradesProgressively } = require('./bot/economic-events');
 const { observationUniverse, missingExpiryDates } = require('./bot/observations');
+const { buildPortfolioObservation } = require('./bot/portfolio-observation');
 const economicStore = db?.db ? createEconomicStore(db.db) : null;
 if (db) {
   console.log('SQLite database connected');
@@ -3433,7 +3434,7 @@ const fetchCollaterals = async () => {
 };
 
 // Fetch subaccount margin state from Derive (leverage, margin, liquidation)
-const fetchSubaccount = async () => {
+const fetchSubaccount = async ({ forObservation = false } = {}) => {
   try {
     const wallet = createWallet();
     const timestamp = Date.now();
@@ -3449,6 +3450,15 @@ const fetchSubaccount = async () => {
       timeout: 10000,
     });
     const r = response.data?.result;
+    if (forObservation) {
+      if (response.data?.error || !r || String(r.subaccount_id) !== String(SUBACCOUNT_ID)) {
+        throw new Error('Portfolio observation account unavailable or mismatched');
+      }
+      // A single raw response supplies valuation, positions and collateral.
+      // Portfolio observation accepts finite zero/negative equity; new exposure
+      // continues through the stricter margin gate below.
+      return { ...r, snapshot_received_at: new Date().toISOString() };
+    }
     if (!r || !['initial_margin', 'maintenance_margin', 'subaccount_value'].every(field => (
       r[field] !== null && r[field] !== undefined && Number.isFinite(Number(r[field]))
     )) || !(Number(r.subaccount_value) > 0) || typeof r.is_under_liquidation !== 'boolean') {
@@ -13007,41 +13017,16 @@ const runBot = async () => {
         }
       } catch (e) { console.log('DB: options snapshot write failed:', e.message); }
 
-      // Portfolio P&L snapshot
+      // One final account response supplies all portfolio snapshot components.
       try {
-        let balances = [];
-        try { balances = await fetchCollaterals(); } catch { /* ok */ }
-        const usdcBal = Number(balances.find(b => b.asset_name === 'USDC')?.amount || 0);
-        const ethBal = Number(balances.find(b => b.asset_name === 'ETH')?.amount || 0);
-
-        const unrealizedPnl = positions.reduce((sum, p) => sum + (Number(p.unrealized_pnl) || 0), 0);
-        const realizedData = db.getRealizedPnL();
-
-        // Portfolio value = subaccount_value from Derive API (includes collateral + positions mark-to-market)
-        // A collateral-only value is not account equity. Preserve a gap if the
-        // venue valuation is unavailable; zero/negative valid equity stays visible.
-        const valuation = await fetchSubaccount();
-        if (valuation?.subaccount_value == null || !Number.isFinite(Number(valuation.subaccount_value))) {
-          throw new Error('Portfolio valuation unavailable; snapshot deferred');
-        }
-        const portfolioValue = Number(valuation.subaccount_value);
-
-        db.insertPortfolioSnapshot({
-          timestamp: tickTimestamp,
-          spot_price: spotPrice,
-          usdc_balance: usdcBal,
-          eth_balance: ethBal,
-          positions_json: positions.map(p => ({
-            instrument: p.instrument_name,
-            direction: p.direction,
-            amount: p.amount,
-            unrealized_pnl: p.unrealized_pnl,
-          })),
-          total_unrealized_pnl: unrealizedPnl,
-          total_realized_pnl: realizedData.net_realized_pnl || 0,
-          portfolio_value_usd: portfolioValue,
-        });
-      } catch (e) { console.log('DB: portfolio snapshot failed:', e.message); }
+        const account = await fetchSubaccount({ forObservation: true });
+        const cashflow = db.getGrossOptionsCashflow();
+        db.insertPortfolioSnapshot(buildPortfolioObservation(account, {
+          timestamp: account?.snapshot_received_at,
+          spotPrice,
+          grossOptionsCashflow: cashflow.gross_options_cashflow,
+        }));
+      } catch (e) { console.log('DB: portfolio snapshot deferred:', e.message); }
 
       try {
         if (typeof db.evaluateDueDecisionOutcomes === 'function') {

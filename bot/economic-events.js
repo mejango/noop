@@ -55,9 +55,10 @@ function normalizeEvent(input) {
 }
 function normalizeV2Trade(trade, accountId) {
   if (!trade?.trade_id || !trade.instrument_name || !['buy', 'sell'].includes(trade.direction)) throw new Error('Trade history is missing durable trade identity or direction');
-  if (trade.subaccount_id != null && String(trade.subaccount_id) !== String(accountId)) throw new Error('Trade account mismatch');
-  if (trade.is_transfer != null && trade.is_transfer !== false) throw new Error('Transfer trade requires explicit transfer accounting');
-  if (trade.tx_status != null && !['settled','success','successful','confirmed','finalized'].includes(String(trade.tx_status).toLowerCase())) {
+  if (accountIdentity(trade.subaccount_id) !== accountIdentity(accountId)) throw new Error('Trade account mismatch');
+  if (trade.is_transfer !== false) throw new Error('Transfer trade identity is missing or requires explicit transfer accounting');
+  // Pinned official V2 schema requires this field; only settled is terminal success.
+  if (trade.tx_status !== 'settled') {
     throw new Error('Trade settlement status is unresolved or unsupported');
   }
   const amount = decimal(trade.trade_amount ?? trade.amount);
@@ -192,6 +193,7 @@ async function syncV2Trades({ store, accountId, post, from = 0, to = Date.now(),
     for (let page = 1; page <= maxPages; page++) {
       const result = await post({subaccount_id:Number(accountId),from_timestamp:fromMs,to_timestamp:toMs,page,page_size:pageSize});
       if (!result || result.error || !Array.isArray(result.trades)) throw new Error('Invalid trade history response');
+      if (accountIdentity(result.subaccount_id) !== accountId) throw new Error('Trade history response account mismatch');
       if (result.pagination != null && (typeof result.pagination !== 'object' || Array.isArray(result.pagination))) throw new Error('Invalid history pagination');
       const metadata = {};
       for (const field of ['num_pages','count']) {

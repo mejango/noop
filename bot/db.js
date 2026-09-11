@@ -706,6 +706,12 @@ addColumnIfMissing('options_snapshots', 'quote_received_at', 'TEXT');
 addColumnIfMissing('options_snapshots', 'quote_source', 'TEXT');
 db.exec(`CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument_receipt
   ON options_snapshots(instrument_name, COALESCE(quote_received_at, timestamp))`);
+db.transaction(() => {
+  if (addColumnIfMissing('portfolio_snapshots', 'gross_options_cashflow', 'REAL')) {
+    // Existing V2 snapshots stored local premium cashflow under the legacy name.
+    db.exec('UPDATE portfolio_snapshots SET gross_options_cashflow = total_realized_pnl');
+  }
+})();
 const hourlyRollups = createHourlyRollups(db);
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
@@ -1597,13 +1603,13 @@ const stmts = {
   // Portfolio P&L
   insertPortfolioSnapshot: db.prepare(`
     INSERT INTO portfolio_snapshots (timestamp, spot_price, usdc_balance, eth_balance, positions_json,
-      total_unrealized_pnl, total_realized_pnl, portfolio_value_usd)
+      total_unrealized_pnl, total_realized_pnl, gross_options_cashflow, portfolio_value_usd)
     VALUES (@timestamp, @spot_price, @usdc_balance, @eth_balance, @positions_json,
-      @total_unrealized_pnl, @total_realized_pnl, @portfolio_value_usd)
+      @total_unrealized_pnl, @total_realized_pnl, @gross_options_cashflow, @portfolio_value_usd)
   `),
   getPortfolioHistory: db.prepare(`
     SELECT timestamp, spot_price, usdc_balance, eth_balance,
-      total_unrealized_pnl, total_realized_pnl, portfolio_value_usd
+      total_unrealized_pnl, total_realized_pnl, gross_options_cashflow, portfolio_value_usd
     FROM portfolio_snapshots
     WHERE timestamp > @since
     ORDER BY timestamp ASC
@@ -2805,13 +2811,15 @@ const hasRestingOrderForInstrument = (instrumentName) => {
 const insertPortfolioSnapshot = (snapshot) => {
   stmts.insertPortfolioSnapshot.run({
     timestamp: snapshot.timestamp || new Date().toISOString(),
-    spot_price: snapshot.spot_price || 0,
-    usdc_balance: snapshot.usdc_balance || 0,
-    eth_balance: snapshot.eth_balance || 0,
-    positions_json: typeof snapshot.positions_json === 'string' ? snapshot.positions_json : JSON.stringify(snapshot.positions_json || []),
-    total_unrealized_pnl: snapshot.total_unrealized_pnl || 0,
-    total_realized_pnl: snapshot.total_realized_pnl || 0,
-    portfolio_value_usd: snapshot.portfolio_value_usd || 0,
+    spot_price: toNum(snapshot.spot_price),
+    usdc_balance: toNum(snapshot.usdc_balance),
+    eth_balance: toNum(snapshot.eth_balance),
+    positions_json: snapshot.positions_json == null ? null
+      : typeof snapshot.positions_json === 'string' ? snapshot.positions_json : JSON.stringify(snapshot.positions_json),
+    total_unrealized_pnl: toNum(snapshot.total_unrealized_pnl),
+    total_realized_pnl: toNum(snapshot.total_realized_pnl),
+    gross_options_cashflow: toNum(snapshot.gross_options_cashflow),
+    portfolio_value_usd: toNum(snapshot.portfolio_value_usd),
   });
 };
 
