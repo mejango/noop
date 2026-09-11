@@ -5,7 +5,8 @@
   "main": "dashboard_server.js",
   "scripts": {
     "start": "node dashboard_server.js",
-    "test": "node test/trading-system.test.js && node --test test/model-api.test.js",
+    "test": "node test/trading-system.test.js && node --test test/model-api.test.js test/v2-*.test.js",
+    "test:mutation": "node test/helpers/production-mutation-probe.js",
     "bot": "node bot/index.js",
     "bot:standalone": "node script.js",
     "dashboard": "node dashboard_server.js",

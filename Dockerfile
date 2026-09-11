@@ -34,8 +34,9 @@ COPY knowledge/ ./knowledge/
 COPY --from=dashboard-builder /dashboard/.next/standalone ./dashboard/
 COPY --from=dashboard-builder /dashboard/.next/static ./dashboard/.next/static
 
-# Start script runs both
+# Supervise both services; a failed service must fail the container.
 COPY start.sh ./
+COPY scripts/process-supervisor.js ./scripts/process-supervisor.js
 RUN chmod +x start.sh
 
 ENV DATA_DIR=/data

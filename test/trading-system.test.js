@@ -1,7 +1,7 @@
 /**
  * Trading System Tests
  *
- * Tests for the LLM-driven trading system's pure functions and DB operations.
+ * Tests for production policy helpers, isolated DB operations, and labelled orchestration fixtures.
  * Uses Node.js built-in assert module (no external test framework required).
  *
  * Run: node test/trading-system.test.js
@@ -44,388 +44,185 @@ const describe = (name, fn) => {
 
 const SCRIPT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'script.js'), 'utf8');
 
+const { loadProduction } = require('./helpers/load-production');
+const {
+  CALL_EXPIRATION_RANGE,
+  CALL_DELTA_RANGE,
+  PUT_DELTA_RANGE,
+  BUY_PUT_ADVISORY_DTE_RANGE,
+  PUT_ROLL_DTE_THRESHOLD,
+  PUT_MONETIZATION_PROFIT_THRESHOLD,
+  PUT_MONETIZATION_MAX_TRANCHE_FRACTION,
+  CALL_BUYBACK_PROFIT_THRESHOLD,
+  SELL_CALL_FALLBACK_MIN_BID,
+  SELL_CALL_FALLBACK_MIN_SCORE,
+  VENUE_AMOUNT_DECIMALS,
+  VENUE_MIN_ORDER_AMOUNT,
+  finiteOrNull,
+  parseExpiryFromInstrument,
+  isSellCallCandidateInStrategyRange,
+  computeCurrentValues,
+  getRuleEvaluationValues,
+  computeDteFromInstrumentName,
+  hasLongerDatedPutProtection,
+  getTotalLongPutAmount,
+  leavesDownsideProtectionAfterSale,
+  getSellPutProtectionGate,
+  getSellPutExitAmount,
+  getAdvisorSellPutLimitPrice,
+  getLongPutFairValueProof,
+  getPatientSellPutPlan,
+  getTradeCashflow,
+  getTradeActionFamily,
+  getExpiryTimestampFromInstrument,
+  getExpiryCloseAction,
+  buildSyntheticExpiryCloseOrder,
+  closeCampaignAtExpiry,
+  deriveClosedTradeCampaigns,
+  ASSESSMENT_UNSUPPORTED_PATTERNS,
+  assessmentUsesUnsupportedMetricLanguage,
+  evaluateConditions,
+  floorOptionPriceCents,
+  normalizeBuyPutValueSignal,
+  hasExplicitBuyPutValueSignal,
+  isActionableBuyPutSignal,
+  buyPutValueSignalMatches,
+  buildRulebookRequirements,
+  findMissingRulebookRequirements,
+  buildAgendaFromValidatedRules,
+  hasLongerDatedPutProtectionSnapshot,
+  buildCanonicalRequiredWatcherRule,
+  extractOrderRecord,
+  CALL_EXPOSURE_CAP_PCT,
+  CALL_EXPOSURE_BUFFER_PCT,
+  getCallExposureLimitPct,
+  CALL_EXPOSURE_LIMIT_PCT,
+  CALL_ENTRY_BUFFER_PCT,
+  CALL_ENTRY_CAP_PCT,
+  getMarginCapacityBase,
+  getMarginUtilizationBase,
+  normalizeMarginUtilizationValue,
+  estimateMarginUtilizationFromComponents,
+  estimateMarginUtilization,
+  estimateDisplayedMarginUtilization,
+  estimateProjectedDisplayedMarginUtilization,
+  estimateStandardShortCallInitialMarginPerUnit,
+  estimateShortCallMarginPerUnit,
+  getCallMarginContext,
+  formatBuyPutConfirmationContext,
+  formatSellCallConfirmationContext,
+  formatSellPutConfirmationContext,
+  getConfirmationScopePrompt,
+  normalizeLearningText,
+  confirmationLessonMatches,
+  getConfirmationLearningScope,
+  formatConfirmationLearningContext,
+  getInstrumentPriceStep,
+  roundToStep,
+  normalizePriceToStep,
+  normalizeOrderPriceForVenue,
+  floorOrderAmountToVenuePrecision,
+  isVenueOrderAmountTradable,
+  avoidRoundNumberRestingPrice,
+  computePostOnlyRetryPrice,
+  isIocNoLiquidityError,
+  extractJSON,
+  normalizeTalebSecondOpinion,
+  parseTalebSecondOpinion,
+  extractConfirmationVote
+} = loadProduction([
+  "CALL_EXPIRATION_RANGE",
+  "CALL_DELTA_RANGE",
+  "PUT_DELTA_RANGE",
+  "BUY_PUT_ADVISORY_DTE_RANGE",
+  "PUT_ROLL_DTE_THRESHOLD",
+  "PUT_MONETIZATION_PROFIT_THRESHOLD",
+  "PUT_MONETIZATION_MAX_TRANCHE_FRACTION",
+  "CALL_BUYBACK_PROFIT_THRESHOLD",
+  "SELL_CALL_FALLBACK_MIN_BID",
+  "SELL_CALL_FALLBACK_MIN_SCORE",
+  "VENUE_AMOUNT_DECIMALS",
+  "VENUE_MIN_ORDER_AMOUNT",
+  "finiteOrNull",
+  "parseExpiryFromInstrument",
+  "isSellCallCandidateInStrategyRange",
+  "computeCurrentValues",
+  "getRuleEvaluationValues",
+  "computeDteFromInstrumentName",
+  "hasLongerDatedPutProtection",
+  "getTotalLongPutAmount",
+  "leavesDownsideProtectionAfterSale",
+  "getSellPutProtectionGate",
+  "getSellPutExitAmount",
+  "getAdvisorSellPutLimitPrice",
+  "getLongPutFairValueProof",
+  "getPatientSellPutPlan",
+  "getTradeCashflow",
+  "getTradeActionFamily",
+  "getExpiryTimestampFromInstrument",
+  "getExpiryCloseAction",
+  "buildSyntheticExpiryCloseOrder",
+  "closeCampaignAtExpiry",
+  "deriveClosedTradeCampaigns",
+  "ASSESSMENT_UNSUPPORTED_PATTERNS",
+  "assessmentUsesUnsupportedMetricLanguage",
+  "evaluateConditions",
+  "floorOptionPriceCents",
+  "normalizeBuyPutValueSignal",
+  "hasExplicitBuyPutValueSignal",
+  "isActionableBuyPutSignal",
+  "buyPutValueSignalMatches",
+  "buildRulebookRequirements",
+  "findMissingRulebookRequirements",
+  "buildAgendaFromValidatedRules",
+  "hasLongerDatedPutProtectionSnapshot",
+  "buildCanonicalRequiredWatcherRule",
+  "extractOrderRecord",
+  "CALL_EXPOSURE_CAP_PCT",
+  "CALL_EXPOSURE_BUFFER_PCT",
+  "getCallExposureLimitPct",
+  "CALL_EXPOSURE_LIMIT_PCT",
+  "CALL_ENTRY_BUFFER_PCT",
+  "CALL_ENTRY_CAP_PCT",
+  "getMarginCapacityBase",
+  "getMarginUtilizationBase",
+  "normalizeMarginUtilizationValue",
+  "estimateMarginUtilizationFromComponents",
+  "estimateMarginUtilization",
+  "estimateDisplayedMarginUtilization",
+  "estimateProjectedDisplayedMarginUtilization",
+  "estimateStandardShortCallInitialMarginPerUnit",
+  "estimateShortCallMarginPerUnit",
+  "getCallMarginContext",
+  "formatBuyPutConfirmationContext",
+  "formatSellCallConfirmationContext",
+  "formatSellPutConfirmationContext",
+  "getConfirmationScopePrompt",
+  "normalizeLearningText",
+  "confirmationLessonMatches",
+  "getConfirmationLearningScope",
+  "formatConfirmationLearningContext",
+  "getInstrumentPriceStep",
+  "roundToStep",
+  "normalizePriceToStep",
+  "normalizeOrderPriceForVenue",
+  "floorOrderAmountToVenuePrecision",
+  "isVenueOrderAmountTradable",
+  "avoidRoundNumberRestingPrice",
+  "computePostOnlyRetryPrice",
+  "isIocNoLiquidityError",
+  "extractJSON",
+  "normalizeTalebSecondOpinion",
+  "parseTalebSecondOpinion",
+  "extractConfirmationVote"
+]);
+
+
 // ============================================================================
-// Pure functions (copied from script.js to keep tests self-contained)
+// Production helpers loaded without starting the bot.
+// Remaining fixture simulations are labelled separately.
 // ============================================================================
 
-const CALL_EXPIRATION_RANGE = [5, 12];
-const CALL_DELTA_RANGE = [0.04, 0.12];
-const PUT_DELTA_RANGE = [-0.12, -0.02];
-const BUY_PUT_ADVISORY_DTE_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
-const PUT_ROLL_DTE_THRESHOLD = 25;
-const PUT_MONETIZATION_PROFIT_THRESHOLD = 1000;
-const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
-const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
-const SELL_CALL_FALLBACK_MIN_BID = 4;
-const SELL_CALL_FALLBACK_MIN_SCORE = 65;
-const VENUE_AMOUNT_DECIMALS = 2;
-const VENUE_MIN_ORDER_AMOUNT = 0.1;
-
-const finiteOrNull = (value) => {
-  if (value == null || (typeof value === 'string' && value.trim() === '')) return null;
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : null;
-};
-
-const parseExpiryFromInstrument = (name) => {
-  if (!name) return null;
-  const parts = name.split('-');
-  if (parts.length < 4) return null;
-  const d = parts[1]; // "20260501"
-  return new Date(`${d.slice(0,4)}-${d.slice(4,6)}-${d.slice(6,8)}T08:00:00Z`);
-};
-
-const isSellCallCandidateInStrategyRange = (dte, delta) => (
-  Number.isFinite(dte)
-  && dte >= CALL_EXPIRATION_RANGE[0]
-  && dte <= CALL_EXPIRATION_RANGE[1]
-  && Number.isFinite(delta)
-  && delta >= CALL_DELTA_RANGE[0]
-  && delta <= CALL_DELTA_RANGE[1]
-);
-
-const computeCurrentValues = (position, ticker, spotPrice) => {
-  const expiry = parseExpiryFromInstrument(position.instrument_name);
-  const dte = expiry ? Math.max(0, (expiry.getTime() - Date.now()) / (86400000)) : null;
-  const markPrice = Number(ticker?.M) || position.mark_price || 0;
-  const entryPrice = position.avg_entry_price || 0;
-  const unrealizedPnlPct = entryPrice > 0 ? ((markPrice - entryPrice) / entryPrice) * 100 : 0;
-  // For short positions, P&L is inverted
-  const adjustedPnlPct = position.direction === 'short' ? -unrealizedPnlPct : unrealizedPnlPct;
-
-  return {
-    delta: Number(ticker?.option_pricing?.d) || position.delta || 0,
-    mark_price: markPrice,
-    spot_price: spotPrice,
-    unrealized_pnl_pct: adjustedPnlPct,
-    dte: dte,
-    iv: Number(ticker?.option_pricing?.i) || 0,
-    theta: Number(ticker?.option_pricing?.t) || position.theta || 0,
-  };
-};
-
-const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => {
-  const values = computeCurrentValues(position, ticker, spotPrice);
-  if (action === 'sell_put' && position?.direction === 'long') {
-    const executablePrice = Number(ticker?.b) || values.mark_price || 0;
-    const entryPrice = Number(position?.avg_entry_price) || 0;
-    const adjustedPnlPct = entryPrice > 0 ? ((executablePrice - entryPrice) / entryPrice) * 100 : 0;
-
-    return {
-      ...values,
-      unrealized_pnl_pct: adjustedPnlPct,
-      execution_price: executablePrice,
-    };
-  }
-
-  if (action !== 'buyback_call' || position?.direction !== 'short') return values;
-
-  const executablePrice = Number(ticker?.a) || values.mark_price || 0;
-  const entryPrice = Number(position?.avg_entry_price) || 0;
-  const rawPnlPct = entryPrice > 0 ? ((executablePrice - entryPrice) / entryPrice) * 100 : 0;
-  const adjustedPnlPct = position.direction === 'short' ? -rawPnlPct : rawPnlPct;
-
-  return {
-    ...values,
-    unrealized_pnl_pct: adjustedPnlPct,
-    execution_price: executablePrice,
-  };
-};
-
-const computeDteFromInstrumentName = (instrumentName, nowMs = Date.now()) => {
-  const expiry = parseExpiryFromInstrument(instrumentName);
-  if (!expiry) return null;
-  return Math.max(0, (expiry.getTime() - nowMs) / 86400000);
-};
-
-const hasLongerDatedPutProtection = (position, positions = []) => {
-  const currentDte = computeDteFromInstrumentName(position?.instrument_name);
-  if (!Number.isFinite(currentDte)) return false;
-  return positions.some((candidate) => {
-    if (!candidate || candidate === position) return false;
-    if (candidate.direction !== 'long') return false;
-    if (!candidate.instrument_name?.endsWith('-P')) return false;
-    if (!(Number(candidate.amount) > 0)) return false;
-    const candidateDte = computeDteFromInstrumentName(candidate.instrument_name);
-    return Number.isFinite(candidateDte) && candidateDte > currentDte;
-  });
-};
-
-const getTotalLongPutAmount = (positions = []) => positions
-  .filter((position) => position?.direction === 'long' && position?.instrument_name?.endsWith('-P'))
-  .reduce((total, position) => total + Math.max(0, Number(position.amount) || 0), 0);
-
-const leavesDownsideProtectionAfterSale = (position, positions = [], sellAmount = 0) => {
-  const totalLongPutAmount = getTotalLongPutAmount(positions);
-  const amount = Math.max(0, Number(sellAmount) || 0);
-  return totalLongPutAmount - amount > 1e-9 && Number(position?.amount) - amount > 1e-9;
-};
-
-const getSellPutProtectionGate = (rule, values, context = {}) => {
-  if (!rule || rule.action !== 'sell_put') {
-    return { allowed: true };
-  }
-
-  const dte = Number(values?.dte);
-  if (Number.isFinite(dte) && dte <= PUT_ROLL_DTE_THRESHOLD && context.criteria?.put_exit_intent !== 'monetize_tail_win') {
-    if (!hasLongerDatedPutProtection(context.position, context.positions || [])) {
-      return { allowed: false };
-    }
-    return { allowed: true };
-  }
-
-  const livePnlPct = Number(values?.unrealized_pnl_pct);
-  const fairValuePnlPct = Number(values?.patient_sell_put_fair_value_pnl_pct);
-  const pnlPct = Math.max(
-    Number.isFinite(livePnlPct) ? livePnlPct : -Infinity,
-    Number.isFinite(fairValuePnlPct) ? fairValuePnlPct : -Infinity
-  );
-  if (Number.isFinite(pnlPct) && pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD) {
-    const plannedSellAmount = Number(context.plannedSellAmount ?? context.position?.amount ?? 0);
-    if (!leavesDownsideProtectionAfterSale(context.position, context.positions || [], plannedSellAmount)) {
-      return { allowed: false };
-    }
-    return { allowed: true };
-  }
-
-  return { allowed: false };
-};
-
-const getSellPutExitAmount = (position, values, criteria = {}) => {
-  const fullAmount = Math.max(0, Number(position?.amount) || 0);
-  const dte = Number(values?.dte);
-  const pnlPct = Number(values?.unrealized_pnl_pct);
-  const isTailWin = criteria.put_exit_intent === 'monetize_tail_win'
-    || (Number.isFinite(dte) && dte > PUT_ROLL_DTE_THRESHOLD
-      && Number.isFinite(pnlPct) && pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD);
-  if (!isTailWin) return fullAmount;
-  const requestedFraction = Number(criteria.tranche_fraction ?? criteria.max_tranche_fraction);
-  const fraction = Number.isFinite(requestedFraction) && requestedFraction > 0
-    ? Math.min(requestedFraction, PUT_MONETIZATION_MAX_TRANCHE_FRACTION)
-    : PUT_MONETIZATION_MAX_TRANCHE_FRACTION;
-  return Math.max(0, Math.min(fullAmount * fraction, fullAmount - 1e-9));
-};
-
-const getAdvisorSellPutLimitPrice = (criteria) => {
-  const explicit = Number(criteria?.min_exit_price ?? criteria?.limit_price ?? criteria?.target_exit_price);
-  return Number.isFinite(explicit) && explicit > 0 ? explicit : null;
-};
-
-const getLongPutFairValueProof = (position, values = {}) => {
-  const entryPrice = Number(position?.avg_entry_price);
-  if (!(entryPrice > 0)) return null;
-  const parts = String(position?.instrument_name || '').split('-');
-  const strike = Number(parts[2]);
-  const spotPrice = Number(values?.spot_price);
-  const intrinsicValue = parts[3] === 'P' && Number.isFinite(strike) && spotPrice > 0
-    ? Math.max(0, strike - spotPrice)
-    : 0;
-  const markPrice = Number(values?.mark_price);
-  const normalizedMarkPrice = Number.isFinite(markPrice) && markPrice > 0 ? markPrice : 0;
-  const fairValuePrice = Math.max(
-    normalizedMarkPrice,
-    intrinsicValue
-  );
-  if (!(fairValuePrice > 0)) return null;
-  return {
-    price: fairValuePrice,
-    pnlPct: ((fairValuePrice - entryPrice) / entryPrice) * 100,
-    source: intrinsicValue > normalizedMarkPrice ? 'intrinsic_value' : 'mark_price',
-  };
-};
-
-const getPatientSellPutPlan = (rule, criteria, position, values = {}) => {
-  if (!rule || rule.action !== 'sell_put') return null;
-  if (criteria?.put_exit_intent !== 'monetize_tail_win') return null;
-  const limitPrice = getAdvisorSellPutLimitPrice(criteria);
-  const entryPrice = Number(position?.avg_entry_price);
-  if (!(limitPrice > 0) || !(entryPrice > 0)) return null;
-  const pnlPct = ((limitPrice - entryPrice) / entryPrice) * 100;
-  if (!(pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
-  const fairValueProof = getLongPutFairValueProof(position, values);
-  if (!(Number(fairValueProof?.pnlPct) > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
-  return {
-    limitPrice,
-    pnlPct,
-    fairValuePrice: fairValueProof.price,
-    fairValuePnlPct: fairValueProof.pnlPct,
-    fairValueSource: fairValueProof.source,
-    preferredOrderType: 'post_only',
-  };
-};
-
-const getTradeCashflow = (order) => {
-  const totalValue = Number(order.total_value || 0);
-  if (order.action === 'sell_call' || order.action === 'sell_put') return totalValue;
-  if (order.action === 'buy_put' || order.action === 'buyback_call') return -totalValue;
-  return 0;
-};
-
-const getTradeActionFamily = (action) => {
-  if (action === 'sell_call' || action === 'buyback_call') return 'short_call_campaign';
-  if (action === 'buy_put' || action === 'sell_put') return 'long_put_campaign';
-  return null;
-};
-
-const getExpiryTimestampFromInstrument = (instrumentName) => {
-  const expiry = parseExpiryFromInstrument(instrumentName);
-  const timestamp = expiry?.getTime?.();
-  return Number.isFinite(timestamp) ? timestamp : null;
-};
-
-const getExpiryCloseAction = (instrumentName) => {
-  if (instrumentName?.endsWith('-C')) return 'expire_call';
-  if (instrumentName?.endsWith('-P')) return 'expire_put';
-  return 'expire_option';
-};
-
-const buildSyntheticExpiryCloseOrder = (active, instrumentName, expiryMs, netExposure) => ({
-  id: `expiry:${instrumentName}:${new Date(expiryMs).toISOString()}`,
-  timestamp: new Date(expiryMs).toISOString(),
-  action: getExpiryCloseAction(instrumentName),
-  success: 1,
-  reason: 'Synthetic expiry close for trade review',
-  instrument_name: instrumentName,
-  intended_amount: Math.max(0, netExposure),
-  filled_amount: Math.max(0, netExposure),
-  fill_price: 0,
-  total_value: 0,
-  spot_price: null,
-  family: active?.action_family || getTradeActionFamily(active?.open_orders?.[0]?.action),
-  _source: 'synthetic_expiry',
-});
-
-const closeCampaignAtExpiry = (campaigns, active, instrumentName, expiryMs, netExposure) => {
-  const expiryOrder = buildSyntheticExpiryCloseOrder(active, instrumentName, expiryMs, netExposure);
-  active.order_ids.push(expiryOrder.id);
-  active.orders.push(expiryOrder);
-  active.close_orders.push(expiryOrder);
-  active.pnl_realized += getTradeCashflow(expiryOrder);
-  active.premium_closed += Number(expiryOrder.total_value || 0);
-  active.closed_at = expiryOrder.timestamp;
-  active.spot_close = null;
-  campaigns.push(active);
-};
-
-const deriveClosedTradeCampaigns = (orders, now = Date.now()) => {
-  const byInstrument = new Map();
-  for (const order of orders) {
-    if (!order?.instrument_name || Number(order?.success || 0) !== 1) continue;
-    const family = getTradeActionFamily(order.action);
-    if (!family) continue;
-    const list = byInstrument.get(order.instrument_name) || [];
-    list.push({ ...order, family });
-    byInstrument.set(order.instrument_name, list);
-  }
-
-  const campaigns = [];
-  const EPS = 1e-9;
-
-  for (const [instrumentName, instrumentOrders] of byInstrument.entries()) {
-    instrumentOrders.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-    const expiryMs = getExpiryTimestampFromInstrument(instrumentName);
-    let netExposure = 0;
-    let active = null;
-
-    for (const order of instrumentOrders) {
-      const orderMs = new Date(order.timestamp).getTime();
-      if (active && netExposure > EPS && expiryMs != null && Number.isFinite(orderMs) && expiryMs <= Math.min(orderMs, now)) {
-        closeCampaignAtExpiry(campaigns, active, instrumentName, expiryMs, netExposure);
-        active = null;
-        netExposure = 0;
-      }
-
-      const qty = Math.abs(Number(order.filled_amount || 0));
-      if (!(qty > 0)) continue;
-
-      const isOpen = order.action === 'sell_call' || order.action === 'buy_put';
-      const exposureDelta = isOpen ? qty : -qty;
-
-      if (!active && isOpen) {
-        active = {
-          instrument_name: instrumentName,
-          action_family: order.family,
-          opened_at: order.timestamp,
-          closed_at: null,
-          order_ids: [],
-          orders: [],
-          open_orders: [],
-          close_orders: [],
-          premium_opened: 0,
-          premium_closed: 0,
-          pnl_realized: 0,
-          spot_open: Number(order.spot_price || 0) || null,
-          spot_close: null,
-        };
-      }
-
-      if (!active) continue;
-
-      active.order_ids.push(order.id);
-      active.orders.push(order);
-      active.pnl_realized += getTradeCashflow(order);
-      if (isOpen) {
-        active.open_orders.push(order);
-        active.premium_opened += Number(order.total_value || 0);
-      } else {
-        active.close_orders.push(order);
-        active.premium_closed += Number(order.total_value || 0);
-      }
-
-      netExposure += exposureDelta;
-
-      if (netExposure <= EPS) {
-        active.closed_at = order.timestamp;
-        active.spot_close = Number(order.spot_price || 0) || null;
-        campaigns.push(active);
-        active = null;
-        netExposure = 0;
-      }
-    }
-
-    if (active && netExposure > EPS) {
-      if (expiryMs != null && expiryMs <= now) {
-        closeCampaignAtExpiry(campaigns, active, instrumentName, expiryMs, netExposure);
-      }
-    }
-  }
-
-  return campaigns;
-};
-
-const ASSESSMENT_UNSUPPORTED_PATTERNS = [
-  /\b(?:put|call|deployment)\s+efficiency\b/i,
-  /\bantifragility\s+score\b/i,
-];
-
-const assessmentUsesUnsupportedMetricLanguage = (text) => {
-  const normalized = String(text || '').trim();
-  if (!normalized) return null;
-  for (const pattern of ASSESSMENT_UNSUPPORTED_PATTERNS) {
-    if (pattern.test(normalized)) return pattern;
-  }
-  return null;
-};
-
-const evaluateConditions = (conditions, logic, values) => {
-  if (!Array.isArray(conditions) || conditions.length === 0) return false;
-  const results = conditions.map(c => {
-    const v = values[c.field];
-    if (v == null) return false;
-    if (c.op === 'gt') return v > c.value;
-    if (c.op === 'lt') return v < c.value;
-    if (c.op === 'gte') return v >= c.value;
-    if (c.op === 'lte') return v <= c.value;
-    return false;
-  });
-  return logic === 'all' ? results.every(Boolean) : results.some(Boolean);
-};
-
-const floorOptionPriceCents = (value) => {
-  const numeric = Number(value);
-  if (!(numeric > 0)) return null;
-  return Math.max(0.01, Math.floor((numeric + 1e-9) * 100) / 100);
-};
 
 const buildBuyPutFreshBestPressure = ({
   currentScore,
@@ -509,185 +306,6 @@ const filterAdvisoryBuyPutCandidates = (candidates) => candidates.filter((candid
   && candidate.ask_price > 0
 ));
 
-const normalizeBuyPutValueSignal = (signal) => {
-  const normalized = String(signal || '').trim().toLowerCase();
-  if (!normalized) return null;
-  if (normalized === 'fresh_best') return 'strict_fresh_best';
-  if (normalized === 'repricing_lag' || normalized === 'spot_lag') return 'spot_drop_option_repricing_lag';
-  if (normalized === 'relative_value' || normalized === 'recent_value') return 'recent_relative_value';
-  if (['strict_fresh_best', 'spot_drop_option_repricing_lag', 'recent_relative_value', 'any_actionable_buy_put'].includes(normalized)) {
-    return normalized;
-  }
-  return null;
-};
-
-const hasExplicitBuyPutValueSignal = (signal) => String(signal ?? '').trim().length > 0;
-
-const isActionableBuyPutSignal = (signal) => (
-  signal === 'strict_fresh_best'
-  || signal === 'spot_drop_option_repricing_lag'
-  || signal === 'recent_relative_value'
-);
-
-const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
-  const required = normalizeBuyPutValueSignal(requiredSignal);
-  if (hasExplicitBuyPutValueSignal(requiredSignal) && !required) return false;
-  if (!required) return true;
-  if (required === 'any_actionable_buy_put') return true;
-  return currentSignal === required;
-};
-
-const buildRulebookRequirements = ({ putBudgetRemaining = 0, accountHealth = {}, positionSnapshots = [] } = {}) => {
-  const requirements = [];
-  if (Number(putBudgetRemaining) > 1) {
-    requirements.push({
-      type: 'entry',
-      action: 'buy_put',
-      instruction: 'Create a patient standing buy_put watcher with favorable min_score/target_score price criteria plus tight-spread, lower-IV/skew, OI-support, and crash-payoff edge context; do not chase higher delta by itself or require an immediately marketable buy.',
-    });
-  }
-
-  const margin = accountHealth.margin || {};
-  const call = accountHealth.callMarginDiscipline || {};
-  const utilizationPct = Number(call.utilizationPct ?? margin.margin_usage_pct);
-  const limitPct = Number(call.bufferedLimitPct) * 100;
-  if (accountHealth.margin && !margin.is_under_liquidation && utilizationPct < limitPct) {
-    requirements.push({
-      type: 'entry',
-      action: 'sell_call',
-      instruction: `Create a standing sell_call watcher only for favorable call premium. Encode value with min_score plus min_bid, DTE, delta, and margin criteria. CALL EDGE is raw bid / abs(delta), lightly normalized by (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT} to reduce weekly expiry-roll artifacts.`,
-    });
-  }
-
-  for (const snapshot of positionSnapshots) {
-    if (snapshot.direction === 'long' && snapshot.option_type === 'P') {
-      requirements.push({ type: 'exit', action: 'sell_put', instrument_name: snapshot.instrument });
-    }
-    if (snapshot.direction === 'short' && snapshot.option_type === 'C') {
-      requirements.push({ type: 'exit', action: 'buyback_call', instrument_name: snapshot.instrument });
-    }
-  }
-  return requirements;
-};
-
-const findMissingRulebookRequirements = (agenda, requirements) => {
-  const entryRules = Array.isArray(agenda?.entry_rules) ? agenda.entry_rules : [];
-  const exitRules = Array.isArray(agenda?.exit_rules) ? agenda.exit_rules : [];
-  return requirements.filter((req) => {
-    if (req.type === 'entry') return !entryRules.some((rule) => rule.action === req.action);
-    return !exitRules.some((rule) => rule.action === req.action && rule.instrument_name === req.instrument_name);
-  });
-};
-
-const buildAgendaFromValidatedRules = (rules = []) => ({
-  entry_rules: rules.filter((rule) => rule.rule_type === 'entry'),
-  exit_rules: rules.filter((rule) => rule.rule_type === 'exit'),
-});
-
-const hasLongerDatedPutProtectionSnapshot = (snapshot, snapshots = []) => {
-  const currentDte = Number(snapshot?.dte);
-  if (!Number.isFinite(currentDte)) return false;
-  return snapshots.some((candidate) =>
-    candidate?.instrument !== snapshot?.instrument
-    && candidate?.direction === 'long'
-    && candidate?.option_type === 'P'
-    && Number(candidate?.amount) > 0
-    && Number(candidate?.dte) > currentDte
-  );
-};
-
-const buildCanonicalRequiredWatcherRule = (requirement, context = {}) => {
-  if (requirement.type === 'entry' && requirement.action === 'sell_call') {
-    return {
-      rule_type: 'entry',
-      action: 'sell_call',
-      instrument_name: null,
-      criteria: {
-        option_type: 'C',
-        delta_range: CALL_DELTA_RANGE,
-        dte_range: CALL_EXPIRATION_RANGE,
-        min_bid: SELL_CALL_FALLBACK_MIN_BID,
-        min_score: SELL_CALL_FALLBACK_MIN_SCORE,
-      },
-      priority: 'low',
-      preferred_order_type: 'post_only',
-    };
-  }
-
-  if (requirement.type === 'exit' && requirement.action === 'sell_put') {
-    const snapshot = (context.positionSnapshots || []).find((item) => item.instrument === requirement.instrument_name);
-    const canRoll = snapshot
-      && Number(snapshot.dte) <= PUT_ROLL_DTE_THRESHOLD
-      && hasLongerDatedPutProtectionSnapshot(snapshot, context.positionSnapshots || []);
-    if (canRoll) {
-      return {
-        rule_type: 'exit',
-        action: 'sell_put',
-        instrument_name: requirement.instrument_name,
-        criteria: {
-          put_exit_intent: 'roll_protection',
-          conditions: [{ field: 'dte', op: 'lte', value: PUT_ROLL_DTE_THRESHOLD }],
-          condition_logic: 'all',
-          requires_longer_dated_protection: true,
-        },
-        priority: 'low',
-        preferred_order_type: 'ioc',
-      };
-    }
-
-    const entryPrice = Number(snapshot?.avg_entry_price);
-    const minExitPrice = entryPrice > 0
-      ? Number((entryPrice * (1 + PUT_MONETIZATION_PROFIT_THRESHOLD / 100) + 0.01).toFixed(2))
-      : null;
-    if (!(minExitPrice > 0)) return null;
-    return {
-      rule_type: 'exit',
-      action: 'sell_put',
-      instrument_name: requirement.instrument_name,
-      criteria: {
-        put_exit_intent: 'monetize_tail_win',
-        conditions: [{ field: 'unrealized_pnl_pct', op: 'gt', value: PUT_MONETIZATION_PROFIT_THRESHOLD }],
-        condition_logic: 'all',
-        min_exit_price: minExitPrice,
-        tranche_fraction: PUT_MONETIZATION_MAX_TRANCHE_FRACTION,
-        retain_downside_protection: true,
-      },
-      priority: 'low',
-      preferred_order_type: 'post_only',
-    };
-  }
-
-  if (requirement.type !== 'exit' || requirement.action !== 'buyback_call') return null;
-  const snapshot = (context.positionSnapshots || []).find((item) => item.instrument === requirement.instrument_name);
-  const entryPrice = Number(snapshot?.avg_entry_price);
-  const maxBuybackPrice = entryPrice > 0
-    ? floorOptionPriceCents(entryPrice * (1 - CALL_BUYBACK_PROFIT_THRESHOLD / 100))
-    : null;
-  const criteria = {
-    buyback_intent: 'profit_capture',
-    conditions: [{ field: 'unrealized_pnl_pct', op: 'gte', value: CALL_BUYBACK_PROFIT_THRESHOLD }],
-    condition_logic: 'all',
-    target_capture_pct: CALL_BUYBACK_PROFIT_THRESHOLD,
-  };
-  if (maxBuybackPrice != null) criteria.max_buyback_price = maxBuybackPrice;
-
-  return {
-    rule_type: 'exit',
-    action: 'buyback_call',
-    instrument_name: requirement.instrument_name,
-    criteria,
-    priority: 'low',
-    preferred_order_type: maxBuybackPrice != null ? 'post_only' : 'ioc',
-  };
-};
-
-const extractOrderRecord = (payload) => {
-  if (!payload || typeof payload !== 'object') return null;
-  if (payload.order && typeof payload.order === 'object') return payload.order;
-  if (payload.result && typeof payload.result === 'object') return extractOrderRecord(payload.result);
-  if (payload.order_id || payload.instrument_name || payload.order_status) return payload;
-  return null;
-};
 
 const summarizeSentimentForLLM = (sentiment) => {
   const skewRows = Array.isArray(sentiment?.optionsSkew) ? sentiment.optionsSkew : [];
@@ -747,298 +365,6 @@ const summarizeSentimentForLLM = (sentiment) => {
   };
 };
 
-const CALL_EXPOSURE_CAP_PCT = 0.45;
-const CALL_EXPOSURE_BUFFER_PCT = 0.05;
-const getCallExposureLimitPct = (targetCapPct) => Math.min(
-  1,
-  Math.max(0, Number(targetCapPct) || 0) + CALL_EXPOSURE_BUFFER_PCT
-);
-const CALL_EXPOSURE_LIMIT_PCT = getCallExposureLimitPct(CALL_EXPOSURE_CAP_PCT);
-const CALL_ENTRY_BUFFER_PCT = 0.05;
-const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
-const getMarginCapacityBase = (marginState) => {
-  const collateralMarginBase = Number(marginState?.collaterals_initial_margin ?? 0);
-  if (collateralMarginBase > 0) return collateralMarginBase;
-  const collateralValue = Number(marginState?.collaterals_value ?? 0);
-  if (collateralValue > 0) return collateralValue;
-  return Number(marginState?.subaccount_value ?? 0);
-};
-const getMarginUtilizationBase = (marginState) => {
-  const aggregatedMaintenanceBase = Math.abs(Number(marginState?.aggregated_collaterals_maintenance_margin ?? 0));
-  if (aggregatedMaintenanceBase > 0) return aggregatedMaintenanceBase;
-  const maintenanceBase = Math.abs(Number(marginState?.collaterals_maintenance_margin ?? 0));
-  if (maintenanceBase > 0) return maintenanceBase;
-  return getMarginCapacityBase(marginState);
-};
-const normalizeMarginUtilizationValue = (value) => {
-  if (!Number.isFinite(value)) return null;
-  return Math.max(0, Math.min(1, value));
-};
-const estimateMarginUtilizationFromComponents = (marginState, additionalOpenOrdersMargin = 0) => {
-  const base = getMarginUtilizationBase(marginState);
-  if (!(base > 0)) return null;
-  const usedMargin = Math.abs(Number(
-      marginState?.aggregated_positions_initial_margin ??
-      marginState?.positions_initial_margin ??
-      0
-    ))
-    + Math.abs(Number(marginState?.open_orders_margin ?? 0))
-    + Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
-  return normalizeMarginUtilizationValue(usedMargin / base);
-};
-const estimateMarginUtilization = (marginState, additionalOpenOrdersMargin = 0) => {
-  const componentUtilization = estimateMarginUtilizationFromComponents(marginState, additionalOpenOrdersMargin);
-  if (componentUtilization != null) return componentUtilization;
-
-  const base = getMarginCapacityBase(marginState);
-  if (!(base > 0)) return null;
-  const availableInitialMargin = Number(marginState?.initial_margin ?? NaN);
-  if (Number.isFinite(availableInitialMargin)) {
-    const projectedAvailable = availableInitialMargin - Math.max(0, Number(additionalOpenOrdersMargin ?? 0));
-    return normalizeMarginUtilizationValue(1 - (projectedAvailable / base));
-  }
-
-  const explicitMarginUsage = Number(
-    marginState?.margin_usage_pct ??
-    marginState?.margin_utilization_pct ??
-    marginState?.margin_utilization ??
-    NaN
-  );
-  const additionalRatio = Math.max(0, Number(additionalOpenOrdersMargin ?? 0)) / base;
-  if (Number.isFinite(explicitMarginUsage)) {
-    const normalized = explicitMarginUsage > 1 ? explicitMarginUsage / 100 : explicitMarginUsage;
-    return normalizeMarginUtilizationValue(normalized + additionalRatio);
-  }
-
-  return estimateMarginUtilizationFromComponents(marginState, additionalOpenOrdersMargin);
-};
-const estimateDisplayedMarginUtilization = (marginState) => {
-  if (!marginState) return null;
-  const maintenanceBase = getMarginUtilizationBase(marginState);
-  const maintenanceMargin = Number(marginState?.maintenance_margin ?? NaN);
-  if (maintenanceBase > 0 && Number.isFinite(maintenanceMargin)) {
-    return normalizeMarginUtilizationValue(1 - (maintenanceMargin / maintenanceBase));
-  }
-  return estimateMarginUtilization(marginState);
-};
-const estimateProjectedDisplayedMarginUtilization = (marginState, additionalMargin = 0) => {
-  if (!marginState) return null;
-  const currentDisplayed = estimateDisplayedMarginUtilization(marginState);
-  const maintenanceBase = getMarginUtilizationBase(marginState);
-  if (currentDisplayed != null && maintenanceBase > 0) {
-    return normalizeMarginUtilizationValue(currentDisplayed + (Math.max(0, Number(additionalMargin ?? 0)) / maintenanceBase));
-  }
-  return estimateMarginUtilization(marginState, additionalMargin);
-};
-const estimateStandardShortCallInitialMarginPerUnit = (strike, spotPrice, premium) => {
-  if (!(spotPrice > 0)) return Infinity;
-  const otm = Math.max(0, strike - spotPrice);
-  const otmBuffer = Math.max(0.15 - (otm / spotPrice), 0.13) * spotPrice;
-  return Math.max(0, otmBuffer - Math.max(0, premium || 0));
-};
-const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, spotPrice, strike = 0, premium = 0) => {
-  const shortCallPositions = positions.filter(p => p.instrument_name?.endsWith('-C') && p.direction === 'short');
-  const currentShortExposure = shortCallPositions.reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
-  const empiricalPositionsMargin = Math.abs(Number(
-      marginState?.aggregated_positions_initial_margin ??
-      marginState?.positions_initial_margin ??
-      0
-    ));
-  if (currentShortExposure > 0 && empiricalPositionsMargin > 0) {
-    return empiricalPositionsMargin / currentShortExposure;
-  }
-  const restingShortExposure = restingOrders.filter(order => order.action === 'sell_call').reduce((sum, order) => sum + Math.abs(Number(order.amount) || 0), 0);
-  if (restingShortExposure > 0 && Number(marginState?.open_orders_margin ?? 0) > 0) {
-    return Number(marginState.open_orders_margin) / restingShortExposure;
-  }
-  const documentedEstimate = estimateStandardShortCallInitialMarginPerUnit(strike, spotPrice, premium);
-  if (Number.isFinite(documentedEstimate) && documentedEstimate > 0) return documentedEstimate;
-  return Math.max((spotPrice || 0) * 0.13, 100);
-};
-const getCallMarginContext = (action, marginState, positions, restingOrders, instruments, spotPrice, instrumentName, amount, limitPrice) => {
-  if (action !== 'sell_call') return 'Call margin utilization: not applicable for this action.';
-  if (!marginState) return 'Call margin utilization: unavailable (margin state unavailable).';
-  const currentUtilization = estimateDisplayedMarginUtilization(marginState);
-  const instrument = instruments.find((item) => item.instrument_name === instrumentName);
-  const strike = Number(instrument?.option_details?.strike || instrumentName?.split('-')?.[2] || 0) || 0;
-  const normalizedAmount = Math.max(0, Number(amount || 0));
-  const normalizedLimitPrice = Number(limitPrice || 0);
-  const marginPerUnit = estimateShortCallMarginPerUnit(marginState, positions, restingOrders, spotPrice, strike, normalizedLimitPrice);
-  const additionalMargin = normalizedAmount * marginPerUnit;
-  const projectedUtilization = estimateProjectedDisplayedMarginUtilization(marginState, additionalMargin);
-  const capPct = CALL_EXPOSURE_CAP_PCT * 100;
-  const limitPct = CALL_EXPOSURE_LIMIT_PCT * 100;
-  const entryCapPct = CALL_ENTRY_CAP_PCT * 100;
-  const entryCapSatisfied = projectedUtilization != null
-    && projectedUtilization <= CALL_EXPOSURE_CAP_PCT + 1e-9;
-  return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_exact=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(6)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${capPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, active_entry_cap_exact=${capPct.toFixed(6)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(1)}pp, entry_cap_satisfied=${entryCapSatisfied ? 'yes' : 'no'}. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the active entry cap. The execution buffer is safety, not planned sell-call capacity. At-or-below means <= and equality is allowed.`;
-};
-const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice }) => {
-  if (action?.action !== 'buy_put') return '';
-  const criteria = action.rule_criteria || {};
-  const triggerScore = Number(triggerData?.score);
-  const triggerDelta = Number(triggerData?.delta);
-  const liveDelta = Number(ticker?.option_pricing?.d);
-  const bestAsk = Number(currentPrice || action.price);
-  const targetScore = Number(triggerData?.target_score);
-  const liveScore = Number(triggerData?.live_score);
-  const requiredValueSignal = triggerData?.required_value_signal || criteria.value_signal || criteria.buy_put_signal || null;
-  const currentValueSignal = triggerData?.buy_put_signal || null;
-  const buyPutResearch = triggerData?.buy_put_research || {};
-  const edgeScore = Number(triggerData?.selection_score ?? buyPutResearch?.selection_score);
-  const edgeComponents = buyPutResearch?.edge_components || {};
-  const edgeWarnings = [
-    buyPutResearch?.spread_caution ? 'spread' : null,
-    buyPutResearch?.iv_caution ? 'iv' : null,
-    buyPutResearch?.skew_caution ? 'skew' : null,
-    buyPutResearch?.weak_shock_payoff_caution ? 'weak_shock_payoff' : null,
-  ].filter(Boolean);
-  const isStandingPatientBid = requiredValueSignal === 'any_actionable_buy_put' && currentValueSignal === 'standing_patient_bid';
-  const limitPrice = Number(advisorLimitPrice) > 0 && bestAsk > 0
-    ? Math.min(Number(advisorLimitPrice), bestAsk)
-    : Number(advisorLimitPrice) > 0
-      ? Number(advisorLimitPrice)
-      : bestAsk;
-  const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
-  const plannedScore = Math.abs(scoreDelta) > 0 && limitPrice > 0 ? Math.abs(scoreDelta) / limitPrice : null;
-  const fmt = (value, digits = 6) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
-  const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
-  return [
-    'Buy-put value confirmation context:',
-    `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}.`,
-    `- Planned execution limit: ${fmtPrice(limitPrice)}; planned_score=${fmt(plannedScore)} using trigger_delta and planned limit; live_ask_score=${fmt(liveScore)}.`,
-    `- Thresholds: min_score=n/a, target_score=${fmt(targetScore)}. For patient maker bids, planned_score at our limit is the economic gate; live_ask_score may be below threshold because we are not willing to lift the ask.`,
-    `- Composite edge context: edge_score=${fmt(edgeScore, 2)}, recommendation=${buyPutResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, candidate_iv_pct:${fmt(edgeComponents.candidate_iv_pct, 2)}, market_put_iv_pct:${fmt(edgeComponents.market_put_iv_pct, 2)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, oi_24h:${fmt(edgeComponents.market_oi_delta_24h_pct, 2)}, shock40:${fmt(edgeComponents.shock_payoff_multiple_40pct, 2)}x}.`,
-    `- value_signal=${currentValueSignal || 'n/a'}, required_value_signal=${requiredValueSignal || 'n/a'}. ${isStandingPatientBid ? 'This is a standing patient bid: no spike signal is active, but the bid is still valid if planned_score meets threshold and budget/risk gates remain valid.' : 'A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.'}`,
-    `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there as our market; do not reject as "not achievable" merely because it is not immediately marketable.`,
-    '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
-    '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit. Edge context helps identify stale/wide/overpriced insurance, but it does not replace the explicit min_score/target_score price contract.',
-  ].join('\n');
-};
-
-const formatSellCallConfirmationContext = ({ action, triggerData, ticker, currentPrice }) => {
-  if (action?.action !== 'sell_call') return '';
-  const criteria = typeof action.rule_criteria === 'string' ? JSON.parse(action.rule_criteria) : (action.rule_criteria || {});
-  const triggerDte = Number(triggerData?.dte);
-  const triggerDelta = Number(triggerData?.delta);
-  const liveDelta = Number(ticker?.option_pricing?.d);
-  const executionBid = Number(currentPrice || action.price);
-  const scoreDelta = Number.isFinite(liveDelta) ? liveDelta : triggerDelta;
-  const liveRawScore = Math.abs(scoreDelta) > 0 && executionBid > 0 ? executionBid / Math.abs(scoreDelta) : null;
-  const liveEdgeScore = normalizeSellCallScore(liveRawScore, triggerDte);
-  const triggerRawScore = Number(triggerData?.raw_score ?? triggerData?.sell_call_research?.edge_components?.raw_score);
-  const triggerEdgeScore = Number(triggerData?.selection_score ?? triggerData?.score);
-  const configuredMinScore = Number(criteria.min_score);
-  const minScore = Number.isFinite(configuredMinScore) && configuredMinScore > 0 ? configuredMinScore : SELL_CALL_FALLBACK_MIN_SCORE;
-  const gateStatus = Number.isFinite(liveEdgeScore) && liveEdgeScore + 1e-9 >= minScore ? 'PASS' : 'FAIL';
-  const fmt = (value, digits = 4) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
-  const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
-  return [
-    'Sell-call value confirmation context:',
-    `- CALL EDGE formula: raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}; raw_score = bid / abs(delta).`,
-    `- Trigger: raw_score=${fmt(triggerRawScore, 2)}, edge_score=${fmt(triggerEdgeScore, 2)}.`,
-    `- Fresh market: raw_score=${fmt(liveRawScore, 2)}, edge_score=${fmt(liveEdgeScore, 2)}, executable_bid=${fmtPrice(executionBid)}, live_delta=${fmt(liveDelta, 4)}.`,
-    `- Rule: min_score=${fmt(minScore, 2)}, min_bid=${fmtPrice(criteria.min_bid)}, edge_gate=${gateStatus} (edge_score=${fmt(liveEdgeScore, 2)} ${gateStatus === 'PASS' ? '>=' : '<'} min_score=${fmt(minScore, 2)}).`,
-  ].join('\n');
-};
-const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, advisorLimitPrice, currentPrice }) => {
-  if (action?.action !== 'sell_put') return '';
-  const criteria = typeof action.rule_criteria === 'string' ? JSON.parse(action.rule_criteria) : (action.rule_criteria || {});
-  const intent = triggerData?.put_exit_intent || criteria.put_exit_intent || 'n/a';
-  const currentValues = triggerData?.current_values || {};
-  const position = (livePositions || []).find((item) => item?.instrument_name === action.instrument_name);
-  const plannedAmount = Number(action.amount);
-  const positionAmount = Number(position?.amount);
-  const totalLongPuts = getTotalLongPutAmount(livePositions || []);
-  const remainingLongPuts = Number.isFinite(plannedAmount) ? Math.max(0, totalLongPuts - plannedAmount) : null;
-  const retainsProtection = position ? leavesDownsideProtectionAfterSale(position, livePositions || [], plannedAmount) : null;
-  const hasLongerDatedProtection = position ? hasLongerDatedPutProtection(position, livePositions || []) : null;
-  const livePnlPct = Number(currentValues.unrealized_pnl_pct);
-  const patientPnlPct = Number(triggerData?.patient_sell_put_pnl_pct ?? currentValues.patient_sell_put_pnl_pct);
-  const advisorFloor = Number(advisorLimitPrice ?? triggerData?.patient_sell_put_limit_price ?? currentValues.patient_sell_put_limit_price);
-  const trancheFraction = Number(triggerData?.tranche_fraction ?? (positionAmount > 0 ? plannedAmount / positionAmount : NaN));
-  const fmt = (value, digits = 2) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
-  const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
-  const baseLines = [
-    'Sell-put exit confirmation context:',
-    `- Intent=${intent}. sell_put closes an owned long put; it is reduce_only and capital-releasing, not a naked short-put entry.`,
-    `- Current executable exit: live_bid=${fmtPrice(currentValues.execution_price ?? currentPrice ?? action.price)}, live_unrealized_pnl_pct=${fmt(livePnlPct)}%, patient_floor_pnl_pct=${fmt(patientPnlPct)}%.`,
-  ];
-
-  if (intent === 'roll_protection') {
-    return [
-      ...baseLines,
-      `- Roll discipline: planned_close_amount=${fmt(plannedAmount, 4)} of aging_position_amount=${fmt(positionAmount, 4)}, longer_dated_protection_in_book=${hasLongerDatedProtection == null ? 'unknown' : hasLongerDatedProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
-      `- Roll confirmation rule: confirm when DTE <= ${PUT_ROLL_DTE_THRESHOLD}, this closes an owned long put, and longer-dated long put protection remains in the book after sale. Do not apply monetize_tail_win tranche_fraction/profit-threshold rules to roll_protection; a full close of the aging instrument and negative PnL are allowed roll facts.`,
-    ].join('\n');
-  }
-
-  return [
-    ...baseLines,
-    `- Tail-win discipline: planned_sell_amount=${fmt(plannedAmount, 4)} of position_amount=${fmt(positionAmount, 4)}, tranche_fraction=${fmt(trancheFraction, 4)}, retain_downside_protection=${retainsProtection == null ? 'unknown' : retainsProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
-    `- Advisor exit floor: ${fmtPrice(advisorFloor)}. If the visible bid is below this floor in a sparse market, use a patient synthetic reduce-only gtc/post_only limit at or above the floor for monetize_tail_win; zero fill is better than dumping into a thin bid.`,
-  ].join('\n');
-};
-
-const getConfirmationScopePrompt = () => 'CONFIRMATION SCOPE: This is a last-mile execution check, not a second scheduled advisory.';
-
-const normalizeLearningText = (value) => String(value || '').toLowerCase();
-
-const confirmationLessonMatches = (lesson, includeKeywords = [], excludeKeywords = []) => {
-  const text = normalizeLearningText(lesson?.lesson || lesson?.summary || '');
-  if (!text) return false;
-  if (excludeKeywords.some((keyword) => text.includes(keyword))) return false;
-  return includeKeywords.some((keyword) => text.includes(keyword));
-};
-
-const getConfirmationLearningScope = (action) => {
-  switch (action) {
-    case 'sell_call':
-      return {
-        includeReviews: false,
-        reviewFamily: 'short_call_campaign',
-        include: ['sell_call', 'sell call', 'selling calls', 'call premium', 'short call entry', 'strike selection', 'premium collection'],
-        exclude: ['buyback', 'buy back', 'bought back', 'exit timing', 'close short call', 'closing short call'],
-        note: 'sell_call is an entry. Buyback-call exit timing lessons are not valid vetoes for a fresh sell_call entry; use live bid/score/margin facts and the active sell_call rule.',
-      };
-    case 'buyback_call':
-      return {
-        includeReviews: true,
-        reviewFamily: 'short_call_campaign',
-        include: ['buyback', 'buy back', 'bought back', 'short call', 'call exit', 'exit timing', 'expiry payoff', 'mark pain'],
-        exclude: ['buy_put', 'buy put', 'sell_put', 'sell put'],
-        note: 'buyback_call is a short-call exit. Short-call campaign reviews and buyback timing lessons may inform this last-mile exit check.',
-      };
-    default:
-      return null;
-  }
-};
-
-const formatConfirmationLearningContext = (action, recentTradeReviews = [], activeTradeLessons = []) => {
-  const scope = getConfirmationLearningScope(action);
-  if (!scope) return '';
-
-  const relevantReviews = scope.includeReviews
-    ? (recentTradeReviews || []).filter((review) => review?.action_family === scope.reviewFamily).slice(0, 3)
-    : [];
-  const relevantLessons = (activeTradeLessons || [])
-    .filter((lesson) => confirmationLessonMatches(lesson, scope.include, scope.exclude))
-    .slice(0, 3);
-  const omittedCount = Math.max(0, (recentTradeReviews?.length || 0) - relevantReviews.length)
-    + Math.max(0, (activeTradeLessons?.length || 0) - relevantLessons.length);
-
-  return [
-    'Action-scoped learning context:',
-    `- ${scope.note}`,
-    `- Omitted unrelated confirmation memories: ${omittedCount}. Do not import omitted lessons or reviews into this action's decision.`,
-    relevantReviews.length > 0
-      ? `Relevant recent trade reviews:\n${relevantReviews.map((r) => `- ${r.instrument_name} [${r.review_status}] [${r.review_window_days}d]: ${r.summary}`).join('\n')}`
-      : '- Relevant recent trade reviews: none for this action scope.',
-    relevantLessons.length > 0
-      ? `Relevant active trade lessons:\n${relevantLessons.map((l) => `- ${l.lesson} (evidence: ${l.evidence_count})`).join('\n')}`
-      : '- Relevant active trade lessons: none for this action scope.',
-  ].join('\n');
-};
 
 const clampSellCallQtyToEntryCap = ({
   desiredQty,
@@ -1074,93 +400,6 @@ const clampSellCallQtyToEntryCap = ({
     qty: finalQty,
     projectedUtilization: estimateProjectedDisplayedMarginUtilization(marginState, finalQty * marginPerUnit),
   };
-};
-
-const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
-  const configuredStep = Number(
-    instrument?.price_step ??
-    instrument?.options?.price_step ??
-    instrument?.option_details?.price_step ??
-    0
-  );
-  const isOption = Boolean(instrument?.option_details?.option_type || instrument?.base_asset_sub_id);
-  if (isOption) return Math.max(configuredStep || 0, 0.1);
-  if (configuredStep > 0) return configuredStep;
-  return fallbackPrice >= 1 ? 0.1 : 0.01;
-};
-
-const roundToStep = (value, step, mode = 'nearest') => {
-  if (!(step > 0)) return value;
-  const scaled = value / step;
-  if (mode === 'up') return Math.ceil(scaled) * step;
-  if (mode === 'down') return Math.floor(scaled) * step;
-  return Math.round(scaled) * step;
-};
-
-const normalizePriceToStep = (value, step, mode = 'nearest') => {
-  if (!(Number(value) > 0)) return 0;
-  if (!(step > 0)) return Number(value);
-  const rounded = roundToStep(Number(value), step, mode);
-  const decimals = (() => {
-    const normalized = String(step);
-    if (normalized.includes('e-')) {
-      const [, exponent] = normalized.split('e-');
-      return Number(exponent) || 0;
-    }
-    const [, fraction = ''] = normalized.split('.');
-    return fraction.length;
-  })();
-  return Number(rounded.toFixed(decimals));
-};
-
-const normalizeOrderPriceForVenue = (price, instrument, direction = 'buy') => {
-  const step = getInstrumentPriceStep(instrument, Number(price));
-  const mode = direction === 'buy' ? 'down' : direction === 'sell' ? 'up' : 'nearest';
-  const normalized = normalizePriceToStep(price, step, mode);
-  return {
-    price: normalized > 0 ? normalized : Number(price),
-    step,
-    mode,
-  };
-};
-
-const floorOrderAmountToVenuePrecision = (amount) => {
-  const numeric = Number(amount);
-  if (!(numeric > 0)) return 0;
-  const scale = 10 ** VENUE_AMOUNT_DECIMALS;
-  return Math.floor((numeric + 1e-12) * scale) / scale;
-};
-
-const isVenueOrderAmountTradable = (amount) =>
-  floorOrderAmountToVenuePrecision(amount) > VENUE_MIN_ORDER_AMOUNT;
-
-const avoidRoundNumberRestingPrice = (direction, price, step) => {
-  const numericPrice = Number(price);
-  if (!(numericPrice > 0) || !(step > 0)) return numericPrice;
-  if (Math.abs(numericPrice - Math.round(numericPrice)) > 1e-9) return numericPrice;
-  if (direction === 'sell') return normalizePriceToStep(numericPrice + step, step, 'up');
-  const lowerPrice = numericPrice - step;
-  return lowerPrice > 0 ? normalizePriceToStep(lowerPrice, step, 'down') : numericPrice;
-};
-
-const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice) => {
-  const bidPrice = Number(ticker?.b) || 0;
-  const askPrice = Number(ticker?.a) || 0;
-  const step = getInstrumentPriceStep(instrument, attemptedPrice);
-
-  if (direction === 'sell') {
-    const retryBase = bidPrice > 0 ? bidPrice + step : attemptedPrice + step;
-    const retryPrice = avoidRoundNumberRestingPrice(direction, normalizePriceToStep(retryBase, step, 'up'), step);
-    return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
-  }
-
-  if (askPrice <= 0) return null;
-  const belowAsk = askPrice - step;
-  const candidate = belowAsk > 0
-    ? normalizePriceToStep(belowAsk, step, 'down')
-    : normalizePriceToStep(askPrice * 0.99, step, 'down');
-  const retryPrice = avoidRoundNumberRestingPrice(direction, candidate, step);
-  return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
 };
 
 
@@ -2527,7 +1766,7 @@ describe('DB operations (isolated test database)', () => {
 // 5. Entry rule matching integration test
 // ============================================================================
 
-describe('Entry rule matching (integration)', () => {
+describe('Production helper composition with fixture market data', () => {
   test('evaluateConditions + computeCurrentValues work together for exit rule triggering', () => {
     // Simulate: position has DTE < 2 and unrealized P&L > 30%
     const position = {
@@ -2655,7 +1894,7 @@ describe('Entry rule matching (integration)', () => {
 // 8. Fill accounting — zero-fill detection & partial fills
 // ============================================================================
 
-// Extract the pure fill-accounting logic from executeOrder for testability
+// Fixture model of inline fill accounting; this does not execute executeOrder.
 const computeFillAccounting = (orderResult, requestedAmount, requestedPrice) => {
   let filledAmt = 0, avgPx = requestedPrice, totalValue = 0;
   if (orderResult?.trades?.length) {
@@ -2742,7 +1981,7 @@ describe('Fill accounting (computeFillAccounting)', () => {
 // 9. Zero-fill result classification
 // ============================================================================
 
-// Extract the result classification logic from executeOrder
+// Fixture model of inline order-result classification.
 const classifyOrderResult = (filledAmt, orderType, orderResult) => {
   if (filledAmt === 0 && orderType === 'ioc') {
     return { type: 'zeroFill' };
@@ -3254,33 +2493,15 @@ describe('placeOrder order construction', () => {
 });
 
 describe('execution order type normalization', () => {
-  const ACTION_POLICY = {
-    buy_put: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
-    sell_call: { phase: 'entry', reduceOnly: false, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
-    sell_put: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
-    buyback_call: { phase: 'exit', reduceOnly: true, allowedOrderTypes: ['ioc', 'gtc', 'post_only'] },
-  };
-  const getActionPolicy = (action) => ACTION_POLICY[action] || null;
-  const getAllowedOrderTypesForAction = (action) => getActionPolicy(action)?.allowedOrderTypes || ['ioc', 'gtc', 'post_only'];
-  const normalizePreferredOrderType = (action, preferredOrderType) => {
-    if (typeof preferredOrderType !== 'string') return null;
-    const normalized = preferredOrderType.trim().toLowerCase();
-    if (!normalized) return null;
-    return getAllowedOrderTypesForAction(action).includes(normalized) ? normalized : null;
-  };
+  const { ACTION_POLICY } = loadProduction(['ACTION_POLICY']);
+  const { getActionPolicy } = loadProduction(['getActionPolicy']);
+  const { getAllowedOrderTypesForAction } = loadProduction(['getAllowedOrderTypesForAction']);
+  const { normalizePreferredOrderType } = loadProduction(['normalizePreferredOrderType']);
   const isInvalidReduceOnlyOrderType = (action, orderType) => {
     return !getAllowedOrderTypesForAction(action).includes(orderType);
   };
-  const isRestingOrderType = (orderType) => orderType === 'gtc' || orderType === 'post_only';
-  const isSyntheticRestingExitIntentAllowed = (action, triggerData = {}, ruleCriteria = {}) => {
-    const intent = action === 'buyback_call'
-      ? (triggerData.buyback_intent || ruleCriteria.buyback_intent)
-      : action === 'sell_put'
-        ? (triggerData.put_exit_intent || ruleCriteria.put_exit_intent)
-        : null;
-    return (action === 'buyback_call' && intent === 'profit_capture')
-      || (action === 'sell_put' && intent === 'monetize_tail_win');
-  };
+  const { isRestingOrderType } = loadProduction(['isRestingOrderType']);
+  const { isSyntheticRestingExitIntentAllowed } = loadProduction(['isSyntheticRestingExitIntentAllowed']);
   const normalizeExitOrderTypeForIntent = (action, orderType, triggerData = {}, ruleCriteria = {}) => {
     if (action === 'sell_put' && triggerData.put_exit_intent === 'roll_protection' && orderType !== 'ioc') return 'ioc';
     if (['sell_put', 'buyback_call'].includes(action) && isRestingOrderType(orderType) && !isSyntheticRestingExitIntentAllowed(action, triggerData, ruleCriteria)) return 'ioc';
@@ -3381,46 +2602,12 @@ describe('execution order type normalization', () => {
 });
 
 describe('synthetic reduce-only resting exit guard', () => {
-  const isRestingOrderType = (orderType) => orderType === 'gtc' || orderType === 'post_only';
-  const isReduceOnlyExitAction = (action) => action === 'sell_put' || action === 'buyback_call';
-  const getCloseablePositionForExit = (action, instrumentName, positions = []) => {
-    const position = positions.find(item => item.instrument_name === instrumentName);
-    if (action === 'buyback_call' && position?.direction === 'short') return position;
-    if (action === 'sell_put' && position?.direction === 'long') return position;
-    return null;
-  };
-  const isSyntheticRestingExitIntentAllowed = (action, triggerData = {}, ruleCriteria = {}) => {
-    const intent = action === 'buyback_call'
-      ? (triggerData.buyback_intent || ruleCriteria.buyback_intent)
-      : action === 'sell_put'
-        ? (triggerData.put_exit_intent || ruleCriteria.put_exit_intent)
-        : null;
-    return (action === 'buyback_call' && intent === 'profit_capture')
-      || (action === 'sell_put' && intent === 'monetize_tail_win');
-  };
-  const floorOrderAmountToVenuePrecision = (amount) => {
-    const numeric = Number(amount);
-    if (!(numeric > 0)) return 0;
-    return Math.floor((numeric + 1e-12) * 100) / 100;
-  };
-  const getSyntheticReduceOnlyPreflight = ({ action, instrumentName, amount, orderType, triggerData = {}, ruleCriteria = {}, positions = [], restingOrders = [] }) => {
-    if (!isReduceOnlyExitAction(action)) return { allowed: true, reduceOnly: false, amount, synthetic: false };
-    if (!isRestingOrderType(orderType)) return { allowed: true, reduceOnly: true, amount, synthetic: false };
-    if (!isSyntheticRestingExitIntentAllowed(action, triggerData, ruleCriteria)) return { allowed: false };
-    const closeablePosition = getCloseablePositionForExit(action, instrumentName, positions);
-    if (!closeablePosition) return { allowed: false };
-    const closeDirection = action === 'buyback_call' ? 'buy' : action === 'sell_put' ? 'sell' : null;
-    const existingResting = restingOrders.find(order =>
-      !['cancelled', 'filled', 'expired', 'rejected'].includes(String(order.status || order.order_status || '').toLowerCase())
-      && order.instrument_name === instrumentName
-      && (order.action === action || (!order.action && closeDirection && String(order.direction || '').toLowerCase() === closeDirection))
-    );
-    if (existingResting) return { allowed: false };
-    const closeableAmount = Math.max(0, Number(closeablePosition.amount) || 0);
-    const cappedAmount = floorOrderAmountToVenuePrecision(Math.min(Math.max(0, Number(amount) || 0), closeableAmount));
-    if (!(cappedAmount > 0)) return { allowed: false };
-    return { allowed: true, reduceOnly: false, amount: cappedAmount, synthetic: true };
-  };
+  const { isRestingOrderType } = loadProduction(['isRestingOrderType']);
+  const { isReduceOnlyExitAction } = loadProduction(['isReduceOnlyExitAction']);
+  const { getCloseablePositionForExit } = loadProduction(['getCloseablePositionForExit']);
+  const { isSyntheticRestingExitIntentAllowed } = loadProduction(['isSyntheticRestingExitIntentAllowed']);
+  const { floorOrderAmountToVenuePrecision } = loadProduction(['floorOrderAmountToVenuePrecision']);
+  const { getSyntheticReduceOnlyPreflight } = loadProduction(['getSyntheticReduceOnlyPreflight']);
 
   test('profit-capture buyback_call can rest synthetically against live short size', () => {
     const result = getSyntheticReduceOnlyPreflight({
@@ -3540,16 +2727,7 @@ describe('execution price validation', () => {
 // 17. Voting logic correctness
 // ============================================================================
 
-const resolveVotingDecision = (anthropicVote, codexVote) => {
-  if (anthropicVote && codexVote) {
-    return (anthropicVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
-  } else if (anthropicVote) {
-    return anthropicVote.confirm ? 'confirmed' : 'rejected';
-  } else if (codexVote) {
-    return codexVote.confirm ? 'confirmed' : 'rejected';
-  }
-  return 'retry'; // both failed
-};
+const { resolveConfirmationVotes: resolveVotingDecision } = loadProduction(['resolveConfirmationVotes']);
 
 describe('Voting logic', () => {
   test('both confirm → confirmed', () => {
@@ -3922,13 +3100,6 @@ const classifyPlaceOrderResult = (order, orderType) => {
   return 'success';
 };
 
-const isIocNoLiquidityError = (err) => {
-  const code = Number(err?.code ?? err?.error?.code);
-  if (code === 11009) return true;
-  const text = typeof err === 'string' ? err.toLowerCase() : JSON.stringify(err || {}).toLowerCase();
-  return text.includes('zero liquidity for market or ioc/fok order')
-    || text.includes('no liquidity within the provided limit price');
-};
 
 const classifyExecutionResult = (result) => {
   if (!result) return 'failed';
@@ -4464,13 +3635,7 @@ describe('Resting buy-put entry live revalidation', () => {
 });
 
 describe('Resting order dedup for advisor-led exit rules', () => {
-  const findRestingExitOrderForRule = (restingOrders, rule) => {
-    if (!Array.isArray(restingOrders) || !rule) return null;
-    return restingOrders.find(order =>
-      order?.instrument_name === rule.instrument_name
-      && order?.action === rule.action
-    ) || null;
-  };
+  const { findRestingExitOrderForRule } = loadProduction(['findRestingExitOrderForRule']);
 
   test('existing buyback_call resting order blocks duplicate trigger for same advisor rule target', () => {
     const existing = findRestingExitOrderForRule([
@@ -4505,129 +3670,7 @@ describe('Resting order dedup for advisor-led exit rules', () => {
 // ── Test 28: extractJSON (balanced brace parser) ────────────────────────────
 
 // Copy of extractJSON from script.js
-const extractJSON = (text) => {
-  if (!text || typeof text !== 'string') return null;
-  const tryParseBalancedObject = (source) => {
-    if (!source || typeof source !== 'string') return null;
-    for (let start = source.indexOf('{'); start !== -1; start = source.indexOf('{', start + 1)) {
-      let depth = 0;
-      let inString = false;
-      let escape = false;
-      for (let i = start; i < source.length; i++) {
-        const ch = source[i];
-        if (escape) { escape = false; continue; }
-        if (ch === '\\' && inString) { escape = true; continue; }
-        if (ch === '"') { inString = !inString; continue; }
-        if (inString) continue;
-        if (ch === '{') depth++;
-        else if (ch === '}') {
-          depth--;
-          if (depth === 0) {
-            try { return JSON.parse(source.slice(start, i + 1)); }
-            catch { break; }
-          }
-        }
-      }
-    }
-    return null;
-  };
 
-  const trimmed = text.trim();
-  const fencedBlocks = [...trimmed.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)]
-    .map(match => match[1]?.trim())
-    .filter(Boolean);
-  const candidates = [
-    ...fencedBlocks,
-    trimmed.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim(),
-    trimmed,
-  ];
-
-  for (const candidate of candidates) {
-    const parsed = tryParseBalancedObject(candidate);
-    if (parsed) return parsed;
-  }
-  return null;
-};
-
-const normalizeTalebSecondOpinion = (payload) => {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
-
-  const critique = [
-    payload.critique,
-    payload.assessment,
-    payload.summary,
-    payload.reasoning,
-    payload.overall_assessment,
-  ].find((value) => typeof value === 'string' && value.trim().length > 0) || null;
-
-  const vetoes = Array.isArray(payload.vetoes) ? payload.vetoes.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
-  const amendments = Array.isArray(payload.amendments) ? payload.amendments.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
-  const additions = Array.isArray(payload.additions) ? payload.additions.filter((item) => item && typeof item === 'object' && !Array.isArray(item)) : [];
-
-  if (!critique && vetoes.length === 0 && amendments.length === 0 && additions.length === 0) {
-    return null;
-  }
-
-  return { critique, vetoes, amendments, additions };
-};
-
-const parseTalebSecondOpinion = (text) => {
-  if (!text || typeof text !== 'string') return null;
-  const normalized = normalizeTalebSecondOpinion(extractJSON(text));
-  if (normalized) return normalized;
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  return {
-    critique: trimmed,
-    vetoes: [],
-    amendments: [],
-    additions: [],
-    _parse_fallback: true,
-  };
-};
-
-const extractConfirmationVote = (text) => {
-  const parsed = extractJSON(text);
-  if (parsed && typeof parsed.confirm === 'boolean') return parsed;
-
-  if (!text || typeof text !== 'string') return null;
-  const cleaned = text
-    .replace(/```json/gi, '')
-    .replace(/```/g, '')
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    .trim();
-
-  const confirmMatch = cleaned.match(/"confirm"\s*:\s*(true|false)/i) || cleaned.match(/\bconfirm\b[^a-z]{0,10}(true|false)/i);
-  const orderTypeMatch = cleaned.match(/"order_type"\s*:\s*"(ioc|gtc|post_only)"/i);
-  const nullOrderTypeMatch = cleaned.match(/"order_type"\s*:\s*null/i);
-  const limitPriceMatch = cleaned.match(/"limit_price"\s*:\s*(null|-?\d+(?:\.\d+)?)/i);
-  const reasoningMatch = cleaned.match(/"reasoning"\s*:\s*"([\s\S]*?)"\s*(?:[,}]|$)/i);
-
-  let confirm = null;
-  if (confirmMatch) {
-    confirm = confirmMatch[1].toLowerCase() === 'true';
-  } else if (/\breject(?:ed)?\b/i.test(cleaned) && !/\bconfirm(?:ed)?\b/i.test(cleaned)) {
-    confirm = false;
-  } else if (/\bconfirm(?:ed)?\b/i.test(cleaned) && !/\breject(?:ed)?\b/i.test(cleaned)) {
-    confirm = true;
-  }
-
-  if (typeof confirm !== 'boolean') return null;
-
-  const vote = {
-    confirm,
-    order_type: orderTypeMatch ? orderTypeMatch[1] : (nullOrderTypeMatch ? null : null),
-    limit_price: null,
-    reasoning: reasoningMatch ? reasoningMatch[1] : cleaned.slice(0, 500),
-  };
-
-  if (limitPriceMatch) {
-    vote.limit_price = limitPriceMatch[1].toLowerCase() === 'null' ? null : Number(limitPriceMatch[1]);
-  }
-
-  return vote;
-};
 
 describe('extractJSON (balanced brace parser)', () => {
   test('simple JSON object', () => {
@@ -4750,29 +3793,7 @@ describe('parseTalebSecondOpinion', () => {
 });
 
 describe('Spot price sourcing helpers', () => {
-  const extractTickerSpotPrice = (ticker) => {
-    if (!ticker || typeof ticker !== 'object') return null;
-    const candidates = [
-      ticker.I,
-      ticker.index_price,
-      ticker.indexPrice,
-      ticker.underlying_price,
-      ticker.underlyingPrice,
-      ticker.spot_price,
-      ticker.spotPrice,
-      ticker.price,
-      ticker.last_price,
-      ticker.lastPrice,
-      ticker.M,
-      ticker.mark_price,
-      ticker.markPrice,
-    ];
-    for (const candidate of candidates) {
-      const value = Number(candidate);
-      if (value > 0) return value;
-    }
-    return null;
-  };
+  const { extractTickerSpotPrice } = loadProduction(['extractTickerSpotPrice']);
 
   test('prefers explicit index price fields from Derive tickers', () => {
     assert.strictEqual(extractTickerSpotPrice({ I: '1825.4', M: '1820.1' }), 1825.4);
@@ -5392,10 +4413,10 @@ describe('accountHealth structure', () => {
 });
 
 // ============================================================================
-// 37. Full schema: ETH holder → budget cycle → entry matching → execution → tracking
+// 37. Fixture scenario: ETH holder → budget cycle → entry matching → execution → tracking
 // ============================================================================
 
-describe('Full schema: ETH collateral → budgeted put buying', () => {
+describe('Fixture scenario: ETH collateral → budgeted put buying', () => {
   // This tests the complete flow an ETH holder experiences:
   // 1. Portfolio valued in ETH * spot
   // 2. 15-day budget cycle allocates 3.33%/yr
@@ -5711,10 +4732,10 @@ describe('Full schema: ETH collateral → budgeted put buying', () => {
 });
 
 // ============================================================================
-// 38. Full schema: exit rule monitoring (sell_put to roll positions)
+// 38. Fixture scenario: exit rule monitoring (sell_put to roll positions)
 // ============================================================================
 
-describe('Full schema: exit monitoring for put rolling', () => {
+describe('Fixture scenario: exit monitoring for put rolling', () => {
   // The bot holds puts and needs to roll them ~3-4 weeks before expiry
   // Exit rule triggers → pending action queued → eventually confirmed/executed
 
@@ -5849,12 +4870,12 @@ describe('Full schema: exit monitoring for put rolling', () => {
     assert.strictEqual(gate.allowed, false);
   });
 
-  test('roll_protection can fully close an underwater aging put when longer protection remains', () => {
+  test('roll_protection blocks a full close until replacement quantity is sufficient', () => {
     const position = { instrument_name: 'ETH-20991226-1000-P', amount: 10.0, direction: 'long', avg_entry_price: 10.00 };
     const longerPut = { instrument_name: 'ETH-20991231-1500-P', amount: 7.1, direction: 'long', avg_entry_price: 26.81 };
     const criteria = { put_exit_intent: 'roll_protection' };
     const values = { dte: 19.22, unrealized_pnl_pct: -84.16, execution_price: 2.10 };
-    const amount = getSellPutExitAmount(position, values, criteria);
+    const amount = getSellPutExitAmount({ action: 'sell_put' }, criteria, position, values);
     const gate = getSellPutProtectionGate(
       { action: 'sell_put' },
       values,
@@ -5862,13 +4883,18 @@ describe('Full schema: exit monitoring for put rolling', () => {
     );
 
     assert.strictEqual(amount, 10.0);
-    assert.strictEqual(gate.allowed, true);
+    assert.strictEqual(gate.allowed, false);
+    const covered = getSellPutProtectionGate(
+      { action: 'sell_put' }, values,
+      { criteria, position, positions: [position, { ...longerPut, amount: 10 }], plannedSellAmount: amount }
+    );
+    assert.strictEqual(covered.allowed, true);
   });
 
   test('long-dated put can be considered after extreme asymmetric upside', () => {
     const position = { instrument_name: 'ETH-20260731-1500-P', amount: 4.0, direction: 'long', avg_entry_price: 5.00 };
     const values = { dte: 63.7, unrealized_pnl_pct: 1200, execution_price: 120 };
-    const amount = getSellPutExitAmount(position, values, { put_exit_intent: 'monetize_tail_win', tranche_fraction: 0.25 });
+    const amount = getSellPutExitAmount({ action: 'sell_put' }, { put_exit_intent: 'monetize_tail_win', tranche_fraction: 0.25 }, position, values);
     const gate = getSellPutProtectionGate(
       { action: 'sell_put' },
       values,
@@ -5900,7 +4926,7 @@ describe('Full schema: exit monitoring for put rolling', () => {
       patient_sell_put_fair_value_pnl_pct: plan.fairValuePnlPct,
       patient_sell_put_fair_value_price: plan.fairValuePrice,
     };
-    const amount = getSellPutExitAmount(position, plannedValues, criteria);
+    const amount = getSellPutExitAmount({ action: 'sell_put' }, criteria, position, plannedValues);
     const gate = getSellPutProtectionGate(
       { action: 'sell_put' },
       plannedValues,
@@ -5978,52 +5004,12 @@ describe('Full schema: exit monitoring for put rolling', () => {
 });
 
 // ============================================================================
-// 39. Full schema: confirmation voting logic
+// 39. Fixture scenario: confirmation voting logic
 // ============================================================================
 
 describe('Confirmation voting logic', () => {
-  // Tests the voting matrix: both confirm → execute, both reject → reject,
-  // split → reject (conservative), one fails → use the other
-
-  const isSellCallMarginCapContradiction = (action, vote, callMarginDecision) => {
-    if (
-      action !== 'sell_call'
-      || vote?.confirm !== false
-      || callMarginDecision?.entryCapSatisfied !== true
-    ) {
-      return false;
-    }
-
-    const reasoning = String(vote.reasoning || '');
-    const namesMarginGate = /\b(?:active[\s_-]+)?(?:entry[\s_-]+)?cap\b|\b(?:active[\s_-]+)?limit\b|\bentry_cap_satisfied\b/i.test(reasoning);
-    const claimsGateFailure = /\b(?:exceed(?:s|ed|ing)?|above|over|breach(?:es|ed|ing)?|violate(?:s|d|ing)?|fail(?:s|ed|ing)?|too\s+high|not\s+satisf(?:y|ied|ying))\b/i.test(reasoning);
-    return namesMarginGate && claimsGateFailure;
-  };
-
-  const resolveVote = (anthropicVote, codexVote) => {
-    if (anthropicVote && codexVote) {
-      return (anthropicVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
-    } else if (anthropicVote) {
-      return anthropicVote.confirm ? 'confirmed' : 'rejected';
-    } else if (codexVote) {
-      return codexVote.confirm ? 'confirmed' : 'rejected';
-    }
-    return 'retry'; // Both failed
-  };
-
-  const resolveSellCallVote = (anthropicVote, codexVote, callMarginDecision) => {
-    const decisionAnthropicVote = isSellCallMarginCapContradiction(
-      'sell_call',
-      anthropicVote,
-      callMarginDecision
-    ) ? null : anthropicVote;
-    const decisionCodexVote = isSellCallMarginCapContradiction(
-      'sell_call',
-      codexVote,
-      callMarginDecision
-    ) ? null : codexVote;
-    return resolveVote(decisionAnthropicVote, decisionCodexVote);
-  };
+  const { resolveConfirmationVotes: resolveVote } = loadProduction(['resolveConfirmationVotes']);
+  const resolveSellCallVote = resolveVote;
 
   test('both confirm → confirmed', () => {
     const result = resolveVote({ confirm: true, reasoning: 'good' }, { confirm: true, reasoning: 'convex' });
@@ -6065,7 +5051,7 @@ describe('Confirmation voting logic', () => {
     assert.strictEqual(result, 'retry');
   });
 
-  test('passed sell-call cap ignores a reviewer that falsely claims projected utilization exceeds it', () => {
+  test('passed sell-call cap preserves the reviewer rejection for review', () => {
     const result = resolveSellCallVote(
       {
         confirm: true,
@@ -6082,7 +5068,7 @@ describe('Confirmation voting logic', () => {
         entryCapSatisfied: true,
       }
     );
-    assert.strictEqual(result, 'confirmed');
+    assert.strictEqual(result, 'rejected');
   });
 
   test('passed sell-call cap preserves a reviewer veto for a separate risk concern', () => {
@@ -6112,156 +5098,48 @@ describe('Confirmation voting logic', () => {
   });
 
   test('production confirmation flow applies the authoritative sell-call margin safeguards', () => {
-    assert.ok(SCRIPT_SOURCE.includes('const isSellCallMarginCapContradiction ='));
+    assert.ok(!SCRIPT_SOURCE.includes('const isSellCallMarginCapContradiction ='));
     assert.ok(SCRIPT_SOURCE.includes("action.action === 'sell_call'"));
     assert.ok(SCRIPT_SOURCE.includes('Auto-rejected before LLM: projected sell-call margin utilization'));
-    assert.ok(SCRIPT_SOURCE.includes('const decisionCodexVote = codexMarginContradiction ? null : codexVote;'));
+    assert.ok(SCRIPT_SOURCE.includes('resolveConfirmationVotes(anthropicVote, codexVote)'));
   });
 });
 
-describe('Buy-put patient maker confirmation override', () => {
-  const buildBuyPutPatientMakerContext = (action, triggerData = {}, advisorLimitPrice = null, liveMarketPrice = null, options = {}) => {
-    if (action?.action !== 'buy_put') return { satisfied: false };
-    const criteria = action.rule_criteria || {};
-    const plannedScore = Number(triggerData?.planned_score ?? triggerData?.score);
-    const minScore = Number(criteria.min_score ?? triggerData?.min_score);
-    const targetScore = Number(triggerData?.target_score ?? criteria.target_score);
-    const requiredScore = Math.max(
-      Number.isFinite(minScore) && minScore > 0 ? minScore : 0,
-      Number.isFinite(targetScore) && targetScore > 0 ? targetScore : 0
-    );
-    const limitPrice = Number(advisorLimitPrice ?? triggerData?.advisor_limit_price);
-    const liveAsk = Number(liveMarketPrice);
-    const amount = Number(action?.amount);
-    const plannedOutlay = Number.isFinite(amount) && amount > 0 && limitPrice > 0 ? amount * limitPrice : null;
-    const putBudgetRemaining = Number(options.putBudgetRemaining);
-    const hasBudgetCap = Number.isFinite(putBudgetRemaining) && putBudgetRemaining >= 0;
-    const budgetSatisfied = !hasBudgetCap || (Number.isFinite(plannedOutlay) && plannedOutlay <= putBudgetRemaining + 0.01);
-    const liquidationSafe = !options.marginState?.is_under_liquidation;
-    return {
-      satisfied: plannedScore + 1e-9 >= requiredScore && limitPrice > 0 && liveAsk > limitPrice && budgetSatisfied && liquidationSafe,
-      plannedScore,
-      requiredScore,
-      limitPrice,
-      liveAsk,
-      plannedOutlay,
-      budgetSatisfied,
-      liquidationSafe,
-    };
-  };
-
-  const applyBuyPutOverride = ({ action, triggerData, advisorLimitPrice, liveMarketPrice, anthropicVote, codexVote, options = {} }) => {
-    let decision = anthropicVote && codexVote
-      ? (anthropicVote.confirm && codexVote.confirm ? 'confirmed' : 'rejected')
-      : anthropicVote
-        ? (anthropicVote.confirm ? 'confirmed' : 'rejected')
-        : codexVote
-          ? (codexVote.confirm ? 'confirmed' : 'rejected')
-          : 'retry';
-    const context = buildBuyPutPatientMakerContext(action, triggerData, advisorLimitPrice, liveMarketPrice, options);
-    const oneConfirmed = Boolean(anthropicVote?.confirm || codexVote?.confirm);
-    const patientMakerOverride = context.satisfied && oneConfirmed;
-    if (decision === 'rejected' && patientMakerOverride) decision = 'confirmed';
-    return { decision, context, patientMakerOverride };
-  };
-
-  test('split vote confirms structurally valid below-ask maker bid', () => {
-    const result = applyBuyPutOverride({
-      action: { action: 'buy_put', amount: 3.2, rule_criteria: { min_score: 0.0031, target_score: 0.0031 } },
-      triggerData: { planned_score: 0.003102, advisor_limit_price: 16.45 },
-      advisorLimitPrice: 16.45,
-      liveMarketPrice: 23.6,
-      anthropicVote: { confirm: true, order_type: 'post_only', reasoning: 'planned score meets threshold' },
-      codexVote: { confirm: false, reasoning: 'Live ask of $23.60 is above the target limit price of $16.45, making the trade unachievable at the desired execution price.' },
-      options: { putBudgetRemaining: 52.89, marginState: { is_under_liquidation: false } },
+describe('Patient buy-put reviewer authority', () => {
+  const { resolveConfirmationVotes } = loadProduction(['resolveConfirmationVotes']);
+  for (const reasoning of [
+    'The current ask exceeds the approved patient bid.',
+    'Reject for a separate risk concern even though the maker price is valid.',
+    'The planned score or available premium budget no longer passes.',
+  ]) {
+    test('patient price cannot override a rejection: ' + reasoning, () => {
+      assert.strictEqual(resolveConfirmationVotes(
+        { confirm: true, order_type: 'post_only', limit_price: 16.45 },
+        { confirm: false, reasoning },
+      ), 'rejected');
     });
-
-    assert.strictEqual(result.context.satisfied, true);
-    assert.strictEqual(result.patientMakerOverride, true);
-    assert.strictEqual(result.decision, 'confirmed');
+  }
+  test('missing reviewers cannot authorize a patient bid', () => {
+    assert.strictEqual(resolveConfirmationVotes(null, null), 'retry');
   });
-
-  test('split vote confirms without depending on rejection wording', () => {
-    const result = applyBuyPutOverride({
-      action: { action: 'buy_put', amount: 3.27, rule_criteria: { min_score: 0.0031, target_score: 0.0031 } },
-      triggerData: { planned_score: 0.003102, advisor_limit_price: 16.14 },
-      advisorLimitPrice: 16.14,
-      liveMarketPrice: 25.4,
-      anthropicVote: { confirm: true, order_type: 'post_only', reasoning: 'standing patient bid confirmed' },
-      codexVote: { confirm: false, reasoning: 'Reject for any prose wording here; typed maker-bid facts decide this narrow case.' },
-      options: { putBudgetRemaining: 52.89, marginState: { is_under_liquidation: false } },
-    });
-
-    assert.strictEqual(result.context.satisfied, true);
-    assert.strictEqual(result.patientMakerOverride, true);
-    assert.strictEqual(result.decision, 'confirmed');
+  test('both reviewers can approve a bounded patient bid', () => {
+    assert.strictEqual(resolveConfirmationVotes(
+      { confirm: true, order_type: 'post_only', limit_price: 16.45 },
+      { confirm: true, order_type: 'post_only', limit_price: 16.45 },
+    ), 'confirmed');
   });
-
-  test('split vote uses trigger target score that priced the pending bid', () => {
-    const result = applyBuyPutOverride({
-      action: { action: 'buy_put', amount: 5, rule_criteria: { min_score: 0.0042, target_score: 0.006 } },
-      triggerData: { planned_score: 0.004201, target_score: 0.0042, advisor_limit_price: 10.38 },
-      advisorLimitPrice: 10.38,
-      liveMarketPrice: 19.3,
-      anthropicVote: { confirm: true, order_type: 'post_only', reasoning: 'planned score meets trigger target' },
-      codexVote: { confirm: false, reasoning: 'Live ask is above target limit price and cannot fill immediately.' },
-      options: { putBudgetRemaining: 52.89, marginState: { is_under_liquidation: false } },
-    });
-
-    assert.strictEqual(result.context.requiredScore, 0.0042);
-    assert.strictEqual(result.context.satisfied, true);
-    assert.strictEqual(result.patientMakerOverride, true);
-    assert.strictEqual(result.decision, 'confirmed');
-  });
-
-  test('does not override when current budget no longer covers the planned bid', () => {
-    const result = applyBuyPutOverride({
-      action: { action: 'buy_put', amount: 3.3, rule_criteria: { min_score: 0.0031, target_score: 0.0031 } },
-      triggerData: { planned_score: 0.003102, advisor_limit_price: 16.45 },
-      advisorLimitPrice: 16.45,
-      liveMarketPrice: 23.6,
-      anthropicVote: { confirm: true, reasoning: 'planned score meets threshold' },
-      codexVote: { confirm: false, reasoning: 'anything' },
-      options: { putBudgetRemaining: 10, marginState: { is_under_liquidation: false } },
-    });
-
-    assert.strictEqual(result.context.budgetSatisfied, false);
-    assert.strictEqual(result.patientMakerOverride, false);
-    assert.strictEqual(result.decision, 'rejected');
-  });
-
-  test('does not override when planned bid no longer satisfies the score threshold', () => {
-    const result = applyBuyPutOverride({
-      action: { action: 'buy_put', amount: 3.2, rule_criteria: { min_score: 0.0031, target_score: 0.0031 } },
-      triggerData: { planned_score: 0.0029, advisor_limit_price: 16.45 },
-      advisorLimitPrice: 16.45,
-      liveMarketPrice: 23.6,
-      anthropicVote: { confirm: true, reasoning: 'ok' },
-      codexVote: { confirm: false, reasoning: 'Live ask is above target limit price and unachievable.' },
-      options: { putBudgetRemaining: 52.89, marginState: { is_under_liquidation: false } },
-    });
-
-    assert.strictEqual(result.context.satisfied, false);
-    assert.strictEqual(result.decision, 'rejected');
-  });
-
-  test('source wires the narrow override into live confirmation', () => {
-    assert.ok(SCRIPT_SOURCE.includes('buildBuyPutPatientMakerContext'));
-    assert.ok(!SCRIPT_SOURCE.includes('isBuyPutMakerBidMarketabilityMisclassification'));
-    assert.ok(SCRIPT_SOURCE.includes('buy_put_patient_maker_override'));
+  test('production has no maker-price rejection override', () => {
+    assert.ok(!SCRIPT_SOURCE.includes('buy_put_patient_maker_override'));
+    assert.ok(!SCRIPT_SOURCE.includes('const buildBuyPutPatientMakerContext ='));
   });
 });
 
 // ============================================================================
-// 40. Full schema: cooldown prevents rapid-fire entries
+// 40. Fixture scenario: cooldown prevents rapid-fire entries
 // ============================================================================
 
 describe('Entry cooldown logic', () => {
-  const isIocZeroFillFailure = (failure) => (
-    String(failure?.reason || failure?.execution_result || '')
-      .toLowerCase()
-      .includes('zero fill (ioc)')
-  );
+  const { isIocZeroFillFailure } = loadProduction(['isIocZeroFillFailure']);
   const shouldSkipForFailedEntryCooldown = (action, failure) => {
     if (!failure) return false;
     return !isIocZeroFillFailure(failure);
@@ -6311,28 +5189,8 @@ describe('Entry cooldown logic', () => {
 });
 
 describe('Recent execution friction confirmation context', () => {
-  const isIocZeroFillFailure = (failure) => (
-    String(failure?.reason || failure?.execution_result || '')
-      .toLowerCase()
-      .includes('zero fill (ioc)')
-  );
-  const formatRecentExecutionFrictionContext = (action, failure) => {
-    const reason = failure?.reason || failure?.execution_result;
-    if (!reason) return '';
-    if (!isIocZeroFillFailure(failure)) {
-      return `Recent execution friction on this exact instrument/action: ${reason}`;
-    }
-
-    const routingGuidance = action === 'buy_put'
-      ? 'For buy_put entries, confirm when the current trigger, advisor limit, budget, and risk facts remain valid; use gtc/post_only at the approved limit when liquidity is sparse, and use ioc only when immediacy is worth another possible zero fill.'
-      : 'For entries, confirm when the current trigger and risk gates remain valid; use route selection to handle thin liquidity.';
-
-    return [
-      `Recent execution routing note for this exact instrument/action: ${reason}`,
-      '- Prior IOC zero fill means no visible/matching liquidity accepted the limit at that instant. It is not a reviewer rejection, not a cooldown blocker, and not evidence that the active rule trigger is invalid.',
-      `- ${routingGuidance}`,
-    ].join('\n');
-  };
+  const { isIocZeroFillFailure } = loadProduction(['isIocZeroFillFailure']);
+  const { formatRecentExecutionFrictionContext } = loadProduction(['formatRecentExecutionFrictionContext']);
 
   test('buy_put IOC zero fill is routing context, not a rejection reason', () => {
     const context = formatRecentExecutionFrictionContext('buy_put', {
@@ -6360,7 +5218,7 @@ describe('Recent execution friction confirmation context', () => {
 });
 
 // ============================================================================
-// 41. Full schema: DRY_RUN budget tracking without real orders
+// 41. Fixture scenario: DRY_RUN budget tracking without real orders
 // ============================================================================
 
 describe('DRY_RUN mode budget tracking', () => {
@@ -6401,7 +5259,7 @@ describe('DRY_RUN mode budget tracking', () => {
 });
 
 // ============================================================================
-// 42. Full schema: entry candidate filtering fidelity
+// 42. Fixture scenario: entry candidate filtering fidelity
 // ============================================================================
 
 describe('Entry candidate filtering: all criteria enforced', () => {
@@ -6492,7 +5350,7 @@ describe('Entry candidate filtering: all criteria enforced', () => {
 });
 
 // ============================================================================
-// 43. Full schema: multi-cycle budget discipline over time
+// 43. Fixture scenario: multi-cycle budget discipline over time
 // ============================================================================
 
 describe('Multi-cycle budget discipline simulation', () => {
@@ -6590,7 +5448,7 @@ describe('Multi-cycle budget discipline simulation', () => {
 });
 
 // ============================================================================
-// 44. Full schema: executeOrder direction and reduceOnly mapping
+// 44. Fixture scenario: executeOrder direction and reduceOnly mapping
 // ============================================================================
 
 describe('executeOrder action → direction + reduceOnly mapping', () => {
@@ -6630,13 +5488,8 @@ describe('executeOrder action → direction + reduceOnly mapping', () => {
 // ============================================================================
 
 describe('action semantics descriptions', () => {
-  const ACTION_POLICY = {
-    buy_put: { semantics: 'Entry action: buying a put for tail-risk insurance. Bounded premium outlay, long convexity.' },
-    sell_call: { semantics: 'Entry action: selling a call to open short call exposure against ETH-collateralized account capacity.' },
-    sell_put: { semantics: 'Exit-only action: selling an already-owned long put to close or trim it. This must be reduce-only in effect and cannot create a naked short put.' },
-    buyback_call: { semantics: 'Exit-only action: buying back an already-open short call to close or trim it. This must be reduce-only in effect and cannot create a new long call exposure beyond the short being closed.' },
-  };
-  const describeActionSemantics = (action) => ACTION_POLICY[action]?.semantics || 'Trade semantics unavailable.';
+  const { ACTION_POLICY } = loadProduction(['ACTION_POLICY']);
+  const { describeActionSemantics } = loadProduction(['describeActionSemantics']);
 
   test('sell_put is explicitly described as closing an owned long put', () => {
     const text = describeActionSemantics('sell_put');
@@ -6816,138 +5669,24 @@ describe('patient buyback market-making price selection', () => {
 });
 
 describe('advisor-led buyback confirmation discipline', () => {
-  const CALL_BUYBACK_PROFIT_THRESHOLD = 80;
-  const REDUNDANT_BUYBACK_CAPTURE_FIELDS = new Set(['dte', 'mark_price']);
-
-  const isProfitCaptureCondition = (condition) =>
-    condition?.field === 'unrealized_pnl_pct'
-    && ['gte', 'gt'].includes(condition.op)
-    && Number.isFinite(Number(condition.value ?? condition.threshold));
-
-  const isThreatManagementCriteria = (criteria) =>
-    criteria?.allow_below_profit_floor === true
-    || criteria?.buyback_intent === 'threat_management';
-
-  const normalizeCaptureFloor = (rule) => {
-    if (rule.rule_type !== 'exit' || rule.action !== 'buyback_call') return { rule, changed: false };
-    if (isThreatManagementCriteria(rule.criteria)) return { rule, changed: false };
-
-    let changed = false;
-    let hasProfitCaptureCondition = false;
-    const conditions = [];
-    for (const condition of rule.criteria.conditions) {
-      if (REDUNDANT_BUYBACK_CAPTURE_FIELDS.has(condition?.field)) {
-        changed = true;
-        continue;
-      }
-      if (!isProfitCaptureCondition(condition)) {
-        conditions.push(condition);
-        continue;
-      }
-      hasProfitCaptureCondition = true;
-      if (Number(condition.value ?? condition.threshold) >= CALL_BUYBACK_PROFIT_THRESHOLD) {
-        conditions.push(condition);
-        continue;
-      }
-      changed = true;
-      conditions.push({ ...condition, value: CALL_BUYBACK_PROFIT_THRESHOLD });
-    }
-    if (!hasProfitCaptureCondition) {
-      conditions.push({ field: 'unrealized_pnl_pct', op: 'gte', value: CALL_BUYBACK_PROFIT_THRESHOLD });
-      changed = true;
-    }
-    const conditionLogic = 'all';
-    if ((rule.criteria.condition_logic || 'all') !== conditionLogic) changed = true;
-
-    return changed
-      ? { rule: { ...rule, criteria: { ...rule.criteria, conditions, condition_logic: conditionLogic } }, changed }
-      : { rule, changed: false };
-  };
-
-  const conditionPasses = (actual, op, threshold) => {
-    if (!Number.isFinite(actual) || !Number.isFinite(threshold)) return false;
-    if (op === 'gt') return actual > threshold;
-    if (op === 'gte') return actual >= threshold;
-    if (op === 'lt') return actual < threshold;
-    if (op === 'lte') return actual <= threshold;
-    return false;
-  };
-
-  const buildBuybackContext = ({ actual, patientCapturePct, threshold = CALL_BUYBACK_PROFIT_THRESHOLD, op = 'gte' }) => {
-    const actualSatisfied = conditionPasses(actual, op, threshold);
-    const patientSatisfied = conditionPasses(patientCapturePct, op, threshold);
-    return {
-      threshold,
-      op,
-      actual,
-      patientCapturePct,
-      satisfied: actualSatisfied || patientSatisfied,
-      actualSatisfied,
-      patientSatisfied,
-    };
-  };
-
-  const isPatientBuybackThresholdMisclassification = (reason) => {
-    const text = String(reason || '').toLowerCase();
-    const oldAdvisorLimitWording = text.includes('advisor limit')
-      && text.includes('would capture')
-      && text.includes('live executable ask')
-      && (text.includes('below the 80') || text.includes('conditions_met=false'));
-    const patientBidWording = text.includes('patient_bid_satisfies_rule=yes')
-      || (
-        text.includes('patient bid')
-        && (text.includes('would capture') || text.includes('capture 80'))
-        && (
-          text.includes('live executable')
-          || text.includes('live ask')
-          || text.includes('current market')
-          || text.includes('rule itself')
-        )
-      );
-    return oldAdvisorLimitWording || patientBidWording;
-  };
-
-  const captureGateAllows = ({ rule, values }) => {
-    if (rule.rule_type !== 'exit' || rule.action !== 'buyback_call') return true;
-    if (isThreatManagementCriteria(rule.criteria)) return true;
-    const condition = rule.criteria.conditions.find(isProfitCaptureCondition);
-    if (!condition) return false;
-    return conditionPasses(
-      Number(values.unrealized_pnl_pct),
-      condition.op,
-      Number(condition.value ?? condition.threshold)
-    );
-  };
-
-  const resolveVote = ({ anthropicVote, codexVote, buybackContext, liveMarketPrice }) => {
-    const deterministicPatientBuyback = buybackContext?.patientSatisfied === true
-      && Number(buybackContext?.patientLimitPrice) > 0
-      && Number(liveMarketPrice) > 0;
-    let decision;
-    if (anthropicVote && codexVote) {
-      decision = (anthropicVote.confirm && codexVote.confirm) ? 'confirmed' : 'rejected';
-    } else if (anthropicVote) {
-      decision = anthropicVote.confirm ? 'confirmed' : 'rejected';
-    } else if (codexVote) {
-      decision = codexVote.confirm ? 'confirmed' : 'rejected';
-    } else {
-      decision = deterministicPatientBuyback ? 'confirmed' : 'retry';
-    }
-    const advisorBuybackRuleSatisfied = buybackContext?.satisfied === true && Number(liveMarketPrice) > 0;
-    if (decision === 'rejected' && deterministicPatientBuyback) {
-      decision = 'confirmed';
-    }
-    if (
-      decision === 'rejected'
-      && advisorBuybackRuleSatisfied
-      && anthropicVote
-      && codexVote
-      && (anthropicVote.confirm || codexVote.confirm)
-    ) {
-      decision = 'confirmed';
-    }
-    return decision;
-  };
+  const {
+    normalizeBuybackCaptureFloor: normalizeCaptureFloor,
+    isBuybackProfitCaptureCondition: isProfitCaptureCondition,
+    getBuybackCaptureGate,
+    buildBuybackConfirmationContext,
+    resolveConfirmationVotes,
+  } = loadProduction([
+    'normalizeBuybackCaptureFloor', 'isBuybackProfitCaptureCondition',
+    'getBuybackCaptureGate', 'buildBuybackConfirmationContext', 'resolveConfirmationVotes',
+  ]);
+  const captureGateAllows = ({ rule, values }) => getBuybackCaptureGate(rule, rule.criteria, values).allowed;
+  const buildBuybackContext = ({ actual, patientCapturePct, threshold = CALL_BUYBACK_PROFIT_THRESHOLD, op = 'gte' }) => (
+    buildBuybackConfirmationContext({
+      action: 'buyback_call',
+      rule_criteria: { conditions: [{ field: 'unrealized_pnl_pct', op, value: threshold }] },
+    }, { current_values: { unrealized_pnl_pct: actual }, patient_buyback_capture_pct: patientCapturePct })
+  );
+  const resolveVote = ({ anthropicVote, codexVote }) => resolveConfirmationVotes(anthropicVote, codexVote);
 
   test('normalizes advisor buyback harvest rules below the configured capture floor', () => {
     const normalized = normalizeCaptureFloor({
@@ -7061,7 +5800,7 @@ describe('advisor-led buyback confirmation discipline', () => {
     assert.strictEqual(normalized.rule.criteria.conditions[0].value, 70);
   });
 
-  test('split review confirms when an active advisor buyback rule is satisfied', () => {
+  test('split review rejects even when an active advisor buyback rule is satisfied', () => {
     const decision = resolveVote({
       anthropicVote: { confirm: false, reasoning: 'mechanical exit' },
       codexVote: { confirm: true, reasoning: 'advisor rule triggered' },
@@ -7069,7 +5808,7 @@ describe('advisor-led buyback confirmation discipline', () => {
       liveMarketPrice: 0.6,
     });
 
-    assert.strictEqual(decision, 'confirmed');
+    assert.strictEqual(decision, 'rejected');
   });
 
   test('patient buyback bid can satisfy profit-capture rule before live ask does', () => {
@@ -7083,7 +5822,7 @@ describe('advisor-led buyback confirmation discipline', () => {
     assert.strictEqual(context.satisfied, true);
   });
 
-  test('patient buyback bid override confirms even when both reviewers reject live ask economics', () => {
+  test('patient buyback bid never overrides both reviewer rejections', () => {
     const decision = resolveVote({
       anthropicVote: { confirm: false, reasoning: 'live ask below threshold' },
       codexVote: { confirm: false, reasoning: 'live executable capture below 80%' },
@@ -7094,10 +5833,10 @@ describe('advisor-led buyback confirmation discipline', () => {
       liveMarketPrice: 9,
     });
 
-    assert.strictEqual(decision, 'confirmed');
+    assert.strictEqual(decision, 'rejected');
   });
 
-  test('deterministic patient buyback does not retry when both reviewers fail to return JSON', () => {
+  test('patient buyback retries when both reviewers fail to return JSON', () => {
     const decision = resolveVote({
       anthropicVote: null,
       codexVote: null,
@@ -7108,7 +5847,7 @@ describe('advisor-led buyback confirmation discipline', () => {
       liveMarketPrice: 9,
     });
 
-    assert.strictEqual(decision, 'confirmed');
+    assert.strictEqual(decision, 'retry');
   });
 
   test('patient buyback override still requires live market price and explicit patient limit', () => {
@@ -7130,13 +5869,14 @@ describe('advisor-led buyback confirmation discipline', () => {
     }), 'rejected');
   });
 
-  test('recognizes stale rejection caused by patient buyback threshold misclassification', () => {
-    const reason = 'Rule NOT satisfied: unrealized_pnl_pct 77.49% is below the 80% threshold. Advisor limit_price=$3.82 would capture 80%, but live executable ask=$4.30 does not achieve the 80% capture rule threshold. conditions_met=false';
-    const newerReason = "REJECT: Rule trigger condition NOT MET. Active buyback_intent='profit_capture' requires executable unrealized_pnl_pct >= 80%. The trigger data shows patient_bid_satisfies_rule=yes (meaning a $3.82 bid would capture 80% IF filled at that level), but the rule itself is NOT triggered at current market.";
-
-    assert.strictEqual(isPatientBuybackThresholdMisclassification(reason), true);
-    assert.strictEqual(isPatientBuybackThresholdMisclassification(newerReason), true);
-    assert.strictEqual(isPatientBuybackThresholdMisclassification('Reject: genuine threat-management concern'), false);
+  test('a reported threshold disagreement remains a reviewer veto', () => {
+    for (const reasoning of [
+      'Advisor limit would capture 80%, but live executable ask does not. conditions_met=false',
+      'patient_bid_satisfies_rule=yes but the rule itself is not triggered at current market',
+      'Separate risk-management concern',
+    ]) {
+      assert.strictEqual(resolveVote({ anthropicVote: { confirm: true }, codexVote: { confirm: false, reasoning } }), 'rejected');
+    }
   });
 
   test('split review still rejects when the buyback rule is not satisfied or price is missing', () => {
@@ -7195,7 +5935,7 @@ describe('confirmation prompt margin context', () => {
     );
     assert.ok(context.includes('projected_after_trade_exact=45.000000%'));
     assert.ok(context.includes('entry_cap_satisfied=yes'));
-    assert.ok(context.includes('At-or-below means <='));
+    assert.match(context, /at-or-below means <=/i);
   });
 
   test('non-call action says margin context not applicable', () => {
@@ -7203,9 +5943,13 @@ describe('confirmation prompt margin context', () => {
     assert.strictEqual(context, 'Call margin utilization: not applicable for this action.');
   });
 
-  test('buy_put confirmation context makes trigger score canonical when live delta differs', () => {
-    const context = formatBuyPutConfirmationContext({
-      action: { action: 'buy_put', price: 21 },
+  test('buy_put confirmation uses fresh delta and DTE rather than the saved trigger score', () => {
+    class EvaluationDate extends Date { static now() { return Date.parse('2030-01-01T08:00:00Z'); } }
+    const { formatBuyPutConfirmationContext: formatAtTestTime } = loadProduction(
+      ['formatBuyPutConfirmationContext'], { bindings: { Date: EvaluationDate } }
+    );
+    const context = formatAtTestTime({
+      action: { action: 'buy_put', price: 21, instrument_name: 'ETH-20300302-1600-P' },
       triggerData: {
         score: 0.004014,
         delta: -0.0843,
@@ -7235,10 +5979,11 @@ describe('confirmation prompt margin context', () => {
     });
 
     assert.ok(context.includes('Trigger score: 0.004014'));
-    assert.ok(context.includes('planned_score=0.004014'));
-    assert.ok(context.includes('live_ask_score=0.003700'));
-    assert.ok(context.includes('planned_score at our limit is the economic gate'));
-    assert.ok(context.includes('live_ask_score may be below threshold'));
+    assert.ok(context.includes('fresh_delta=-0.0737, fresh_dte=60.00'));
+    assert.ok(context.includes('planned PUT_EDGE=0.003510'));
+    assert.ok(context.includes('live PUT_EDGE=0.003510'));
+    assert.ok(context.includes('planned PUT EDGE at our limit is the economic gate'));
+    assert.ok(context.includes('live PUT EDGE may be below threshold'));
     assert.ok(context.includes('Composite edge context'));
     assert.ok(context.includes('edge_score=128.40'));
     assert.ok(context.includes('shock40:3.20x'));
@@ -7421,7 +6166,7 @@ describe('confirmation prompt margin context', () => {
 
     assert.ok(context.includes('Intent=roll_protection'));
     assert.ok(context.includes('planned_close_amount=10.0000'));
-    assert.ok(context.includes('longer_dated_protection_in_book=yes'));
+    assert.ok(context.includes('longer_dated_protection_in_book=no'));
     assert.ok(context.includes('total_long_puts_after_sale=7.1000'));
     assert.ok(context.includes('full close of the aging instrument'));
     assert.ok(context.includes('negative PnL are allowed roll facts'));
