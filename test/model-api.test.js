@@ -85,12 +85,18 @@ test('Claude failure diagnostics distinguish truncation, refusal, and empty text
 });
 
 function loadMakerHelpers() {
+  const now = Date.parse('2026-09-10T08:00:00Z');
+  class FixedDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  }
   const context = vm.createContext({
     normalizeBuyPutScore: require('../bot/put-score').normalizeBuyPutScore,
+    ...require('../bot/order-pricing'),
+    Date: FixedDate,
   });
   for (const name of [
-    'parseMaybeJsonObject', 'getInstrumentPriceStep', 'roundToStep', 'getStepDecimals',
-    'normalizePriceToStep', 'avoidRoundNumberRestingPrice', 'computePostOnlyRetryPrice',
+    'parseMaybeJsonObject', 'parseExpiryFromInstrument', 'computeDteFromInstrumentName',
     'formatBuyPutConfirmationContext',
   ]) {
     const start = source.indexOf(`const ${name} =`);
@@ -110,7 +116,7 @@ test('screenshot scenario supplies a cheaper maker bid within the approved cap',
   assert.ok(3.38 * plan.retryPrice < 45);
   assert.ok(Math.abs(plan.retryPrice * 10 - Math.round(plan.retryPrice * 10)) < 1e-9);
   const prompt = api.formatBuyPutConfirmationContext({
-    action: { action: 'buy_put', amount: 3.38, rule_criteria: { min_score: 0.001 } },
+    action: { action: 'buy_put', instrument_name: 'ETH-20261127-1600-P', amount: 3.38, rule_criteria: { min_score: 0.001 } },
     triggerData: { delta: -0.1, dte: 78, target_score: 0.001 },
     ticker, currentPrice: 13.28, advisorLimitPrice: 13.28, instrument,
   });
@@ -135,7 +141,7 @@ test('confirmation economics use the proposed maker price, not the reference cap
   const plan = api.computePostOnlyRetryPrice('buy', ticker, instrument, 13.56);
   const normalizeScore = require('../bot/put-score').normalizeBuyPutScore;
   const prompt = api.formatBuyPutConfirmationContext({
-    action: { action: 'buy_put', amount: 3, rule_criteria: { min_score: 0.001 } },
+    action: { action: 'buy_put', instrument_name: 'ETH-20261127-1600-P', amount: 3, rule_criteria: { min_score: 0.001 } },
     triggerData: { delta: -0.1, dte: 78, target_score: 0.001 },
     ticker, currentPrice: 13.56, advisorLimitPrice: 13.56, instrument,
   });
@@ -148,7 +154,7 @@ test('confirmation economics use the proposed maker price, not the reference cap
 test('missing maker book is explicitly identified as reference-only economics', () => {
   const api = loadMakerHelpers();
   const prompt = api.formatBuyPutConfirmationContext({
-    action: { action: 'buy_put', amount: 3 },
+    action: { action: 'buy_put', instrument_name: 'ETH-20261127-1600-P', amount: 3 },
     triggerData: { delta: -0.1, dte: 78 },
     ticker: {}, currentPrice: 13.56, advisorLimitPrice: 13.56,
     instrument: { price_step: 0.1 },

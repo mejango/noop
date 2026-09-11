@@ -104,6 +104,16 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { getInstrumentPriceStep, roundToStep, getStepDecimals, normalizePriceToStep, normalizeOrderPriceForVenue, avoidRoundNumberRestingPrice, computePostOnlyRetryPrice } = require('./bot/order-pricing');
+const {
+  evaluateConditions,
+  evaluateExitConditions,
+  resolveConfirmationVotes,
+  hasUsableMarginState,
+  getPutReplacementCoverage,
+  liveRuleValues,
+  validateFinalOrderPolicy,
+} = require('./bot/trade-policy');
 const { ADX, MACD } = require('technicalindicators');
 const { ethers, AbiCoder } = require('ethers');
 const {
@@ -120,6 +130,7 @@ const {
   normalizeBuyPutScore,
   getBuyPutPriceForEdgeScore,
 } = require('./bot/put-score');
+const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
 
 const encoder = new AbiCoder();
 
@@ -179,6 +190,7 @@ const DOMAIN_SEPARATOR = '0xd96e5f90797da7ec8dc4e276260c7f3f87fedf68775fbe1ef116
 
 // Common trading parameters (single source of truth: bot/config.json)
 const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'config.json'), 'utf-8'));
+const STRATEGY_FACTS = require('./bot/strategy-facts.json');
 // Arithmetic discipline: spend 3.33% of insured base per year on puts,
 // allocated in PERIOD_DAYS windows. Budget recalculated at each cycle start.
 // Formula: insuredBaseValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
@@ -319,7 +331,7 @@ const PERIOD = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 
 // Trading parameters - PUTS
 const PUT_EXPIRATION_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
-const PUT_DELTA_RANGE = [-0.12, -0.02]; // Negative delta for puts
+const PUT_DELTA_RANGE = STRATEGY_FACTS.put_delta_range; // Negative delta for puts
 const BUY_PUT_ADVISORY_DTE_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
 const ADVISORY_OPTION_VALUE_WINDOW_DAYS = 6.2;
 const BUY_PUT_URGENT_SCORE_NUDGE = 1.005;
@@ -354,23 +366,23 @@ const BUY_PUT_EDGE_DTE_MIN_OK = 55;
 const BUY_PUT_EDGE_SHOCKS = [0.30, 0.40, 0.50];
 const BUY_PUT_EDGE_SHOCK_PAYOFF_GOOD = 2.0;
 const BUY_PUT_EDGE_SHOCK_PAYOFF_STRONG = 4.0;
-const PUT_ROLL_DTE_THRESHOLD = 25;
-const PUT_MONETIZATION_PROFIT_THRESHOLD = 1000;
-const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = 0.25;
+const PUT_ROLL_DTE_THRESHOLD = STRATEGY_FACTS.put_roll_dte_threshold;
+const PUT_MONETIZATION_PROFIT_THRESHOLD = STRATEGY_FACTS.put_monetization_profit_threshold_pct;
+const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = STRATEGY_FACTS.put_monetization_max_tranche_fraction;
 const REJECTED_ACTION_BACKOFF_MS = 60 * 60 * 1000;
 const MANDELBROT_SPOT_PATH_LOOKBACK_DAYS = 30;
 const MANDELBROT_SPOT_PATH_INTERVAL_HOURS = 1;
 const MANDELBROT_SPOT_PATH_MAX_POINTS = (MANDELBROT_SPOT_PATH_LOOKBACK_DAYS * 24) + 1;
 
 // Trading parameters - CALLS  
-const CALL_EXPIRATION_RANGE = [5, 12];
-const CALL_DELTA_RANGE = [0.04, 0.12]; // Positive delta for calls
-const SELL_CALL_FALLBACK_MIN_BID = 4;
-const SELL_CALL_FALLBACK_MIN_SCORE = 65;
+const CALL_EXPIRATION_RANGE = STRATEGY_FACTS.call_dte_range;
+const CALL_DELTA_RANGE = STRATEGY_FACTS.call_delta_range; // Positive delta for calls
+const SELL_CALL_FALLBACK_MIN_BID = STRATEGY_FACTS.sell_call_fallback_min_bid;
+const SELL_CALL_FALLBACK_MIN_SCORE = STRATEGY_FACTS.sell_call_fallback_min_score;
 const CANDIDATE_OBSERVATION_TOP_N = 8;
 
 // Call buyback thresholds
-const CALL_BUYBACK_PROFIT_THRESHOLD = 80; // Harvest short calls once at least this much premium is captured
+const CALL_BUYBACK_PROFIT_THRESHOLD = STRATEGY_FACTS.call_buyback_profit_threshold_pct; // Harvest short calls once at least this much premium is captured
 
 // Journal auto-generation
 const JOURNAL_INTERVAL_MS = 8 * 60 * 60 * 1000; // Every 8 hours
@@ -1860,6 +1872,7 @@ const buildLiveSellCallMarketContext = (tickerMap = {}, nowMs = Date.now(), extr
     rows.push({
       name,
       optionType: parsed.optionType,
+      expiry: parsed.expiry.getTime(),
       dte,
       delta,
       bidPrice,
@@ -1896,7 +1909,7 @@ const buildLiveSellCallMarketContext = (tickerMap = {}, nowMs = Date.now(), extr
   const putIv = meanFinite(buyPutRows.map((row) => row.impliedVol));
   const callOi = sumFinite(sellCallRows.map((row) => row.openInterest));
   const putOi = sumFinite(buyPutRows.map((row) => row.openInterest));
-  const skew = putIv != null && callIv != null ? putIv - callIv : null;
+  const matchedSkew = computeMatchedPutCallSkew(buyPutRows, rows.filter((row) => row.optionType === 'C'));
 
   return {
     market_avg_spread: meanFinite(valueRows.map((row) => row.spreadPct)),
@@ -1905,7 +1918,11 @@ const buildLiveSellCallMarketContext = (tickerMap = {}, nowMs = Date.now(), extr
     market_best_put_score: bestPutScore > 0 ? bestPutScore : null,
     market_call_iv: callIv,
     market_put_iv: putIv,
-    market_skew: skew,
+    market_skew: matchedSkew.skew,
+    market_skew_basis: 'same_expiry_absolute_delta',
+    market_skew_matched_pairs: matchedSkew.matchedPairs,
+    market_skew_matched_expiries: matchedSkew.matchedExpiries,
+    market_skew_unmatched_puts: matchedSkew.unmatchedPuts,
     market_call_oi: callOi > 0 ? callOi : null,
     market_put_oi: putOi > 0 ? putOi : null,
     market_total_oi: callOi + putOi > 0 ? callOi + putOi : null,
@@ -2201,7 +2218,7 @@ const getBestCurrentBuyPutCandidate = (tickerMap = {}, nowMs = Date.now(), marke
       marketContext,
     });
     const selectionScore = research.selection_score || score;
-    if (!best || selectionScore > (best.selection_score || best.score)) {
+    if (isBetterBuyPutCandidate({ instrument: name, selection_score: selectionScore, edge_score: score }, best)) {
       best = {
         instrument: name,
         delta,
@@ -2236,12 +2253,17 @@ const getBestCurrentBuyPutEdgeCandidate = (tickerMap = {}, nowMs = Date.now()) =
     if (!(delta >= PUT_DELTA_RANGE[0] && delta <= PUT_DELTA_RANGE[1]) || !(askPrice > 0)) continue;
     const rawScore = Math.abs(delta) / askPrice;
     const edgeScore = normalizeBuyPutScore(rawScore, dte);
-    if (!(edgeScore > 0) || (best && best.edge_score >= edgeScore)) continue;
+    if (!(edgeScore > 0) || !isBetterBuyPutCandidate({ instrument: name, edge_score: edgeScore }, best)) continue;
     best = {
       instrument: name,
       raw_score: rawScore,
       edge_score: edgeScore,
       ask_price: askPrice,
+      bid_price: Number(ticker?.b),
+      mark_price: Number(ticker?.M),
+      ask_amount: Number(ticker?.A) || 0,
+      strike: parsed.strike,
+      expiry: Math.floor(parsed.expiry.getTime() / 1000),
       delta,
       dte,
     };
@@ -2518,7 +2540,8 @@ const buildRollingOptionValueContext = ({
   spotPrice = null,
 }) => {
   const before = currentTickTimestamp || new Date().toISOString();
-  const since = new Date(Date.now() - ADVISORY_OPTION_VALUE_WINDOW_DAYS * 86400000).toISOString();
+  const nowMs = Date.now();
+  const since = new Date(nowMs - ADVISORY_OPTION_VALUE_WINDOW_DAYS * 86400000).toISOString();
   let marketOiDelta24hPct = null;
   if (db && typeof db.getOpenInterestHourly === 'function') {
     try {
@@ -2530,11 +2553,14 @@ const buildRollingOptionValueContext = ({
       console.log(`📋 Advisory context: open-interest trend query failed: ${e.message}`);
     }
   }
-  const sellCallMarketContext = buildLiveSellCallMarketContext(tickerMap, Date.now(), {
+  const sellCallMarketContext = buildLiveSellCallMarketContext(tickerMap, nowMs, {
     market_oi_delta_24h_pct: marketOiDelta24hPct,
   });
-  const currentPut = getBestCurrentBuyPutCandidate(tickerMap, Date.now(), sellCallMarketContext, spotPrice);
-  const currentCall = getBestCurrentSellCallCandidate(tickerMap, Date.now());
+  const currentPut = getBestCurrentBuyPutCandidate(tickerMap, nowMs, sellCallMarketContext, spotPrice);
+  // History stores the maximum eligible PUT EDGE per observation, independent
+  // of quality ranking. Compare that same population and statistic live.
+  const currentPutEdge = getBestCurrentBuyPutEdgeCandidate(tickerMap, nowMs);
+  const currentCall = getBestCurrentSellCallCandidate(tickerMap, nowMs);
   let priorSamples = [];
   let priorBestDetail = null;
   let priorCallSamples = [];
@@ -2593,7 +2619,7 @@ const buildRollingOptionValueContext = ({
 
   const priorScores = priorSamples.map((row) => Number(row.score)).filter((score) => score > 0);
   const priorBestScore = priorScores.length > 0 ? Math.max(...priorScores) : null;
-  const currentScore = Number(currentPut?.score || 0);
+  const currentScore = Number(currentPutEdge?.edge_score || 0);
   const currentVsPriorBestPct = priorBestScore > 0 ? (currentScore / priorBestScore) * 100 : null;
   const percentile = currentScore > 0 && priorScores.length > 0
     ? (priorScores.filter((score) => score <= currentScore).length / priorScores.length) * 100
@@ -2677,7 +2703,7 @@ const buildRollingOptionValueContext = ({
       dte_range: BUY_PUT_ADVISORY_DTE_RANGE,
       raw_score: 'abs(delta) / ask_price',
       edge_score: `raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}`,
-      composite_selection_score: 'PUT EDGE adjusted for spread quality, IV/skew, OI trend, and 30/40/50% drawdown payoff multiples',
+      composite_selection_score: 'Quality score from PUT EDGE bands, spread, IV/skew, OI trend, and 30/40/50% drawdown payoff multiples; ties prefer higher continuous PUT EDGE',
     },
     sell_call_filters: {
       delta_range: CALL_DELTA_RANGE,
@@ -2686,6 +2712,7 @@ const buildRollingOptionValueContext = ({
       edge_score: `raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}`,
     },
     put_value_context: {
+      comparison_basis: 'maximum_eligible_put_edge_per_observation',
       current_score: roundForAdvisory(currentScore, 6),
       prior_window_best_score: roundForAdvisory(priorBestScore, 6),
       current_vs_prior_best_pct: roundForAdvisory(currentVsPriorBestPct, 2),
@@ -2694,7 +2721,21 @@ const buildRollingOptionValueContext = ({
       trend_1h_pct: scoreTrend1hPct,
       trend_6h_pct: computeScoreTrendPct(priorSamples, currentScore, 6),
       trend_24h_pct: computeScoreTrendPct(priorSamples, currentScore, 24),
-      current_detail: currentPut ? {
+      current_detail: currentPutEdge ? {
+        instrument: currentPutEdge.instrument,
+        raw_score: roundForAdvisory(currentPutEdge.raw_score, 6),
+        put_edge_score: roundForAdvisory(currentPutEdge.edge_score, 6),
+        delta: roundForAdvisory(currentPutEdge.delta, 4),
+        ask_price: roundForAdvisory(currentPutEdge.ask_price, 4),
+        bid_price: roundForAdvisory(currentPutEdge.bid_price, 4),
+        mark_price: roundForAdvisory(currentPutEdge.mark_price, 4),
+        ask_amount: roundForAdvisory(currentPutEdge.ask_amount, 2),
+        spread_pct: roundForAdvisory(currentPutEdge.mark_price > 0 ? ((currentPutEdge.ask_price - currentPutEdge.bid_price) / currentPutEdge.mark_price) * 100 : null, 2),
+        strike: currentPutEdge.strike,
+        expiry: currentPutEdge.expiry,
+        dte: roundForAdvisory(currentPutEdge.dte, 1),
+      } : null,
+      selected_candidate_detail: currentPut ? {
         instrument: currentPut.instrument,
         raw_score: roundForAdvisory(currentPut.raw_score, 6),
         put_edge_score: roundForAdvisory(currentPut.edge_score, 6),
@@ -2754,6 +2795,9 @@ const buildRollingOptionValueContext = ({
         market_call_iv_pct: roundForAdvisory(sellCallMarketContext.market_call_iv != null ? sellCallMarketContext.market_call_iv * 100 : null, 2),
         market_put_iv_pct: roundForAdvisory(sellCallMarketContext.market_put_iv != null ? sellCallMarketContext.market_put_iv * 100 : null, 2),
         put_call_iv_skew_pct: roundForAdvisory(sellCallMarketContext.market_skew != null ? sellCallMarketContext.market_skew * 100 : null, 2),
+        put_call_iv_skew_basis: sellCallMarketContext.market_skew_basis,
+        put_call_iv_skew_matched_pairs: sellCallMarketContext.market_skew_matched_pairs,
+        put_call_iv_skew_unmatched_puts: sellCallMarketContext.market_skew_unmatched_puts,
         market_oi_delta_24h_pct: roundForAdvisory(sellCallMarketContext.market_oi_delta_24h_pct, 2),
         market_pc_oi: roundForAdvisory(sellCallMarketContext.market_pc_oi, 4),
         market_total_oi: roundForAdvisory(sellCallMarketContext.market_total_oi, 2),
@@ -2816,6 +2860,7 @@ const buildRollingOptionValueContext = ({
       supports_buy_put_review: Boolean(requiresDecision && (repricingLagSignal || ['downward', 'stable'].includes(spotAction.state))),
       execution_style: executionStyle,
       target_score: roundForAdvisory(targetScore, 6),
+      suggested_instrument: currentPut?.instrument || null,
       suggested_limit_price: roundForAdvisory(suggestedLimitPrice, 4),
       score_nudge_pct: roundForAdvisory((scoreNudge - 1) * 100, 2),
       explanation: requiresDecision
@@ -2839,6 +2884,7 @@ const formatRollingOptionValueContext = (context) => {
   const lag = context.spot_repricing_lag_context || {};
   const recent = context.recent_relative_value_context || {};
   const detail = put.current_detail;
+  const selectedPut = put.selected_candidate_detail;
   const prior = put.prior_window_best_detail;
   const putResearch = put.research_context || {};
   const callDetail = call.current_detail;
@@ -2851,7 +2897,7 @@ const formatRollingOptionValueContext = (context) => {
     `Prior ${context.window_days}d best PUT EDGE: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (raw=${prior.raw_score ?? 'n/a'}, ${prior.instrument} at ${prior.timestamp})` : ''}.`,
     `Current PUT vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${put.is_strict_fresh_best ? 'yes' : 'no'}; samples=${put.samples}.`,
     `PUT score trend: 1h=${put.trend_1h_pct ?? 'n/a'}%, 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
-    `PUT composite selector: recommendation=${putResearch.recommendation || 'n/a'}; preferred=${putResearch.preferred ? 'yes' : 'no'}; selection_score=${putResearch.selection_score ?? 'n/a'}; dte_bucket=${putResearch.dte_bucket || 'n/a'}; score_band=${putResearch.score_band || 'n/a'}; warnings=${[
+    `PUT composite selector: instrument=${selectedPut?.instrument || 'n/a'}; PUT EDGE=${selectedPut?.put_edge_score ?? 'n/a'}; recommendation=${putResearch.recommendation || 'n/a'}; preferred=${putResearch.preferred ? 'yes' : 'no'}; selection_score=${putResearch.selection_score ?? 'n/a'}; dte_bucket=${putResearch.dte_bucket || 'n/a'}; score_band=${putResearch.score_band || 'n/a'}; warnings=${[
       putResearch.spread_caution ? 'spread' : null,
       putResearch.iv_caution ? 'iv' : null,
       putResearch.skew_caution ? 'skew' : null,
@@ -2862,13 +2908,13 @@ const formatRollingOptionValueContext = (context) => {
     `Prior ${context.window_days}d best CALL EDGE: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
     `Current CALL vs prior best: ${call.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${call.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${call.is_strict_fresh_best ? 'yes' : 'no'}; samples=${call.samples ?? 0}.`,
     `CALL score trend: 1h=${call.trend_1h_pct ?? 'n/a'}%, 6h=${call.trend_6h_pct ?? 'n/a'}%, 24h=${call.trend_24h_pct ?? 'n/a'}%.`,
-    `CALL market context (not part of CALL EDGE): avg_spread=${callMarket.market_avg_spread_pct ?? 'n/a'}%; best_put_score=${callMarket.market_best_put_score ?? 'n/a'}; skew=${callMarket.put_call_iv_skew_pct ?? 'n/a'}%; oi_24h=${callMarket.market_oi_delta_24h_pct ?? 'n/a'}%; pc_oi=${callMarket.market_pc_oi ?? 'n/a'}.`,
+    `CALL market context (not part of CALL EDGE): avg_spread=${callMarket.market_avg_spread_pct ?? 'n/a'}%; best_put_score=${callMarket.market_best_put_score ?? 'n/a'}; matched-expiry/delta skew=${callMarket.put_call_iv_skew_pct ?? 'n/a'}% (${callMarket.put_call_iv_skew_matched_pairs ?? 0} matched puts); oi_24h=${callMarket.market_oi_delta_24h_pct ?? 'n/a'}%; pc_oi=${callMarket.market_pc_oi ?? 'n/a'}.`,
     `CALL EDGE normalization: edge_score=${callResearch.selection_score ?? 'n/a'}; raw_score=${callResearch.edge_components?.raw_score ?? 'n/a'}; DTE=${callResearch.edge_components?.dte ?? 'n/a'}; factor=${callResearch.edge_components?.normalization_factor ?? 'n/a'}; formula=${callResearch.reason || 'n/a'}.`,
     `Spot-lag repricing check: detected=${lag.is_detected ? 'yes' : 'no'}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%; spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%; near_best=${lag.current_vs_prior_best_pct ?? 'n/a'}%; reason=${lag.reason || 'n/a'}.`,
     `Recent-relative value check: detected=${recent.is_detected ? 'yes' : 'no'}; lookback=${recent.lookback_hours ?? 'n/a'}h; samples=${recent.samples ?? 0}; percentile=${recent.percentile ?? 'n/a'}; vs_recent_avg=${recent.current_vs_recent_avg_pct ?? 'n/a'}%; vs_rolling_best=${recent.current_vs_rolling_best_pct ?? 'n/a'}%; reason=${recent.reason || 'n/a'}.`,
     `Put budget: remaining=$${budget.remaining ?? 'n/a'}; active_buy_put_rules=${budget.active_buy_put_rules ?? 0}; blocking_buy_put_actions=${budget.blocking_buy_put_actions ?? 0}; working_buy_put_actions=${budget.working_buy_put_actions ?? 0}; resting_buy_put_orders=${budget.resting_buy_put_orders ?? 0}.`,
     `Spot price action: ${spotAction.state || 'unknown'}${spotAction.slope_pct_6h != null ? ` (${spotAction.slope_pct_6h}% over recent 6h)` : ''}; reason=${spotAction.reason || 'n/a'}.`,
-    `Buy-put review: signal=${action.signal || 'none'}; requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; supports_buy_put_review=${action.supports_buy_put_review ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
+    `Buy-put review: signal=${action.signal || 'none'}; requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; supports_buy_put_review=${action.supports_buy_put_review ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_instrument=${action.suggested_instrument || 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
   ].join('\n');
 };
 
@@ -3405,6 +3451,11 @@ const fetchSubaccount = async () => {
       timeout: 10000,
     });
     const r = response.data?.result;
+    if (!r || !['initial_margin', 'maintenance_margin', 'subaccount_value'].every(field => (
+      r[field] !== null && r[field] !== undefined && Number.isFinite(Number(r[field]))
+    )) || !(Number(r.subaccount_value) > 0) || typeof r.is_under_liquidation !== 'boolean') {
+      throw new Error('Subaccount response is missing required margin fields');
+    }
     const collateralRows = Array.isArray(r?.collaterals) ? r.collaterals : [];
     const positionRows = Array.isArray(r?.positions) ? r.positions : [];
     const aggregatedCollateralsMaintenanceMargin = collateralRows.reduce((sum, row) => (
@@ -6978,6 +7029,7 @@ Return JSON only. Synthesize market characteristics for a downstream strategist;
 // ─── LLM-Driven Trading: Monitoring ──────────────────────────────────────────
 
 const parseExpiryFromInstrument = (name) => {
+  if (typeof name !== 'string') return null;
   // "ETH-20260501-1500-P" → Date(2026-05-01T08:00:00Z)
   const parts = name.split('-');
   if (parts.length < 4) return null;
@@ -7222,20 +7274,6 @@ const getRuleEvaluationValues = (position, ticker, spotPrice, action = null) => 
   };
 };
 
-const evaluateConditions = (conditions, logic, values) => {
-  if (!Array.isArray(conditions) || conditions.length === 0) return false;
-  const results = conditions.map(c => {
-    const v = values[c.field];
-    if (v == null) return false;
-    if (c.op === 'gt') return v > c.value;
-    if (c.op === 'lt') return v < c.value;
-    if (c.op === 'gte') return v >= c.value;
-    if (c.op === 'lte') return v <= c.value;
-    return false;
-  });
-  return logic === 'all' ? results.every(Boolean) : results.some(Boolean);
-};
-
 const parseMaybeJsonObject = (value) => {
   if (!value) return null;
   if (typeof value === 'object' && !Array.isArray(value)) return value;
@@ -7316,30 +7354,13 @@ const hasThresholdCondition = (criteria, field, ops, threshold, mode = 'at_least
   })
 );
 
-const hasLongerDatedPutProtection = (position, positions = []) => {
-  const currentDte = computeDteFromInstrumentName(position?.instrument_name);
-  if (!Number.isFinite(currentDte)) return false;
-  return (positions || []).some((candidate) => {
-    if (!candidate || candidate === position) return false;
-    if (candidate.direction !== 'long') return false;
-    if (!candidate.instrument_name?.endsWith('-P')) return false;
-    if (!(Number(candidate.amount) > 0)) return false;
-    const candidateDte = computeDteFromInstrumentName(candidate.instrument_name);
-    return Number.isFinite(candidateDte) && candidateDte > currentDte;
-  });
-};
+const hasLongerDatedPutProtection = (position, positions = [], closeAmount = position?.amount) => (
+  getPutReplacementCoverage(position, positions, closeAmount).allowed
+);
 
-const hasLongerDatedPutProtectionSnapshot = (snapshot, snapshots = []) => {
-  const currentDte = Number(snapshot?.dte);
-  if (!Number.isFinite(currentDte)) return false;
-  return (snapshots || []).some((candidate) =>
-    candidate?.instrument !== snapshot?.instrument
-    && candidate?.direction === 'long'
-    && candidate?.option_type === 'P'
-    && Number(candidate?.amount) > 0
-    && Number(candidate?.dte) > currentDte
-  );
-};
+const hasLongerDatedPutProtectionSnapshot = (snapshot, snapshots = []) => (
+  getPutReplacementCoverage(snapshot, snapshots).allowed
+);
 
 const getTotalLongPutAmount = (positions = []) => (positions || [])
   .filter((position) => position?.direction === 'long' && position?.instrument_name?.endsWith('-P'))
@@ -7698,10 +7719,10 @@ const getSellPutProtectionGate = (rule, values, context = {}) => {
   const intent = getPutExitIntent(criteria);
   const dte = Number(values?.dte);
   if (Number.isFinite(dte) && dte <= PUT_ROLL_DTE_THRESHOLD && intent !== 'monetize_tail_win') {
-    if ((intent === 'roll_protection' || !intent) && !hasLongerDatedPutProtection(context.position, context.positions || [])) {
+    if ((intent === 'roll_protection' || !intent) && !hasLongerDatedPutProtection(context.position, context.positions || [], context.plannedSellAmount ?? context.position?.amount)) {
       return {
         allowed: false,
-        reason: `roll_protection requires longer-dated long put protection before selling aging hedge; none found`,
+        reason: 'roll_protection requires enough later-expiry long puts at the same or higher strike to replace the quantity sold',
       };
     }
     return { allowed: true };
@@ -7793,36 +7814,19 @@ const formatBuybackConfirmationContext = (context, liveMarketPrice) => {
   ].join('\n');
 };
 
-const isPatientBuybackThresholdMisclassification = (reason) => {
-  const text = String(reason || '').toLowerCase();
-  const oldAdvisorLimitWording = text.includes('advisor limit')
-    && text.includes('would capture')
-    && text.includes('live executable ask')
-    && (text.includes('below the 80') || text.includes('conditions_met=false'));
-  const patientBidWording = text.includes('patient_bid_satisfies_rule=yes')
-    || (
-      text.includes('patient bid')
-      && (text.includes('would capture') || text.includes('capture 80'))
-      && (
-        text.includes('live executable')
-        || text.includes('live ask')
-        || text.includes('current market')
-        || text.includes('rule itself')
-      )
-    );
-  return oldAdvisorLimitWording || patientBidWording;
-};
-
 const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentPrice, advisorLimitPrice, instrument }) => {
   if (action?.action !== 'buy_put') return '';
   const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
   const triggerScore = Number(triggerData?.score);
   const triggerDelta = Number(triggerData?.delta);
   const liveDelta = Number(ticker?.option_pricing?.d);
-  const bestAsk = Number(currentPrice || action.price);
+  const bestAsk = Number(currentPrice);
   const targetScore = Number(triggerData?.target_score);
   const minScore = Number(criteria.min_score ?? triggerData?.min_score);
-  const liveScore = Number(triggerData?.live_score);
+  const liveDte = computeDteFromInstrumentName(action.instrument_name);
+  const liveScore = bestAsk > 0 && Number.isFinite(liveDelta) && liveDte > 0
+    ? normalizeBuyPutScore(Math.abs(liveDelta) / bestAsk, liveDte)
+    : null;
   const requiredValueSignal = triggerData?.required_value_signal || criteria.value_signal || criteria.buy_put_signal || null;
   const currentValueSignal = triggerData?.buy_put_signal || null;
   const buyPutResearch = triggerData?.buy_put_research || {};
@@ -7847,21 +7851,21 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   const plannedPremium = Number(action?.amount) > 0 && plannedPrice > 0
     ? Number(action.amount) * plannedPrice
     : null;
-  const scoreDelta = Number.isFinite(triggerDelta) ? triggerDelta : liveDelta;
+  const scoreDelta = liveDelta;
   const triggerDte = Number(triggerData?.dte);
   const plannedRawScore = Math.abs(scoreDelta) > 0 && plannedPrice > 0
     ? Math.abs(scoreDelta) / plannedPrice
     : null;
-  const plannedScore = plannedRawScore > 0 && triggerDte > 0
-    ? normalizeBuyPutScore(plannedRawScore, triggerDte)
-    : plannedRawScore;
+  const plannedScore = plannedRawScore > 0 && liveDte > 0
+    ? normalizeBuyPutScore(plannedRawScore, liveDte)
+    : null;
 
   const fmt = (value, digits = 6) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
   return [
     'Buy-put value confirmation context:',
     `- Trigger score: ${fmt(triggerScore)} from pending action; trigger_delta=${fmt(triggerDelta, 4)}, trigger_dte=${fmt(Number(triggerData?.dte), 2)}, trigger_strike=${triggerData?.strike ?? 'n/a'}.`,
-    `- Planned execution limit: ${fmtPrice(plannedPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned PUT_EDGE=${fmt(plannedScore)} using trigger_delta, trigger_dte, and planned limit; live PUT_EDGE=${fmt(liveScore)}.`,
+    `- Planned execution limit: ${fmtPrice(plannedPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned PUT_EDGE=${fmt(plannedScore)} using fresh_delta=${fmt(liveDelta, 4)}, fresh_dte=${fmt(liveDte, 2)}, and planned limit; live PUT_EDGE=${fmt(liveScore)}.`,
     `- Planned premium outlay (excluding fees): ${fmtPrice(plannedPremium)} for amount=${action?.amount ?? 'n/a'} at the planned execution limit. ${makerPlan ? 'The planned limit, PUT EDGE, and premium above all use the computed post_only bid below.' : 'These are reference-limit economics only; a maker price has not been established.'}`,
     `- Thresholds: min_score=${fmt(minScore)}, target_score=${fmt(targetScore)}. For patient maker bids, planned PUT EDGE at our limit is the economic gate; live PUT EDGE may be below threshold because we are not willing to lift the ask.`,
     `- Composite edge context: edge_score=${fmt(edgeScore, 2)}, recommendation=${buyPutResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, candidate_iv_pct:${fmt(edgeComponents.candidate_iv_pct, 2)}, market_put_iv_pct:${fmt(edgeComponents.market_put_iv_pct, 2)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, oi_24h:${fmt(edgeComponents.market_oi_delta_24h_pct, 2)}, shock40:${fmt(edgeComponents.shock_payoff_multiple_40pct, 2)}x}.`,
@@ -7876,51 +7880,6 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   ].join('\n');
 };
 
-const buildBuyPutPatientMakerContext = (action, triggerData = {}, advisorLimitPrice = null, liveMarketPrice = null, options = {}) => {
-  if (action?.action !== 'buy_put') return { satisfied: false };
-
-  const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
-  const plannedScore = Number(triggerData?.planned_score ?? triggerData?.score);
-  const minScore = Number(criteria.min_score ?? triggerData?.min_score);
-  const targetScore = Number(triggerData?.target_score ?? criteria.target_score);
-  const requiredScore = Math.max(
-    Number.isFinite(minScore) && minScore > 0 ? minScore : 0,
-    Number.isFinite(targetScore) && targetScore > 0 ? targetScore : 0
-  );
-  const limitPrice = Number(advisorLimitPrice ?? triggerData?.advisor_limit_price);
-  const liveAsk = Number(liveMarketPrice);
-  const amount = Number(action?.amount);
-  const plannedOutlay = Number.isFinite(amount) && amount > 0 && Number.isFinite(limitPrice) && limitPrice > 0
-    ? amount * limitPrice
-    : null;
-  const putBudgetRemaining = Number(options.putBudgetRemaining);
-  const hasBudgetCap = Number.isFinite(putBudgetRemaining) && putBudgetRemaining >= 0;
-  const budgetSatisfied = !hasBudgetCap
-    || (Number.isFinite(plannedOutlay) && plannedOutlay <= putBudgetRemaining + 0.01);
-  const liquidationSafe = !options.marginState?.is_under_liquidation;
-
-  const scoreSatisfied = Number.isFinite(plannedScore)
-    && plannedScore > 0
-    && requiredScore > 0
-    && plannedScore + 1e-9 >= requiredScore;
-  const patientBid = Number.isFinite(limitPrice)
-    && limitPrice > 0
-    && Number.isFinite(liveAsk)
-    && liveAsk > limitPrice;
-
-  return {
-    satisfied: scoreSatisfied && patientBid && budgetSatisfied && liquidationSafe,
-    plannedScore,
-    requiredScore,
-    limitPrice,
-    liveAsk,
-    plannedOutlay,
-    putBudgetRemaining: hasBudgetCap ? putBudgetRemaining : null,
-    budgetSatisfied,
-    liquidationSafe,
-  };
-};
-
 const formatSellCallConfirmationContext = ({ action, triggerData, ticker, currentPrice }) => {
   if (action?.action !== 'sell_call') return '';
   const criteria = parseMaybeJsonObject(action.rule_criteria) || {};
@@ -7932,7 +7891,8 @@ const formatSellCallConfirmationContext = ({ action, triggerData, ticker, curren
   const liveRawScore = Math.abs(scoreDelta) > 0 && executionBid > 0
     ? executionBid / Math.abs(scoreDelta)
     : null;
-  const liveEdgeScore = normalizeSellCallScore(liveRawScore, triggerDte);
+  const liveDte = computeDteFromInstrumentName(action.instrument_name);
+  const liveEdgeScore = normalizeSellCallScore(liveRawScore, liveDte);
   const triggerRawScore = Number(triggerData?.raw_score ?? triggerData?.sell_call_research?.edge_components?.raw_score);
   const triggerEdgeScore = Number(triggerData?.selection_score ?? triggerData?.score);
   const configuredMinScore = Number(criteria.min_score);
@@ -7993,7 +7953,7 @@ const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, 
     return [
       ...baseLines,
       `- Roll discipline: planned_close_amount=${fmt(plannedAmount, 4)} of aging_position_amount=${fmt(positionAmount, 4)}, longer_dated_protection_in_book=${hasLongerDatedProtection == null ? 'unknown' : hasLongerDatedProtection ? 'yes' : 'no'}, total_long_puts_after_sale=${remainingLongPuts == null ? 'unknown' : fmt(remainingLongPuts, 4)}.`,
-      `- Roll confirmation rule: confirm when DTE <= ${PUT_ROLL_DTE_THRESHOLD}, this closes an owned long put, and longer-dated long put protection remains in the book after sale. Do not apply monetize_tail_win tranche_fraction/profit-threshold rules to roll_protection; a full close of the aging instrument and negative PnL are allowed roll facts.`,
+      `- Roll confirmation rule: confirm when DTE <= ${PUT_ROLL_DTE_THRESHOLD}, this closes an owned long put, and later-expiry long puts at the same or higher strike cover at least the quantity sold. Do not apply monetize_tail_win tranche_fraction/profit-threshold rules to roll_protection; a full close of the aging instrument and negative PnL are allowed roll facts.`,
       '- Reject roll_protection only for DTE above the roll window, missing longer-dated protection, missing/unsafe executable price, non-reduce-only/non-closeable execution, or a sale that would remove all book downside protection.',
     ].join('\n');
   }
@@ -8596,7 +8556,7 @@ const estimateShortCallMarginPerUnit = (marginState, positions, restingOrders, s
 
   const restingShortExposure = restingOrders
     .filter(order => order.action === 'sell_call')
-    .reduce((sum, order) => sum + Math.abs(Number(order.amount) || 0), 0);
+    .reduce((sum, order) => sum + Math.max(0, Number(order.amount || 0) - Number(order.filled_amount || 0)), 0);
   if (restingShortExposure > 0 && Number(marginState?.open_orders_margin ?? 0) > 0) {
     return Number(marginState.open_orders_margin) / restingShortExposure;
   }
@@ -8680,28 +8640,15 @@ const getCallMarginContext = (action, marginState, positions, restingOrders, ins
   return `Call margin utilization: current_derive_display=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_display=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_after_trade_exact=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(6)}%` : 'N/A'}, per_contract_estimate=$${marginPerUnit.toFixed(2)}, caution_zone=${entryCapPct.toFixed(1)}%-${baseCapPct.toFixed(1)}%, target_cap=${capPct.toFixed(1)}%, active_entry_cap_exact=${capPct.toFixed(6)}%, buffered_limit=${limitPct.toFixed(1)}%, execution_buffer=${bufferPct.toFixed(1)}pp, base_target_cap=${baseCapPct.toFixed(1)}%, base_buffered_limit=${baseLimitPct.toFixed(1)}%, breakout_override=${breakoutOverrideActive ? 'active' : 'inactive'}, entry_cap_satisfied=${entryCapSatisfied ? 'yes' : 'no'}. Treat ${entryCapPct.toFixed(1)}% as a caution threshold and ${capPct.toFixed(1)}% as the active entry cap. The ${bufferPct.toFixed(1)} percentage point buffer is last-mile safety for estimate drift, not planned sell-call capacity. Confirm only when projected utilization stays at or below the active entry cap; at-or-below means <= and equality is allowed. Reject call sells that exceed the active entry cap, exceed the buffered limit, lack buying power, or are too small to matter. Use entry_cap_satisfied as the authoritative margin gate; do not reinterpret a rounded ${capPct.toFixed(1)}% display as a failure when entry_cap_satisfied=yes.`;
 };
 
-const isSellCallMarginCapContradiction = (action, vote, callMarginDecision) => {
-  if (
-    action !== 'sell_call'
-    || vote?.confirm !== false
-    || callMarginDecision?.entryCapSatisfied !== true
-  ) {
-    return false;
-  }
-
-  const reasoning = String(vote.reasoning || '');
-  const namesMarginGate = /\b(?:active[\s_-]+)?(?:entry[\s_-]+)?cap\b|\b(?:active[\s_-]+)?limit\b|\bentry_cap_satisfied\b/i.test(reasoning);
-  const claimsGateFailure = /\b(?:exceed(?:s|ed|ing)?|above|over|breach(?:es|ed|ing)?|violate(?:s|d|ing)?|fail(?:s|ed|ing)?|too\s+high|not\s+satisf(?:y|ied|ying))\b/i.test(reasoning);
-  return namesMarginGate && claimsGateFailure;
-};
-
 const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice, instruments, spotPrice }) => {
   let marginState = null;
   try { marginState = await fetchSubaccount(); } catch { /* ok */ }
-  if (!marginState) return { allowed: true, reason: 'margin state unavailable' };
+  if (!hasUsableMarginState(marginState)) return { allowed: false, reason: 'fresh margin state unavailable' };
+  if (marginState.is_under_liquidation) return { allowed: false, reason: 'account under liquidation' };
 
   let positions = [];
-  try { positions = await fetchPositions(); } catch { /* ok */ }
+  try { positions = await fetchPositions({ throwOnError: true }); }
+  catch { return { allowed: false, reason: 'fresh positions unavailable' }; }
   const restingOrders = db ? db.getOpenRestingOrders() : [];
   const instrument = instruments.find((item) => item.instrument_name === instrumentName);
   const strike = Number(instrument?.option_details?.strike || instrumentName?.split('-')?.[2] || 0) || 0;
@@ -8798,9 +8745,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             patient_sell_put_fair_value_source: patientSellPutPlan.fairValueSource,
           } : {}),
         };
-        const triggered = evaluateConditions(criteria.conditions, criteria.condition_logic, values)
-          || Boolean(patientBuybackPlan)
-          || Boolean(patientSellPutPlan);
+        const triggered = evaluateExitConditions(
+          criteria,
+          values,
+          patientBuybackPlan?.capturePct ?? patientSellPutPlan?.pnlPct ?? null
+        );
         if (!triggered) {
           logDecision(rule, {
             decision_status: 'skipped',
@@ -8858,21 +8807,14 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
 
         const recentRejection = getRecentRejectedAction(rule.action, rule.instrument_name);
         if (recentRejection) {
-          const ignorePatientBuybackRejection = rule.action === 'buyback_call'
-            && patientBuybackPlan
-            && isPatientBuybackThresholdMisclassification(recentRejection.reason);
-          if (ignorePatientBuybackRejection) {
-            console.log(`📋 Exit retry: ${rule.action} ${rule.instrument_name} ignoring stale patient-buyback threshold rejection; patient bid $${patientBuybackPlan.limitPrice.toFixed(4)} captures ${patientBuybackPlan.capturePct.toFixed(2)}%`);
-          } else {
-            console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} rejected recently; backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
-            logDecision(rule, {
-              decision_status: 'skipped',
-              reason_code: 'recent_rejection',
-              reason: recentRejection.reason || 'Recent rejection backoff',
-              criteria_json: criteria,
-            });
-            continue;
-          }
+          console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} rejected recently; backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: 'recent_rejection',
+            reason: recentRejection.reason || 'Recent rejection backoff',
+            criteria_json: criteria,
+          });
+          continue;
         }
 
         const existingRestingExit = findRestingExitOrderForRule(openRestingExitOrders, rule);
@@ -9423,7 +9365,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         candidates.sort((a, b) => {
           const aRank = ['sell_call', 'buy_put'].includes(rule.action) ? (a.selectionScore ?? a.score) : a.score;
           const bRank = ['sell_call', 'buy_put'].includes(rule.action) ? (b.selectionScore ?? b.score) : b.score;
-          return bRank - aRank;
+          return bRank - aRank || b.score - a.score || a.name.localeCompare(b.name);
         });
         let blockedByRestingOrder = 0;
         const best = candidates.find((candidate) => {
@@ -10307,70 +10249,6 @@ const adaptOrderTypeFromFailureHistory = (action, instrumentName, proposedOrderT
 
 // ─── LLM-Driven Trading: Confirmation & Execution ───────────────────────────
 
-const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
-  const configuredStep = Number(
-    instrument?.price_step ??
-    instrument?.options?.price_step ??
-    instrument?.option_details?.price_step ??
-    0
-  );
-  const isOption = Boolean(instrument?.option_details?.option_type || instrument?.base_asset_sub_id);
-  if (isOption) {
-    // Derive option orders currently reject >1 decimal place even when some metadata
-    // is missing or too fine, e.g. "limit price 0.85 must not have more than 1 decimals".
-    return Math.max(configuredStep || 0, 0.1);
-  }
-  if (configuredStep > 0) return configuredStep;
-  return fallbackPrice >= 1 ? 0.1 : 0.01;
-};
-
-const roundToStep = (value, step, mode = 'nearest') => {
-  if (!(step > 0)) return value;
-  const scaled = value / step;
-  if (mode === 'up') return Math.ceil(scaled) * step;
-  if (mode === 'down') return Math.floor(scaled) * step;
-  return Math.round(scaled) * step;
-};
-
-const getStepDecimals = (step) => {
-  if (!(step > 0)) return 8;
-  const normalized = String(step);
-  if (normalized.includes('e-')) {
-    const [, exponent] = normalized.split('e-');
-    return Number(exponent) || 0;
-  }
-  const [, fraction = ''] = normalized.split('.');
-  return fraction.length;
-};
-
-const normalizePriceToStep = (value, step, mode = 'nearest') => {
-  if (!(Number(value) > 0)) return 0;
-  if (!(step > 0)) return Number(value);
-  const rounded = roundToStep(Number(value), step, mode);
-  const decimals = getStepDecimals(step);
-  return Number(rounded.toFixed(decimals));
-};
-
-const normalizeOrderPriceForVenue = (price, instrument, direction = 'buy') => {
-  const step = getInstrumentPriceStep(instrument, Number(price));
-  const mode = direction === 'buy' ? 'down' : direction === 'sell' ? 'up' : 'nearest';
-  const normalized = normalizePriceToStep(price, step, mode);
-  return {
-    price: normalized > 0 ? normalized : Number(price),
-    step,
-    mode,
-  };
-};
-
-const avoidRoundNumberRestingPrice = (direction, price, step) => {
-  const numericPrice = Number(price);
-  if (!(numericPrice > 0) || !(step > 0)) return numericPrice;
-  if (Math.abs(numericPrice - Math.round(numericPrice)) > 1e-9) return numericPrice;
-  if (direction === 'sell') return normalizePriceToStep(numericPrice + step, step, 'up');
-  const lowerPrice = numericPrice - step;
-  return lowerPrice > 0 ? normalizePriceToStep(lowerPrice, step, 'down') : numericPrice;
-};
-
 const ACTION_POLICY = Object.freeze({
   buy_put: Object.freeze({
     phase: 'entry',
@@ -10481,7 +10359,7 @@ const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normal
 
 const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, keep two intents separate. Intent 1 is profit/capacity reset while the short call is winning: use buyback_intent="profit_capture" and executable unrealized_pnl_pct >= ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic trigger, or set a patient max_buyback_price/target_capture_pct where the bid would capture at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% if filled. Do not add DTE or mark_price blockers for this intent; executable capture already uses the live buyback ask. Intent 2 is threat management when the short call is genuinely dangerous and time/range for recovery is running out: use buyback_intent="threat_management" with allow_below_profit_floor=true, and conditions on real threat facts such as delta, spot vs strike, and remaining DTE. Do not prematurely buy back just because price is rising; spot can come back down, and buying back fear premium can make us the sucker of the trade. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks only when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
 
-const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does not consume more margin. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long put protection. For roll_protection, a full close of the aging instrument is allowed, negative PnL is not a rejection reason, and monetize_tail_win tranche/profit thresholds do not apply because replacement protection is already in the book. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. For monetization, never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Even when the monetization hard trigger is satisfied, confirm only if the full market context says selling a tranche is wise rather than prematurely cutting convexity. If you reject a sell_put, do it because the typed intent's requirements fail or removing protection is strategically unwise, not because the exit itself uses more margin.`;
+const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put returns cash and reduces the hedge position, but removing hedge offsets may worsen portfolio margin; assess the remaining portfolio. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds enough later-expiry long puts at the same or higher strike to replace the quantity sold. For roll_protection, a full close of the aging instrument is allowed, negative PnL is not a rejection reason, and monetize_tail_win tranche/profit thresholds do not apply because replacement protection is already in the book. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. For monetization, never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Even when the monetization hard trigger is satisfied, confirm only if the full market context says selling a tranche is wise rather than prematurely cutting convexity. If you reject a sell_put, do it because the typed intent's requirements fail or removing protection is strategically unwise, and include any loss of portfolio hedge offsets in that assessment.`;
 
 const normalizeLearningText = (value) => String(value || '').toLowerCase();
 
@@ -10581,30 +10459,6 @@ const formatPostOnlyContext = ({ attemptedPrice, retryPrice = null, bidPrice = 0
   if (step > 0) parts.push(`step=$${step.toFixed(4)}`);
   if (reason) parts.push(`exchange=${reason}`);
   return parts.join(', ');
-};
-
-const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice) => {
-  const bidPrice = Number(ticker?.b) || 0;
-  const askPrice = Number(ticker?.a) || 0;
-  const step = getInstrumentPriceStep(instrument, attemptedPrice);
-
-  if (direction === 'sell') {
-    const retryBase = bidPrice > 0 ? bidPrice + step : attemptedPrice + step;
-    const retryPrice = avoidRoundNumberRestingPrice(direction, normalizePriceToStep(retryBase, step, 'up'), step);
-    return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
-  }
-
-  if (askPrice <= 0 || !(Number(attemptedPrice) > 0)) return null;
-  const belowAsk = askPrice - step;
-  const candidate = belowAsk > 0
-    ? normalizePriceToStep(belowAsk, step, 'down')
-    : normalizePriceToStep(askPrice * 0.99, step, 'down');
-  // A refreshed ask must never make a buy retry exceed the approved bid.
-  const cappedCandidate = normalizePriceToStep(Math.min(candidate, Number(attemptedPrice)), step, 'down');
-  const retryPrice = avoidRoundNumberRestingPrice(direction, cappedCandidate, step);
-  return retryPrice > 0 && retryPrice < askPrice && retryPrice <= Number(attemptedPrice)
-    ? { retryPrice, bidPrice, askPrice, step }
-    : null;
 };
 
 const executeOrder = async (action, instrumentName, amount, price, instruments, spotPrice, orderType = 'ioc', tickerMap = {}, pendingActionId = null, executionContext = {}) => {
@@ -11010,6 +10864,53 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   return { filledAmt, avgPx, totalValue, order, orderType };
 };
 
+const getFinalOrderPolicy = () => ({
+  putDeltaRange: PUT_DELTA_RANGE,
+  putDteRange: PUT_EXPIRATION_RANGE,
+  callDeltaRange: CALL_DELTA_RANGE,
+  callDteRange: CALL_EXPIRATION_RANGE,
+  sellCallMinScore: SELL_CALL_FALLBACK_MIN_SCORE,
+  sellCallMinBid: SELL_CALL_FALLBACK_MIN_BID,
+  callCapturePct: CALL_BUYBACK_PROFIT_THRESHOLD,
+  putRollDte: PUT_ROLL_DTE_THRESHOLD,
+  putMonetizationPct: PUT_MONETIZATION_PROFIT_THRESHOLD,
+  putMaxTrancheFraction: PUT_MONETIZATION_MAX_TRANCHE_FRACTION,
+});
+
+const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData, ruleCriteria, orderType }) => async ({ price, amount }) => {
+  try {
+    // Refresh after reviewer latency and again for any maker retry. Reads are
+    // independent; no stored trigger value authorizes a later submission.
+    const [ticker, marginState, positions] = await Promise.all([
+      fetchFreshTickerForInstrument(action.instrument_name),
+      fetchSubaccount(),
+      fetchPositions({ throwOnError: true }),
+    ]);
+    const activeRule = db.getActiveRules().find(rule => Number(rule.id) === Number(action.rule_id));
+    if (!activeRule || activeRule.action !== action.action
+      || JSON.stringify(parseMaybeJsonObject(activeRule.criteria)) !== JSON.stringify(ruleCriteria)) {
+      return { allowed: false, code: 'inactive_rule', reason: 'The approved rule is no longer active or has changed' };
+    }
+    const currentSpot = Number(ticker?.I) > 0 ? Number(ticker.I) : spotPrice;
+    const currentRestingOrders = db.getOpenRestingOrders();
+    const callMarginDecision = getCallMarginDecision(action.action, marginState, positions, currentRestingOrders,
+      instruments, currentSpot, action.instrument_name, amount, price);
+    const reservedPutBudget = summarizeReservedEntryCapacity(currentRestingOrders).putBudget;
+    const putBudgetRemaining = botData.putBudgetForCycle > 0
+      ? botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought - reservedPutBudget
+      : null;
+    return validateFinalOrderPolicy({
+      action: action.action, instrumentName: action.instrument_name, price, amount, orderType,
+      criteria: ruleCriteria, triggerData, ticker,
+      instrument: instruments.find(instrument => instrument.instrument_name === action.instrument_name),
+      positions, spotPrice: currentSpot, marginState, callMarginDecision, putBudgetRemaining,
+      ruleBudgetLimit: activeRule.budget_limit, policy: getFinalOrderPolicy(), now: Date.now(),
+    });
+  } catch (error) {
+    return { allowed: false, code: 'fresh_state_unavailable', reason: `Unable to verify final order: ${error.message}` };
+  }
+};
+
 const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
   if (!db) return;
 
@@ -11023,9 +10924,17 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
   for (const action of pending.slice(0, 2)) { // Max 2 per tick
     // Fetch fresh margin state for each confirmation (margin changes between trades)
     let marginState = null;
-    try { marginState = await fetchSubaccount(); } catch { /* ok */ }
     let livePositions = [];
-    try { livePositions = await fetchPositions(); } catch { /* ok */ }
+    try {
+      [marginState, livePositions] = await Promise.all([fetchSubaccount(), fetchPositions({ throwOnError: true })]);
+    } catch (error) {
+      console.log(`📋 Defer ${action.action} ${action.instrument_name}: fresh account state unavailable (${error.message})`);
+      continue;
+    }
+    if (isEntryAction(action.action) && !hasUsableMarginState(marginState)) {
+      console.log(`📋 Defer ${action.action} ${action.instrument_name}: fresh margin state unavailable`);
+      continue;
+    }
     const restingOrders = db.getOpenRestingOrders();
     const activeTradeLessons = db.getActiveTradeLessons();
     const recentTradeReviews = db.getRecentTradeReviews(3);
@@ -11050,15 +10959,50 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       }
 
       // Build context for confirmation
-      const ticker = tickerMap[action.instrument_name];
+      const ticker = await fetchFreshTickerForInstrument(action.instrument_name);
+      if (!ticker) {
+        console.log(`📋 Defer ${action.action} ${action.instrument_name}: fresh ticker unavailable`);
+        continue;
+      }
+      const requiredQuote = action.action === 'sell_call' ? ticker.b : ticker.a;
+      if (action.action !== 'sell_put' && !(Number(requiredQuote) > 0)) {
+        console.log(`📋 Defer ${action.action} ${action.instrument_name}: fresh executable quote unavailable`);
+        continue;
+      }
       const liveMarketPrice = ticker ? (action.action.includes('buy') ? Number(ticker.a) : Number(ticker.b)) : null;
-      const currentPrice = liveMarketPrice || action.price;
+      const currentPrice = liveMarketPrice;
       const momentum = botData.mediumTermMomentum;
 
       // Parse trigger details for advisory's preferred order type and value context.
       let triggerData = {};
       try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
       const ruleCriteria = parseMaybeJsonObject(action.rule_criteria);
+      const livePosition = livePositions.find(position => position.instrument_name === action.instrument_name);
+      if (isReduceOnlyExitAction(action.action) && livePosition) {
+        const currentValues = liveRuleValues(livePosition, ticker, spotPrice);
+        const livePatientBuyback = action.action === 'buyback_call'
+          ? refinePatientBuybackPlanPrice(getPatientBuybackPlan({ action: action.action }, ruleCriteria, livePosition), ticker,
+              instruments.find(instrument => instrument.instrument_name === action.instrument_name))
+          : null;
+        const livePatientPut = action.action === 'sell_put'
+          ? getPatientSellPutPlan({ action: action.action }, ruleCriteria, livePosition, currentValues)
+          : null;
+        triggerData = {
+          ...triggerData,
+          current_values: {
+            ...currentValues,
+            patient_buyback_capture_pct: livePatientBuyback?.capturePct ?? null,
+            patient_buyback_limit_price: livePatientBuyback?.limitPrice ?? null,
+            patient_sell_put_pnl_pct: livePatientPut?.pnlPct ?? null,
+            patient_sell_put_fair_value_pnl_pct: livePatientPut?.fairValuePnlPct ?? null,
+          },
+          patient_buyback_capture_pct: livePatientBuyback?.capturePct ?? null,
+        };
+        if (!evaluateExitConditions(ruleCriteria, currentValues, livePatientBuyback?.capturePct ?? livePatientPut?.pnlPct ?? null)) {
+          db.updatePendingAction(action.id, { status: 'rejected', confirmation_reasoning: 'Fresh exit conditions no longer satisfied' });
+          continue;
+        }
+      }
       const advisoryOrderPref = normalizePreferredOrderType(action.action, triggerData.preferred_order_type);
       const advisorEntryLimitPrice = isEntryAction(action.action) && Number(triggerData.advisor_limit_price) > 0
         ? Number(triggerData.advisor_limit_price)
@@ -11171,6 +11115,10 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         action.amount,
         currentPrice || action.price
       );
+      if (action.action === 'sell_call' && !callMarginDecision.available) {
+        console.log(`📋 Defer ${action.action} ${action.instrument_name}: fresh margin utilization unavailable`);
+        continue;
+      }
       if (
         action.action === 'sell_call'
         && callMarginDecision.available
@@ -11216,9 +11164,9 @@ ${confirmationLearningContext}
 ${getConfirmationScopePrompt()}
 Confirm or reject this trade. If confirming, choose the order execution strategy:
 ${getActionOrderTypeHardRule(action.action)}
-- "ioc" (immediate-or-cancel): fill now at market or cancel. TAKER fee = $0.50 base + 0.03% of notional (~$1/contract for ETH options). Use only when the opportunity is exceptional and might vanish.
-- "gtc" (good-til-cancelled): rest on the order book at your limit_price until filled. MAKER fee = 0.01% of notional (~$0.16/contract). 6x cheaper than IOC. Use when you want a specific price and can wait.
-- "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee 0.01%). 6x cheaper than IOC. Best for patient limit orders.
+- "ioc" (immediate-or-cancel): take available liquidity within the approved limit and cancel any remainder. Venue taker fees apply to fills.
+- "gtc" (good-til-cancelled): a marketable limit can take liquidity immediately; any remainder rests. Maker/taker fees depend on each fill, not the GTC label.
+- "post_only": rest as a maker or reject if the price would cross. Use for patient maker intent; filling is not guaranteed. Use the current venue fee schedule, not a fixed cost ratio.
 
 ${getConfirmationJsonOnlyPrompt()}
 No explanation outside the JSON.
@@ -11305,107 +11253,18 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         console.log(`⚠️ OpenAI confirmation failed: ${e.message}`);
       }
 
-      const anthropicMarginContradiction = isSellCallMarginCapContradiction(
-        action.action,
-        anthropicVote,
-        callMarginDecision
-      );
-      const codexMarginContradiction = isSellCallMarginCapContradiction(
-        action.action,
-        codexVote,
-        callMarginDecision
-      );
-      const decisionAnthropicVote = anthropicMarginContradiction ? null : anthropicVote;
-      const decisionCodexVote = codexMarginContradiction ? null : codexVote;
-
-      const advisorBuybackRuleSatisfied = action.action === 'buyback_call'
-        && buybackConfirmationContext?.satisfied === true
-        && Number(liveMarketPrice) > 0;
-      const deterministicPatientBuyback = action.action === 'buyback_call'
-        && buybackConfirmationContext?.patientSatisfied === true
-        && Number(buybackConfirmationContext?.patientLimitPrice) > 0
-        && Number(liveMarketPrice) > 0;
-      const patientBuybackOverrideReason = deterministicPatientBuyback
-        ? `advisor_patient_buyback_override: patient bid $${buybackConfirmationContext.patientLimitPrice.toFixed(4)} captures ${buybackConfirmationContext.patientCapturePct.toFixed(2)}%, satisfying ${buybackConfirmationContext.op} ${buybackConfirmationContext.threshold}% without crossing live ask`
-        : null;
-      const buyPutPatientMakerContext = buildBuyPutPatientMakerContext(
-        action,
-        triggerData,
-        advisorEntryLimitPrice,
-        liveMarketPrice,
-        {
-          marginState,
-          putBudgetRemaining: botData.putBudgetForCycle > 0
-            ? botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought
-            : null,
-        }
-      );
-      const confirmedByAtLeastOneReviewer = Boolean(decisionAnthropicVote?.confirm || decisionCodexVote?.confirm);
-      const buyPutPatientMakerOverride = Boolean(
-        buyPutPatientMakerContext.satisfied
-        && confirmedByAtLeastOneReviewer
-      );
-      const buyPutMakerBidOverrideReason = buyPutPatientMakerOverride
-        ? `buy_put_patient_maker_override: planned bid $${buyPutPatientMakerContext.limitPrice.toFixed(4)} scores ${buyPutPatientMakerContext.plannedScore.toFixed(6)} >= required ${buyPutPatientMakerContext.requiredScore.toFixed(6)} while live ask is $${buyPutPatientMakerContext.liveAsk.toFixed(4)}; planned outlay $${buyPutPatientMakerContext.plannedOutlay?.toFixed(2) || 'n/a'} remains within budget; below-ask maker bids are the intended market`
-        : null;
-
-      // Voting logic
-      let decision;
-      let decisionOverrideReason = null;
-      if (decisionAnthropicVote && decisionCodexVote) {
-        // Both voted
-        decision = (decisionAnthropicVote.confirm && decisionCodexVote.confirm) ? 'confirmed' : 'rejected';
-      } else if (decisionAnthropicVote) {
-        // Single advisor fallback
-        decision = decisionAnthropicVote.confirm ? 'confirmed' : 'rejected';
-      } else if (decisionCodexVote) {
-        decision = decisionCodexVote.confirm ? 'confirmed' : 'rejected';
-      } else {
-        if (deterministicPatientBuyback) {
-          decision = 'confirmed';
-          decisionOverrideReason = patientBuybackOverrideReason;
-        } else {
-          // Both failed — increment retries
-          db.updatePendingAction(action.id, { retries: (action.retries || 0) + 1 });
-          console.log(`⚠️ Confirmation failed for ${action.instrument_name} (retry ${(action.retries || 0) + 1})`);
-          continue;
-        }
+      const decisionAnthropicVote = anthropicVote;
+      const decisionCodexVote = codexVote;
+      const decision = resolveConfirmationVotes(anthropicVote, codexVote);
+      if (decision === 'retry') {
+        db.updatePendingAction(action.id, { retries: (action.retries || 0) + 1 });
+        console.log(`⚠️ Confirmation failed for ${action.instrument_name} (retry ${(action.retries || 0) + 1})`);
+        continue;
       }
-
-      if (decision === 'rejected' && deterministicPatientBuyback) {
-        decision = 'confirmed';
-        decisionOverrideReason = patientBuybackOverrideReason;
-      }
-      if (
-        decision === 'rejected'
-        && advisorBuybackRuleSatisfied
-        && decisionAnthropicVote
-        && decisionCodexVote
-        && (decisionAnthropicVote.confirm || decisionCodexVote.confirm)
-      ) {
-        decision = 'confirmed';
-        const overrideCapture = buybackConfirmationContext.patientSatisfied
-          ? buybackConfirmationContext.patientCapturePct
-          : buybackConfirmationContext.actual;
-        const overrideCaptureText = Number.isFinite(overrideCapture)
-          ? `${overrideCapture.toFixed(2)}%`
-          : 'available patient/live capture';
-        decisionOverrideReason = `advisor_rule_buyback_override: active rule capture ${overrideCaptureText} satisfies ${buybackConfirmationContext.op} ${buybackConfirmationContext.threshold}% and one reviewer confirmed`;
-      }
-      if (decision === 'rejected' && buyPutPatientMakerOverride) {
-        decision = 'confirmed';
-        decisionOverrideReason = buyPutMakerBidOverrideReason;
-      }
-
       const reasoning = [
-        anthropicMarginContradiction
-          ? `Sonnet: INVALID REJECT — contradicted authoritative entry_cap_satisfied=yes (${anthropicVote.reasoning || 'no reason'})`
-          : anthropicVote ? `Sonnet: ${anthropicVote.confirm ? 'CONFIRM' : 'REJECT'} — ${anthropicVote.reasoning || 'no reason'}` : `Sonnet: FAILED — ${anthropicFailure || 'unknown error'}`,
-        codexMarginContradiction
-          ? `OpenAI: INVALID REJECT — contradicted authoritative entry_cap_satisfied=yes (${codexVote.reasoning || 'no reason'})`
-          : codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : `OpenAI: FAILED — ${codexFailure || 'unknown error'}`,
-        decisionOverrideReason,
-      ].filter(Boolean).join(' | ');
+        anthropicVote ? `Sonnet: ${anthropicVote.confirm ? 'CONFIRM' : 'REJECT'} — ${anthropicVote.reasoning || 'no reason'}` : `Sonnet: FAILED — ${anthropicFailure || 'unknown error'}`,
+        codexVote ? `OpenAI: ${codexVote.confirm ? 'CONFIRM' : 'REJECT'} — ${codexVote.reasoning || 'no reason'}` : `OpenAI: FAILED — ${codexFailure || 'unknown error'}`,
+      ].join(' | ');
 
       // Resolve order type from voter consensus (prefer Anthropic's pick, fallback to OpenAI)
       let confirmedOrderType = (
@@ -11557,6 +11416,21 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       }
 
       if (decision === 'confirmed') {
+        const executionInstrument = instruments.find(instrument => instrument.instrument_name === action.instrument_name);
+        const executionDirection = getActionPolicy(action.action)?.direction;
+        executionPrice = normalizeOrderPriceForVenue(executionPrice, executionInstrument, executionDirection).price;
+        const executionAmount = floorOrderAmountToVenuePrecision(Number(action.amount));
+        const validateOrder = createFinalOrderValidator({ action, instruments, spotPrice, triggerData, ruleCriteria, orderType });
+        const finalPolicyCheck = await validateOrder({ price: executionPrice, amount: executionAmount });
+        if (!finalPolicyCheck.allowed) {
+          db.updatePendingAction(action.id, {
+            status: 'failed',
+            confirmation_reasoning: reasoning,
+            execution_result: `Final order rejected (${finalPolicyCheck.code}): ${finalPolicyCheck.reason}`,
+          });
+          console.log(`📋 Final order blocked: ${action.action} ${action.instrument_name} — ${finalPolicyCheck.reason}`);
+          continue;
+        }
         db.updatePendingAction(action.id, {
           status: 'confirmed',
           confirmation_reasoning: `${reasoning} | order_type=${orderType} limit=$${executionPrice}${orderTypeNote ? ` | order_type_override=${orderTypeNote}` : ''}`,
@@ -11567,7 +11441,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         const result = await executeOrder(
           action.action,
           action.instrument_name,
-          action.amount || 0.01,
+          executionAmount,
           executionPrice,
           instruments,
           spotPrice,
@@ -11579,6 +11453,8 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
             ruleCriteria,
             livePositions,
             restingOrders,
+            validateOrder,
+            approvedBounds: finalPolicyCheck.approvedBounds,
           }
         );
 
@@ -11968,7 +11844,8 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
     }
   }
 
-  scoredPuts.sort((a, b) => (b.selectionScore || b.score) - (a.selectionScore || a.score));
+  scoredPuts.sort((a, b) => (b.selectionScore || b.score) - (a.selectionScore || a.score)
+    || b.score - a.score || a.name.localeCompare(b.name));
   scoredCalls.sort((a, b) => (b.selectionScore || b.score) - (a.selectionScore || a.score));
   const top5Puts = scoredPuts.slice(0, 8);
   const top5Calls = scoredCalls.slice(0, 8);
@@ -12133,7 +12010,7 @@ ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~${PUT_ROLL_DTE_THRESHOLD} only if the book already holds longer-dated long puts. Use put_exit_intent="roll_protection", requires_longer_dated_protection=true, condition dte lte ${PUT_ROLL_DTE_THRESHOLD}. This roll trigger is independent of the ${PUT_MONETIZATION_PROFIT_THRESHOLD}% monetization threshold.
 - For sell_call: set option_type "C", positive delta_range (e.g. [0.04, 0.12]), min_bid for the minimum executable bid, and min_score for favorable CALL EDGE. Raw score is bid / abs(delta). CALL EDGE = raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}; this light DTE normalization reduces the mechanical weekly spike when the eligible expiry range rolls forward. Rank and gate sell calls by CALL EDGE while retaining raw score for comparison. Do not emit min_edge_score for sell_call. DTE DISCIPLINE: sell calls at 5-12 DTE; dte_range must remain within [5, 12].
-- For sell_put exits: IMPORTANT: sell_put means selling an already-owned long put to close, trim, or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do not sell a long-dated protective put merely because it has recoverable bid/mark value. When DTE is above ${PUT_ROLL_DTE_THRESHOLD}, use put_exit_intent="monetize_tail_win"; require executable unrealized_pnl_pct gt ${PUT_MONETIZATION_PROFIT_THRESHOLD}, retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. Sell chunks, never all protection at once, so the book can capture more if ETH keeps dropping or bounces around. In severe crashes with sparse books, visible bids may badly understate fair value; if monetizing, make the market at a disciplined floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and payoff role instead of dumping into a stale bid. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you avoid triggering a sell_put, do it because removing protection is strategically unwise or value has not delivered extreme asymmetric upside, not because the exit itself uses more margin.
+- For sell_put exits: IMPORTANT: sell_put means selling an already-owned long put to close, trim, or roll it. It is reduce_only and must never be interpreted as opening a naked short put. Do not sell a long-dated protective put merely because it has recoverable bid/mark value. When DTE is above ${PUT_ROLL_DTE_THRESHOLD}, use put_exit_intent="monetize_tail_win"; require executable unrealized_pnl_pct gt ${PUT_MONETIZATION_PROFIT_THRESHOLD}, retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. Sell chunks, never all protection at once, so the book can capture more if ETH keeps dropping or bounces around. In severe crashes with sparse books, visible bids may badly understate fair value; if monetizing, make the market at a disciplined floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and payoff role instead of dumping into a stale bid. Selling an owned long put is capital-releasing: it returns cash/premium recovery, reduces the hedge position, and does NOT consume more margin. It will generally improve headroom, not worsen it. If you avoid triggering a sell_put, do it because removing protection is strategically unwise or value has not delivered extreme asymmetric upside, and include any loss of portfolio hedge offsets in that assessment.
 - For buyback_call exits, choose one intent. Intent 1: profit_capture / capacity reset while the short call is working. Use buyback_intent "profit_capture", condition_logic "all", and executable unrealized_pnl_pct gte ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic condition. For patient resting attempts before the live ask reaches the capture line, also set target_capture_pct=${CALL_BUYBACK_PROFIT_THRESHOLD}, max_buyback_price to the highest price you are willing to bid, and preferred_order_type "post_only" or "gtc"; the limit price must imply at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture if filled. This uses synthetic reduce-only guarded by live position checks and one open exit order per instrument. Do not add dte or mark_price trigger blockers; executable capture already includes the live ask and is the relevant economic threshold. Intent 2: threat_management when price is moving against the short call and time is running out for recovery inside the threatened range. Use buyback_intent "threat_management", set allow_below_profit_floor true, and use real threat conditions such as delta, spot_price vs strike, and remaining DTE. Do not mix these two intents in one rule. Do not prematurely buy back calls just because price is rising; spot can come back down and buying back fear premium can make us the sucker of the trade. The premium was already collected; a buyback below strike is buying upside insurance, not undoing a completed loss. Profit capture, expiry cleanup, margin-harvest capacity resets, genuine assignment risk, or credible breakout continuation are good reasons. Price moving against you alone is not. For unrealized_pnl_pct-based harvesting, think in executable terms: the real buyback cost is the live ask/marketable buy price, not the midpoint mark. The ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line is a minimum acceptable capture, not a target. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not give back edge by bidding at the threshold. Never create a threshold-style buyback rule without a live buyback market price. Do not use margin utilization by itself as the buyback trigger. Margin release is a benefit of a good profit-harvest close, not a reason to panic-close. On upside breakouts with existing short calls, compare buyback insurance against the alternative of selling richer additional calls if margin still allows. Set conditions that reflect that tradeoff.
 - budget_limit is how much USD to allocate to this rule. For puts: must stay within the remaining put budget (arithmetic discipline — we commit to a predictable spend rate per cycle). For calls: size based on margin health and ETH collateral.
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
@@ -12144,11 +12021,11 @@ ${getStandingRulebookDisciplinePrompt()}
 - If the market is unclear, tighten the watcher criteria and lower priority. Do not omit required standing watchers solely because they are not currently triggered.
 - Maximum 5 entry rules; exit rules should cover each required open-position watcher from REQUIRED STANDING RULEBOOK COVERAGE.
 
-Order type guidance (fee matters — maker is 6x cheaper than taker):
-- "ioc" (immediate-or-cancel): fill instantly or cancel. TAKER fee = $0.50 base + 0.03% of notional (~$1/contract for ETH options). Only use when the opportunity is exceptional and might vanish.
-- "gtc" (good-til-cancelled): rest on the order book. MAKER fee = 0.01% of notional (~$0.16/contract). Use when you want to name your price and wait.
-- "post_only": like GTC but rejected if it would cross the book (guaranteed maker fee 0.01%). Best for patient entries — cheapest execution.
-- DEFAULT to post_only or gtc. Only suggest ioc when urgency genuinely justifies paying 6x more in fees.
+Order type guidance:
+- "ioc" (immediate-or-cancel): take available liquidity within the approved limit and cancel any remainder. Venue taker fees apply to fills.
+- "gtc" (good-til-cancelled): a marketable limit can take liquidity immediately; any remainder rests. Maker/taker fees depend on each fill, not the GTC label.
+- "post_only": rest as a maker or reject if the price would cross. Use for patient maker intent; filling is not guaranteed. Use the current venue fee schedule, not a fixed cost ratio.
+- Prefer post_only for patient maker intent. Choose IOC only when the approved opportunity justifies taking liquidity.
 - The confirmation step can override your suggestion, so this is advisory guidance not a hard rule.
 
 - Return ONLY valid JSON, no markdown fences`;

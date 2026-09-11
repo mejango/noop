@@ -1,13 +1,15 @@
 'use strict';
 
+const STRATEGY_FACTS = require('./strategy-facts.json');
+
 // DTE normalization for abs(delta) / ask. Production history showed that the
 // raw score rises mechanically as a put ages, then resets when the available
 // long-dated expiry rolls forward. A 60-DTE reference and 0.8 exponent remove
 // most of that calendar effect while retaining the market-driven signal.
 const BUY_PUT_EDGE_REFERENCE_DTE = 60;
 const BUY_PUT_EDGE_DTE_EXPONENT = 0.8;
-const BUY_PUT_EDGE_MIN_DTE = 45;
-const BUY_PUT_EDGE_MAX_DTE = 78;
+const BUY_PUT_EDGE_MIN_DTE = STRATEGY_FACTS.put_dte_range[0];
+const BUY_PUT_EDGE_MAX_DTE = STRATEGY_FACTS.put_dte_range[1];
 
 const getBuyPutDteNormalizationFactor = (dte) => {
   const days = Number(dte);
