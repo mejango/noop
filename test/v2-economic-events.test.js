@@ -73,5 +73,123 @@ test('large histories retain a contiguous completed prefix under bounded request
   return {trades:[],num_pages:0};
  };
  await assert.rejects(syncV2TradesProgressively({store,accountId:25923,from:0,to:8000,post,maxPages:1,maxRequests:5}),/budget/);
+ assert.equal(store.latestCoverage(25923,'trades'),'1970-01-01T00:00:02.000Z');
+});
+
+test('pagination count and page declarations remain consistent before complete coverage',async t=>{
+ const {db,store}=harness(t);
+ const cases=[
+  async()=>({trades:[trade()],pagination:{num_pages:1,count:2}}),
+  async body=>({trades:[trade(String(body.page))],pagination:{num_pages:body.page===1?2:1,count:2}}),
+  async body=>({trades:[trade(String(body.page))],pagination:{num_pages:2,count:body.page===1?2:3}}),
+  async()=>({trades:[trade()],pagination:{num_pages:0,count:1}}),
+  async()=>({trades:[],pagination:{num_pages:0,count:'invalid'}}),
+ ];
+ for(const post of cases){
+  await assert.rejects(syncV2Trades({store,accountId:25923,from,to,pageSize:1,post}),/pagination|pages/);
+  assert.equal(getEconomicHistory(db,25923,from,to).coverage.trades,false);
+ }
+ assert.equal(db.prepare('SELECT COUNT(*) n FROM economic_events').get().n,0);
+});
+
+test('partially overlapping pages cannot hide a missing trade behind deduplication',async t=>{
+ const {db,store}=harness(t);
+ await assert.rejects(syncV2Trades({store,accountId:25923,from,to,pageSize:2,
+  post:async body=>({trades:body.page===1?[trade('A'),trade('B')]:[trade('B'),trade('C')],pagination:{num_pages:2,count:4}})
+ }),/repeated/);
+ assert.equal(getEconomicHistory(db,25923,from,to).coverage.trades,false);
+ assert.equal(db.prepare('SELECT COUNT(*) n FROM economic_events').get().n,0);
+});
+
+test('a complete counted history preserves the query provenance',async t=>{
+ const {db,store}=harness(t);
+ const result=await syncV2Trades({store,accountId:25923,from,to,pageSize:2,
+  post:async body=>({trades:body.page===1?[trade('A'),trade('B')]:[trade('C')],pagination:{num_pages:2,count:3}})
+ });
+ assert.equal(result.count,3);
+ assert.equal(getEconomicHistory(db,25923,from,to).coverage.trades,true);
+ const coverage=db.prepare('SELECT evidence_reference FROM economic_coverage').get();
+ assert.match(coverage.evidence_reference,/derive-v2\/private\/get_trade_history account=25923/);
+ assert.match(coverage.evidence_reference,/unique_trades=3/);
+});
+
+test('coverage migration preserves rows and imported evidence references',t=>{
+ const db=new Database(':memory:');t.after(()=>db.close());
+ db.exec(`CREATE TABLE economic_coverage (
+  account_id TEXT NOT NULL,dataset TEXT NOT NULL,from_timestamp TEXT NOT NULL,to_timestamp TEXT NOT NULL,
+  complete INTEGER NOT NULL,error TEXT,PRIMARY KEY(account_id,dataset,from_timestamp,to_timestamp)
+ );`);
+ db.prepare('INSERT INTO economic_coverage VALUES (?,?,?,?,?,?)').run('25923','trades',new Date(from).toISOString(),new Date(to).toISOString(),0,'legacy gap');
+ const {importEvidence}=require('../scripts/import-economic-events');
+ importEvidence(db,{schema_version:1,events:[],coverage:{account_id:25923,dataset:'transfers',from_timestamp:from,to_timestamp:to,complete:true,evidence_reference:'sha256:exhaustive-venue-export'}});
+ const old=db.prepare("SELECT * FROM economic_coverage WHERE dataset='trades'").get();
+ assert.equal(old.error,'legacy gap');assert.equal(old.evidence_reference,null);
+ const imported=db.prepare("SELECT * FROM economic_coverage WHERE dataset='transfers'").get();
+ assert.equal(imported.complete,1);assert.equal(imported.evidence_reference,'sha256:exhaustive-venue-export');
+ assert.equal(createEconomicStore(db).recordBatch([],{account_id:25923,dataset:'transfers',from_timestamp:from,to_timestamp:to,complete:true}),0);
+ assert.equal(db.prepare("SELECT evidence_reference FROM economic_coverage WHERE dataset='transfers'").get().evidence_reference,'sha256:exhaustive-venue-export');
+});
+
+test('durable splits make progress across retries even before any leaf can complete',async t=>{
+ const {db}=harness(t);
+ const makePost=()=>{
+  let requests=0;
+  return {count:()=>requests,post:async body=>{
+   requests++;
+   return body.to_timestamp-body.from_timestamp>1000
+    ?{trades:[{...trade(String(body.from_timestamp)),timestamp:body.from_timestamp}],num_pages:100}
+    :{trades:[],num_pages:0};
+  }};
+ };
+ const first=makePost();
+ await assert.rejects(syncV2TradesProgressively({store:createEconomicStore(db),accountId:25923,from:0,to:8000,post:first.post,maxRequests:2}),/budget/);
+ assert.equal(first.count(),2);
+ assert.equal(createEconomicStore(db).latestCoverage(25923,'trades'),null);
+ assert.deepEqual(createEconomicStore(db).getTradeSyncWork(25923).windows[0],[0,2000]);
+ const second=makePost();
+ await assert.rejects(syncV2TradesProgressively({store:createEconomicStore(db),accountId:25923,from:0,to:8000,post:second.post,maxRequests:2}),/budget/);
+ assert.equal(second.count(),2);
+ assert.equal(createEconomicStore(db).latestCoverage(25923,'trades'),'1970-01-01T00:00:01.000Z');
+ for(let attempt=0;attempt<10&&createEconomicStore(db).getTradeSyncWork(25923);attempt++){
+  const next=makePost();
+  try{await syncV2TradesProgressively({store:createEconomicStore(db),accountId:25923,from:0,to:8000,post:next.post,maxRequests:2});}catch(error){assert.match(error.message,/budget/);}
+  assert.ok(next.count()<=2);
+ }
+ assert.equal(createEconomicStore(db).getTradeSyncWork(25923),null);
+ assert.equal(createEconomicStore(db).latestCoverage(25923,'trades'),'1970-01-01T00:00:08.000Z');
+});
+
+test('resumed work skips only proven coverage and appends a later requested endpoint',async t=>{
+ const {store}=harness(t);
+ store.recordBatch([],{account_id:25923,dataset:'trades',from_timestamp:0,to_timestamp:2000,complete:true});
+ store.saveTradeSyncWork(25923,{to:4000,windows:[[2000,3000],[3000,4000]]});
+ const requested=[];
+ const result=await syncV2TradesProgressively({store,accountId:25923,from:1000,to:5000,
+  post:async body=>{requested.push([body.from_timestamp,body.to_timestamp]);return {trades:[],pagination:{num_pages:0,count:0}};}
+ });
+ assert.equal(result.complete,true);
+ assert.deepEqual(requested,[[2000,3000],[3000,4000],[4000,5000]]);
+ assert.equal(store.latestCoverage(25923,'trades'),'1970-01-01T00:00:05.000Z');
+ assert.equal(store.getTradeSyncWork(25923),null);
+});
+
+test('a saved pending window cannot bypass an uncovered prefix',async t=>{
+ const {store}=harness(t);
+ store.saveTradeSyncWork(25923,{to:4000,windows:[[2000,4000]]});
+ const requested=[];
+ await syncV2TradesProgressively({store,accountId:25923,from:0,to:4000,
+  post:async body=>{requested.push([body.from_timestamp,body.to_timestamp]);return {trades:[],num_pages:0};}
+ });
+ assert.deepEqual(requested,[[0,4000]]);
+});
+
+test('a request budget below the default page cap still persists narrower windows',async t=>{
+ const {store}=harness(t);
+ const post=async body=>body.to_timestamp-body.from_timestamp>1000
+  ?{trades:[{...trade(String(body.from_timestamp)),timestamp:body.from_timestamp}],num_pages:3}
+  :{trades:[],num_pages:0};
+ await assert.rejects(syncV2TradesProgressively({store,accountId:25923,from:0,to:8000,post,maxRequests:2}),/budget/);
+ assert.deepEqual(store.getTradeSyncWork(25923).windows[0],[0,2000]);
+ await assert.rejects(syncV2TradesProgressively({store,accountId:25923,from:0,to:8000,post,maxRequests:2}),/budget/);
  assert.equal(store.latestCoverage(25923,'trades'),'1970-01-01T00:00:01.000Z');
 });
