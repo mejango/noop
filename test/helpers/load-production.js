@@ -31,6 +31,7 @@ function loadProduction(names, { bindings = {}, source = SCRIPT_SOURCE } = {}) {
   const policyModules = ['trade-policy', 'order-pricing'].map(name => path.join(ROOT, `bot/${name}.js`));
   const supplied = {
     BOT_CONFIG,
+    STRATEGY_FACTS: require('../../bot/strategy-facts.json'),
     ...require('../../bot/put-score'),
     ...require('../../bot/call-score'),
     ...Object.assign({}, ...policyModules.filter(file => fs.existsSync(file)).map(file => require(file))),

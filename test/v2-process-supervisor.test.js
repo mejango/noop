@@ -34,6 +34,10 @@ function stubSource(root, name, options) {
     const root = ${JSON.stringify(root)};
     const name = ${JSON.stringify(name)};
     const options = ${JSON.stringify(options)};
+    function writeJSON(file, value) {
+      fs.writeFileSync(file + '.tmp', JSON.stringify(value));
+      fs.renameSync(file + '.tmp', file);
+    }
     let malformedIndex = 0;
     function sendHeartbeat() {
       if (name !== 'bot' || !process.connected || options.heartbeat === 'none') return;
@@ -62,21 +66,21 @@ function stubSource(root, name, options) {
     }
     if (options.descendant) {
       require('node:child_process').spawn(process.execPath, ['-e',
-        "process.on('SIGTERM', () => {}); process.on('SIGINT', () => {}); require('node:fs').writeFileSync(process.argv[1], JSON.stringify({ pid: process.pid })); setInterval(() => {}, 1000);",
+        "process.on('SIGTERM', () => {}); process.on('SIGINT', () => {}); const fs = require('node:fs'); const file = process.argv[1]; fs.writeFileSync(file + '.tmp', JSON.stringify({ pid: process.pid })); fs.renameSync(file + '.tmp', file); setInterval(() => {}, 1000);",
         path.join(root, name + '.descendant.json')
       ], { stdio: 'ignore' });
     }
     setInterval(() => {
       if (fs.existsSync(path.join(root, name + '.exit'))) process.exit(options.exitCode || 0);
       if (fs.existsSync(path.join(root, name + '.hang'))) {
-        fs.writeFileSync(path.join(root, name + '.hung.json'), JSON.stringify({ pid: process.pid }));
+        writeJSON(path.join(root, name + '.hung.json'), { pid: process.pid });
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
       }
     }, 10);
-    fs.writeFileSync(path.join(root, name + '.ready.json'), JSON.stringify({
+    writeJSON(path.join(root, name + '.ready.json'), {
       pid: process.pid, cwd: process.cwd(), hostname: process.env.HOSTNAME,
       supervised: process.env.BOT_SUPERVISED
-    }));
+    });
   `;
 }
 

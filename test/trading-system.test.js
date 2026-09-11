@@ -6020,9 +6020,14 @@ describe('confirmation prompt margin context', () => {
   });
 
   test('sell_call confirmation context carries advisor score gates', () => {
+    class EvaluationDate extends Date { static now() { return Date.parse('2030-01-01T08:00:00Z'); } }
+    const { formatSellCallConfirmationContext } = loadProduction(
+      ['formatSellCallConfirmationContext'], { bindings: { Date: EvaluationDate } }
+    );
     const context = formatSellCallConfirmationContext({
       action: {
         action: 'sell_call',
+        instrument_name: 'ETH-20300110-2100-C',
         price: 8.1,
         rule_criteria: {
           option_type: 'C',
@@ -6057,12 +6062,18 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('edge_gate=PASS'));
     assert.ok(context.includes('min_bid=$4.0000'));
     assert.ok(context.includes('Fresh market: raw_score=68.53'));
+    assert.ok(context.includes(`Fresh market: raw_score=68.53, edge_score=${normalizeSellCallScore(8.1 / 0.1182, 9).toFixed(2)}`));
   });
 
   test('sell_call confirmation applies the DTE correction before the min_score gate', () => {
+    class EvaluationDate extends Date { static now() { return Date.parse('2030-01-01T08:00:00Z'); } }
+    const { formatSellCallConfirmationContext } = loadProduction(
+      ['formatSellCallConfirmationContext'], { bindings: { Date: EvaluationDate } }
+    );
     const context = formatSellCallConfirmationContext({
       action: {
         action: 'sell_call',
+        instrument_name: 'ETH-20300106-2050-C',
         price: 6.46,
         rule_criteria: {
           option_type: 'C',
@@ -6089,7 +6100,7 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('raw_score=53.86'));
     assert.ok(context.includes('edge_gate=PASS'));
     assert.ok(context.includes('min_score=55.00'));
-    assert.ok(SCRIPT_SOURCE.includes('const liveEdgeScore = normalizeSellCallScore(liveRawScore, triggerDte);'));
+    assert.ok(context.includes(`Fresh market: raw_score=53.83, edge_score=${normalizeSellCallScore(6.46 / 0.12, 5).toFixed(2)}`));
   });
 
   test('sell_put confirmation context preserves tail monetization floor and tranche discipline', () => {
