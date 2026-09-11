@@ -161,3 +161,26 @@ test('legacy migration preserves unknown fill value, reopens incomplete outcomes
     assert.equal(run(`const s=require(${JSON.stringify(modulePath)}); console.log(s.getOpenRestingOrders()[0].filled_value); s.close();`), '19');
   } finally { fs.rmSync(fixture, { recursive: true, force: true }); }
 });
+
+test('a later batch envelope cannot turn a pre-horizon quote into future evidence', () => {
+  store.insertCandidateObservations([observation()], [1]);
+  spot();
+  const oldReceipt = '2026-09-11T10:59:59.000Z';
+  const laterFrame = '2026-09-11T11:00:01.000Z';
+  store.insertOptionsSnapshotBatch([quote(name, { quoteReceivedAt: oldReceipt, quoteSource: 'derive-v2/get_tickers' })], laterFrame);
+  assert.equal(store.evaluateDueDecisionOutcomes({ now: laterFrame }).pending, 1);
+  assert.equal(outcome().future_quote_at, null);
+  const raw = db.prepare('SELECT timestamp, quote_received_at, quote_source FROM options_snapshots').get();
+  assert.deepEqual(raw, { timestamp: laterFrame, quote_received_at: oldReceipt, quote_source: 'derive-v2/get_tickers' });
+  const trueReceipt = '2026-09-11T11:00:02.000Z';
+  const nextFrame = '2026-09-11T11:00:03.000Z';
+  store.insertOptionsSnapshotBatch([quote(name, { quoteReceivedAt: trueReceipt })], nextFrame);
+  assert.equal(store.evaluateDueDecisionOutcomes({ now: trueReceipt }).pending, 1);
+  assert.equal(store.evaluateDueDecisionOutcomes({ now: nextFrame }).evaluated, 1);
+  assert.equal(outcome().future_quote_at, trueReceipt);
+});
+
+test('quote receipts after their availability envelope reject the whole raw batch', () => {
+  assert.throws(() => store.insertOptionsSnapshotBatch([quote(name, { quoteReceivedAt: '2026-09-11T11:00:01.000Z' })], due), /Quote receipt/);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM options_snapshots').get().n, 0);
+});

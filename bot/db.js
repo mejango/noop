@@ -701,6 +701,11 @@ db.transaction(() => {
     db.prepare('INSERT INTO data_migrations VALUES (?, ?)').run('v2-observation-completeness-lifecycle-1', new Date().toISOString());
   }
 })();
+// Keep per-contract receipt evidence alongside the cross-sectional frame time.
+addColumnIfMissing('options_snapshots', 'quote_received_at', 'TEXT');
+addColumnIfMissing('options_snapshots', 'quote_source', 'TEXT');
+db.exec(`CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument_receipt
+  ON options_snapshots(instrument_name, COALESCE(quote_received_at, timestamp))`);
 const hourlyRollups = createHourlyRollups(db);
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
@@ -718,10 +723,10 @@ const stmts = {
   insertOptionsSnapshot: db.prepare(`
     INSERT INTO options_snapshots (timestamp, instrument_name, strike, expiry, option_type,
       delta, ask_price, bid_price, ask_amount, bid_amount, mark_price, index_price,
-      ask_delta_value, bid_delta_value, open_interest, implied_vol)
+      ask_delta_value, bid_delta_value, open_interest, implied_vol, quote_received_at, quote_source)
     VALUES (@timestamp, @instrument_name, @strike, @expiry, @option_type,
       @delta, @ask_price, @bid_price, @ask_amount, @bid_amount, @mark_price, @index_price,
-      @ask_delta_value, @bid_delta_value, @open_interest, @implied_vol)
+      @ask_delta_value, @bid_delta_value, @open_interest, @implied_vol, @quote_received_at, @quote_source)
   `),
 
   insertOnchainData: db.prepare(`
@@ -1702,15 +1707,16 @@ const stmts = {
   `),
 
   getOutcomeFutureQuote: db.prepare(`
-    SELECT timestamp, bid_price, ask_price, mark_price, delta, bid_delta_value, ask_delta_value
+    SELECT COALESCE(quote_received_at, timestamp) AS timestamp,
+      bid_price, ask_price, mark_price, delta, bid_delta_value, ask_delta_value
     FROM options_snapshots
     WHERE instrument_name = @instrument_name
-      AND timestamp >= @due_at
-      AND timestamp < @until
+      AND COALESCE(quote_received_at, timestamp) >= @due_at
+      AND COALESCE(quote_received_at, timestamp) < @until
       AND timestamp <= @now
       AND ((@action IN ('sell_call', 'sell_put') AND ask_price > 0)
         OR (@action IN ('buy_put', 'buyback_call') AND bid_price >= 0))
-    ORDER BY timestamp ASC, id ASC
+    ORDER BY COALESCE(quote_received_at, timestamp) ASC, id ASC
     LIMIT 1
   `),
 
@@ -1850,7 +1856,15 @@ const normalizeOptionType = (value, instrumentName) => {
 
 const insertOptionsSnapshotBatch = (options, timestamp) => {
   const insert = db.transaction((opts) => {
+    const envelopeMs = new Date(timestamp).getTime();
+    if (!Number.isFinite(envelopeMs)) throw new Error('Invalid snapshot timestamp');
     for (const opt of opts) {
+      let quoteReceivedAt = null;
+      if (opt.details?.quoteReceivedAt != null) {
+        const receiptMs = new Date(opt.details.quoteReceivedAt).getTime();
+        if (!Number.isFinite(receiptMs) || receiptMs > envelopeMs) throw new Error('Quote receipt must precede or equal its snapshot timestamp');
+        quoteReceivedAt = new Date(receiptMs).toISOString();
+      }
       stmts.insertOptionsSnapshot.run({
         timestamp,
         instrument_name: opt.instrument_name || '',
@@ -1868,6 +1882,8 @@ const insertOptionsSnapshotBatch = (options, timestamp) => {
         bid_delta_value: toNum(opt.details?.bidDeltaValue),
         open_interest: toNum(opt.details?.openInterest),
         implied_vol: toNum(opt.details?.impliedVol),
+        quote_received_at: quoteReceivedAt,
+        quote_source: opt.details?.quoteSource || null,
       });
     }
     hourlyRollups.refreshOptionsHour(timestamp);
