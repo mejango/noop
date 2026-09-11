@@ -65,18 +65,52 @@ function reconcileSubmission({ db, submissionId, accountId, accountAddress, orde
   }).immediate();
 }
 
+// V2's documented page overflow repeats the last page. Prefer its explicit
+// pagination boundary so a complete, exactly-full last page is not reread.
+// Schema: derivexyz/derive-py@e662f36, specs/openapi-spec.json,
+// PaginationInfoSchema and PrivateGetTradeHistoryParamsSchema.
+function recoveryPagination(result, page, rows, count, previous) {
+  const pagination = result?.pagination;
+  if (pagination == null) {
+    if (previous) throw new Error('History pagination changed between pages');
+    return { complete: rows.length < 100, metadata: null };
+  }
+  if (typeof pagination !== 'object' || Array.isArray(pagination)
+    || !Number.isSafeInteger(pagination.count) || pagination.count < 0
+    || !Number.isSafeInteger(pagination.num_pages) || pagination.num_pages < 0) {
+    throw new Error('Invalid history pagination');
+  }
+  const metadata = { count: pagination.count, num_pages: pagination.num_pages };
+  if (previous && (previous.count !== metadata.count || previous.num_pages !== metadata.num_pages)) {
+    throw new Error('History pagination changed between pages');
+  }
+  if (count > metadata.count || (metadata.num_pages === 0 && count > 0)
+    || (page < metadata.num_pages && rows.length < 100)) {
+    throw new Error('History pagination conflicts with returned rows');
+  }
+  const complete = page >= metadata.num_pages;
+  if (complete && count !== metadata.count) throw new Error('History pagination count is incomplete');
+  return { complete, metadata };
+}
+
 async function collectRecoveryEvidence({ read, request }) {
   const account = { subaccount_id: request.subaccount_id };
   let order = null;
   const seenPages = new Set();
+  const orderHistoryTo = Date.now();
+  let orderCount = 0, orderPagination = null;
   for (let page = 1; page <= 100; page++) {
-    const result = await read('get_order_history', { ...account, from_timestamp: 0, page, page_size: 100 });
+    const result = await read('get_order_history', { ...account, from_timestamp: 0,
+      to_timestamp: orderHistoryTo, page, page_size: 100 });
     const rows = Array.isArray(result) ? result : result?.orders;
     if (!Array.isArray(rows)) throw new Error('Order history unavailable');
+    orderCount += rows.length;
+    const pagination = recoveryPagination(result, page, rows, orderCount, orderPagination);
+    orderPagination = pagination.metadata;
     const matches = rows.filter(row => String(row.nonce) === String(request.nonce));
     if (matches.length > 1) throw new Error('Ambiguous order nonce in venue history');
     if (matches.length) { order = matches[0]; break; }
-    if (rows.length < 100) break;
+    if (pagination.complete) break;
     const key = rows.map(row => row.order_id).join(',');
     if (seenPages.has(key)) throw new Error('Order history pagination did not advance');
     seenPages.add(key);
@@ -98,14 +132,20 @@ async function collectRecoveryEvidence({ read, request }) {
 
   const trades = [];
   const tradePages = new Set();
+  const tradeHistoryTo = Date.now();
+  let tradeCount = 0, tradePagination = null;
   let complete = false;
   for (let page = 1; page <= 100; page++) {
     const result = await read('get_trade_history', { ...account, instrument_name: request.instrument_name,
-      from_timestamp: 0, page, page_size: 100 });
+      order_id: order.order_id, from_timestamp: 0, to_timestamp: tradeHistoryTo, page, page_size: 100 });
     const rows = Array.isArray(result) ? result : result?.trades;
     if (!Array.isArray(rows)) throw new Error('Trade history unavailable');
-    trades.push(...rows.filter(trade => trade.order_id === order.order_id));
-    if (rows.length < 100) { complete = true; break; }
+    if (rows.some(trade => trade.order_id !== order.order_id)) throw new Error('Trade history order filter returned conflicting evidence');
+    tradeCount += rows.length;
+    const pagination = recoveryPagination(result, page, rows, tradeCount, tradePagination);
+    tradePagination = pagination.metadata;
+    trades.push(...rows);
+    if (pagination.complete) { complete = true; break; }
     const key = rows.map(row => row.trade_id).join(',');
     if (tradePages.has(key)) throw new Error('Trade history pagination did not advance');
     tradePages.add(key);

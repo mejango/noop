@@ -643,13 +643,23 @@ function recoveryFixture(t) {
   state.botData.lastTradeReviewRun = 987654;
   state.db.saveBotState(state.botData);
   const request = {
-    instrument_name: putName, subaccount_id: '7', account_address: 'fixture-account',
-    nonce: '12345', direction: 'buy', amount: '5', limit_price: '10',
+    instrument_name: putName, subaccount_id: 7, account_address: 'fixture-account',
+    nonce: 12345, direction: 'buy', amount: '5', limit_price: '10',
     time_in_force: 'gtc', action: 'buy_put', approved_limit_price: 10,
   };
-  const order = venueOrder({ subaccount_id: '7', nonce: request.nonce, filled_amount: '1', average_price: '10' });
-  const trades = [{ trade_id: 'trade-1', order_id: order.order_id, subaccount_id: '7',
-    instrument_name: putName, direction: 'buy', trade_amount: '1', trade_price: '10' }];
+  // Synthetic values, complete required V2 response fields from the official
+  // pre-V3 SDK schemas (OrderResponseSchema and TradeResponseSchema):
+  // https://github.com/derivexyz/derive-py/blob/e662f36f6b1ab326e97e595f131a1fa5cf6376a8/specs/openapi-spec.json
+  const order = venueOrder({ subaccount_id: 7, nonce: request.nonce, filled_amount: '1', average_price: '10',
+    cancel_reason: '', is_transfer: false, label: '', last_update_timestamp: Date.now(),
+    max_fee: '10', mmp: false, order_fee: '0.01', order_type: 'limit', quote_id: null,
+    signature: 'fixture-signature', signature_expiry_sec: 1800000000, signer: 'fixture-signer', time_in_force: 'gtc' });
+  const trades = [{ trade_id: 'trade-1', order_id: order.order_id, subaccount_id: 7,
+    instrument_name: putName, direction: 'buy', trade_amount: '1', trade_price: '10',
+    expected_rebate: '0', extra_fee: '0', index_price: '2000', is_transfer: false,
+    label: '', liquidity_role: 'taker', mark_price: '10', quote_id: null, realized_pnl: '0',
+    realized_pnl_excl_fees: '0.01', rfq_id: null, timestamp: Date.now(), trade_fee: '0.01',
+    transaction_id: 'fixture-transaction', tx_hash: null, tx_status: 'settled' }];
   const { beginSubmission } = require('../bot/order-accounting');
   const submissionId = beginSubmission(state.db, pendingId, request);
   return {
@@ -713,6 +723,8 @@ test('recovery rejects a different order ID from the saved acknowledgement', (t)
 test('recovery evidence collection paginates both histories and refreshes the order by durable ID', async (t) => {
   const { request, payload } = recoveryFixture(t);
   const calls = [];
+  const expectedTrades = Array.from({ length: 101 }, (_, i) => ({ ...payload.trades[0],
+    trade_id: `order-trade-${i}`, trade_amount: i === 100 ? '0.5' : '0.005' }));
   const { collectRecoveryEvidence } = require('../bot/reconcile-execution');
   const evidence = await collectRecoveryEvidence({ request, read: async (method, params) => {
     calls.push([method, params.page]);
@@ -728,17 +740,70 @@ test('recovery evidence collection paginates both histories and refreshes the or
       return { ...payload.order };
     }
     assert.equal(method, 'get_trade_history');
-    return { trades: params.page === 1
-      ? Array.from({ length: 100 }, (_, i) => ({ trade_id: `other-trade-${i}`, order_id: 'another-order' }))
-      : payload.trades };
+    assert.equal(params.order_id, payload.order.order_id);
+    assert.equal(params.instrument_name, request.instrument_name);
+    return { trades: expectedTrades.slice((params.page - 1) * 100, params.page * 100) };
   } });
   assert.equal(evidence.order.order_id, payload.order.order_id);
-  assert.deepEqual(evidence.trades, payload.trades);
+  assert.deepEqual(evidence.trades, expectedTrades);
   assert.deepEqual(calls, [
     ['get_order_history', 1], ['get_order_history', 2], ['get_order', undefined],
     ['get_trade_history', 1], ['get_trade_history', 2],
   ]);
 });
+
+test('official V2 pagination stops an exactly full final trade page and recovers it once', async (t) => {
+  const { state, request, payload } = recoveryFixture(t);
+  const trades = Array.from({ length: 100 }, (_, i) => ({ ...payload.trades[0],
+    trade_id: `filtered-trade-${i}`, trade_amount: '0.01' }));
+  const calls = [];
+  const { collectRecoveryEvidence, reconcileSubmission } = require('../bot/reconcile-execution');
+  const evidence = await collectRecoveryEvidence({ request, read: async (method, params) => {
+    calls.push(method);
+    if (method === 'get_order') return payload.order;
+    assert.equal(params.page, 1, 'V2 returns its last page again on page overflow');
+    if (method === 'get_order_history') return { orders: [payload.order], pagination: { count: 1, num_pages: 1 } };
+    assert.equal(params.order_id, payload.order.order_id);
+    return { trades, pagination: { count: 100, num_pages: 1 } };
+  } });
+  reconcileSubmission({ ...payload, ...evidence });
+  assert.ok(Math.abs(state.db.getOpenRestingOrders()[0].filled_amount - 1) < 1e-9);
+  assert.ok(Math.abs(state.db.loadBotState().put_net_bought - 10) < 1e-9);
+  assert.deepEqual(calls, ['get_order_history', 'get_order', 'get_trade_history']);
+});
+
+test('official V2 pagination stops an exactly full final order page without inventing absence evidence', async (t) => {
+  const { request } = recoveryFixture(t);
+  let calls = 0;
+  const { collectRecoveryEvidence } = require('../bot/reconcile-execution');
+  await assert.rejects(collectRecoveryEvidence({ request, read: async (method, params) => {
+    calls++;
+    assert.equal(method, 'get_order_history');
+    assert.equal(params.page, 1);
+    return { orders: Array.from({ length: 100 }, (_, i) => ({ order_id: `unrelated-${i}`, nonce: `nonce-${i}` })),
+      pagination: { count: 100, num_pages: 1 } };
+  } }), /absence cannot release/);
+  assert.equal(calls, 1);
+});
+
+for (const [name, result] of [
+  ['missing rows', { trades: [], pagination: { count: 1, num_pages: 1 } }],
+  ['invalid count', { trades: [], pagination: { count: -1, num_pages: 0 } }],
+  ['short intermediate page', { trades: [], pagination: { count: 101, num_pages: 2 } }],
+  ['conflicting order filter', { trades: [{ trade_id: 'wrong-trade', order_id: 'another-order' }], pagination: { count: 1, num_pages: 1 } }],
+]) {
+  test(`recovery rejects trade history with ${name}`, async (t) => {
+    const { state, request, payload } = recoveryFixture(t);
+    const { collectRecoveryEvidence } = require('../bot/reconcile-execution');
+    await assert.rejects(collectRecoveryEvidence({ request, read: async (method) => {
+      if (method === 'get_order_history') return { orders: [payload.order] };
+      if (method === 'get_order') return payload.order;
+      return result;
+    } }), /pagination|conflicting evidence/);
+    assert.throws(() => require('../bot/order-accounting').assertNoUnresolvedSubmission(state.db), /accounting recovery/);
+    assert.equal(state.db.loadBotState().put_net_bought, 0);
+  });
+}
 
 test('missing recovery evidence cannot be interpreted as proof that an unknown submission was rejected', async (t) => {
   const { state, request, payload } = recoveryFixture(t);
