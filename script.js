@@ -125,7 +125,7 @@ const encoder = new AbiCoder();
 
 // SQLite database (loaded via bot/index.js or standalone)
 const db = global.__noopDb || null;
-const { createEconomicStore, syncV2Trades } = require('./bot/economic-events');
+const { createEconomicStore, syncV2TradesProgressively } = require('./bot/economic-events');
 const { observationUniverse, missingExpiryDates } = require('./bot/observations');
 const economicStore = db?.db ? createEconomicStore(db.db) : null;
 if (db) {
@@ -12755,11 +12755,12 @@ let lastEconomicSyncAt = 0;
 const syncEconomicEvidence = async (now = Date.now()) => {
   if (!economicStore || now - lastEconomicSyncAt < 15 * 60 * 1000) return;
   lastEconomicSyncAt = now;
-  economicStore.recordExposure(String(PUT_INSURED_EXTERNAL_ETH), now);
+
   const lastCovered = economicStore.latestCoverage(SUBACCOUNT_ID, 'trades');
   const from = lastCovered ? Math.max(0, Date.parse(lastCovered) - 60000) : 0;
   try {
-    const result = await syncV2Trades({
+    economicStore.recordExposure(SUBACCOUNT_ID, String(PUT_INSURED_EXTERNAL_ETH), now);
+    const result = await syncV2TradesProgressively({
       store: economicStore, accountId: SUBACCOUNT_ID, from, to: now,
       post: async (body) => {
         const wallet = createWallet();
@@ -13194,7 +13195,9 @@ const runBot = async () => {
       try {
         const allOptions = observedInstruments.map(inst => {
           const ticker = tickerMap[inst.instrument_name];
-          return ticker ? enrichCandidateFromTicker(inst, ticker, spotPrice) : null;
+          const enriched = ticker ? enrichCandidateFromTicker(inst, ticker, spotPrice) : null;
+          if (enriched) enriched.details = { ...enriched.details, quoteReceivedAt: ticker.quote_received_at, quoteSource: ticker.quote_source };
+          return enriched;
         }).filter(Boolean);
         if (allOptions.length > 0) {
           // The snapshot is available only once its component quotes have arrived.
@@ -13243,7 +13246,7 @@ const runBot = async () => {
 
       try {
         if (typeof db.evaluateDueDecisionOutcomes === 'function') {
-          const outcomeResult = db.evaluateDueDecisionOutcomes({ now: tickTimestamp, limit: 750 });
+          const outcomeResult = db.evaluateDueDecisionOutcomes({ now: new Date().toISOString(), limit: 750 });
           if (outcomeResult?.scanned > 0) {
             console.log(`📊 Decision outcomes labeled: scanned=${outcomeResult.scanned} evaluated=${outcomeResult.evaluated} missing=${outcomeResult.missing}`);
           }

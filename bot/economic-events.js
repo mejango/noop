@@ -4,6 +4,11 @@
 // Native quantities remain decimal strings; unknown valuation is never zero.
 const KINDS = new Set(['trade', 'fee', 'settlement', 'transfer']);
 const DATASETS = new Set(['trades', 'settlements', 'transfers']);
+const accountIdentity = value => {
+  const text = String(value);
+  if (!/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(Number(text))) throw new Error('Invalid or unsafe account identity');
+  return text;
+};
 const decimal = (value, optional = false) => {
   if (value == null && optional) return null;
   const text = String(value);
@@ -34,8 +39,7 @@ function multiply(a, b) {
 function normalizeEvent(input) {
   if (!input || !KINDS.has(input.event_type)) throw new Error('Unsupported economic event type');
   if (!input.event_id || input.account_id == null || !input.source || !input.currency) throw new Error('Economic evidence requires identity, account, source and currency');
-  const accountId = String(input.account_id);
-  if (!/^\d+$/.test(accountId)) throw new Error('Invalid account identity');
+  const accountId = accountIdentity(input.account_id);
   if (!input.raw_json) throw new Error('Economic evidence requires its original source record');
   const event = {
     event_id: String(input.event_id), account_id: accountId, event_type: input.event_type,
@@ -52,6 +56,10 @@ function normalizeEvent(input) {
 function normalizeV2Trade(trade, accountId) {
   if (!trade?.trade_id || !trade.instrument_name || !['buy', 'sell'].includes(trade.direction)) throw new Error('Trade history is missing durable trade identity or direction');
   if (trade.subaccount_id != null && String(trade.subaccount_id) !== String(accountId)) throw new Error('Trade account mismatch');
+  if (trade.is_transfer != null && trade.is_transfer !== false) throw new Error('Transfer trade requires explicit transfer accounting');
+  if (trade.tx_status != null && !['settled','success','successful','confirmed','finalized'].includes(String(trade.tx_status).toLowerCase())) {
+    throw new Error('Trade settlement status is unresolved or unsupported');
+  }
   const amount = decimal(trade.trade_amount ?? trade.amount);
   const price = decimal(trade.trade_price ?? trade.price);
   if (amount.startsWith('-') || amount === '0' || price.startsWith('-')) throw new Error('Invalid executed trade amount or price');
@@ -80,7 +88,8 @@ function createEconomicStore(db) {
     PRIMARY KEY(account_id,dataset,from_timestamp,to_timestamp)
   );
   CREATE TABLE IF NOT EXISTS exposure_history (
-    effective_at TEXT PRIMARY KEY, external_eth TEXT NOT NULL, source TEXT NOT NULL
+    account_id TEXT NOT NULL, effective_at TEXT NOT NULL, external_eth TEXT NOT NULL, source TEXT NOT NULL,
+    PRIMARY KEY(account_id,effective_at)
   );`);
   const keys = ['event_id','account_id','event_type','timestamp','instrument_name','currency','amount','cashflow_usd','realized_pnl_usd','fee_usd','source','raw_json'];
   const insert = db.prepare(`INSERT INTO economic_events (${keys.join(',')}) VALUES (${keys.map(k => `@${k}`).join(',')})`);
@@ -101,7 +110,7 @@ function createEconomicStore(db) {
   const recordEvents = db.transaction(record);
   const recordBatch = db.transaction((rows, evidence) => {
     if (!evidence || !DATASETS.has(evidence.dataset)) throw new Error('Coverage dataset required');
-    const account = String(evidence.account_id);
+    const account = accountIdentity(evidence.account_id);
     const from = iso(evidence.from_timestamp), to = iso(evidence.to_timestamp);
     if (from > to) throw new Error('Invalid coverage interval');
     for (const row of rows) {
@@ -113,22 +122,31 @@ function createEconomicStore(db) {
     coverage.run({account_id: account,dataset:evidence.dataset,from_timestamp:from,to_timestamp:to,complete:evidence.complete === true ? 1 : 0,error:evidence.error || null});
     return inserted;
   });
-  function recordExposure(externalEth, effectiveAt, source = 'runtime-config') {
+  function recordExposure(accountId, externalEth, effectiveAt, source = 'runtime-config') {
+    accountId = accountIdentity(accountId);
     const amount = decimal(externalEth);
     if (amount.startsWith('-')) throw new Error('External exposure cannot be negative');
-    const last = db.prepare('SELECT external_eth FROM exposure_history ORDER BY effective_at DESC LIMIT 1').get();
-    if (last?.external_eth !== amount) db.prepare('INSERT INTO exposure_history VALUES (?,?,?)').run(iso(effectiveAt),amount,source);
+    const last = db.prepare('SELECT external_eth FROM exposure_history WHERE account_id=? ORDER BY effective_at DESC LIMIT 1').get(String(accountId));
+    if (last?.external_eth !== amount) db.prepare('INSERT INTO exposure_history VALUES (?,?,?,?)').run(String(accountId),iso(effectiveAt),amount,source);
   }
   function latestCoverage(accountId, dataset) {
-    return db.prepare('SELECT MAX(to_timestamp) AS until FROM economic_coverage WHERE account_id=? AND dataset=? AND complete=1').get(String(accountId),dataset)?.until || null;
+    const start = iso(0);
+    let cursor = start;
+    const rows = db.prepare('SELECT from_timestamp,to_timestamp FROM economic_coverage WHERE account_id=? AND dataset=? AND complete=1 ORDER BY from_timestamp').all(accountIdentity(accountId),dataset);
+    for (const row of rows) {
+      if (row.from_timestamp > cursor) break;
+      if (row.to_timestamp > cursor) cursor = row.to_timestamp;
+    }
+    return cursor === start ? null : cursor;
   }
   return { recordEvents, recordBatch, recordExposure, latestCoverage };
 }
 async function syncV2Trades({ store, accountId, post, from = 0, to = Date.now(), maxPages = 20, pageSize = 1000 }) {
+  accountId = accountIdentity(accountId);
   const fromMs = new Date(from).getTime(), toMs = new Date(to).getTime();
   if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs > toMs) throw new Error('Invalid trade history window');
   const rows = [];
-  const seen = new Set();
+  const seen = new Map();
   const evidence = {account_id:String(accountId),dataset:'trades',from_timestamp:iso(fromMs),to_timestamp:iso(toMs)};
   try {
     for (let page = 1; page <= maxPages; page++) {
@@ -137,20 +155,50 @@ async function syncV2Trades({ store, accountId, post, from = 0, to = Date.now(),
       let newCount = 0;
       for (const row of result.trades) {
         const event = normalizeV2Trade(row,accountId);
-        if (!seen.has(event.event_id)) {seen.add(event.event_id);rows.push(event);newCount++;}
+        const fingerprint = JSON.stringify(Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'raw_json')));
+        if (seen.has(event.event_id) && seen.get(event.event_id) !== fingerprint) throw new Error('Conflicting repeated trade identity');
+        if (!seen.has(event.event_id)) {seen.set(event.event_id,fingerprint);rows.push(event);newCount++;}
       }
       const numPages = result.pagination?.num_pages ?? result.num_pages;
       if (numPages != null && (!Number.isInteger(Number(numPages)) || Number(numPages) < 0)) throw new Error('Invalid history pagination');
+      if (page > 1 && newCount === 0 && (numPages != null || result.trades.length > 0)) throw new Error('Trade history pagination repeated without progress');
       if ((numPages != null && page >= Number(numPages)) || (numPages == null && result.trades.length < pageSize)) {
         return { inserted:store.recordBatch(rows,{...evidence,complete:true}), count:rows.length, complete:true };
       }
       if (newCount === 0) throw new Error('Trade history pagination repeated without progress');
     }
-    throw new Error('Trade history pagination incomplete');
+    throw Object.assign(new Error('Trade history pagination incomplete'), {code:'HISTORY_PAGE_LIMIT'});
   } catch (error) {
     store.recordBatch([],{...evidence,complete:false,error:error.message});
     throw error;
   }
+}
+async function syncV2TradesProgressively(options) {
+  let requests = 0;
+  let inserted = 0;
+  let count = 0;
+  const originalPost = options.post;
+  const budget = options.maxRequests ?? 20;
+  const post = async body => {
+    if (requests >= budget) throw new Error('Trade history request budget reached; completed prefix retained for next sync');
+    requests++;
+    return originalPost(body);
+  };
+  async function visit(from, to) {
+    try {
+      const result = await syncV2Trades({...options,from,to,post,maxPages:options.maxPages ?? 4});
+      inserted += result.inserted; count += result.count;
+    } catch (error) {
+      if (error.code !== 'HISTORY_PAGE_LIMIT' || to - from <= 1) throw error;
+      const midpoint = Math.floor(from + (to - from) / 2);
+      // Oldest first: a failed right side cannot advance past a gap. Completed
+      // intervals remain durable, so large account histories make progress.
+      await visit(from,midpoint);
+      await visit(midpoint,to);
+    }
+  }
+  await visit(new Date(options.from ?? 0).getTime(),new Date(options.to ?? Date.now()).getTime());
+  return {complete:true,inserted,count,requests};
 }
 function coversRange(rows, from, to) {
   let cursor = iso(from);
@@ -173,9 +221,9 @@ function getEconomicHistory(db, accountId, from, to) {
   const coverage = Object.fromEntries([...DATASETS].map(dataset => [dataset,coversRange(coverageRows.filter(r => r.dataset === dataset),start,end)]));
   let exposureHistory = [];
   if (tableExists('exposure_history')) {
-    const prior = db.prepare('SELECT * FROM exposure_history WHERE effective_at<=? ORDER BY effective_at DESC LIMIT 1').get(start);
-    exposureHistory = [...(prior ? [prior] : []),...db.prepare('SELECT * FROM exposure_history WHERE effective_at>? AND effective_at<=? ORDER BY effective_at').all(start,end)];
+    const prior = db.prepare('SELECT * FROM exposure_history WHERE account_id=? AND effective_at<=? ORDER BY effective_at DESC LIMIT 1').get(account,start);
+    exposureHistory = [...(prior ? [prior] : []),...db.prepare('SELECT * FROM exposure_history WHERE account_id=? AND effective_at>? AND effective_at<=? ORDER BY effective_at').all(account,start,end)];
   }
   return {events,coverage,available:true,exposureHistory,exposureKnown:Boolean(exposureHistory[0]?.effective_at <= start)};
 }
-module.exports = { createEconomicStore, normalizeEvent, normalizeV2Trade, syncV2Trades, decimal, multiply, coversRange, getEconomicHistory };
+module.exports = { createEconomicStore, normalizeEvent, normalizeV2Trade, syncV2Trades, syncV2TradesProgressively, decimal, multiply, coversRange, getEconomicHistory };
