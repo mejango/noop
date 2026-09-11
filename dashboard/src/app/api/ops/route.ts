@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getActiveTradingRules, getRecentPendingActions, getRecentOrders, getOpsStats, getLatestAdvisoryAssessment, getLatestAdvisoryArtifacts, getLatestPortfolioSnapshot, getRealizedPnL, getBudgetCycleState } from '@/lib/db';
+import { getActiveTradingRules, getRecentPendingActions, getRecentOrders, getOpsStats, getLatestAdvisoryAssessment, getLatestAdvisoryArtifacts, getLatestPortfolioSnapshot, getOptionsCashflow, getBudgetCycleState } from '@/lib/db';
 import { cachedJsonRoute } from '@/lib/response-cache';
 
 export const dynamic = 'force-dynamic';
@@ -13,9 +13,9 @@ function getOpsResponse() {
     const assessment = getLatestAdvisoryAssessment();
     const advisoryArtifacts = getLatestAdvisoryArtifacts();
     const portfolio = getLatestPortfolioSnapshot();
-    const pnl = getRealizedPnL();
+    const cashflow = getOptionsCashflow();
     const budgetCycle = getBudgetCycleState();
-    return NextResponse.json({ stats, rules, actions, orders, assessment, advisoryArtifacts, portfolio, pnl, budgetCycle, schedulerState: budgetCycle });
+    return NextResponse.json({ stats, rules, actions, orders, assessment, advisoryArtifacts, portfolio, cashflow, budgetCycle, schedulerState: budgetCycle });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
     return NextResponse.json({ error: message }, { status: 500 });

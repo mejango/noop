@@ -30,16 +30,25 @@ type Report = {
     orderCount: number;
     hasBaseline: boolean;
     bucketMs: number;
+    performanceUnavailableReason: string;
+    externalHoldingsUnavailableReason: string;
+    cashflowBasis: string;
+    settlementEstimateCount: number;
+    missingSettlementEstimateCount: number;
+    economicHistoryAvailable: boolean;
+    accountingCoverage: { trades: boolean; settlements: boolean; transfers: boolean };
+    unvaluedRecordedSettlementCount: number;
   };
   summary: {
     openingValue: number;
     closingValue: number;
     portfolioChange: number;
-    portfolioReturnPct: number;
+    portfolioReturnPct: number | null;
     openingUnrealized: number;
     closingUnrealized: number;
     unrealizedChange: number;
     netTradeCashflow: number;
+    estimatedSettlementCashflow: number;
     putNetCashflow: number;
     callNetCashflow: number;
     openingSpot: number;
@@ -47,8 +56,8 @@ type Report = {
     spotChangePct: number;
     highWatermark: number;
     lowWatermark: number;
-    maxDrawdown: number;
-    maxDrawdownPct: number;
+    maxDrawdown: number | null;
+    maxDrawdownPct: number | null;
   };
   series: {
     portfolio: Array<{
@@ -56,7 +65,6 @@ type Report = {
       ts: number;
       portfolioValue: number;
       unrealizedPnl: number;
-      realizedTotal: number;
       spotPrice: number;
       usdcBalance: number;
       ethBalance: number;
@@ -85,7 +93,7 @@ type Report = {
     filledAmount: number;
   }>;
   orders: Array<{
-    id: number;
+    id: number | string;
     timestamp: string;
     action: string;
     instrument_name: string | null;
@@ -94,6 +102,21 @@ type Report = {
     total_value: number | null;
     spot_price: number | null;
     cashflow: number;
+  }>;
+  settlementEstimates: Array<{
+    id: string;
+    timestamp: string;
+    instrument_name: string;
+    filled_amount: number;
+    spot_price: number;
+    cashflow: number;
+    reason: string;
+  }>;
+  missingSettlementEstimates: Array<{
+    timestamp: string;
+    instrument_name: string;
+    amount: number;
+    reason: string;
   }>;
 };
 
@@ -116,16 +139,25 @@ const emptyReport: Report = {
     orderCount: 0,
     hasBaseline: false,
     bucketMs: 0,
+    performanceUnavailableReason: 'Return and drawdown require reconciled deposits and withdrawals.',
+    externalHoldingsUnavailableReason: 'Historical external ETH holdings are unavailable and excluded from balances.',
+    cashflowBasis: 'Recorded cashflows exclude estimates and unavailable fees.',
+    settlementEstimateCount: 0,
+    missingSettlementEstimateCount: 0,
+    economicHistoryAvailable: false,
+    accountingCoverage: { trades: false, settlements: false, transfers: false },
+    unvaluedRecordedSettlementCount: 0,
   },
   summary: {
     openingValue: 0,
     closingValue: 0,
     portfolioChange: 0,
-    portfolioReturnPct: 0,
+    portfolioReturnPct: null,
     openingUnrealized: 0,
     closingUnrealized: 0,
     unrealizedChange: 0,
     netTradeCashflow: 0,
+    estimatedSettlementCashflow: 0,
     putNetCashflow: 0,
     callNetCashflow: 0,
     openingSpot: 0,
@@ -133,12 +165,14 @@ const emptyReport: Report = {
     spotChangePct: 0,
     highWatermark: 0,
     lowWatermark: 0,
-    maxDrawdown: 0,
-    maxDrawdownPct: 0,
+    maxDrawdown: null,
+    maxDrawdownPct: null,
   },
   series: { portfolio: [], buckets: [] },
   actionBreakdown: [],
   orders: [],
+  settlementEstimates: [],
+  missingSettlementEstimates: [],
 };
 
 function toLocalInputValue(date: Date) {
@@ -213,10 +247,10 @@ export default function PnlReportPage() {
 
   const summaryCards = [
     { label: 'Portfolio Change', value: fmtSignedUsd(report.summary.portfolioChange), tone: report.summary.portfolioChange >= 0 ? 'text-emerald-600' : 'text-red-600' },
-    { label: 'Return', value: fmtPct(report.summary.portfolioReturnPct), tone: report.summary.portfolioReturnPct >= 0 ? 'text-emerald-600' : 'text-red-600' },
-    { label: 'Trade Cashflow', value: fmtSignedUsd(report.summary.netTradeCashflow), tone: report.summary.netTradeCashflow >= 0 ? 'text-emerald-600' : 'text-red-600' },
+    { label: 'Return', value: report.summary.portfolioReturnPct == null ? 'Unavailable' : fmtPct(report.summary.portfolioReturnPct), tone: 'text-zinc-600' },
+    { label: 'Recorded Gross Cashflow', value: fmtSignedUsd(report.summary.netTradeCashflow), tone: report.summary.netTradeCashflow >= 0 ? 'text-emerald-600' : 'text-red-600' },
     { label: 'Unrealized Change', value: fmtSignedUsd(report.summary.unrealizedChange), tone: report.summary.unrealizedChange >= 0 ? 'text-emerald-600' : 'text-red-600' },
-    { label: 'Max Drawdown', value: `${fmtSignedUsd(-report.summary.maxDrawdown)} / ${report.summary.maxDrawdownPct.toFixed(2)}%`, tone: 'text-red-600' },
+    { label: 'Max Drawdown', value: report.summary.maxDrawdown == null || report.summary.maxDrawdownPct == null ? 'Unavailable' : `${fmtSignedUsd(-report.summary.maxDrawdown)} / ${report.summary.maxDrawdownPct.toFixed(2)}%`, tone: 'text-zinc-600' },
     { label: 'Spot Move', value: `${formatUSD(report.summary.openingSpot)} → ${formatUSD(report.summary.closingSpot)} (${fmtPct(report.summary.spotChangePct)})`, tone: 'text-zinc-900' },
   ];
 
@@ -235,7 +269,7 @@ export default function PnlReportPage() {
             <div>
               <p className="text-xs uppercase tracking-[0.24em] text-amber-700">Noop Reporting</p>
               <h1 className="text-3xl md:text-4xl font-semibold tracking-tight">P&amp;L Sheet</h1>
-              <p className="text-sm text-zinc-600 mt-1">Range-scoped portfolio change, trade cashflow, and risk path.</p>
+              <p className="text-sm text-zinc-600 mt-1">Recorded account balances and gross cashflows for the selected range.</p>
             </div>
             <div className="flex items-center gap-2">
               <Link href="/" className="px-3 py-2 border border-zinc-300 text-sm hover:bg-white transition-colors">
@@ -287,7 +321,7 @@ export default function PnlReportPage() {
               <div className="text-sm text-zinc-600 self-end pb-2">
                 {report.meta.snapshotCount} snapshots
                 {' · '}
-                {report.meta.orderCount} filled orders
+                {report.meta.orderCount} recorded cashflow events
               </div>
             </div>
           </div>
@@ -329,6 +363,19 @@ export default function PnlReportPage() {
             ))}
           </div>
 
+          <div className="mt-3 text-sm text-zinc-600 space-y-1">
+            <p>{report.meta.performanceUnavailableReason}</p>
+            <p>Balances cover the Derive subaccount. {report.meta.externalHoldingsUnavailableReason}</p>
+            <p>{report.meta.cashflowBasis}</p>
+            {!report.meta.economicHistoryAvailable && <p>Exchange accounting history is unavailable; recorded cashflows may be incomplete.</p>}
+            {report.meta.economicHistoryAvailable && (!report.meta.accountingCoverage.trades || !report.meta.accountingCoverage.settlements) && (
+              <p>Exchange trade and settlement history is not fully reconciled; recorded cashflows may be incomplete.</p>
+            )}
+            {report.meta.unvaluedRecordedSettlementCount > 0 && (
+              <p>{report.meta.unvaluedRecordedSettlementCount} recorded settlements have no USD value and are excluded from cashflow totals.</p>
+            )}
+          </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 text-sm">
             <div className="border border-zinc-200 p-4 bg-[#fcfaf6]">
               <p className="text-xs uppercase tracking-[0.18em] text-zinc-500 mb-2">Balances</p>
@@ -354,8 +401,8 @@ export default function PnlReportPage() {
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
           <div className="bg-white border border-black/10 p-5">
             <div className="mb-3">
-              <p className="text-xs uppercase tracking-[0.24em] text-zinc-500">Equity Curve</p>
-              <h3 className="text-xl font-semibold mt-1">Portfolio value vs. spot</h3>
+              <p className="text-xs uppercase tracking-[0.24em] text-zinc-500">Account Balance</p>
+              <h3 className="text-xl font-semibold mt-1">Subaccount value vs. spot</h3>
             </div>
             <div className="h-[320px]">
               {mounted ? (
@@ -373,7 +420,7 @@ export default function PnlReportPage() {
                     <YAxis yAxisId="spot" orientation="right" tickFormatter={(v) => `$${Math.round(v)}`} tick={{ fill: '#57534e', fontSize: 12 }} width={60} />
                     <Tooltip formatter={(value) => formatUSD(Number(value ?? 0))} />
                     <Legend />
-                    <Area yAxisId="equity" type="monotone" dataKey="portfolioValue" name="Portfolio Value" stroke="#a16207" fill="url(#equityFill)" strokeWidth={2.5} />
+                    <Area yAxisId="equity" type="monotone" dataKey="portfolioValue" name="Subaccount Value" stroke="#a16207" fill="url(#equityFill)" strokeWidth={2.5} />
                     <Line yAxisId="spot" type="monotone" dataKey="spotPrice" name="ETH Spot" stroke="#1d4ed8" dot={false} strokeWidth={1.75} />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -385,7 +432,7 @@ export default function PnlReportPage() {
 
           <div className="bg-white border border-black/10 p-5">
             <div className="mb-3">
-              <p className="text-xs uppercase tracking-[0.24em] text-zinc-500">P&amp;L Components</p>
+              <p className="text-xs uppercase tracking-[0.24em] text-zinc-500">Recorded Cashflows</p>
               <h3 className="text-xl font-semibold mt-1">Cashflow and unrealized path</h3>
             </div>
             <div className="h-[320px]">
@@ -399,9 +446,9 @@ export default function PnlReportPage() {
                     <Tooltip formatter={(value) => formatUSD(Number(value ?? 0))} />
                     <Legend />
                     <Bar yAxisId="cash" dataKey="callRevenue" name="Call Premium" stackId="grossFlow" fill="#059669" radius={[4, 4, 0, 0]} />
-                    <Bar yAxisId="cash" dataKey="putRevenue" name="Put Exits" stackId="grossFlow" fill="#0f766e" radius={[4, 4, 0, 0]} />
+                    <Bar yAxisId="cash" dataKey="putRevenue" name="Put Proceeds" stackId="grossFlow" fill="#0f766e" radius={[4, 4, 0, 0]} />
                     <Bar yAxisId="cash" dataKey="putExpenses" name="Put Buys" stackId="grossFlow" fill="#dc2626" radius={[0, 0, 4, 4]} />
-                    <Bar yAxisId="cash" dataKey="callExpenses" name="Call Buybacks" stackId="grossFlow" fill="#ea580c" radius={[0, 0, 4, 4]} />
+                    <Bar yAxisId="cash" dataKey="callExpenses" name="Call Costs" stackId="grossFlow" fill="#ea580c" radius={[0, 0, 4, 4]} />
                     <Line yAxisId="u" type="monotone" dataKey="endUnrealizedPnl" name="Unrealized P&L" stroke="#dc2626" dot={false} strokeWidth={2} />
                   </ComposedChart>
                 </ResponsiveContainer>
@@ -416,7 +463,7 @@ export default function PnlReportPage() {
           <div className="bg-white border border-black/10 p-5">
             <div className="mb-3">
               <p className="text-xs uppercase tracking-[0.24em] text-zinc-500">Action Breakdown</p>
-              <h3 className="text-xl font-semibold mt-1">Filled orders by action</h3>
+              <h3 className="text-xl font-semibold mt-1">Recorded cashflows by action</h3>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -451,8 +498,8 @@ export default function PnlReportPage() {
 
           <div className="bg-white border border-black/10 p-5">
             <div className="mb-3">
-              <p className="text-xs uppercase tracking-[0.24em] text-zinc-500">Execution Log</p>
-              <h3 className="text-xl font-semibold mt-1">Recent filled trades</h3>
+              <p className="text-xs uppercase tracking-[0.24em] text-zinc-500">Recorded Activity</p>
+              <h3 className="text-xl font-semibold mt-1">Recent cashflow events</h3>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -490,6 +537,47 @@ export default function PnlReportPage() {
             </div>
           </div>
         </div>
+
+        {(report.settlementEstimates.length > 0 || report.missingSettlementEstimates.length > 0) && (
+          <div className="bg-amber-50 border border-amber-200 p-5">
+            <h3 className="text-xl font-semibold">Unreconciled expiries</h3>
+            <p className="text-sm text-zinc-700 mt-2">
+              {report.meta.settlementEstimateCount} spot estimates total {fmtSignedUsd(report.summary.estimatedSettlementCashflow)};
+              {' '}{report.meta.missingSettlementEstimateCount} expiries have no nearby spot observation.
+              These values are excluded from recorded cashflows. Estimates use bot fill history and spot within 15 minutes before expiry, which may differ from the official settlement index.
+            </p>
+            <div className="overflow-x-auto mt-3">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-zinc-600 border-b border-amber-200">
+                    <th className="py-2 pr-3 font-medium">Expiry</th>
+                    <th className="py-2 pr-3 font-medium">Instrument</th>
+                    <th className="py-2 pr-3 font-medium">Status</th>
+                    <th className="py-2 font-medium text-right">Estimated Cashflow</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {report.settlementEstimates.map(row => (
+                    <tr key={row.id} className="border-b border-amber-100">
+                      <td className="py-2 pr-3">{new Date(row.timestamp).toLocaleString()}</td>
+                      <td className="py-2 pr-3">{row.instrument_name}</td>
+                      <td className="py-2 pr-3">Estimate · spot {formatUSD(row.spot_price)}</td>
+                      <td className="py-2 text-right tabular-nums">{fmtSignedUsd(row.cashflow)}</td>
+                    </tr>
+                  ))}
+                  {report.missingSettlementEstimates.map(row => (
+                    <tr key={row.instrument_name} className="border-b border-amber-100">
+                      <td className="py-2 pr-3">{new Date(row.timestamp).toLocaleString()}</td>
+                      <td className="py-2 pr-3">{row.instrument_name}</td>
+                      <td className="py-2 pr-3">{row.reason}</td>
+                      <td className="py-2 text-right">Unavailable</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

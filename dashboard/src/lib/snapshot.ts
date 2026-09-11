@@ -74,13 +74,7 @@ async function _buildUncached() {
   }
 
   // Fetch Lyra account data (positions + collaterals)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let positions: any[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let collaterals: any[] = [];
-  try {
-    [positions, collaterals] = await Promise.all([getPositions(), getCollaterals()]);
-  } catch { /* Lyra API unavailable — continue without account data */ }
+  const [positions, collaterals] = await Promise.all([getPositions(), getCollaterals()]);
 
   return {
     _meta: {
@@ -108,7 +102,7 @@ async function _buildUncached() {
     },
 
     budget: {
-      _description: 'Budget in USD. cycleDays=10d.',
+      _description: `Spending allowance in USD over ${budget.cycleDays} days. Remaining budget does not measure held protection.`,
       put: {
         total: budget.putTotalBudget,
         spent: budget.putSpent,
@@ -235,8 +229,8 @@ async function _buildUncached() {
         mark_price: Number(p.mark_price ?? 0),
         mark_value: Number(p.mark_value ?? 0),
         unrealized_pnl: Number(p.unrealized_pnl ?? 0),
-        delta: Number(p.delta ?? 0),
-        theta: Number(p.theta ?? 0),
+        delta: p.delta == null ? null : Number(p.delta),
+        theta: p.theta == null ? null : Number(p.theta),
         index_price: Number(p.index_price ?? 0),
       })),
       total_position_value: positions.reduce((s: number, p: Record<string, unknown>) => s + Number(p.mark_value ?? 0), 0),

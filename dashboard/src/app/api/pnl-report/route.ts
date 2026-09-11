@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getOrderCashflowTotalsBefore, getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange, getSpotPrices } from '@/lib/db';
-import { deriveExpirySettlements } from '@/lib/expiry-settlement';
+import { getEconomicHistory, getOrderCashflowTotalsBefore, getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange, getSpotPricesAtOrBefore } from '@/lib/db';
+import { deriveExpirySettlementReport, getExpiredExposures, parseInstrument, SETTLEMENT_SPOT_MAX_AGE_MS } from '@/lib/expiry-settlement';
 import { cachedJsonRoute } from '@/lib/response-cache';
 import { dashboardRangeMs } from '@/lib/dashboard-ranges';
 
@@ -17,14 +17,14 @@ type SnapshotRow = {
 };
 
 type OrderRow = {
-  id: number;
+  id: number | string;
   timestamp: string;
   action: string;
   success: number;
   reason: string | null;
   instrument_name: string | null;
   strike: number | null;
-  expiry: string | null;
+  expiry: string | number | null;
   delta: number | null;
   price: number | null;
   intended_amount: number | null;
@@ -32,6 +32,8 @@ type OrderRow = {
   fill_price: number | null;
   total_value: number | null;
   spot_price: number | null;
+  actual_cashflow_usd?: number;
+  source?: string;
 };
 
 function parseDateParam(value: string | null, fallback: number): Date {
@@ -53,7 +55,8 @@ function resolveWindow(req: NextRequest) {
   return { range, from, to };
 }
 
-function signedCashflow(action: string, totalValue: number | null | undefined): number {
+function signedCashflow(action: string, totalValue: number | null | undefined, actualCashflow?: number): number {
+  if (actualCashflow !== undefined) return actualCashflow;
   const value = Number(totalValue ?? 0);
   if (!Number.isFinite(value) || value === 0) return 0;
   switch (action) {
@@ -71,17 +74,16 @@ function signedCashflow(action: string, totalValue: number | null | undefined): 
   }
 }
 
-// Portfolio value = Derive subaccount value + the off-platform ETH the put budget insures.
-// The insurance budget is sized on that combined base, so the equity line must show the same base.
-const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
+// A current insurance-budget setting is not a record of historical external holdings.
+const portfolioValue = (row: { portfolio_value_usd?: number } | null | undefined) =>
+  Number(row?.portfolio_value_usd ?? 0);
 
-const insuredPortfolioValue = (row: { portfolio_value_usd?: number; spot_price?: number } | null | undefined) =>
-  Number(row?.portfolio_value_usd ?? 0) + PUT_INSURED_EXTERNAL_ETH * Number(row?.spot_price ?? 0);
+const PERFORMANCE_UNAVAILABLE_REASON = 'Return and drawdown require reconciled deposits and withdrawals with portfolio valuations around those flows. Portfolio change is the raw account balance change.';
 
 const isCallAction = (a: string) => a === 'sell_call' || a === 'buyback_call' || a === 'settle_call';
 const isPutAction = (a: string) => a === 'buy_put' || a === 'sell_put' || a === 'settle_put';
 
-function cashflowParts(action: string, totalValue: number | null | undefined) {
+function cashflowParts(action: string, totalValue: number | null | undefined, actualCashflow?: number) {
   const value = Number(totalValue ?? 0);
   const zero = {
     revenue: 0,
@@ -91,6 +93,17 @@ function cashflowParts(action: string, totalValue: number | null | undefined) {
     callRevenue: 0,
     callExpenses: 0,
   };
+  if (actualCashflow !== undefined) {
+    const revenue = Math.max(0, actualCashflow);
+    const expenses = Math.max(0, -actualCashflow);
+    return {
+      revenue, expenses,
+      putRevenue: isPutAction(action) ? revenue : 0,
+      putExpenses: isPutAction(action) ? expenses : 0,
+      callRevenue: isCallAction(action) ? revenue : 0,
+      callExpenses: isCallAction(action) ? expenses : 0,
+    };
+  }
   if (!Number.isFinite(value) || value === 0) return zero;
 
   switch (action) {
@@ -142,21 +155,52 @@ function getPnlResponse(req: NextRequest) {
 
     const rawSnapshots = getPortfolioSnapshotsInRange(fromIso, toIso) as SnapshotRow[];
     const baseline = getPortfolioSnapshotBefore(fromIso) as SnapshotRow | undefined;
-    // Expiry settlements (forced buyback of ITM short calls, ITM long put payout) are not bot orders,
-    // so synthesize them from full order history + spot at expiry.
+    // Resolve each expiry directly; a moving latest-N spot window makes old reports unstable.
     const allOrders = getOrdersInRange('1970-01-01T00:00:00.000Z', toIso) as OrderRow[];
-    const spotRows = getSpotPrices('1970-01-01T00:00:00.000Z', 100000) as Array<{ timestamp: string; price: number }>;
-    const settlements = deriveExpirySettlements(allOrders, spotRows, to.getTime()) as unknown as OrderRow[];
-    const orders = [...allOrders, ...settlements]
-      .filter(o => o.success === 1 && Number(o.filled_amount ?? 0) > 0 && o.timestamp >= fromIso)
+    const economicHistory = getEconomicHistory('1970-01-01T00:00:00.000Z', toIso);
+    const recordedSettlements = economicHistory.events.filter(event => event.event_type === 'settlement');
+    const settledInstruments = new Set(recordedSettlements.flatMap(event => event.instrument_name ? [event.instrument_name] : []));
+    const settlementRows: OrderRow[] = recordedSettlements.flatMap(event => {
+      if (event.cashflow_usd == null || event.cashflow_usd === '' || !Number.isFinite(Number(event.cashflow_usd))) return [];
+      const cashflow = Number(event.cashflow_usd);
+      const parsed = parseInstrument(event.instrument_name);
+      return [{
+        id: `economic:${event.event_id}`,
+        timestamp: event.timestamp,
+        action: parsed ? (parsed.optionType === 'C' ? 'settle_call' : 'settle_put') : 'settlement',
+        success: 1,
+        reason: 'Recorded exchange settlement',
+        instrument_name: event.instrument_name,
+        strike: parsed?.strike ?? null,
+        expiry: parsed ? Math.floor(parsed.expiryMs / 1000) : null,
+        delta: null,
+        price: null,
+        intended_amount: null,
+        filled_amount: null,
+        fill_price: null,
+        total_value: Math.abs(cashflow),
+        spot_price: null,
+        actual_cashflow_usd: cashflow,
+        source: event.source,
+      }];
+    });
+    const expiryTimestamps = Array.from(new Set(getExpiredExposures(allOrders, to.getTime())
+      .filter(exposure => !settledInstruments.has(exposure.instrument_name))
+      .map(exposure => new Date(exposure.expiryMs).toISOString())));
+    const spotRows = getSpotPricesAtOrBefore(expiryTimestamps, SETTLEMENT_SPOT_MAX_AGE_MS);
+    const estimatedSettlements = deriveExpirySettlementReport(allOrders, spotRows, to.getTime(), settledInstruments);
+    const settlementEstimates = estimatedSettlements.estimates.filter(row => row.timestamp >= fromIso);
+    const missingSettlementEstimates = estimatedSettlements.missing.filter(row => row.timestamp >= fromIso);
+    const orders = [...allOrders.filter(o => o.success === 1 && Number(o.filled_amount ?? 0) > 0), ...settlementRows]
+      .filter(o => o.timestamp >= fromIso)
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-    const openingCashflow = { ...(getOrderCashflowTotalsBefore(fromIso) || { revenue: 0, expenses: 0, profit: 0, order_count: 0 }) };
-    for (const s of settlements) {
-      if (s.timestamp >= fromIso) continue;
-      const parts = cashflowParts(s.action, s.total_value);
+    const openingCashflow = { ...(getOrderCashflowTotalsBefore(fromIso) || { revenue: 0, expenses: 0, gross_cashflow: 0, order_count: 0 }) };
+    for (const settlement of settlementRows) {
+      if (settlement.timestamp >= fromIso) continue;
+      const parts = cashflowParts(settlement.action, settlement.total_value, settlement.actual_cashflow_usd);
       openingCashflow.revenue += parts.revenue;
       openingCashflow.expenses += parts.expenses;
-      openingCashflow.profit += signedCashflow(s.action, s.total_value);
+      openingCashflow.gross_cashflow += settlement.actual_cashflow_usd!;
       openingCashflow.order_count += 1;
     }
 
@@ -166,9 +210,8 @@ function getPnlResponse(req: NextRequest) {
     const portfolioSeries = rawSnapshots.map((row) => ({
       timestamp: row.timestamp,
       ts: new Date(row.timestamp).getTime(),
-      portfolioValue: insuredPortfolioValue(row),
+      portfolioValue: portfolioValue(row),
       unrealizedPnl: Number(row.total_unrealized_pnl ?? 0),
-      realizedTotal: Number(row.total_realized_pnl ?? 0),
       spotPrice: Number(row.spot_price ?? 0),
       usdcBalance: Number(row.usdc_balance ?? 0),
       ethBalance: Number(row.eth_balance ?? 0),
@@ -178,35 +221,26 @@ function getPnlResponse(req: NextRequest) {
       ? [{
           timestamp: fromIso,
           ts: from.getTime(),
-          portfolioValue: insuredPortfolioValue(opening),
+          portfolioValue: portfolioValue(opening),
           unrealizedPnl: Number(opening.total_unrealized_pnl ?? 0),
-          realizedTotal: Number(opening.total_realized_pnl ?? 0),
           spotPrice: Number(opening.spot_price ?? 0),
           usdcBalance: Number(opening.usdc_balance ?? 0),
           ethBalance: Number(opening.eth_balance ?? 0),
         }, ...portfolioSeries]
       : portfolioSeries;
 
-    let peak = opening ? insuredPortfolioValue(opening) : 0;
-    let highWatermark = peak;
-    let lowWatermark = peak;
-    let maxDrawdown = 0;
-    let maxDrawdownPct = 0;
+    let highWatermark = portfolioValue(opening);
+    let lowWatermark = highWatermark;
     for (const point of seriesWithOpening) {
-      peak = Math.max(peak, point.portfolioValue);
       highWatermark = Math.max(highWatermark, point.portfolioValue);
       lowWatermark = Math.min(lowWatermark, point.portfolioValue);
-      const dd = peak - point.portfolioValue;
-      const ddPct = peak > 0 ? (dd / peak) * 100 : 0;
-      if (dd > maxDrawdown) maxDrawdown = dd;
-      if (ddPct > maxDrawdownPct) maxDrawdownPct = ddPct;
     }
 
-    const netTradeCashflow = orders.reduce((sum, order) => sum + signedCashflow(order.action, order.total_value), 0);
+    const netTradeCashflow = orders.reduce((sum, order) => sum + signedCashflow(order.action, order.total_value, order.actual_cashflow_usd), 0);
     const putNetCashflow = orders.reduce((sum, order) =>
-      sum + (isPutAction(order.action) ? signedCashflow(order.action, order.total_value) : 0), 0);
+      sum + (isPutAction(order.action) ? signedCashflow(order.action, order.total_value, order.actual_cashflow_usd) : 0), 0);
     const callNetCashflow = orders.reduce((sum, order) =>
-      sum + (isCallAction(order.action) ? signedCashflow(order.action, order.total_value) : 0), 0);
+      sum + (isCallAction(order.action) ? signedCashflow(order.action, order.total_value, order.actual_cashflow_usd) : 0), 0);
 
     const actionMap = new Map<string, { action: string; count: number; grossValue: number; cashflow: number; filledAmount: number }>();
     for (const order of orders) {
@@ -219,7 +253,7 @@ function getPnlResponse(req: NextRequest) {
       };
       existing.count += 1;
       existing.grossValue += Number(order.total_value ?? 0);
-      existing.cashflow += signedCashflow(order.action, order.total_value);
+      existing.cashflow += signedCashflow(order.action, order.total_value, order.actual_cashflow_usd);
       existing.filledAmount += Number(order.filled_amount ?? order.intended_amount ?? 0);
       actionMap.set(order.action, existing);
     }
@@ -282,8 +316,8 @@ function getPnlResponse(req: NextRequest) {
         endPortfolioValue: null,
         endUnrealizedPnl: null,
       };
-      const cashflow = signedCashflow(order.action, order.total_value);
-      const parts = cashflowParts(order.action, order.total_value);
+      const cashflow = signedCashflow(order.action, order.total_value, order.actual_cashflow_usd);
+      const parts = cashflowParts(order.action, order.total_value, order.actual_cashflow_usd);
       bucket.tradeCashflow += cashflow;
       bucket.tradeRevenue += parts.revenue;
       bucket.tradeExpenses += parts.expenses;
@@ -297,15 +331,14 @@ function getPnlResponse(req: NextRequest) {
       bucketMap.set(key, bucket);
     }
 
-    const openingValue = insuredPortfolioValue(opening);
-    const closingValue = closing ? insuredPortfolioValue(closing) : openingValue;
+    const openingValue = portfolioValue(opening);
+    const closingValue = closing ? portfolioValue(closing) : openingValue;
     const openingUnrealized = Number(opening?.total_unrealized_pnl ?? 0);
     const closingUnrealized = Number(closing?.total_unrealized_pnl ?? openingUnrealized);
     const openingSpot = Number(opening?.spot_price ?? 0);
     const closingSpot = Number(closing?.spot_price ?? openingSpot);
     const portfolioChange = closingValue - openingValue;
     const unrealizedChange = closingUnrealized - openingUnrealized;
-    const portfolioReturnPct = openingValue > 0 ? (portfolioChange / openingValue) * 100 : 0;
     const spotChangePct = openingSpot > 0 ? ((closingSpot - openingSpot) / openingSpot) * 100 : 0;
 
     return NextResponse.json({
@@ -318,21 +351,34 @@ function getPnlResponse(req: NextRequest) {
         orderCount: orders.length,
         hasBaseline: Boolean(opening),
         bucketMs,
-        insuredExternalEth: PUT_INSURED_EXTERNAL_ETH,
+        insuredExternalEth: 0,
+        valuationScope: 'derive_subaccount',
+        externalHoldingsUnavailableReason: 'Historical external ETH holdings are unavailable and are excluded from reported balances.',
+        performanceAvailable: false,
+        performanceUnavailableReason: PERFORMANCE_UNAVAILABLE_REASON,
+        settlementEstimateCount: settlementEstimates.length,
+        missingSettlementEstimateCount: missingSettlementEstimates.length,
+        settlementEstimateMaxSpotAgeMs: SETTLEMENT_SPOT_MAX_AGE_MS,
+        economicHistoryAvailable: economicHistory.available,
+        accountingCoverage: economicHistory.coverage,
+        unvaluedRecordedSettlementCount: recordedSettlements.filter(event => event.timestamp >= fromIso
+          && (event.cashflow_usd == null || event.cashflow_usd === '' || !Number.isFinite(Number(event.cashflow_usd)))).length,
+        cashflowBasis: 'Recorded bot-order cashflows plus valued exchange settlements. External fills and fees are not reconciled; spot estimates are excluded. Gross cashflow is not realized P&L.',
       },
       summary: {
         openingValue,
         closingValue,
         portfolioChange,
-        portfolioReturnPct,
+        portfolioReturnPct: null,
         openingUnrealized,
         closingUnrealized,
         unrealizedChange,
         openingTradeRevenue: Number(openingCashflow.revenue ?? 0),
         openingTradeExpenses: Number(openingCashflow.expenses ?? 0),
-        openingTradeProfit: Number(openingCashflow.profit ?? 0),
+        openingGrossCashflow: Number(openingCashflow.gross_cashflow ?? 0),
         openingTradeOrderCount: Number(openingCashflow.order_count ?? 0),
         netTradeCashflow,
+        estimatedSettlementCashflow: settlementEstimates.reduce((sum, row) => sum + signedCashflow(row.action, row.total_value), 0),
         putNetCashflow,
         callNetCashflow,
         openingSpot,
@@ -340,8 +386,8 @@ function getPnlResponse(req: NextRequest) {
         spotChangePct,
         highWatermark,
         lowWatermark,
-        maxDrawdown,
-        maxDrawdownPct,
+        maxDrawdown: null,
+        maxDrawdownPct: null,
       },
       series: {
         portfolio: downsampleKeepLast(seriesWithOpening, 720, (row) => row.ts),
@@ -364,12 +410,14 @@ function getPnlResponse(req: NextRequest) {
           })),
       },
       actionBreakdown: Array.from(actionMap.values()).sort((a, b) => Math.abs(b.cashflow) - Math.abs(a.cashflow)),
+      settlementEstimates: settlementEstimates.map(row => ({ ...row, cashflow: signedCashflow(row.action, row.total_value) })),
+      missingSettlementEstimates,
       orders: orders
         .slice()
         .reverse()
         .map((order) => ({
           ...order,
-          cashflow: signedCashflow(order.action, order.total_value),
+          cashflow: signedCashflow(order.action, order.total_value, order.actual_cashflow_usd),
         })),
     });
   } catch (e: unknown) {

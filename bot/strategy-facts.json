@@ -1,0 +1,12 @@
+{
+  "put_delta_range": [-0.12, -0.02],
+  "put_dte_range": [45, 78],
+  "call_delta_range": [0.04, 0.12],
+  "call_dte_range": [5, 12],
+  "sell_call_fallback_min_bid": 4,
+  "sell_call_fallback_min_score": 65,
+  "put_roll_dte_threshold": 25,
+  "call_buyback_profit_threshold_pct": 80,
+  "put_monetization_profit_threshold_pct": 1000,
+  "put_monetization_max_tranche_fraction": 0.25
+}

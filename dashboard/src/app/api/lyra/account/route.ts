@@ -31,10 +31,10 @@ async function getAccountResponse(request: NextRequest) {
           direction: order.action === 'buy_put' || order.action === 'buyback_call' ? 'buy' : 'sell',
           trade_amount: Number(order.filled_amount ?? order.intended_amount ?? 0),
           trade_price: Number(order.fill_price ?? order.price ?? 0),
-          trade_fee: 0,
+          trade_fee: null,
           timestamp: tradeTs,
           index_price: normalizeSpotPrice(order.spot_price),
-          realized_pnl: 0,
+          realized_pnl: null,
           is_bot: true,
         };
       })
@@ -46,14 +46,17 @@ async function getAccountResponse(request: NextRequest) {
       );
 
     return NextResponse.json({
-      collaterals: (Array.isArray(collaterals) ? collaterals : []).map((c: Record<string, unknown>) => ({
+      account_available: true,
+      trade_history_source: 'recorded_bot_orders',
+      trade_fees_available: false,
+      collaterals: collaterals.map((c: Record<string, unknown>) => ({
         asset_name: c.asset_name,
         amount: Number(c.amount ?? 0),
         mark_price: Number(c.mark_price ?? 0),
         mark_value: Number(c.mark_value ?? c.value ?? 0),
         unrealized_pnl: Number(c.unrealized_pnl ?? 0),
       })),
-      positions: (Array.isArray(positions) ? positions : []).map((p: Record<string, unknown>) => ({
+      positions: positions.map((p: Record<string, unknown>) => ({
         instrument_name: p.instrument_name,
         instrument_type: p.instrument_type,
         amount: Number(p.amount ?? 0),
@@ -61,10 +64,10 @@ async function getAccountResponse(request: NextRequest) {
         mark_price: Number(p.mark_price ?? 0),
         mark_value: Number(p.mark_value ?? 0),
         unrealized_pnl: Number(p.unrealized_pnl ?? 0),
-        delta: Number(p.delta ?? 0),
-        gamma: Number(p.gamma ?? 0),
-        theta: Number(p.theta ?? 0),
-        vega: Number(p.vega ?? 0),
+        delta: p.delta == null ? null : Number(p.delta),
+        gamma: p.gamma == null ? null : Number(p.gamma),
+        theta: p.theta == null ? null : Number(p.theta),
+        vega: p.vega == null ? null : Number(p.vega),
         index_price: Number(p.index_price ?? 0),
         liquidation_price: p.liquidation_price != null ? Number(p.liquidation_price) : null,
       })),
@@ -72,7 +75,7 @@ async function getAccountResponse(request: NextRequest) {
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';
-    return NextResponse.json({ error: message, collaterals: [], positions: [], trades: [] }, { status: 500 });
+    return NextResponse.json({ error: message, account_available: false }, { status: 502 });
   }
 }
 
@@ -80,7 +83,7 @@ export function GET(request: NextRequest) {
   const range = request.nextUrl.searchParams.get('range') || '30d';
   return cachedJsonRoute(request, `account:${range}`, () => getAccountResponse(request), {
     freshMs: 30_000,
-    staleMs: 2 * 60_000,
-    browserMaxAgeSeconds: 15,
+    staleMs: 0,
+    browserMaxAgeSeconds: 0,
   });
 }

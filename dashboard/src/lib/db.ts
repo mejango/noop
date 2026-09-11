@@ -1,13 +1,12 @@
 import Database from 'better-sqlite3';
 import path from 'path';
-import fs from 'fs';
+import { BOT_CONFIG } from './strategy-config';
+import { getEconomicHistory as readEconomicHistory } from '../../../bot/economic-events';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
 
 // Bot constants (single source of truth: bot/config.json)
-const CONFIG_PATH = process.env.BOT_CONFIG_PATH || path.join(process.cwd(), '..', 'bot', 'config.json');
-const BOT_CONFIG = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
 // Budget is now dynamic (calculated per cycle in bot_state), not static config constants
 const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
 const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
@@ -212,7 +211,8 @@ function prepareAll(d: Database.Database) {
     getAvgCallPremium7d: d.prepare(`
       SELECT AVG(bid_price) as avg_premium
       FROM options_snapshots
-      WHERE option_type = 'call' AND timestamp > ? AND bid_price > 0
+      WHERE (option_type = 'C' OR option_type = 'call' OR instrument_name LIKE '%-C')
+        AND timestamp > ? AND bid_price > 0
     `),
 
     getLatestOnchainRawData: d.prepare(`
@@ -432,13 +432,6 @@ function prepareAll(d: Database.Database) {
       ORDER BY timestamp ASC
     `),
 
-    getLocalTrades: d.prepare(`
-      SELECT instrument_name, direction, amount, price, timestamp
-      FROM trades
-      WHERE timestamp > ?
-      ORDER BY timestamp DESC
-    `),
-
     getOrderTradesSince: d.prepare(`
       SELECT id, timestamp, action, instrument_name, filled_amount, intended_amount,
         fill_price, price, spot_price, total_value
@@ -620,16 +613,16 @@ function prepareAll(d: Database.Database) {
         COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as expenses,
         COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0)
           - COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0)
-          as profit,
+          as gross_cashflow,
         COUNT(CASE WHEN success = 1 AND COALESCE(filled_amount, 0) > 0 AND action IN ('sell_call', 'buyback_call', 'buy_put', 'sell_put') THEN 1 END) as order_count
       FROM orders
       WHERE timestamp < ?
     `),
-    getRealizedPnL: d.prepare(`
+    getOptionsCashflow: d.prepare(`
       SELECT
         COALESCE(SUM(CASE WHEN action IN ('sell_put','sell_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0)
         - COALESCE(SUM(CASE WHEN action IN ('buy_put','buyback_call') AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0)
-        as net_realized_pnl,
+        as gross_options_cashflow,
         COALESCE(SUM(CASE WHEN action = 'buy_put' AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as total_put_cost,
         COALESCE(SUM(CASE WHEN action = 'sell_put' AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as total_put_revenue,
         COALESCE(SUM(CASE WHEN action = 'sell_call' AND success = 1 AND COALESCE(filled_amount, 0) > 0 THEN total_value ELSE 0 END), 0) as total_call_revenue,
@@ -653,6 +646,51 @@ export function getLyraSpot() {
 
 export function getSpotPrices(since: string, limit = 2000) {
   return getStmts().getSpotPrices.all(since, limit);
+}
+
+/** One bounded observation per expiry. Newer ticks cannot evict historical evidence. */
+export function getSpotPricesAtOrBefore(timestamps: string[], maxAgeMs: number) {
+  if (!Number.isFinite(maxAgeMs) || maxAgeMs < 0) throw new Error('Invalid observation age');
+  const statement = getDb().prepare(`
+    SELECT timestamp, price FROM spot_prices
+    WHERE timestamp >= ? AND timestamp <= ? AND price BETWEEN 100 AND 20000
+    ORDER BY timestamp DESC LIMIT 1
+  `);
+  const observations = new Map<string, { timestamp: string; price: number }>();
+  for (const value of Array.from(new Set(timestamps))) {
+    const expiryMs = Date.parse(value);
+    if (!Number.isFinite(expiryMs)) throw new Error('Invalid expiry timestamp');
+    const row = statement.get(new Date(expiryMs - maxAgeMs).toISOString(), new Date(expiryMs).toISOString()) as { timestamp: string; price: number } | undefined;
+    if (row) observations.set(row.timestamp, row);
+  }
+  return Array.from(observations.values()).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
+export type EconomicEvent = {
+  event_id: string;
+  account_id: string;
+  event_type: 'trade' | 'fee' | 'settlement' | 'transfer';
+  timestamp: string;
+  instrument_name: string | null;
+  currency: string;
+  amount: string;
+  cashflow_usd: string | null;
+  realized_pnl_usd: string | null;
+  fee_usd: string | null;
+  source: string;
+};
+
+export type EconomicHistory = {
+  events: EconomicEvent[];
+  coverage: { trades: boolean; settlements: boolean; transfers: boolean };
+  available: boolean;
+  exposureHistory: { effective_at: string; external_eth: string; source: string }[];
+  exposureKnown: boolean;
+};
+
+/** Shared, read-only ledger reader for the V2 subaccount. */
+export function getEconomicHistory(from: string, to: string): EconomicHistory {
+  return readEconomicHistory(getDb(), '25923', from, to) as EconomicHistory;
 }
 
 export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
@@ -1321,7 +1359,10 @@ export function getOISnapshotsBucketed(since: string, bucketMs: number) {
 
 export function getLocalTrades(since: string) {
   try {
-    return getStmts().getLocalTrades.all(since) as {
+    return getDb().prepare(`
+      SELECT instrument_name, direction, amount, price, timestamp
+      FROM trades WHERE timestamp > ? ORDER BY timestamp DESC
+    `).all(since) as {
       instrument_name: string; direction: string; amount: number; price: number; timestamp: string;
     }[];
   } catch {
@@ -1742,16 +1783,16 @@ export function getOrderCashflowTotalsBefore(ts: string) {
     return getStmts().getOrderCashflowTotalsBefore.get(ts) as {
       revenue: number;
       expenses: number;
-      profit: number;
+      gross_cashflow: number;
       order_count: number;
     } | undefined;
   } catch { return undefined; }
 }
 
-export function getRealizedPnL() {
+export function getOptionsCashflow() {
   try {
-    return getStmts().getRealizedPnL.get() as {
-      net_realized_pnl: number; total_put_cost: number; total_put_revenue: number;
+    return getStmts().getOptionsCashflow.get() as {
+      gross_options_cashflow: number; total_put_cost: number; total_put_revenue: number;
       total_call_revenue: number; total_call_cost: number;
       successful_orders: number; total_orders: number;
     } | undefined;

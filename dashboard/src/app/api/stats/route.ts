@@ -12,15 +12,22 @@ async function getStatsResponse() {
     const budget = getBotBudget();
     const lyra = getLyraSpot();
     let margin_usage_pct: number | null = null;
+    let account_available = false;
+    let account_error: string | null = null;
     try {
       const subaccount = await getSubaccount();
       margin_usage_pct = subaccount.margin_usage_pct;
-    } catch { /* leave null */ }
+      account_available = true;
+    } catch (error) {
+      account_error = error instanceof Error ? error.message : 'Account data unavailable';
+    }
     return NextResponse.json({
       ...stats,
       budget,
       lyra_spot: lyra?.lyra_spot ?? null,
       margin_usage_pct,
+      account_available,
+      account_error,
       put_insured_external_eth: PUT_INSURED_EXTERNAL_ETH,
     });
   } catch (e: unknown) {

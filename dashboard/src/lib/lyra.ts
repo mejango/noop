@@ -73,6 +73,31 @@ async function cachedRequest<T>(key: string, loader: () => Promise<T>, ttlMs = C
 
 // ─── API calls ───────────────────────────────────────────────────────────────
 
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Account data unavailable: invalid ${label}`);
+  return value as Record<string, unknown>;
+}
+
+function requireNumbers(row: Record<string, unknown>, fields: string[], label: string): void {
+  for (const field of fields) {
+    const value = row[field];
+    if ((typeof value !== 'number' && typeof value !== 'string') || String(value).trim() === '' || !Number.isFinite(Number(value))) {
+      throw new Error(`Account data unavailable: invalid ${label}.${field}`);
+    }
+  }
+}
+
+function accountRows(result: unknown, field: string, name: string, numbers: string[]): Record<string, unknown>[] {
+  const rows = Array.isArray(result) ? result : record(result, field)[field];
+  if (!Array.isArray(rows)) throw new Error(`Account data unavailable: missing ${field}`);
+  return rows.map((value) => {
+    const row = record(value, field);
+    if (typeof row[name] !== 'string' || !row[name]) throw new Error(`Account data unavailable: missing ${name}`);
+    requireNumbers(row, numbers, field);
+    return row;
+  });
+}
+
 async function lyraPost<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
   const headers = await getAuthHeaders();
   const res = await fetch(`${BASE_URL}${endpoint}`, {
@@ -80,13 +105,21 @@ async function lyraPost<T>(endpoint: string, body: Record<string, unknown>): Pro
     headers,
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    redirect: 'error',
   });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Lyra API ${endpoint} ${res.status}: ${text}`);
   }
-  const json = await res.json();
-  return json.result ?? json;
+  const json = record(await res.json(), 'API response');
+  if (json.error) throw new Error(`Account data unavailable: ${endpoint} returned an API error`);
+  const result = json.result ?? json;
+  if (!Array.isArray(result)) {
+    const row = record(result, 'API result');
+    if (row.failed_to_fetch === true || row.error) throw new Error('Account data unavailable');
+    if (row.subaccount_id != null && Number(row.subaccount_id) !== SUBACCOUNT_ID) throw new Error('Account data unavailable: subaccount mismatch');
+  }
+  return result as T;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -95,7 +128,16 @@ export async function getPositions(): Promise<any[]> {
     const result = await lyraPost<{ positions: unknown[] }>('/private/get_positions', {
       subaccount_id: SUBACCOUNT_ID,
     });
-    return (result.positions ?? result) as unknown[];
+    return accountRows(result, 'positions', 'instrument_name', ['amount', 'average_price', 'mark_price', 'mark_value', 'unrealized_pnl', 'index_price'])
+      .map((position) => {
+        const greeks = position.greeks && typeof position.greeks === 'object' ? position.greeks as Record<string, unknown> : {};
+        const normalized = { ...position };
+        for (const field of ['delta', 'gamma', 'theta', 'vega']) {
+          const value = position[field] ?? greeks[field];
+          normalized[field] = value == null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value);
+        }
+        return normalized;
+      });
   });
 }
 
@@ -105,7 +147,12 @@ export async function getCollaterals(): Promise<any[]> {
     const result = await lyraPost<{ collaterals: unknown[] }>('/private/get_collaterals', {
       subaccount_id: SUBACCOUNT_ID,
     });
-    return (result.collaterals ?? result) as unknown[];
+    return accountRows(result, 'collaterals', 'asset_name', ['amount', 'mark_price'])
+      .map((collateral) => {
+        const normalized = { ...collateral, mark_value: collateral.mark_value ?? collateral.value };
+        requireNumbers(normalized, ['mark_value'], 'collaterals');
+        return normalized;
+      });
   });
 }
 
@@ -154,8 +201,10 @@ export async function getSubaccount(): Promise<{
     const result = await lyraPost<Record<string, unknown>>('/private/get_subaccount', {
       subaccount_id: SUBACCOUNT_ID,
     });
-    const collateralRows = Array.isArray(result?.collaterals) ? result.collaterals as Record<string, unknown>[] : [];
-    const positionRows = Array.isArray(result?.positions) ? result.positions as Record<string, unknown>[] : [];
+    record(result, 'subaccount');
+    requireNumbers(result, ['initial_margin', 'maintenance_margin', 'subaccount_value', 'collaterals_value', 'collaterals_initial_margin', 'collaterals_maintenance_margin', 'positions_initial_margin', 'open_orders_margin'], 'subaccount');
+    const collateralRows = accountRows(result, 'collaterals', 'asset_name', ['amount', 'maintenance_margin']);
+    const positionRows = accountRows(result, 'positions', 'instrument_name', ['amount', 'initial_margin']);
     const collateralsInitialMargin = Number(result?.collaterals_initial_margin ?? 0);
     const collateralsMaintenanceMargin = Math.abs(Number(result?.collaterals_maintenance_margin ?? 0));
     const initialMargin = Number(result?.initial_margin ?? 0);

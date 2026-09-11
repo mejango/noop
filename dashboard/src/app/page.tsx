@@ -171,10 +171,10 @@ interface LyraPosition {
   mark_price: number;
   mark_value: number;
   unrealized_pnl: number;
-  delta: number;
-  gamma: number;
-  theta: number;
-  vega: number;
+  delta: number | null;
+  gamma: number | null;
+  theta: number | null;
+  vega: number | null;
   index_price: number;
   liquidation_price: number | null;
 }
@@ -185,10 +185,10 @@ interface LyraTrade {
   direction: string;
   trade_amount: number;
   trade_price: number;
-  trade_fee: number;
+  trade_fee: number | null;
   timestamp: number;
   index_price: number;
-  realized_pnl: number;
+  realized_pnl: number | null;
   is_bot: boolean;
 }
 
@@ -346,13 +346,13 @@ interface PnlReportData {
     openingValue: number;
     closingValue: number;
     portfolioChange: number;
-    portfolioReturnPct: number;
+    portfolioReturnPct: number | null;
     openingUnrealized: number;
     closingUnrealized: number;
     unrealizedChange: number;
     openingTradeRevenue: number;
     openingTradeExpenses: number;
-    openingTradeProfit: number;
+    openingGrossCashflow: number;
     openingTradeOrderCount: number;
     netTradeCashflow: number;
     putNetCashflow: number;
@@ -362,8 +362,8 @@ interface PnlReportData {
     spotChangePct: number;
     highWatermark: number;
     lowWatermark: number;
-    maxDrawdown: number;
-    maxDrawdownPct: number;
+    maxDrawdown: number | null;
+    maxDrawdownPct: number | null;
   };
   series: {
     portfolio: Array<{
@@ -371,7 +371,6 @@ interface PnlReportData {
       ts: number;
       portfolioValue: number;
       unrealizedPnl: number;
-      realizedTotal: number;
       spotPrice: number;
       usdcBalance: number;
       ethBalance: number;
@@ -460,7 +459,7 @@ const emptyPnlReport: PnlReportData = {
     unrealizedChange: 0,
     openingTradeRevenue: 0,
     openingTradeExpenses: 0,
-    openingTradeProfit: 0,
+    openingGrossCashflow: 0,
     openingTradeOrderCount: 0,
     netTradeCashflow: 0,
     putNetCashflow: 0,
@@ -900,12 +899,12 @@ export default function OverviewPage() {
       }
       cumulativeRevenue += periodRevenue;
       cumulativeExpenses += periodExpenseAmount;
-      const profit = cumulativeRevenue - cumulativeExpenses;
+      const cashflow = cumulativeRevenue - cumulativeExpenses;
       return {
         ts: new Date(bucket.timestamp).getTime(),
         cumulativeRevenue,
         cumulativeExpenses,
-        cumulativeProfit: profit,
+        cumulativeCashflow: cashflow,
         periodRevenue,
         periodExpenses,
         periodNet: net,
@@ -925,7 +924,7 @@ export default function OverviewPage() {
         ts: fromTs,
         cumulativeRevenue: openingRevenue,
         cumulativeExpenses: openingExpenses,
-        cumulativeProfit: openingRevenue - openingExpenses,
+        cumulativeCashflow: openingRevenue - openingExpenses,
         periodRevenue: 0,
         periodExpenses: 0,
         periodNet: 0,
@@ -943,7 +942,7 @@ export default function OverviewPage() {
         ts: toTs,
         cumulativeRevenue: last?.cumulativeRevenue ?? 0,
         cumulativeExpenses: last?.cumulativeExpenses ?? 0,
-        cumulativeProfit: last?.cumulativeProfit ?? 0,
+        cumulativeCashflow: last?.cumulativeCashflow ?? 0,
         periodRevenue: 0,
         periodExpenses: 0,
         periodNet: 0,
@@ -970,7 +969,7 @@ export default function OverviewPage() {
     const values = pnlChartData.flatMap((row) => [
       row.cumulativeRevenue,
       row.cumulativeExpenses,
-      row.cumulativeProfit,
+      row.cumulativeCashflow,
     ]).filter((value) => Number.isFinite(value));
     if (values.length === 0) return [-1, 1];
     const min = Math.min(...values, 0);
@@ -1953,7 +1952,8 @@ export default function OverviewPage() {
 
       {/* P&L */}
       {pnlChartData.length > 0 && (
-        <Card title="P&L" subtitle={pnlCoverageLabel ?? `${range} trade flow`}>
+        <Card title="Options Cashflow & Account Value" subtitle={pnlCoverageLabel ?? `${range} gross trade flow`}>
+          <p className="text-xs text-gray-500 mb-3">Gross options cashflow excludes unknown fees and estimated settlements. Account value changes include deposits and withdrawals.</p>
           <ResponsiveContainer width="100%" height={320}>
             <ComposedChart data={pnlChartData} margin={baseMargins} barGap={0} barCategoryGap="25%">
               <XAxis {...timeAxis}
@@ -1990,7 +1990,7 @@ export default function OverviewPage() {
                   const labels: Record<string, string> = {
                     cumulativeRevenue: 'Cum Revenue',
                     cumulativeExpenses: 'Cum Expenses',
-                    cumulativeProfit: 'Cum Profit',
+                    cumulativeCashflow: 'Gross cashflow',
                     periodRevenue: 'Revenue',
                     periodExpenses: 'Expenses',
                     periodCallRevenue: 'Call Premium',
@@ -2013,7 +2013,7 @@ export default function OverviewPage() {
                   <span style={{ color: '#9ca3af' }}>
                     {value === 'cumulativeRevenue' ? 'revenue' :
                      value === 'cumulativeExpenses' ? 'expenses' :
-                     value === 'cumulativeProfit' ? 'profit' :
+                     value === 'cumulativeCashflow' ? 'gross cashflow' :
                      value === 'periodRevenue' ? 'rev bars' :
                      value === 'periodExpenses' ? 'exp bars' :
                      value === 'periodCallRevenue' ? 'call rev' :
@@ -2032,7 +2032,7 @@ export default function OverviewPage() {
               <Bar yAxisId="bars" dataKey="periodCallExpenses" name="periodCallExpenses" stackId="grossFlow" fill="rgba(251, 146, 60, 0.46)" radius={[0, 0, 2, 2]} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeRevenue" name="cumulativeRevenue" stroke="#4ade80" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="monotone" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
-              <Line yAxisId="lines" type="monotone" dataKey="cumulativeProfit" name="cumulativeProfit" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
+              <Line yAxisId="lines" type="monotone" dataKey="cumulativeCashflow" name="cumulativeCashflow" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
               <Line yAxisId="portfolio" type="monotone" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={2} dot={false} strokeDasharray="5 4" isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
@@ -2892,6 +2892,9 @@ export default function OverviewPage() {
         </Card>
       )}
 
+      {accountError && (
+        <p role="alert" className="text-sm text-amber-300">Account data is unavailable. Any positions still shown are from the last successful refresh.</p>
+      )}
       {account.positions.length > 0 && (() => {
         const posCols: { key: string; label: string; align: 'left' | 'right' }[] = [
           { key: 'instrument_name', label: 'Instrument', align: 'left' },
@@ -2907,8 +2910,8 @@ export default function OverviewPage() {
           .map(p => ({
             ...p,
             pnlPct: (p.average_price * Math.abs(p.amount)) > 0 ? (p.unrealized_pnl / (p.average_price * Math.abs(p.amount))) * 100 : 0,
-            thetaPerDay: p.theta * p.amount,
-            thetaPerContract: Math.abs(p.amount) > 0 ? (p.theta * p.amount) / Math.abs(p.amount) : 0,
+            thetaPerDay: p.theta == null ? null : p.theta * p.amount,
+            thetaPerContract: p.theta == null ? null : Math.abs(p.amount) > 0 ? (p.theta * p.amount) / Math.abs(p.amount) : 0,
           }))
           .sort((a, b) => {
             const k = posSort.key as keyof typeof a;
@@ -2946,9 +2949,9 @@ export default function OverviewPage() {
                       <td className="py-1.5 px-2 text-right tabular-nums text-white">{formatUSD(p.mark_value)}</td>
                       <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{formatUSD(p.unrealized_pnl)}</td>
                       <td className={`py-1.5 px-2 text-right tabular-nums ${pnlColor}`}>{p.pnlPct.toFixed(1)}%</td>
-                      <td className={`py-1.5 px-2 text-right tabular-nums ${p.thetaPerDay >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                        {p.thetaPerDay >= 0 ? '+' : ''}{formatUSD(p.thetaPerDay)}
-                        <span className="text-gray-500 text-[10px] ml-1">({p.thetaPerContract >= 0 ? '+' : ''}{formatUSD(p.thetaPerContract)} per)</span>
+                      <td className={`py-1.5 px-2 text-right tabular-nums ${p.thetaPerDay != null && p.thetaPerDay >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {p.thetaPerDay != null && p.thetaPerDay >= 0 ? '+' : ''}{formatUSD(p.thetaPerDay)}
+                        <span className="text-gray-500 text-[10px] ml-1">({p.thetaPerContract != null && p.thetaPerContract >= 0 ? '+' : ''}{formatUSD(p.thetaPerContract)} per)</span>
                       </td>
                     </tr>
                   );
@@ -2964,8 +2967,8 @@ export default function OverviewPage() {
                   </td>
                   <td />
                   {(() => {
-                    const totalTheta = sorted.reduce((s, p) => s + p.thetaPerDay, 0);
-                    return <td className={`py-1.5 px-2 text-right tabular-nums ${totalTheta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{totalTheta >= 0 ? '+' : ''}{formatUSD(totalTheta)}</td>;
+                    const totalTheta = sorted.some(p => p.thetaPerDay == null) ? null : sorted.reduce((s, p) => s + (p.thetaPerDay ?? 0), 0);
+                    return <td className={`py-1.5 px-2 text-right tabular-nums ${totalTheta != null && totalTheta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{totalTheta != null && totalTheta >= 0 ? '+' : ''}{formatUSD(totalTheta)}</td>;
                   })()}
                 </tr>
               </tbody>
@@ -2977,7 +2980,7 @@ export default function OverviewPage() {
 
       {/* Recent Trades */}
       {account.trades.length > 0 && (
-        <Card title="Recent Trades" subtitle={`${account.trades.length} trades (${accountRange})`}>
+        <Card title="Recorded Bot Trades" subtitle={`${account.trades.length} trades (${accountRange})`}>
           <div className="overflow-auto max-h-[300px]">
             <table className="w-full text-xs md:text-sm">
               <thead className="sticky top-0 bg-[#111] z-10">
@@ -2999,7 +3002,7 @@ export default function OverviewPage() {
                     <td className={`py-1.5 px-2 text-center ${t.direction === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>{t.direction.toUpperCase()}</td>
                     <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{t.trade_amount.toFixed(4)}</td>
                     <td className="py-1.5 px-2 text-right tabular-nums text-gray-300">{formatUSD(t.trade_price)}</td>
-                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">{formatUSD(t.trade_fee)}</td>
+                    <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">{t.trade_fee == null ? 'Unknown' : formatUSD(t.trade_fee)}</td>
                     <td className="py-1.5 px-2 text-center">
                       {t.is_bot
                         ? <Bot className="inline w-3.5 h-3.5 text-cyan-400" />

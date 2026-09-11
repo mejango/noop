@@ -440,8 +440,8 @@ interface PortfolioSnapshot {
   total_unrealized_pnl: number; total_realized_pnl: number; portfolio_value_usd: number;
 }
 
-interface RealizedPnL {
-  net_realized_pnl: number; total_put_cost: number; total_put_revenue: number;
+interface OptionsCashflow {
+  gross_options_cashflow: number; total_put_cost: number; total_put_revenue: number;
   total_call_revenue: number; total_call_cost: number;
   successful_orders: number; total_orders: number;
 }
@@ -454,7 +454,7 @@ interface OpsData {
   assessment: OpsAssessment | null;
   advisoryArtifacts?: AdvisoryArtifacts | null;
   portfolio?: PortfolioSnapshot | null;
-  pnl?: RealizedPnL | null;
+  cashflow?: OptionsCashflow | null;
   schedulerState?: SchedulerState | null;
 }
 
@@ -1924,7 +1924,7 @@ export default function AdvisorDrawer() {
                 </div>
 
                 {/* Portfolio P&L */}
-                {(opsData.portfolio || opsData.pnl) && (
+                {(opsData.portfolio || opsData.cashflow) && (
                   <div className="bg-white/5 border border-white/10 px-3 py-2.5">
                     <p className="text-[10px] text-gray-500 uppercase tracking-wider mb-2">Portfolio P&L</p>
                     {opsData.portfolio && (
@@ -1941,22 +1941,22 @@ export default function AdvisorDrawer() {
                         </div>
                       </div>
                     )}
-                    {opsData.pnl && (
+                    {opsData.cashflow && (
                       <div className="space-y-1 text-[11px]">
                         <div className="flex justify-between">
-                          <span className="text-gray-500">Realized P&L</span>
-                          <span className={`font-mono ${Number(opsData.pnl.net_realized_pnl) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                            {Number(opsData.pnl.net_realized_pnl) >= 0 ? '+' : ''}${Number(opsData.pnl.net_realized_pnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          <span className="text-gray-500">Gross options cashflow</span>
+                          <span className={`font-mono ${Number(opsData.cashflow.gross_options_cashflow) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                            {Number(opsData.cashflow.gross_options_cashflow) >= 0 ? '+' : ''}${Number(opsData.cashflow.gross_options_cashflow).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>
                         </div>
                         <div className="flex justify-between text-[10px]">
-                          <span className="text-gray-600">Puts: cost ${Number(opsData.pnl.total_put_cost).toFixed(2)} / rev ${Number(opsData.pnl.total_put_revenue).toFixed(2)}</span>
+                          <span className="text-gray-600">Puts: cost ${Number(opsData.cashflow.total_put_cost).toFixed(2)} / rev ${Number(opsData.cashflow.total_put_revenue).toFixed(2)}</span>
                         </div>
                         <div className="flex justify-between text-[10px]">
-                          <span className="text-gray-600">Calls: rev ${Number(opsData.pnl.total_call_revenue).toFixed(2)} / cost ${Number(opsData.pnl.total_call_cost).toFixed(2)}</span>
+                          <span className="text-gray-600">Calls: rev ${Number(opsData.cashflow.total_call_revenue).toFixed(2)} / cost ${Number(opsData.cashflow.total_call_cost).toFixed(2)}</span>
                         </div>
                         <div className="flex justify-between text-[10px] pt-1 border-t border-white/5">
-                          <span className="text-gray-600">{opsData.pnl.successful_orders}/{opsData.pnl.total_orders} orders successful</span>
+                          <span className="text-gray-600">{opsData.cashflow.successful_orders}/{opsData.cashflow.total_orders} orders successful</span>
                         </div>
                       </div>
                     )}
