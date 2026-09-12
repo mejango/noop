@@ -21,7 +21,7 @@ const ticker = { b: 10, a: 11, M: 10.5, I: 2500, option_pricing: { d: 0.1 } };
 
 async function confirm(overrides = {}) {
   const updates = [], submitted = [], validationResults = [];
-  let marginReads = 0, reviewerCalls = 0;
+  let marginReads = 0, reviewerCalls = 0, ruleReads = 0;
   const action = { id: 1, rule_id: 11, action: 'sell_call', instrument_name: name, amount: 1, price: 10, retries: 0,
     rule_criteria: { option_type: 'C', delta_range: [0.04, 0.12], dte_range: [5, 12], min_score: 65, min_bid: 8 },
     trigger_details: { dte: 8.5, delta: 0.1 } };
@@ -36,7 +36,11 @@ async function confirm(overrides = {}) {
     botData: { mediumTermMomentum: {}, putBudgetForCycle: 100, putUnspentBuyLimit: 0, putNetBought: 0 },
     db: {
       getPendingActions: () => [action], getOpenRestingOrders: () => [], getActiveTradeLessons: () => [], getRecentTradeReviews: () => [],
-      getActiveRules: () => overrides.ruleExpired ? [] : [{ id: 11, action: action.action, criteria: action.rule_criteria }],
+      getActiveRules: () => {
+        ruleReads++;
+        return overrides.ruleExpired || (overrides.ruleExpiresAfterReview && ruleReads > 1)
+          ? [] : [{ id: 11, action: action.action, criteria: action.rule_criteria }];
+      },
       updatePendingAction: (_id, update) => updates.push(update),
     },
     fetchSubaccount: async () => { marginReads++; return overrides.marginMissingAt === marginReads ? null : margin; },
@@ -119,9 +123,18 @@ test('pre-send execution failure clears confirmed status without claiming a subm
   assert.equal(result.updates.at(-1).execution_result, 'positions unavailable');
 });
 
-test('changed or withdrawn rule cannot execute after reviewers finish', async () => {
+test('withdrawn pending rule is retired before reviewer calls', async () => {
   const result = await confirm({ ruleExpired: true });
   assert.equal(result.submitted.length, 0);
+  assert.equal(result.reviewerCalls, 0);
+  assert.equal(result.updates.at(-1).status, 'cancelled');
+  assert.ok(result.updates.some(update => update.execution_result?.includes('inactive_rule')));
+});
+
+test('rule withdrawn during review cannot execute after reviewers finish', async () => {
+  const result = await confirm({ ruleExpiresAfterReview: true });
+  assert.equal(result.submitted.length, 0);
+  assert.equal(result.reviewerCalls, 2);
   assert.ok(result.updates.some(update => update.execution_result?.includes('inactive_rule')));
 });
 

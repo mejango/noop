@@ -1499,6 +1499,7 @@ const stmts = {
       confirmed_at = COALESCE(@confirmed_at, confirmed_at),
       executed_at = COALESCE(@executed_at, executed_at),
       execution_result = COALESCE(@execution_result, execution_result),
+      trigger_details = COALESCE(@trigger_details, trigger_details),
       retries = COALESCE(@retries, retries)
     WHERE id = @id
   `),
@@ -1513,6 +1514,12 @@ const stmts = {
 
   getRecentPendingActions: db.prepare(`
     SELECT * FROM pending_actions ORDER BY triggered_at DESC LIMIT @limit
+  `),
+
+  getPendingActionById: db.prepare(`
+    SELECT pa.*, tr.criteria AS rule_criteria, tr.preferred_order_type AS rule_preferred_order_type
+    FROM pending_actions pa LEFT JOIN trading_rules tr ON pa.rule_id = tr.id
+    WHERE pa.id = @id
   `),
 
   hasPendingActionForRule: db.prepare(`
@@ -2727,6 +2734,8 @@ const updatePendingAction = (id, fields) => {
     confirmed_at: fields.confirmed_at ?? null,
     executed_at: fields.executed_at ?? null,
     execution_result: fields.execution_result ? (typeof fields.execution_result === 'string' ? fields.execution_result : JSON.stringify(fields.execution_result)) : null,
+    trigger_details: fields.trigger_details == null ? null
+      : typeof fields.trigger_details === 'string' ? fields.trigger_details : JSON.stringify(fields.trigger_details),
     retries: fields.retries ?? null,
   });
 };
@@ -2736,6 +2745,7 @@ const getActiveRulesByType = (ruleType) => stmts.getActiveRulesByType.all({ rule
 const deactivateStaleEmergencyBuybackRules = () => stmts.deactivateStaleEmergencyBuybackRules.run().changes || 0;
 const deactivateRuleById = (id) => stmts.deactivateRuleById.run({ id }).changes || 0;
 const getPendingActions = (status) => stmts.getPendingActionsByStatus.all({ status });
+const getPendingActionById = (id) => stmts.getPendingActionById.get({ id });
 const getRecentPendingActions = (limit = 20) => stmts.getRecentPendingActions.all({ limit });
 const hasPendingActionForRule = (ruleId) => (stmts.hasPendingActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
 const hasPendingOrConfirmedActionForRule = (ruleId) => (stmts.hasPendingOrConfirmedActionForRule.get({ rule_id: ruleId })?.count || 0) > 0;
@@ -2981,6 +2991,7 @@ module.exports = {
   deactivateStaleEmergencyBuybackRules,
   deactivateRuleById,
   getPendingActions,
+  getPendingActionById,
   getRecentPendingActions,
   hasPendingActionForRule,
   hasPendingOrConfirmedActionForRule,

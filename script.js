@@ -105,6 +105,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const { getInstrumentPriceStep, roundToStep, getStepDecimals, normalizePriceToStep, normalizeOrderPriceForVenue, avoidRoundNumberRestingPrice, computePostOnlyRetryPrice } = require('./bot/order-pricing');
+const { normalizeDesiredExitOrder, compareRestingExitOrder, resolveDesiredExitOrderType, getDesiredSellPutRemainingAmount } = require('./bot/resting-exit-plan');
 const {
   evaluateConditions,
   evaluateExitConditions,
@@ -8699,7 +8700,6 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
   // ── Exit rules ─────────────────────────────────────────────────────────────
   try {
     const exitRules = db.getActiveRulesByType('exit');
-    const openRestingExitOrders = getOpenRestingExitOrders();
     for (const rule of exitRules) {
       try {
         const position = positions.find(p => p.instrument_name === rule.instrument_name);
@@ -8799,7 +8799,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
 
         // Dedup: skip if there's already a pending/confirmed action for this rule
-        if (db.hasPendingActionForRule(rule.id)) {
+        if (hasPendingOrConfirmedActionForRule(rule.id)) {
           logDecision(rule, {
             decision_status: 'skipped',
             reason_code: 'pending_duplicate',
@@ -8809,36 +8809,10 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
-        const recentRejection = getRecentRejectedAction(rule.action, rule.instrument_name);
-        if (recentRejection) {
-          console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} rejected recently; backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
-          logDecision(rule, {
-            decision_status: 'skipped',
-            reason_code: 'recent_rejection',
-            reason: recentRejection.reason || 'Recent rejection backoff',
-            criteria_json: criteria,
-          });
-          continue;
-        }
-
-        const existingRestingExit = findRestingExitOrderForRule(openRestingExitOrders, rule);
-        if (existingRestingExit) {
-          console.log(`📋 Keep resting ${rule.action} ${rule.instrument_name}: existing advisor-backed order already on book @ $${Number(existingRestingExit.limit_price).toFixed(4)} x ${Number(existingRestingExit.amount).toFixed(2)}`);
-          logDecision(rule, {
-            decision_status: 'skipped',
-            reason_code: 'existing_resting_exit',
-            reason: 'Existing advisor-backed exit order already on book',
-            price: existingRestingExit.limit_price,
-            amount: existingRestingExit.amount,
-            criteria_json: criteria,
-          });
-          continue;
-        }
-
         const askPrice = Number(ticker?.a) || 0;
         const bidPrice = Number(ticker?.b) || 0;
         const markPrice = Number(ticker?.M) || values.mark_price || 0;
-        const price = patientBuybackPlan?.limitPrice
+        const plannedPrice = patientBuybackPlan?.limitPrice
           || patientSellPutPlan?.limitPrice
           || (rule.action.includes('buy') ? askPrice : bidPrice);
 
@@ -8857,16 +8831,74 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
+        // Compare the executable desired order before spending reviewer calls.
+        // A different plan becomes a replacement candidate while its existing
+        // quote remains live until confirmation and terminal-fill reconciliation.
+        const exitSnapshot = await readFreshExitOrderSnapshot({ action: rule.action, instrument_name: rule.instrument_name });
+        if (!Array.isArray(exitSnapshot?.orders)) throw new Error('Fresh exit order snapshot unavailable');
+        const existingOrders = exitSnapshot.orders;
+        if (existingOrders.length > 1) throw new Error('Multiple existing exits require reconciliation');
+        const existingRestingExit = existingOrders[0] || null;
+        const currentExitPositions = Array.isArray(exitSnapshot.positions)
+          ? exitSnapshot.positions : await fetchPositions({ throwOnError: true });
+        const sizingPosition = getCloseablePositionForExit(rule.action, rule.instrument_name, currentExitPositions);
+        if (!sizingPosition) continue;
+        const baseDesiredAmount = rule.action === 'sell_put'
+          ? getSellPutExitAmount(rule, criteria, sizingPosition, plannedValues)
+          : Number(sizingPosition.amount);
+        const intent = getSyntheticExitIntent(rule.action, {}, criteria);
+        const desiredTrancheFraction = rule.action === 'sell_put' && intent === 'monetize_tail_win'
+          ? baseDesiredAmount / Number(sizingPosition.amount) : null;
+        const desiredAmount = desiredTrancheFraction != null
+          ? getDesiredSellPutRemainingAmount({ positionAmount: sizingPosition.amount,
+              desiredFraction: desiredTrancheFraction, existingOrder: existingRestingExit })
+          : baseDesiredAmount;
+        const desiredOrderType = resolveDesiredExitOrderType({ action: rule.action, intent,
+          preferredOrderType: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
+          price: plannedPrice, ticker });
+        const desiredExitOrder = normalizeDesiredExitOrder({ action: rule.action,
+          instrumentName: rule.instrument_name, amount: desiredAmount, price: plannedPrice,
+          orderType: desiredOrderType, intent, instrument, ticker, existingOrder: existingRestingExit,
+          priceReason: patientBuybackPlan?.priceReason, ceilingPrice: patientBuybackPlan?.ceilingPrice });
+        const existingComparison = existingRestingExit
+          ? compareRestingExitOrder(existingRestingExit, desiredExitOrder) : null;
+        if (existingComparison && existingComparison.decision !== 'replace') {
+          const equivalent = existingComparison.decision === 'keep';
+          logDecision(rule, {
+            decision_status: 'skipped',
+            reason_code: equivalent ? 'existing_resting_exit' : 'existing_exit_unresolved',
+            reason: equivalent ? 'Existing exit matches the normalized desired order'
+              : 'Existing exit terms are incomplete; reconciliation required',
+            price: desiredExitOrder.limit_price, amount: desiredExitOrder.amount, criteria_json: criteria,
+            context_json: { existing_order_id: existingRestingExit.order_id, desired_exit_order: desiredExitOrder },
+          });
+          continue;
+        }
+
+        const recentRejection = getRecentRejectedAction(rule.action, rule.instrument_name);
+        if (recentRejection) {
+          console.log(`📋 Exit skip: ${rule.action} ${rule.instrument_name} rejected recently; backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
+          logDecision(rule, {
+            decision_status: 'skipped', reason_code: 'recent_rejection',
+            reason: recentRejection.reason || 'Recent rejection backoff', criteria_json: criteria,
+          });
+          continue;
+        }
+
+        const price = desiredExitOrder.limit_price;
         const pendingResult = db.insertPendingAction({
           rule_id: rule.id,
           action: rule.action,
           instrument_name: rule.instrument_name,
-            amount: plannedSellPutAmount ?? position.amount,
+            amount: desiredExitOrder.amount,
             price: price,
             trigger_details: {
               conditions_met: criteria.conditions.map(c => ({ field: c.field, op: c.op, threshold: c.value, actual: values[c.field] })),
               current_values: plannedValues,
-              advisor_limit_price: patientBuybackPlan?.limitPrice ?? patientSellPutPlan?.limitPrice ?? null,
+              advisor_limit_price: patientBuybackPlan || patientSellPutPlan ? desiredExitOrder.limit_price : null,
+              desired_exit_order: desiredExitOrder,
+              replacement_order_id: existingRestingExit?.order_id ?? null,
+              replacement_order_snapshot: existingRestingExit ? { ...existingRestingExit } : null,
               patient_buyback_capture_pct: patientBuybackPlan?.capturePct ?? null,
               patient_buyback_ceiling_price: patientBuybackPlan?.ceilingPrice ?? null,
               patient_buyback_price_reason: patientBuybackPlan?.priceReason ?? null,
@@ -8877,10 +8909,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               patient_sell_put_fair_value_source: patientSellPutPlan?.fairValueSource ?? null,
               buyback_intent: rule.action === 'buyback_call' ? getBuybackIntent(criteria) : null,
               put_exit_intent: rule.action === 'sell_put' ? getPutExitIntent(criteria) : null,
-              tranche_fraction: rule.action === 'sell_put' && plannedSellPutAmount != null && Number(position.amount) > 0
-                ? plannedSellPutAmount / Number(position.amount)
-                : null,
-              preferred_order_type: normalizePreferredOrderType(rule.action, rule.preferred_order_type),
+              tranche_fraction: desiredTrancheFraction,
+              preferred_order_type: desiredExitOrder.order_type,
             },
           });
         const pendingActionId = pendingResult?.lastInsertRowid ?? null;
@@ -8890,7 +8920,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           reason: 'Exit rule triggered pending action',
           selected_instrument: rule.instrument_name,
           price,
-          amount: plannedSellPutAmount ?? position.amount,
+          amount: desiredExitOrder.amount,
           pending_action_id: pendingActionId,
           criteria_json: criteria,
           context_json: { current_values: plannedValues },
@@ -10104,7 +10134,11 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
 
     const invalidRestingExitReason = getRestingExitInvalidReason({ order, tracked, activeRules, positions, instruments, tickerMap, spotPrice });
 
-    if (isStale || isOrphaned || invalidRestingEntryReason || invalidRestingExitReason) {
+    // A valid patient exit remains useful across advisory renewal and elapsed
+    // wall time. Changed desired terms are reviewed as replacements below;
+    // elapsed age alone must not tear down an otherwise valid standing exit.
+    const keepValidRestingExit = isReduceOnlyExitAction(inferredAction) && !invalidRestingExitReason;
+    if ((isStale && !keepValidRestingExit) || isOrphaned || invalidRestingEntryReason || invalidRestingExitReason) {
       const reason = invalidRestingEntryReason || invalidRestingExitReason
         || (isStale ? `stale (${ageHours.toFixed(1)}h old)` : 'orphaned (no matching active rule)');
       console.log(`🗑️ Cancelling ${order.instrument_name} order ${order.order_id}: ${reason}`);
@@ -10260,10 +10294,10 @@ const getActionOrderTypeHardRule = (action) => {
   const policy = getActionPolicy(action);
   if (!policy) return '- HARD RULE: use a valid order type for the action.';
   if (action === 'sell_put') {
-    return `- HARD RULE: sell_put is an exit-only close/trim of owned long puts. Use exchange reduce_only IOC for roll_protection or urgency. For monetize_tail_win only, gtc/post_only is allowed as synthetic reduce-only: live position must still be long, size must be capped to live closeable amount, and no same-instrument exit order may already rest.`;
+    return `- HARD RULE: sell_put is an exit-only close/trim of owned long puts. Use exchange reduce_only IOC for roll_protection or urgency. For monetize_tail_win only, gtc/post_only is allowed as synthetic reduce-only: live position must still be long, size must be capped to live closeable amount, and only one exit order may rest per instrument. An explicit replacement is allowed only after the old order is confirmed terminal and all its fills are reconciled; it never adds a second live exit.`;
   }
   if (action === 'buyback_call') {
-    return `- HARD RULE: buyback_call is an exit-only close/trim of open short calls. Use exchange reduce_only IOC for threat_management or urgency. For profit_capture only, gtc/post_only is allowed as synthetic reduce-only: live position must still be short, size must be capped to live closeable amount, and no same-instrument exit order may already rest.`;
+    return `- HARD RULE: buyback_call is an exit-only close/trim of open short calls. Use exchange reduce_only IOC for threat_management or urgency. For profit_capture only, gtc/post_only is allowed as synthetic reduce-only: live position must still be short, size must be capped to live closeable amount, and only one exit order may rest per instrument. An explicit replacement is allowed only after the old order is confirmed terminal and all its fills are reconciled; it never adds a second live exit.`;
   }
   if (policy.phase === 'exit') {
     return `- HARD RULE: if action is ${EXIT_ACTIONS.join(' or ')}, this is an exit-only close/trim action. Resting exits are allowed only when the synthetic reduce-only guard passes.`;
@@ -10582,6 +10616,15 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
         throw new Error(validation?.reason || 'Final execution policy rejected order');
       }
     }
+    if (isReduceOnlyExitAction(action)) {
+      // An IOC close also conflicts with a synthetic resting exit: filling the
+      // IOC first could leave that older quote able to open a reverse position.
+      // Refresh after policy reads, on both the initial attempt and maker retry.
+      const venueOpenOrders = await fetchOpenOrders({ throwOnError: true });
+      const trackedOpenOrders = db ? db.getOpenRestingOrders() : [];
+      const blockingExit = getExistingRestingExitOrder(action, instrumentName, [...trackedOpenOrders, ...venueOpenOrders]);
+      if (blockingExit) throw new Error(`Existing exit ${blockingExit.order_id || 'unknown'} must be terminal and reconciled before submitting ${action}`);
+    }
     return normalized;
   };
   try { price = await validateSubmission(price); } catch (error) {
@@ -10831,6 +10874,104 @@ const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData
   }
 };
 
+const accountExitOrderObservation = (tracked, live) => {
+  const result = require('./bot/order-accounting').accountRestingObservation({ db, botData, tracked, live });
+  if (result.deltaAmount > 0) notifyOrderLifecycle({
+    stage: result.resting ? 'partial_fill' : 'executed', action: tracked.action,
+    instrumentName: tracked.instrument_name, amount: tracked.amount, filledAmount: result.deltaAmount,
+    price: result.deltaValue / result.deltaAmount, totalValue: result.deltaValue,
+    orderId: tracked.order_id, status: live.order_status,
+  });
+  return result;
+};
+
+const readFreshExitOrderSnapshot = async (action) => {
+  const direction = getActionPolicy(action.action)?.direction;
+  const relevant = order => order.instrument_name === action.instrument_name
+    && (order.action === action.action || order.direction === direction);
+  const trackedOrders = db.getOpenRestingOrders().filter(relevant);
+  const venueOrders = (await fetchOpenOrders({ throwOnError: true })).filter(relevant);
+  const byId = new Map();
+  for (const order of venueOrders) {
+    if (!order.order_id || byId.has(order.order_id)
+      || !['open', 'untriggered'].includes(order.order_status)) throw new Error('Exit order snapshot is inconsistent');
+    if (!trackedOrders.some(tracked => tracked.order_id === order.order_id)) {
+      throw new Error(`Untracked exit order ${order.order_id}; reconcile before confirmation`);
+    }
+    byId.set(order.order_id, order);
+  }
+  const orders = [];
+  for (const tracked of trackedOrders) {
+    const live = byId.get(tracked.order_id) || await fetchOrderStatus(tracked.order_id);
+    if (!live) throw new Error(`Exit order ${tracked.order_id} status unknown; confirmation deferred`);
+    const result = accountExitOrderObservation(tracked, live);
+    if (result.resting) {
+      if (!byId.has(tracked.order_id)) throw new Error('Exit order appeared after snapshot; refresh required');
+      const origin = typeof db.getPendingActionById === 'function' ? db.getPendingActionById(tracked.pending_action_id) : null;
+      const originalTrigger = parseMaybeJsonObject(origin?.trigger_details);
+      const originalCriteria = parseMaybeJsonObject(origin?.rule_criteria);
+      const originalIntent = tracked.action === 'buyback_call'
+        ? originalTrigger?.buyback_intent || originalCriteria?.buyback_intent
+        : originalTrigger?.put_exit_intent || originalCriteria?.put_exit_intent;
+      orders.push({ ...tracked, ...live, exit_intent: tracked.exit_intent || originalIntent || null,
+        action: tracked.action, tranche_fraction: originalTrigger?.tranche_fraction ?? originalCriteria?.tranche_fraction ?? null });
+    }
+  }
+  return { orders, observedAt: new Date().toISOString() };
+};
+
+const formatExitConfirmationSnapshot = (action, position, snapshot, plan) => {
+  const orders = snapshot.orders.map(order => ({
+    order_id: order.order_id, action: order.action, direction: order.direction,
+    limit_price: Number(order.limit_price), remaining_amount: Number(order.amount) - Number(order.filled_amount),
+    order_type: order.time_in_force || order.order_type, exit_intent: order.exit_intent,
+  }));
+  return [
+    `AUTHORITATIVE CURRENT EXIT STATE (venue checked ${snapshot.observedAt}):`,
+    `Live closeable position: ${position.direction} ${Number(position.amount)} ${action.instrument_name}; average entry price=$${position.avg_entry_price}.`,
+    `Current same-instrument exit orders on the venue: ${orders.length}. ${JSON.stringify(orders)}`,
+    `Concrete desired exit order: ${JSON.stringify(plan)}`,
+    orders.length
+      ? 'Operation: REPLACE the listed order, subject to confirmation. The executor must prove its cancellation/terminal status, reconcile all fills, refresh closeable quantity and revalidate before submitting the replacement. There will be no overlapping exit orders. Review the replacement economics; the listed order is not a proposed duplicate.'
+      : 'Operation: PLACE a new exit. No existing exit is currently resting. Historical rule prose cannot establish an existing order.',
+  ].join('\n');
+};
+
+const prepareExitOrderReplacement = async ({ action, reviewedOrders, desiredOrder }) => {
+  const fresh = await readFreshExitOrderSnapshot(action);
+  const reviewedIds = new Set(reviewedOrders.map(order => order.order_id));
+  if (fresh.orders.some(order => !reviewedIds.has(order.order_id))) {
+    return { allowed: false, reason: 'Exit book changed during review; re-evaluate before replacing' };
+  }
+  let fillsSinceReview = 0;
+  for (const reviewed of reviewedOrders) {
+    const current = fresh.orders.find(order => order.order_id === reviewed.order_id);
+    if (current) {
+      const currentFills = Math.max(0, Number(current.filled_amount) - Number(reviewed.filled_amount));
+      const remainingApproved = Math.max(0, Number(desiredOrder.amount) - fillsSinceReview - currentFills);
+      const comparison = compareRestingExitOrder(current, { ...desiredOrder, amount: remainingApproved });
+      if (comparison.decision === 'keep') return { allowed: false, reason: 'Equivalent exit is already resting; keep it' };
+      if (comparison.decision === 'unresolved') return { allowed: false, reason: 'Existing exit terms are unresolved' };
+      // A successful cancellation request alone never authorizes replacement.
+      await cancelOrder(current.order_id, current.instrument_name);
+    }
+    const terminal = await fetchOrderStatus(reviewed.order_id);
+    if (!terminal) return { allowed: false, reason: `Cancellation status unknown for ${reviewed.order_id}` };
+    const result = accountExitOrderObservation({ ...reviewed }, terminal);
+    if (result.resting) return { allowed: false, reason: `Exit ${reviewed.order_id} is still open; replacement deferred` };
+    fillsSinceReview += Math.max(0, Number(terminal.filled_amount) - Number(reviewed.filled_amount));
+  }
+  // Check the book again after cancellation before reading the remaining position.
+  const after = await readFreshExitOrderSnapshot(action);
+  if (after.orders.length) return { allowed: false, reason: 'Exit order remains on the venue; replacement deferred' };
+  const positions = await fetchPositions({ throwOnError: true });
+  const position = getCloseablePositionForExit(action.action, action.instrument_name, positions);
+  const amount = floorOrderAmountToVenuePrecision(Math.min(Number(position?.amount) || 0,
+    Math.max(0, Number(desiredOrder.amount) - fillsSinceReview)));
+  if (!(amount > 0)) return { allowed: false, reason: 'No approved closeable quantity remains after fills' };
+  return { allowed: true, amount, positions };
+};
+
 const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
   if (!db) return;
 
@@ -10842,6 +10983,12 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
   let executed = 0;
   let resting = 0;
   for (const action of pending.slice(0, 2)) { // Max 2 per tick
+    const activeRule = db.getActiveRules().find(rule => Number(rule.id) === Number(action.rule_id));
+    if (!activeRule || activeRule.action !== action.action
+      || JSON.stringify(parseMaybeJsonObject(activeRule.criteria)) !== JSON.stringify(parseMaybeJsonObject(action.rule_criteria))) {
+      db.updatePendingAction(action.id, { status: 'cancelled', confirmation_reasoning: 'Obsolete pending action: rule is inactive or changed', execution_result: 'inactive_rule' });
+      continue;
+    }
     // Fetch fresh margin state for each confirmation (margin changes between trades)
     let marginState = null;
     let livePositions = [];
@@ -10897,30 +11044,102 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       let triggerData = {};
       try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
       const ruleCriteria = parseMaybeJsonObject(action.rule_criteria);
-      const livePosition = livePositions.find(position => position.instrument_name === action.instrument_name);
-      if (isReduceOnlyExitAction(action.action) && livePosition) {
+      let exitSnapshot = null;
+      let exitOrderPlan = null;
+      if (isReduceOnlyExitAction(action.action)) {
+        exitSnapshot = await readFreshExitOrderSnapshot(action);
+        // Read after reconciling the order snapshot so intervening fills also
+        // reduce the position used for sizing and reviewer context.
+        livePositions = await fetchPositions({ throwOnError: true });
+      }
+      const livePosition = isReduceOnlyExitAction(action.action)
+        ? getCloseablePositionForExit(action.action, action.instrument_name, livePositions)
+        : null;
+      if (isReduceOnlyExitAction(action.action) && !livePosition) {
+        db.updatePendingAction(action.id, { status: 'cancelled', confirmation_reasoning: 'No live closeable position remains' });
+        continue;
+      }
+      if (isReduceOnlyExitAction(action.action)) {
         const currentValues = liveRuleValues(livePosition, ticker, spotPrice);
         const livePatientBuyback = action.action === 'buyback_call'
-          ? refinePatientBuybackPlanPrice(getPatientBuybackPlan({ action: action.action }, ruleCriteria, livePosition), ticker,
+          ? refinePatientBuybackPlanPrice(getPatientBuybackPlan(activeRule, ruleCriteria, livePosition), ticker,
               instruments.find(instrument => instrument.instrument_name === action.instrument_name))
           : null;
         const livePatientPut = action.action === 'sell_put'
-          ? getPatientSellPutPlan({ action: action.action }, ruleCriteria, livePosition, currentValues)
+          ? getPatientSellPutPlan(activeRule, ruleCriteria, livePosition, currentValues)
           : null;
         triggerData = {
           ...triggerData,
+          conditions_met: (ruleCriteria.conditions || []).map(condition => ({ field: condition.field,
+            op: condition.op, threshold: condition.value, actual: currentValues[condition.field] })),
+          replacement_order_id: exitSnapshot.orders[0]?.order_id ?? null,
+          replacement_order_snapshot: exitSnapshot.orders[0] ?? null,
+          advisor_limit_price: livePatientBuyback?.limitPrice ?? livePatientPut?.limitPrice ?? null,
+          preferred_order_type: normalizePreferredOrderType(action.action, activeRule.preferred_order_type),
+          buyback_intent: action.action === 'buyback_call' ? getBuybackIntent(ruleCriteria) : null,
+          put_exit_intent: action.action === 'sell_put' ? getPutExitIntent(ruleCriteria) : null,
           current_values: {
             ...currentValues,
             patient_buyback_capture_pct: livePatientBuyback?.capturePct ?? null,
             patient_buyback_limit_price: livePatientBuyback?.limitPrice ?? null,
+            patient_buyback_ceiling_price: livePatientBuyback?.ceilingPrice ?? null,
             patient_sell_put_pnl_pct: livePatientPut?.pnlPct ?? null,
             patient_sell_put_fair_value_pnl_pct: livePatientPut?.fairValuePnlPct ?? null,
           },
           patient_buyback_capture_pct: livePatientBuyback?.capturePct ?? null,
+          patient_buyback_ceiling_price: livePatientBuyback?.ceilingPrice ?? null,
+          patient_buyback_price_reason: livePatientBuyback?.priceReason ?? null,
+          patient_sell_put_pnl_pct: livePatientPut?.pnlPct ?? null,
+          patient_sell_put_limit_price: livePatientPut?.limitPrice ?? null,
+          patient_sell_put_fair_value_pnl_pct: livePatientPut?.fairValuePnlPct ?? null,
+          patient_sell_put_fair_value_price: livePatientPut?.fairValuePrice ?? null,
+          patient_sell_put_fair_value_source: livePatientPut?.fairValueSource ?? null,
         };
+        const policyExitAmount = action.action === 'sell_put'
+          ? getSellPutExitAmount(activeRule, ruleCriteria, livePosition, currentValues) : Number(livePosition.amount);
+        const desiredTrancheFraction = action.action === 'sell_put' && triggerData.put_exit_intent === 'monetize_tail_win'
+          ? policyExitAmount / Number(livePosition.amount) : null;
+        const remainingExitAmount = desiredTrancheFraction != null
+          ? getDesiredSellPutRemainingAmount({ positionAmount: livePosition.amount,
+              desiredFraction: desiredTrancheFraction, existingOrder: exitSnapshot.orders[0] }) : policyExitAmount;
+        triggerData.tranche_fraction = desiredTrancheFraction;
+        action.amount = floorOrderAmountToVenuePrecision(Math.min(Number(action.amount), remainingExitAmount));
         if (!evaluateExitConditions(ruleCriteria, currentValues, livePatientBuyback?.capturePct ?? livePatientPut?.pnlPct ?? null)) {
           db.updatePendingAction(action.id, { status: 'rejected', confirmation_reasoning: 'Fresh exit conditions no longer satisfied' });
           continue;
+        }
+        if (exitSnapshot.orders.length > 1) {
+          console.log(`📋 Defer ${action.action} ${action.instrument_name}: multiple existing exits require reconciliation`);
+          continue;
+        }
+        const intent = getSyntheticExitIntent(action.action, triggerData, ruleCriteria);
+        const desiredPrice = livePatientBuyback?.limitPrice ?? livePatientPut?.limitPrice ?? currentPrice;
+        exitOrderPlan = normalizeDesiredExitOrder({ action: action.action, instrumentName: action.instrument_name,
+          amount: action.amount, price: desiredPrice, intent,
+          orderType: resolveDesiredExitOrderType({ action: action.action, intent,
+            preferredOrderType: triggerData.preferred_order_type, price: desiredPrice, ticker }),
+          instrument: instruments.find(instrument => instrument.instrument_name === action.instrument_name),
+          ticker, existingOrder: exitSnapshot.orders[0], priceReason: livePatientBuyback?.priceReason,
+          ceilingPrice: livePatientBuyback?.ceilingPrice });
+        const comparison = exitSnapshot.orders[0] ? compareRestingExitOrder(exitSnapshot.orders[0], exitOrderPlan) : null;
+        if (comparison?.decision === 'keep') {
+          db.updatePendingAction(action.id, { status: 'cancelled', confirmation_reasoning: 'Equivalent exit already resting; kept without reviewer calls' });
+          console.log(`📋 Keep equivalent resting exit ${action.instrument_name} @ $${exitOrderPlan.limit_price} x ${exitOrderPlan.amount}; no reviewers needed`);
+          continue;
+        }
+        if (comparison?.decision === 'unresolved') {
+          console.log(`📋 Defer ${action.action} ${action.instrument_name}: existing exit terms unavailable`);
+          continue;
+        }
+        action.amount = exitOrderPlan.amount;
+        action.price = exitOrderPlan.limit_price;
+        triggerData.desired_exit_order = exitOrderPlan;
+        triggerData.preferred_order_type = exitOrderPlan.order_type;
+        if (livePatientBuyback || livePatientPut) triggerData.advisor_limit_price = exitOrderPlan.limit_price;
+        if (livePatientBuyback) {
+          triggerData.patient_buyback_capture_pct = getBuybackCapturePctAtPrice(livePosition.avg_entry_price, exitOrderPlan.limit_price);
+          triggerData.current_values.patient_buyback_capture_pct = triggerData.patient_buyback_capture_pct;
+          triggerData.current_values.patient_buyback_limit_price = exitOrderPlan.limit_price;
         }
       }
       const advisoryOrderPref = normalizePreferredOrderType(action.action, triggerData.preferred_order_type);
@@ -10938,7 +11157,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       let detailsStr;
       if (isReduceOnlyExitAction(action.action)) {
         // Exit: show position info
-        detailsStr = `Position exit. ${describeActionSemantics(action.action)} Trigger: ${action.trigger_details || 'N/A'}`;
+        detailsStr = `Position exit. ${describeActionSemantics(action.action)} Current values: ${JSON.stringify(triggerData.current_values)}`;
       } else {
         // Entry: show option info
         const triggerDelta = Number(triggerData.delta);
@@ -11058,7 +11277,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         ? `Standing rule reasoning at advisory creation (historical; may contain stale score/target language, current buy-put trigger context is authoritative): ${action.rule_reasoning || 'N/A'}`
         : action.action === 'sell_call'
           ? `Standing rule reasoning at advisory creation (historical; may contain stale score/bid/margin language, current sell-call trigger context and margin gate are authoritative): ${action.rule_reasoning || 'N/A'}`
-          : `Rule reasoning: ${action.rule_reasoning || 'N/A'}`;
+          : `Standing rule reasoning at advisory creation (historical; mentions of existing orders, their age, position size or quotes are not current evidence. The fresh venue snapshot and live position below are authoritative): ${action.rule_reasoning || 'N/A'}`;
 
       const confirmPrompt = `Trade confirmation:
 Action: ${action.action} ${action.instrument_name}
@@ -11077,7 +11296,8 @@ ${buyPutConfirmationPrompt}
 ${sellCallConfirmationPrompt}
 ${sellPutConfirmationPrompt}
 ${ruleReasoningLine}
-Triggered because: ${action.trigger_details || 'N/A'}
+${exitSnapshot ? formatExitConfirmationSnapshot(action, livePosition, exitSnapshot, exitOrderPlan) : ''}
+${exitSnapshot ? 'Fresh exit trigger context' : 'Triggered because'}: ${exitSnapshot ? JSON.stringify(triggerData) : (action.trigger_details || 'N/A')}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
 ${formatRecentExecutionFrictionContext(action.action, recentFailedEntry)}
 ${confirmationLearningContext}
@@ -11339,9 +11559,16 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         const executionInstrument = instruments.find(instrument => instrument.instrument_name === action.instrument_name);
         const executionDirection = getActionPolicy(action.action)?.direction;
         executionPrice = normalizeOrderPriceForVenue(executionPrice, executionInstrument, executionDirection).price;
-        const executionAmount = floorOrderAmountToVenuePrecision(Number(action.amount));
+        if (exitSnapshot) {
+          const executionTicker = await fetchFreshTickerForInstrument(action.instrument_name);
+          if (!executionTicker) continue;
+          executionPrice = normalizeDesiredExitOrder({ action: action.action, instrumentName: action.instrument_name,
+            amount: action.amount, price: executionPrice, orderType, intent: exitOrderPlan.exit_intent,
+            instrument: executionInstrument, ticker: executionTicker }).limit_price;
+        }
+        let executionAmount = floorOrderAmountToVenuePrecision(Number(action.amount));
         const validateOrder = createFinalOrderValidator({ action, instruments, spotPrice, triggerData, ruleCriteria, orderType });
-        const finalPolicyCheck = await validateOrder({ price: executionPrice, amount: executionAmount });
+        let finalPolicyCheck = await validateOrder({ price: executionPrice, amount: executionAmount });
         if (!finalPolicyCheck.allowed) {
           db.updatePendingAction(action.id, {
             status: 'failed',
@@ -11351,8 +11578,26 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           console.log(`📋 Final order blocked: ${action.action} ${action.instrument_name} — ${finalPolicyCheck.reason}`);
           continue;
         }
+        if (exitSnapshot) {
+          const replacement = await prepareExitOrderReplacement({ action, reviewedOrders: exitSnapshot.orders,
+            desiredOrder: { ...exitOrderPlan, amount: executionAmount, limit_price: executionPrice, order_type: orderType } });
+          if (!replacement.allowed) {
+            db.updatePendingAction(action.id, { status: 'cancelled', confirmation_reasoning: reasoning, execution_result: replacement.reason });
+            console.log(`📋 Exit deferred: ${action.instrument_name} — ${replacement.reason}`);
+            continue;
+          }
+          executionAmount = replacement.amount;
+          livePositions = replacement.positions;
+          finalPolicyCheck = await validateOrder({ price: executionPrice, amount: executionAmount });
+          if (!finalPolicyCheck.allowed) {
+            db.updatePendingAction(action.id, { status: 'failed', confirmation_reasoning: reasoning,
+              execution_result: `Final order rejected after exit reconciliation (${finalPolicyCheck.code}): ${finalPolicyCheck.reason}` });
+            continue;
+          }
+        }
         db.updatePendingAction(action.id, {
           status: 'confirmed',
+          ...(exitSnapshot ? { trigger_details: triggerData } : {}),
           confirmation_reasoning: `${reasoning} | order_type=${orderType} limit=$${executionPrice}${orderTypeNote ? ` | order_type_override=${orderTypeNote}` : ''}`,
           confirmed_at: new Date().toISOString(),
         });
