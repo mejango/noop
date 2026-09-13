@@ -85,13 +85,14 @@ function routeFixture({
   from = FROM,
   to = TO,
   env = {},
+  openingCashflow = { revenue: 0, expenses: 0, gross_cashflow: 0, order_count: 0 },
 } = {}) {
   const spotQueries = [];
   const db = {
     getPortfolioSnapshotsInRange: (start, end) => snapshots.filter(row => row.timestamp >= start && row.timestamp <= end),
     getPortfolioSnapshotBefore: () => baseline,
     getOrdersInRange: (start, end) => orders.filter(row => row.timestamp >= start && row.timestamp <= end),
-    getOrderCashflowTotalsBefore: () => ({ revenue: 0, expenses: 0, gross_cashflow: 0, order_count: 0 }),
+    getOrderCashflowTotalsBefore: () => ({ ...openingCashflow }),
     getEconomicHistory: (start, end) => ({
       events: events.filter(row => row.timestamp >= start && row.timestamp <= end),
       coverage: { trades: false, settlements: false, transfers: false },
@@ -299,4 +300,203 @@ test('settlement action totals preserve unknown quantities instead of displaying
   const report = await routeFixture({ events: [recordedSettlement()] }).report();
   assert.equal(report.actionBreakdown[0].filledAmount, null);
   assert.match(report.meta.externalHoldingsUnavailableReason, /excluded from this account report/);
+});
+
+// The graph may combine these explicit estimate fields with recorded cashflow;
+// the API must preserve the independently inspectable recorded components.
+test('an ITM call adds an expiry-only loss bucket without changing recorded cashflow or counts', async () => {
+  const report = await routeFixture({ orders: [order()], spots: [quote(-60_000)] }).report();
+  const expiryBucket = report.series.buckets.find(row => row.timestamp === '2026-03-06T00:00:00.000Z');
+  assert.ok(expiryBucket, 'an expiry with no snapshot or recorded order still appears on the graph');
+  assert.equal(expiryBucket.estimatedSettlementCashflow, -500);
+  assert.equal(expiryBucket.estimatedCallSettlementExpenses, 500);
+  assert.equal(expiryBucket.estimatedPutSettlementRevenue, 0);
+  assert.equal(expiryBucket.estimateCount, 1);
+  assert.equal(expiryBucket.tradeCashflow, 0);
+  assert.equal(expiryBucket.tradeExpenses, 0);
+  assert.equal(expiryBucket.callExpenses, 0);
+  assert.equal(expiryBucket.orderCount, 0);
+  assert.equal(expiryBucket.endPortfolioValue, null);
+  assert.equal(report.summary.netTradeCashflow, 100);
+  assert.equal(report.summary.estimatedSettlementCashflow, -500);
+  assert.equal(report.meta.orderCount, 1);
+  assert.equal(report.series.buckets.reduce((sum, row) => sum + row.orderCount, 0), 1);
+  assert.deepEqual(report.orders.map(row => row.action), ['sell_call']);
+
+  let combined = report.summary.openingGrossCashflow + report.summary.openingEstimatedSettlementCashflow;
+  const graphValues = report.series.buckets.map(row => (combined += row.tradeCashflow + row.estimatedSettlementCashflow));
+  assert.deepEqual(graphValues, [100, -400], 'the estimate-inclusive graph reaches the call loss at expiry');
+});
+
+test('a partial call buyback reduces estimated expiry loss to the remaining exposure', async () => {
+  const report = await routeFixture({
+    orders: [
+      order({ filled_amount: 2, intended_amount: 2, total_value: 200 }),
+      order({ id: 2, timestamp: '2026-03-04T12:00:00.000Z', action: 'buyback_call', filled_amount: 0.5, intended_amount: 0.5, total_value: 60, fill_price: 120 }),
+    ],
+    spots: [quote(-60_000)],
+  }).report();
+  const expiryBucket = report.series.buckets.find(row => row.estimateCount > 0);
+  assert.equal(report.settlementEstimates[0].filled_amount, 1.5);
+  assert.equal(expiryBucket.estimatedCallSettlementExpenses, 750);
+  assert.equal(expiryBucket.estimatedSettlementCashflow, -750);
+  assert.equal(expiryBucket.estimateCount, 1);
+  assert.equal(report.summary.netTradeCashflow, 140);
+  assert.equal(report.summary.estimatedSettlementCashflow, -750);
+  assert.equal(report.summary.netTradeCashflow + report.summary.estimatedSettlementCashflow, -610);
+  assert.equal(report.meta.orderCount, 2);
+  assert.equal(report.series.buckets.reduce((sum, row) => sum + row.tradeExpenses, 0), 60);
+});
+
+test('ITM put proceeds are positive estimate components and do not become recorded revenue', async () => {
+  const report = await routeFixture({
+    orders: [order({ action: 'buy_put', instrument_name: 'ETH-20260306-3000-P', strike: 3000, total_value: 50 })],
+    spots: [quote(-60_000)],
+  }).report();
+  const expiryBucket = report.series.buckets.find(row => row.estimateCount > 0);
+  assert.equal(expiryBucket.estimatedSettlementCashflow, 500);
+  assert.equal(expiryBucket.estimatedPutSettlementRevenue, 500);
+  assert.equal(expiryBucket.estimatedCallSettlementExpenses, 0);
+  assert.equal(expiryBucket.putRevenue, 0);
+  assert.equal(expiryBucket.tradeRevenue, 0);
+  assert.equal(expiryBucket.orderCount, 0);
+  assert.equal(report.summary.putNetCashflow, -50);
+  assert.equal(report.summary.netTradeCashflow, -50);
+  assert.equal(report.summary.estimatedSettlementCashflow, 500);
+  assert.equal(report.summary.netTradeCashflow + report.summary.estimatedSettlementCashflow, 450);
+});
+
+test('pre-window estimates carry into the graph baseline without reappearing in current buckets', async () => {
+  const report = await routeFixture({
+    from: '2026-03-07T00:00:00.000Z',
+    to: '2026-03-14T00:00:00.000Z',
+    orders: [
+      order(),
+      order({ id: 2, timestamp: '2026-03-10T00:00:00.000Z', action: 'buy_put', instrument_name: 'ETH-20260313-2700-P', strike: 2700, total_value: 50 }),
+    ],
+    spots: [quote(-60_000), { timestamp: '2026-03-13T07:59:00.000Z', price: 2500 }],
+    openingCashflow: { revenue: 100, expenses: 0, gross_cashflow: 100, order_count: 1 },
+  }).report();
+  assert.equal(report.summary.openingGrossCashflow, 100);
+  assert.equal(report.summary.openingEstimatedSettlementCashflow, -500);
+  assert.equal(report.summary.openingTradeOrderCount, 1);
+  assert.equal(report.summary.netTradeCashflow, -50);
+  assert.equal(report.summary.estimatedSettlementCashflow, 200);
+  assert.equal(report.series.buckets.reduce((sum, row) => sum + row.estimatedSettlementCashflow, 0), 200);
+  assert.ok(report.series.buckets.every(row => row.timestamp >= report.meta.from));
+  assert.equal(report.settlementEstimates.length, 1);
+  assert.equal(report.settlementEstimates[0].instrument_name, 'ETH-20260313-2700-P');
+  const openingInclusive = report.summary.openingGrossCashflow + report.summary.openingEstimatedSettlementCashflow;
+  const closingInclusive = report.series.buckets.reduce((sum, row) => sum + row.tradeCashflow + row.estimatedSettlementCashflow, openingInclusive);
+  assert.equal(openingInclusive, -400);
+  assert.equal(closingInclusive, -250);
+});
+
+test('recorded settlements never also contribute estimated graph values, including zero and unknown USD', async (t) => {
+  for (const cashflow of ['-475', '0', null]) {
+    await t.test(`recorded cashflow ${cashflow}`, async () => {
+      const report = await routeFixture({
+        orders: [order()], spots: [quote(-60_000)], events: [recordedSettlement({ cashflow_usd: cashflow })],
+      }).report();
+      assert.equal(report.summary.openingEstimatedSettlementCashflow, 0);
+      assert.equal(report.summary.estimatedSettlementCashflow, 0);
+      assert.equal(report.meta.settlementEstimateCount, 0);
+      for (const row of report.series.buckets) {
+        assert.equal(row.estimatedSettlementCashflow, 0);
+        assert.equal(row.estimatedCallSettlementExpenses, 0);
+        assert.equal(row.estimatedPutSettlementRevenue, 0);
+        assert.equal(row.estimateCount, 0);
+      }
+      assert.equal(report.summary.netTradeCashflow, cashflow === '-475' ? -375 : 100);
+      assert.equal(report.meta.unvaluedRecordedSettlementCount, cashflow == null ? 1 : 0);
+      assert.equal(report.meta.orderCount, cashflow == null ? 1 : 2);
+    });
+  }
+});
+
+test('missing estimates and unvalued recorded settlements are reported separately before and within the window', async () => {
+  const oldMissing = 'ETH-20260227-2100-C';
+  const oldUnvalued = 'ETH-20260227-2200-C';
+  const currentMissing = 'ETH-20260306-2300-C';
+  const currentUnvalued = 'ETH-20260306-2400-C';
+  const report = await routeFixture({
+    orders: [
+      order({ id: 1, timestamp: '2026-02-20T00:00:00.000Z', instrument_name: oldMissing }),
+      order({ id: 2, timestamp: '2026-02-20T00:00:00.000Z', instrument_name: oldUnvalued }),
+      order({ id: 3, instrument_name: currentMissing }),
+      order({ id: 4, instrument_name: currentUnvalued }),
+    ],
+    events: [
+      recordedSettlement({ event_id: 'old-unvalued', timestamp: '2026-02-27T08:00:00.000Z', instrument_name: oldUnvalued, cashflow_usd: null }),
+      recordedSettlement({ event_id: 'current-unvalued', instrument_name: currentUnvalued, cashflow_usd: null }),
+    ],
+  }).report();
+  assert.equal(report.meta.openingMissingSettlementEstimateCount, 1);
+  assert.equal(report.meta.missingSettlementEstimateCount, 1);
+  assert.equal(report.meta.openingUnvaluedRecordedSettlementCount, 1);
+  assert.equal(report.meta.unvaluedRecordedSettlementCount, 1);
+  assert.deepEqual(report.missingSettlementEstimates.map(row => row.instrument_name), [currentMissing]);
+  assert.equal(report.summary.openingEstimatedSettlementCashflow, 0);
+  assert.equal(report.summary.estimatedSettlementCashflow, 0);
+  assert.equal(report.settlementEstimates.length, 0);
+  assert.equal(report.meta.orderCount, 2);
+  assert.equal(report.series.buckets.reduce((sum, row) => sum + row.estimateCount, 0), 0);
+});
+
+test('a custom window clamps its first partial bucket without losing recorded or estimated cashflow', async () => {
+  const from = '2026-03-06T07:30:00.000Z';
+  const report = await routeFixture({
+    from,
+    to: '2026-03-07T12:00:00.000Z',
+    orders: [order({ timestamp: '2026-03-06T07:35:00.000Z' })],
+    snapshots: [snapshot('2026-03-06T07:40:00.000Z', 10_100)],
+    spots: [quote(-60_000)],
+  }).report();
+  assert.equal(report.meta.bucketMs, 60 * 60 * 1000);
+  assert.equal(report.series.buckets[0].timestamp, from);
+  assert.equal(report.series.buckets[0].tradeCashflow, 100);
+  assert.equal(report.series.buckets[0].orderCount, 1);
+  assert.equal(report.series.buckets[0].endPortfolioValue, 10_100);
+  assert.equal(report.series.buckets[1].timestamp, EXPIRY);
+  assert.equal(report.series.buckets[1].estimatedSettlementCashflow, -500);
+  assert.ok(report.series.buckets.every(row => row.timestamp >= from));
+  assert.equal(report.series.buckets.reduce((sum, row) => sum + row.tradeCashflow + row.estimatedSettlementCashflow, 0), -400);
+});
+
+test('offsetting call and put estimates retain their gross components and worthless-expiry count', async () => {
+  const report = await routeFixture({
+    orders: [
+      order(),
+      order({ id: 2, action: 'buy_put', instrument_name: 'ETH-20260306-3000-P', strike: 3000, total_value: 50 }),
+      order({ id: 3, instrument_name: 'ETH-20260306-4000-C', strike: 4000, total_value: 10 }),
+    ],
+    spots: [quote(-60_000)],
+  }).report();
+  const expiryBucket = report.series.buckets.find(row => row.estimateCount > 0);
+  assert.equal(expiryBucket.estimatedSettlementCashflow, 0);
+  assert.equal(expiryBucket.estimatedCallSettlementExpenses, 500);
+  assert.equal(expiryBucket.estimatedPutSettlementRevenue, 500);
+  assert.equal(expiryBucket.estimateCount, 3);
+  assert.equal(expiryBucket.orderCount, 0);
+  assert.equal(report.summary.estimatedSettlementCashflow, 0);
+  assert.equal(report.meta.settlementEstimateCount, 3);
+  assert.equal(report.summary.netTradeCashflow, 60);
+});
+
+test('expiry at a window boundary appears once, either in current estimates or the opening estimate baseline', async (t) => {
+  for (const [name, from, to, openingExpected, currentExpected] of [
+    ['exactly at from', EXPIRY, TO, 0, -500],
+    ['one millisecond before from', isoAt(1), TO, -500, 0],
+    ['after to', FROM, isoAt(-1), 0, 0],
+  ]) {
+    await t.test(name, async () => {
+      const report = await routeFixture({ orders: [order()], spots: [quote(-60_000)], from, to }).report();
+      assert.equal(report.summary.openingEstimatedSettlementCashflow, openingExpected);
+      assert.equal(report.summary.estimatedSettlementCashflow, currentExpected);
+      assert.equal(report.series.buckets.reduce((sum, row) => sum + row.estimatedSettlementCashflow, 0), currentExpected);
+      assert.equal(report.series.buckets.reduce((sum, row) => sum + row.estimateCount, 0), currentExpected === 0 ? 0 : 1);
+      assert.ok(report.series.buckets.every(row => row.timestamp >= from));
+      if (currentExpected !== 0) assert.equal(report.series.buckets[0].timestamp, EXPIRY);
+    });
+  }
 });

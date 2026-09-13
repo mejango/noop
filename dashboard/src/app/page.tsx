@@ -6,6 +6,7 @@ import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, momentumColor, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import { DASHBOARD_RANGES } from '@/lib/dashboard-ranges';
+import { buildOptionsCashflowChart, cashflowDisplayDomain, type CashflowBucket } from '@/lib/options-cashflow-chart';
 import Card from '@/components/Card';
 import { Bot, User } from 'lucide-react';
 import {
@@ -314,7 +315,7 @@ interface ChartData {
   tier?: string;
 }
 
-interface PnlBucketPoint {
+interface PnlBucketPoint extends CashflowBucket {
   timestamp: string;
   tradeCashflow: number;
   tradeRevenue?: number;
@@ -341,6 +342,10 @@ interface PnlReportData {
     hasBaseline: boolean;
     bucketMs: number;
     insuredExternalEth?: number;
+    missingSettlementEstimateCount?: number;
+    unvaluedRecordedSettlementCount?: number;
+    openingMissingSettlementEstimateCount?: number;
+    openingUnvaluedRecordedSettlementCount?: number;
   };
   summary: {
     openingValue: number;
@@ -353,6 +358,7 @@ interface PnlReportData {
     openingTradeRevenue: number;
     openingTradeExpenses: number;
     openingGrossCashflow: number;
+    openingEstimatedSettlementCashflow?: number;
     openingTradeOrderCount: number;
     netTradeCashflow: number;
     putNetCashflow: number;
@@ -819,6 +825,7 @@ export default function OverviewPage() {
   const {
     data: pnlReport,
     error: pnlError,
+    dataUrl: pnlDataUrl,
     settledUrl: pnlSettledUrl,
   } = usePolling<PnlReportData>(pnlQuery, emptyPnlReport, 90_000);
   const chartRange = rangeFromRequestUrl(chartDataUrl, range);
@@ -870,107 +877,22 @@ export default function OverviewPage() {
     return `coverage through ${new Date(coverage.lastInRange || coverage.firstInRange).toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
   }, [chart.optionsCoverage]);
 
-  const pnlChartData = useMemo(() => {
-    const openingRevenue = Number.isFinite(pnlReport.summary.openingTradeRevenue)
-      ? pnlReport.summary.openingTradeRevenue
-      : 0;
-    const openingExpenses = Number.isFinite(pnlReport.summary.openingTradeExpenses)
-      ? pnlReport.summary.openingTradeExpenses
-      : 0;
-    let cumulativeRevenue = openingRevenue;
-    let cumulativeExpenses = openingExpenses;
-    let lastPortfolioValue = Number.isFinite(pnlReport.summary.openingValue) ? pnlReport.summary.openingValue : 0;
-    const rows = pnlReport.series.buckets.map((bucket) => {
-      const net = Number(bucket.tradeCashflow ?? 0);
-      const fallbackRevenue = net > 0 ? net : 0;
-      const fallbackExpenses = net < 0 ? Math.abs(net) : 0;
-      const periodCallRevenue = Number(bucket.callRevenue ?? 0);
-      const periodPutRevenue = Number(bucket.putRevenue ?? 0);
-      const periodCallExpenseAmount = Number(bucket.callExpenses ?? 0);
-      const periodPutExpenseAmount = Number(bucket.putExpenses ?? 0);
-      const periodRevenue = Number(bucket.tradeRevenue ?? fallbackRevenue);
-      const periodExpenseAmount = Number(bucket.tradeExpenses ?? fallbackExpenses);
-      const periodExpenses = -periodExpenseAmount;
-      const periodCallExpenses = -periodCallExpenseAmount;
-      const periodPutExpenses = -periodPutExpenseAmount;
-      const bucketPortfolioValue = Number(bucket.endPortfolioValue);
-      if (Number.isFinite(bucketPortfolioValue) && bucketPortfolioValue > 0) {
-        lastPortfolioValue = bucketPortfolioValue;
-      }
-      cumulativeRevenue += periodRevenue;
-      cumulativeExpenses += periodExpenseAmount;
-      const cashflow = cumulativeRevenue - cumulativeExpenses;
-      return {
-        ts: new Date(bucket.timestamp).getTime(),
-        cumulativeRevenue,
-        cumulativeExpenses,
-        cumulativeCashflow: cashflow,
-        periodRevenue,
-        periodExpenses,
-        periodNet: net,
-        periodCallRevenue,
-        periodPutRevenue,
-        periodCallExpenses,
-        periodPutExpenses,
-        orderCount: bucket.orderCount,
-        portfolioValueUsd: lastPortfolioValue,
-      };
-    });
-    const fromTs = pnlReport.meta.from ? new Date(pnlReport.meta.from).getTime() : null;
-    const toTs = pnlReport.meta.to ? new Date(pnlReport.meta.to).getTime() : null;
-    const padded = [...rows];
-    if (fromTs != null && Number.isFinite(fromTs) && (padded.length === 0 || padded[0].ts > fromTs)) {
-      padded.unshift({
-        ts: fromTs,
-        cumulativeRevenue: openingRevenue,
-        cumulativeExpenses: openingExpenses,
-        cumulativeCashflow: openingRevenue - openingExpenses,
-        periodRevenue: 0,
-        periodExpenses: 0,
-        periodNet: 0,
-        periodCallRevenue: 0,
-        periodPutRevenue: 0,
-        periodCallExpenses: 0,
-        periodPutExpenses: 0,
-        orderCount: 0,
-        portfolioValueUsd: pnlReport.summary.openingValue,
-      });
-    }
-    if (toTs != null && Number.isFinite(toTs) && (padded.length === 0 || padded[padded.length - 1].ts < toTs)) {
-      const last = padded[padded.length - 1];
-      padded.push({
-        ts: toTs,
-        cumulativeRevenue: last?.cumulativeRevenue ?? 0,
-        cumulativeExpenses: last?.cumulativeExpenses ?? 0,
-        cumulativeCashflow: last?.cumulativeCashflow ?? 0,
-        periodRevenue: 0,
-        periodExpenses: 0,
-        periodNet: 0,
-        periodCallRevenue: 0,
-        periodPutRevenue: 0,
-        periodCallExpenses: 0,
-        periodPutExpenses: 0,
-        orderCount: 0,
-        portfolioValueUsd: last?.portfolioValueUsd ?? pnlReport.summary.closingValue,
-      });
-    }
-    return padded;
-  }, [
-    pnlReport.meta.from,
-    pnlReport.meta.to,
-    pnlReport.series.buckets,
-    pnlReport.summary.closingValue,
-    pnlReport.summary.openingTradeExpenses,
-    pnlReport.summary.openingTradeRevenue,
-    pnlReport.summary.openingValue,
-  ]);
+  const pnlChartData = useMemo(() => buildOptionsCashflowChart(pnlReport), [pnlReport]);
+  const pnlXDomain = useMemo(() => cashflowDisplayDomain(pnlReport), [pnlReport]);
+  const pnlRange = rangeFromRequestUrl(pnlDataUrl, range);
+  const pnlMissingSettlements = (pnlReport.meta.missingSettlementEstimateCount ?? 0)
+    + (pnlReport.meta.unvaluedRecordedSettlementCount ?? 0)
+    + (pnlReport.meta.openingMissingSettlementEstimateCount ?? 0)
+    + (pnlReport.meta.openingUnvaluedRecordedSettlementCount ?? 0);
+  const settlementResultLabel = pnlMissingSettlements > 0 ? 'Known result incl. settlements (partial est.)' : 'Result incl. settlements (est.)';
 
   const pnlLineDomain = useMemo<[number, number]>(() => {
     const values = pnlChartData.flatMap((row) => [
       row.cumulativeRevenue,
       row.cumulativeExpenses,
       row.cumulativeCashflow,
-    ]).filter((value) => Number.isFinite(value));
+      row.cumulativeSettlementAdjustedCashflow,
+    ]).filter((value): value is number => value != null && Number.isFinite(value));
     if (values.length === 0) return [-1, 1];
     const min = Math.min(...values, 0);
     const max = Math.max(...values, 0);
@@ -986,6 +908,8 @@ export default function OverviewPage() {
       row.periodPutRevenue,
       row.periodCallExpenses,
       row.periodPutExpenses,
+      row.periodCallRevenue + row.periodPutRevenue + row.periodPutSettlements,
+      row.periodCallExpenses + row.periodPutExpenses + row.periodCallSettlements,
     ]).filter((value) => Number.isFinite(value));
     if (flows.length === 0) return [-1, 1];
     const absMax = Math.max(...flows.map((value) => Math.abs(value)), 1);
@@ -995,21 +919,22 @@ export default function OverviewPage() {
 
   const pnlPortfolioDomain = useMemo<[number, number]>(() => {
     const values = pnlChartData
+      .filter((row) => row.ts >= pnlXDomain[0] && row.ts <= pnlXDomain[1])
       .map((row) => row.portfolioValueUsd)
-      .filter((value) => Number.isFinite(value) && value > 0);
+      .filter((value) => Number.isFinite(value));
     if (values.length === 0) return [0, 1];
     const min = Math.min(...values);
     const max = Math.max(...values);
     const pad = Math.max(25, (max - min) * 0.08);
-    return [Math.max(0, min - pad), max + pad];
-  }, [pnlChartData]);
+    return [min - pad, max + pad];
+  }, [pnlChartData, pnlXDomain]);
 
   const pnlCoverageLabel = useMemo(() => {
     if (!pnlReport.meta.from || !pnlReport.meta.to) return null;
-    const from = new Date(pnlReport.meta.from).toLocaleDateString([], { month: 'short', day: 'numeric' });
-    const to = new Date(pnlReport.meta.to).toLocaleDateString([], { month: 'short', day: 'numeric' });
-    return `${from} -> ${to} | ${pnlReport.meta.orderCount} fills`;
-  }, [pnlReport.meta.from, pnlReport.meta.orderCount, pnlReport.meta.to]);
+    const dates = pnlXDomain.map(ts => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }));
+    const grouping = pnlReport.meta.bucketMs > 86400000 ? 'weekly' : pnlReport.meta.bucketMs >= 86400000 ? 'daily' : 'hourly';
+    return `${dates[0]} → ${dates[1]} | ${pnlReport.meta.orderCount} recorded events | ${grouping} totals`;
+  }, [pnlReport.meta.from, pnlReport.meta.orderCount, pnlReport.meta.to, pnlReport.meta.bucketMs, pnlXDomain]);
 
   // Shared X-axis tick formatter
   const xTickFormatter = useCallback((ts: number) => {
@@ -1952,11 +1877,17 @@ export default function OverviewPage() {
 
       {/* P&L */}
       {pnlChartData.length > 0 && (
-        <Card title="Options Cashflow & Account Value" subtitle={pnlCoverageLabel ?? `${range} gross trade flow`}>
-          <p className="text-xs text-gray-500 mb-3">Gross options cashflow excludes unknown fees and estimated settlements. Account value changes include deposits and withdrawals.</p>
-          <ResponsiveContainer width="100%" height={320}>
-            <ComposedChart data={pnlChartData} margin={baseMargins} barGap={0} barCategoryGap="25%">
+        <Card title="Options Result, Cashflow & Account Value" subtitle={pnlCoverageLabel ?? `${pnlRange} options activity`}>
+          <p className="text-xs text-gray-500 mb-3">The result includes call expiry costs and put expiry proceeds, using estimates when exchange records are unavailable. Fees and open-position P&amp;L are excluded. Account value includes deposits and withdrawals.</p>
+          {pnlMissingSettlements > 0 && <p className="text-xs text-amber-400 mb-3">Partial estimate: {pnlMissingSettlements} expired positions or recorded settlements lack a valuation and are omitted. This is not complete P&amp;L.</p>}
+          <ResponsiveContainer width="100%" height={mobile ? 390 : 350}>
+            <ComposedChart data={pnlChartData} margin={baseMargins} stackOffset="sign" barGap={0} barCategoryGap="25%">
               <XAxis {...timeAxis}
+                domain={pnlXDomain}
+                ticks={Array.from({ length: mobile ? 3 : 5 }, (_, i) => pnlXDomain[0] + (pnlXDomain[1] - pnlXDomain[0]) * i / (mobile ? 2 : 4))}
+                tickFormatter={(ts: number) => ['1h', '6h', '24h'].includes(pnlRange)
+                  ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                  : new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric', timeZone: 'UTC' })}
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
               />
@@ -1973,6 +1904,7 @@ export default function OverviewPage() {
                 yAxisId="bars"
                 orientation="right"
                 hide
+                width={0}
                 domain={pnlBarDomain}
               />
               <YAxis
@@ -1982,6 +1914,7 @@ export default function OverviewPage() {
                 tick={chartAxis.tick}
                 width={primaryYAxisWidth}
                 domain={pnlPortfolioDomain}
+                allowDataOverflow
                 tickFormatter={(v) => `$${Math.round(v)}`}
               />
               <Tooltip
@@ -1991,12 +1924,15 @@ export default function OverviewPage() {
                     cumulativeRevenue: 'Cum Revenue',
                     cumulativeExpenses: 'Cum Expenses',
                     cumulativeCashflow: 'Gross cashflow',
+                    cumulativeSettlementAdjustedCashflow: settlementResultLabel,
                     periodRevenue: 'Revenue',
                     periodExpenses: 'Expenses',
-                    periodCallRevenue: 'Call Premium',
-                    periodPutRevenue: 'Put Exits',
+                    periodCallRevenue: 'Recorded Call Proceeds',
+                    periodPutRevenue: 'Recorded Put Proceeds',
                     periodPutExpenses: 'Put Buys',
-                    periodCallExpenses: 'Call Buybacks',
+                    periodCallExpenses: 'Recorded Call Costs',
+                    periodCallSettlements: 'Call Expiry Costs (est.)',
+                    periodPutSettlements: 'Put Expiry Proceeds (est.)',
                     portfolioValueUsd: Number(pnlReport.meta.insuredExternalEth ?? 0) > 0
                       ? `Portfolio USD (incl. ${Number(pnlReport.meta.insuredExternalEth).toFixed(4)} off-platform ETH)`
                       : 'Portfolio USD',
@@ -2005,34 +1941,44 @@ export default function OverviewPage() {
                   const key = name ?? '';
                   return [formatUSD(numericValue), labels[key] ?? key];
                 }}
-                labelFormatter={(label) => new Date(Number(label)).toLocaleString()}
+                labelFormatter={(label) => pnlReport.meta.bucketMs >= 86400000
+                  ? `${pnlReport.meta.bucketMs > 86400000 ? 'Week' : 'Day'} of ${new Date(Number(label)).toLocaleDateString([], { timeZone: 'UTC' })} (UTC)`
+                  : new Date(Number(label)).toLocaleString()}
               />
               <Legend
+                key={mobile ? 'options-mobile' : 'options-desktop'}
+                height={mobile ? 110 : 36}
                 wrapperStyle={{ fontSize: 11, color: '#9ca3af' }}
                 formatter={(value) => (
                   <span style={{ color: '#9ca3af' }}>
                     {value === 'cumulativeRevenue' ? 'revenue' :
                      value === 'cumulativeExpenses' ? 'expenses' :
                      value === 'cumulativeCashflow' ? 'gross cashflow' :
+                     value === 'cumulativeSettlementAdjustedCashflow' ? (pnlMissingSettlements > 0 ? 'after settlements (partial est.)' : 'after settlements (est.)') :
                      value === 'periodRevenue' ? 'rev bars' :
                      value === 'periodExpenses' ? 'exp bars' :
                      value === 'periodCallRevenue' ? 'call rev' :
                      value === 'periodPutRevenue' ? 'put rev' :
                      value === 'periodPutExpenses' ? 'put buys' :
-                     value === 'periodCallExpenses' ? 'call buybacks' :
+                     value === 'periodCallExpenses' ? 'call costs' :
+                     value === 'periodCallSettlements' ? 'call expiry (est.)' :
+                     value === 'periodPutSettlements' ? 'put expiry (est.)' :
                      value === 'portfolioValueUsd' ? 'portfolio usd' : value}
                   </span>
                 )}
               />
               <ReferenceLine yAxisId="lines" y={0} stroke="rgba(255,255,255,0.12)" />
               <ReferenceLine yAxisId="bars" y={0} stroke="rgba(255,255,255,0.08)" />
-              <Bar yAxisId="bars" dataKey="periodCallRevenue" name="periodCallRevenue" stackId="grossFlow" fill="rgba(74, 222, 128, 0.46)" radius={[2, 2, 0, 0]} />
-              <Bar yAxisId="bars" dataKey="periodPutRevenue" name="periodPutRevenue" stackId="grossFlow" fill="rgba(45, 212, 191, 0.38)" radius={[2, 2, 0, 0]} />
-              <Bar yAxisId="bars" dataKey="periodPutExpenses" name="periodPutExpenses" stackId="grossFlow" fill="rgba(248, 113, 113, 0.34)" radius={[0, 0, 2, 2]} />
-              <Bar yAxisId="bars" dataKey="periodCallExpenses" name="periodCallExpenses" stackId="grossFlow" fill="rgba(251, 146, 60, 0.46)" radius={[0, 0, 2, 2]} />
-              <Line yAxisId="lines" type="monotone" dataKey="cumulativeRevenue" name="cumulativeRevenue" stroke="#4ade80" strokeWidth={2} dot={false} isAnimationActive={false} />
-              <Line yAxisId="lines" type="monotone" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
-              <Line yAxisId="lines" type="monotone" dataKey="cumulativeCashflow" name="cumulativeCashflow" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
+              <Bar isAnimationActive={false} yAxisId="bars" dataKey="periodCallRevenue" name="periodCallRevenue" stackId="grossFlow" fill="rgba(74, 222, 128, 0.46)" radius={[2, 2, 0, 0]} />
+              <Bar isAnimationActive={false} yAxisId="bars" dataKey="periodPutRevenue" name="periodPutRevenue" stackId="grossFlow" fill="rgba(45, 212, 191, 0.38)" radius={[2, 2, 0, 0]} />
+              <Bar isAnimationActive={false} yAxisId="bars" dataKey="periodPutExpenses" name="periodPutExpenses" stackId="grossFlow" fill="rgba(248, 113, 113, 0.34)" radius={[0, 0, 2, 2]} />
+              <Bar isAnimationActive={false} yAxisId="bars" dataKey="periodCallExpenses" name="periodCallExpenses" stackId="grossFlow" fill="rgba(251, 146, 60, 0.46)" radius={[0, 0, 2, 2]} />
+              <Bar isAnimationActive={false} yAxisId="bars" dataKey="periodCallSettlements" name="periodCallSettlements" stackId="grossFlow" fill="rgba(251, 113, 133, 0.7)" radius={[0, 0, 2, 2]} />
+              <Bar isAnimationActive={false} yAxisId="bars" dataKey="periodPutSettlements" name="periodPutSettlements" stackId="grossFlow" fill="rgba(34, 211, 238, 0.55)" radius={[2, 2, 0, 0]} />
+              <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeRevenue" name="cumulativeRevenue" stroke="#4ade80" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
+              <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeCashflow" name="cumulativeCashflow" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
+              <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeSettlementAdjustedCashflow" name="cumulativeSettlementAdjustedCashflow" stroke="#c4b5fd" strokeWidth={2.5} strokeDasharray="6 3" dot={false} isAnimationActive={false} />
               <Line yAxisId="portfolio" type="monotone" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={2} dot={false} strokeDasharray="5 4" isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>

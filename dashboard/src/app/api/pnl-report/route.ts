@@ -190,7 +190,13 @@ function getPnlResponse(req: NextRequest) {
     const spotRows = getSpotPricesAtOrBefore(expiryTimestamps, SETTLEMENT_SPOT_MAX_AGE_MS);
     const estimatedSettlements = deriveExpirySettlementReport(allOrders, spotRows, to.getTime(), settledInstruments);
     const settlementEstimates = estimatedSettlements.estimates.filter(row => row.timestamp >= fromIso);
+    const openingEstimatedSettlementCashflow = estimatedSettlements.estimates
+      .filter(row => row.timestamp < fromIso)
+      .reduce((sum, row) => sum + signedCashflow(row.action, row.total_value), 0);
     const missingSettlementEstimates = estimatedSettlements.missing.filter(row => row.timestamp >= fromIso);
+    const openingMissingSettlementEstimateCount = estimatedSettlements.missing.filter(row => row.timestamp < fromIso).length;
+    const unvaluedRecordedSettlements = recordedSettlements.filter(event =>
+      event.cashflow_usd == null || event.cashflow_usd === '' || !Number.isFinite(Number(event.cashflow_usd)));
     const orders = [...allOrders.filter(o => o.success === 1 && Number(o.filled_amount ?? 0) > 0), ...settlementRows]
       .filter(o => o.timestamp >= fromIso)
       .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
@@ -275,50 +281,50 @@ function getPnlResponse(req: NextRequest) {
       callRevenue: number;
       callExpenses: number;
       orderCount: number;
+      estimatedSettlementCashflow: number;
+      estimatedCallSettlementExpenses: number;
+      estimatedPutSettlementRevenue: number;
+      estimateCount: number;
       endPortfolioValue: number | null;
       endUnrealizedPnl: number | null;
     }>();
 
+    const getBucket = (timestampMs: number) => {
+      const key = bucketKey(timestampMs, bucketMs);
+      let bucket = bucketMap.get(key);
+      if (!bucket) {
+        bucket = {
+          bucketTs: key,
+          tradeCashflow: 0,
+          tradeRevenue: 0,
+          tradeExpenses: 0,
+          putCashflow: 0,
+          putRevenue: 0,
+          putExpenses: 0,
+          callCashflow: 0,
+          callRevenue: 0,
+          callExpenses: 0,
+          orderCount: 0,
+          estimatedSettlementCashflow: 0,
+          estimatedCallSettlementExpenses: 0,
+          estimatedPutSettlementRevenue: 0,
+          estimateCount: 0,
+          endPortfolioValue: null,
+          endUnrealizedPnl: null,
+        };
+        bucketMap.set(key, bucket);
+      }
+      return bucket;
+    };
+
     for (const point of portfolioSeries) {
-      const key = bucketKey(point.ts, bucketMs);
-      const bucket = bucketMap.get(key) || {
-        bucketTs: key,
-        tradeCashflow: 0,
-        tradeRevenue: 0,
-        tradeExpenses: 0,
-        putCashflow: 0,
-        putRevenue: 0,
-        putExpenses: 0,
-        callCashflow: 0,
-        callRevenue: 0,
-        callExpenses: 0,
-        orderCount: 0,
-        endPortfolioValue: null,
-        endUnrealizedPnl: null,
-      };
+      const bucket = getBucket(point.ts);
       bucket.endPortfolioValue = point.portfolioValue;
       bucket.endUnrealizedPnl = point.unrealizedPnl;
-      bucketMap.set(key, bucket);
     }
 
     for (const order of orders) {
-      const ts = new Date(order.timestamp).getTime();
-      const key = bucketKey(ts, bucketMs);
-      const bucket = bucketMap.get(key) || {
-        bucketTs: key,
-        tradeCashflow: 0,
-        tradeRevenue: 0,
-        tradeExpenses: 0,
-        putCashflow: 0,
-        putRevenue: 0,
-        putExpenses: 0,
-        callCashflow: 0,
-        callRevenue: 0,
-        callExpenses: 0,
-        orderCount: 0,
-        endPortfolioValue: null,
-        endUnrealizedPnl: null,
-      };
+      const bucket = getBucket(new Date(order.timestamp).getTime());
       const cashflow = signedCashflow(order.action, order.total_value, order.actual_cashflow_usd);
       const parts = cashflowParts(order.action, order.total_value, order.actual_cashflow_usd);
       bucket.tradeCashflow += cashflow;
@@ -331,7 +337,16 @@ function getPnlResponse(req: NextRequest) {
       if (isPutAction(order.action)) bucket.putCashflow += cashflow;
       if (isCallAction(order.action)) bucket.callCashflow += cashflow;
       bucket.orderCount += 1;
-      bucketMap.set(key, bucket);
+    }
+
+    // Estimates are a separate display series: they never become recorded fills,
+    // change gross cashflow, or overwrite authoritative settlement records.
+    for (const estimate of settlementEstimates) {
+      const bucket = getBucket(new Date(estimate.timestamp).getTime());
+      bucket.estimatedSettlementCashflow += signedCashflow(estimate.action, estimate.total_value);
+      if (estimate.action === 'settle_call') bucket.estimatedCallSettlementExpenses += estimate.total_value;
+      if (estimate.action === 'settle_put') bucket.estimatedPutSettlementRevenue += estimate.total_value;
+      bucket.estimateCount += 1;
     }
 
     const openingValue = portfolioValue(opening);
@@ -361,11 +376,12 @@ function getPnlResponse(req: NextRequest) {
         performanceUnavailableReason: PERFORMANCE_UNAVAILABLE_REASON,
         settlementEstimateCount: settlementEstimates.length,
         missingSettlementEstimateCount: missingSettlementEstimates.length,
+        openingMissingSettlementEstimateCount,
+        openingUnvaluedRecordedSettlementCount: unvaluedRecordedSettlements.filter(event => event.timestamp < fromIso).length,
         settlementEstimateMaxSpotAgeMs: SETTLEMENT_SPOT_MAX_AGE_MS,
         economicHistoryAvailable: economicHistory.available,
         accountingCoverage: economicHistory.coverage,
-        unvaluedRecordedSettlementCount: recordedSettlements.filter(event => event.timestamp >= fromIso
-          && (event.cashflow_usd == null || event.cashflow_usd === '' || !Number.isFinite(Number(event.cashflow_usd)))).length,
+        unvaluedRecordedSettlementCount: unvaluedRecordedSettlements.filter(event => event.timestamp >= fromIso).length,
         cashflowBasis: 'Recorded bot-order cashflows plus valued exchange settlements. External fills and fees are not reconciled; spot estimates are excluded. Gross cashflow is not realized P&L.',
       },
       summary: {
@@ -381,6 +397,7 @@ function getPnlResponse(req: NextRequest) {
         openingGrossCashflow: Number(openingCashflow.gross_cashflow ?? 0),
         openingTradeOrderCount: Number(openingCashflow.order_count ?? 0),
         netTradeCashflow,
+        openingEstimatedSettlementCashflow,
         estimatedSettlementCashflow: settlementEstimates.reduce((sum, row) => sum + signedCashflow(row.action, row.total_value), 0),
         putNetCashflow,
         callNetCashflow,
@@ -397,7 +414,8 @@ function getPnlResponse(req: NextRequest) {
         buckets: Array.from(bucketMap.values())
           .sort((a, b) => a.bucketTs - b.bucketTs)
           .map((bucket) => ({
-            timestamp: new Date(bucket.bucketTs).toISOString(),
+            // The first calendar bucket may begin before the requested window.
+            timestamp: new Date(Math.max(bucket.bucketTs, from.getTime())).toISOString(),
             tradeCashflow: bucket.tradeCashflow,
             tradeRevenue: bucket.tradeRevenue,
             tradeExpenses: bucket.tradeExpenses,
@@ -408,6 +426,10 @@ function getPnlResponse(req: NextRequest) {
             callRevenue: bucket.callRevenue,
             callExpenses: bucket.callExpenses,
             orderCount: bucket.orderCount,
+            estimatedSettlementCashflow: bucket.estimatedSettlementCashflow,
+            estimatedCallSettlementExpenses: bucket.estimatedCallSettlementExpenses,
+            estimatedPutSettlementRevenue: bucket.estimatedPutSettlementRevenue,
+            estimateCount: bucket.estimateCount,
             endPortfolioValue: bucket.endPortfolioValue,
             endUnrealizedPnl: bucket.endUnrealizedPnl,
           })),
