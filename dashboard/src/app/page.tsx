@@ -1077,46 +1077,25 @@ export default function OverviewPage() {
         mediumDerivative: stats.medium_derivative || undefined,
         shortDerivative: stats.short_derivative || undefined,
         momentumVal: 1,
-        bestPut: latestTick?.best_put_detail?.raw_score ?? latestTick?.current_best_put ?? undefined,
-        bestCall: latestTick?.best_call_detail?.raw_score ?? latestTick?.current_best_call ?? undefined,
-        putEdge: latestTick?.current_best_put ?? undefined,
-        bestPutDetail: latestTick?.best_put_detail
-          ? {
-              delta: latestTick.best_put_detail.delta,
-              price: latestTick.best_put_detail.price,
-              strike: Number(latestTick.best_put_detail.strike ?? 0),
-              expiry: latestTick.best_put_detail.expiry,
-              dte: dteDays(latestTick.best_put_detail.expiry),
-            }
-          : undefined,
-        bestCallDetail: latestTick?.best_call_detail
-          ? {
-              delta: latestTick.best_call_detail.delta,
-              price: latestTick.best_call_detail.price,
-              strike: Number(latestTick.best_call_detail.strike ?? 0),
-              expiry: latestTick.best_call_detail.expiry,
-              dte: dteDays(latestTick.best_call_detail.expiry),
-            }
-          : undefined,
       };
 
+      // RAW and EDGE each come from their chart series. The tick summary's
+      // RAW score belongs to the EDGE winner, which can be a different contract
+      // from the maximum-RAW contract. Never splice it into the RAW history.
+      // A newer spot observation also must not retimestamp older option quotes.
       const last = rows[rows.length - 1];
-      if (!last) {
-        rows.push(liveRow);
-      } else if (liveTs >= last.ts - 1_000) {
+      if (liveTs === last.ts) {
         rows[rows.length - 1] = {
           ...last,
           ...liveRow,
-          ts: Math.max(last.ts, liveTs),
         };
-      } else {
+      } else if (liveTs > last.ts) {
         rows.push(liveRow);
       }
-      rows.sort((a, b) => a.ts - b.ts);
     }
 
     return rows;
-  }, [chart, chartRange, latestTick, stats]);
+  }, [chart, chartRange, stats]);
 
   // Data for momentum bar (only points with momentum data)
   const momentumData = useMemo(() =>
