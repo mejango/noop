@@ -109,7 +109,7 @@ function productionContext(samples = []) {
     ...constants,
     between('const roundForAdvisory =', '// Load private key'),
     between('const isSellCallCandidateInStrategyRange =', 'const telemetryNumber ='),
-    'globalThis.api = { buildLiveSellCallMarketContext, classifyBuyPutEdge, getBestCurrentBuyPutCandidate, getBestCurrentBuyPutEdgeCandidate, buildRollingOptionValueContext, formatRollingOptionValueContext };',
+    'globalThis.api = { buildLiveSellCallMarketContext, classifyBuyPutEdge, getBestCurrentBuyPutCandidate, getBestCurrentBuyPutEdgeCandidate, getBestCurrentSellCallCandidate, buildRollingOptionValueContext, formatRollingOptionValueContext };',
   ].join('\n'), context);
   return context.api;
 }
@@ -118,6 +118,28 @@ const nameAt = (days, strike, type) => `ETH-${new Date(nowMs + days * 86400000).
 const ticker = (ask = 10, bid = ask * 0.98, delta = -0.06, iv = 0.6) => ({
   a: ask, b: bid, M: (ask + bid) / 2, A: 10, B: 10,
   option_pricing: { d: delta, i: iv },
+});
+
+test('both market selectors normalize every option before choosing the winner', () => {
+  const api = productionContext();
+  const puts = [
+    [nameAt(45, 1900, 'P'), ticker(20, 19, -0.074)], // RAW .0037
+    [nameAt(78, 1800, 'P'), ticker(20, 19, -0.064)], // RAW .0032, higher EDGE
+  ];
+  const calls = [
+    [nameAt(12, 3000, 'C'), ticker(8, 7.2, 0.06)], // RAW 120
+    [nameAt(5, 2800, 'C'), ticker(8, 7.08, 0.06)], // RAW 118, higher EDGE
+  ];
+  for (const entries of [puts, [...puts].reverse()]) {
+    const winner = api.getBestCurrentBuyPutEdgeCandidate(Object.fromEntries(entries), nowMs);
+    assert.equal(winner.instrument, puts[1][0]);
+    closeTo(winner.edge_score, putScore.normalizeBuyPutScore(0.0032, 78));
+  }
+  for (const entries of [calls, [...calls].reverse()]) {
+    const winner = api.getBestCurrentSellCallCandidate(Object.fromEntries(entries), nowMs);
+    assert.equal(winner.instrument, calls[1][0]);
+    closeTo(winner.selection_score, callScore.normalizeSellCallScore(118, 5));
+  }
 });
 
 test('production quality selector resolves same-bucket candidates by economics in either input order', () => {

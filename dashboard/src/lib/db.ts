@@ -790,7 +790,9 @@ export function getBuyPutEdgeOverTime(since: string, bucketMs = 0) {
 
   // Dedicated telemetry records the best executable PUT EDGE on every market
   // evaluation, including evaluations where no buy-put rule is active.
+  let dedicatedSince: string | null = null;
   if (tableExists('buy_put_edge_snapshots')) {
+    dedicatedSince = (database.prepare('SELECT MIN(timestamp) AS timestamp FROM buy_put_edge_snapshots').get() as { timestamp: string | null }).timestamp;
     sources.push(`
       SELECT
         timestamp,
@@ -801,17 +803,20 @@ export function getBuyPutEdgeOverTime(since: string, bucketMs = 0) {
         AND dte BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
     `);
   }
-  // Historical rule telemetry predates the dedicated series. raw_score remains
-  // immutable so the current normalization can be recomputed consistently.
+  // Before continuous market telemetry, use the live quotes of recorded rule
+  // candidates. Their raw_score may instead describe a proposed patient bid.
+  // Never mix this partial population into the dedicated series or its gaps.
   if (tableExists('candidate_observations')) {
     sources.push(`
       SELECT
         observed_at AS timestamp,
-        raw_score * pow(dte / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) AS edge_score
+        (abs(delta) / ask_price) * pow(dte / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) AS edge_score
       FROM candidate_observations
       WHERE observed_at > @since
+        AND (@dedicated_since IS NULL OR observed_at < @dedicated_since)
         AND action = 'buy_put'
-        AND raw_score > 0
+        AND ask_price > 0
+        AND delta BETWEEN -0.12 AND -0.02
         AND dte BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
     `);
   }
@@ -839,7 +844,7 @@ export function getBuyPutEdgeOverTime(since: string, bucketMs = 0) {
       edge_score
     FROM bucketed
     ORDER BY bucket_epoch ASC
-  `).all({ since, bucket_seconds: bucketSeconds }) as {
+  `).all({ since, dedicated_since: dedicatedSince, bucket_seconds: bucketSeconds }) as {
     timestamp: string;
     edge_score: number;
   }[];
@@ -855,7 +860,9 @@ export function getSellCallEdgeOverTime(since: string, bucketMs = 0) {
   // Recompute the current formula from compact immutable telemetry. Reading one
   // winner per tick is orders of magnitude cheaper than scanning every option
   // quote, and raw_score + dte keep pre-normalization rows comparable.
+  let dedicatedSince: string | null = null;
   if (tableExists('sell_call_edge_snapshots')) {
+    dedicatedSince = (database.prepare('SELECT MIN(timestamp) AS timestamp FROM sell_call_edge_snapshots').get() as { timestamp: string | null }).timestamp;
     sources.push(`
       SELECT
         timestamp,
@@ -866,17 +873,20 @@ export function getSellCallEdgeOverTime(since: string, bucketMs = 0) {
         AND dte BETWEEN 5 AND 12
     `);
   }
-  // Candidate observations predate the dedicated continuous series and contain
-  // all ranked candidates. per_tick below chooses the best normalized value.
+  // Earlier history contains only recorded rule candidates. Normalize each
+  // observed bid before taking MAX; continuous market winners are authoritative
+  // from the start of the dedicated series, including periods with missing data.
   if (tableExists('candidate_observations')) {
     sources.push(`
       SELECT
         observed_at AS timestamp,
-        raw_score * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT}) AS edge_score
+        (bid_price / abs(delta)) * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT}) AS edge_score
       FROM candidate_observations
       WHERE observed_at > @since
+        AND (@dedicated_since IS NULL OR observed_at < @dedicated_since)
         AND action = 'sell_call'
-        AND raw_score > 0
+        AND bid_price > 0
+        AND delta BETWEEN 0.04 AND 0.12
         AND dte BETWEEN 5 AND 12
     `);
   }
@@ -904,7 +914,7 @@ export function getSellCallEdgeOverTime(since: string, bucketMs = 0) {
       edge_score
     FROM bucketed
     ORDER BY bucket_epoch ASC
-  `).all({ since, bucket_seconds: bucketSeconds }) as {
+  `).all({ since, dedicated_since: dedicatedSince, bucket_seconds: bucketSeconds }) as {
     timestamp: string;
     edge_score: number;
   }[];
