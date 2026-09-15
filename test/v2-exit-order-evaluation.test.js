@@ -105,6 +105,7 @@ test('manager retains a valid patient exit beyond eight hours but still cancels 
   const tracked = { ...order, action: 'buyback_call', status: 'open', exit_intent: 'profit_capture' };
   let invalid = false, cancels = 0;
   const bindings = {
+    ...loadProduction(['isEntryAction']),
     process: { env: {} }, console: quiet,
     db: { getOpenRestingOrders: () => [tracked], getActiveRules: () => [{ id: 1912, rule_type: 'exit', action: 'buyback_call', instrument_name: name }] },
     require: () => ({ assertNoUnresolvedSubmission() {}, accountRestingObservation: () => ({ resting: true, deltaAmount: 0 }) }),

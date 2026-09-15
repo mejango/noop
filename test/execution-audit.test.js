@@ -87,7 +87,7 @@ const pricing = [
   'normalizePriceToStep', 'normalizeOrderPriceForVenue',
   'avoidRoundNumberRestingPrice', 'computePostOnlyRetryPrice', 'formatPostOnlyContext',
 ];
-const actionPolicy = ['ACTION_POLICY', 'getActionPolicy', 'isReduceOnlyExitAction', 'isRestingOrderType'];
+const actionPolicy = ['ACTION_POLICY', 'getActionPolicy', 'isEntryAction', 'isReduceOnlyExitAction', 'isRestingOrderType'];
 const exitPolicy = [
   'getRuleIntent', 'getBuybackIntent', 'getPutExitIntent',
   'getCloseablePositionForExit', 'getSyntheticExitIntent',
@@ -324,13 +324,14 @@ test('a zero-fill cancelled GTC receipt does not create a phantom open order', a
   assert.equal(state.botData.putNetBought, 0);
 });
 
-test('failed stale-order cancellation accounts observed fills and keeps the remaining reservation', async (t) => {
+test('failed orphan-entry cancellation accounts observed fills and keeps the remaining reservation', async (t) => {
   let cancellations = 0;
   const state = runtime(t, {
     cancelOrder: async () => { cancellations++; return null; },
     fetchOrderStatus: async () => null,
   });
   const { order, pendingId } = seedResting(state, { creation_timestamp: Date.now() - 9 * 3600000 });
+  assert.equal(state.db.getActiveRules().length, 0, 'No active rule backs this entry; age alone does not invalidate it');
   state.fetchOpenOrders = async () => [{ ...order, filled_amount: '1', average_price: '10' }];
   await assert.rejects(state.manageOpenOrders({}, [], [instrument()], 2000), /Cancellation.*failed/);
   assert.equal(cancellations, 1);
@@ -340,6 +341,38 @@ test('failed stale-order cancellation accounts observed fills and keeps the rema
   assert.notEqual(pending(state, pendingId).status, 'cancelled');
   assert.equal(orders(state).reduce((sum, row) => sum + row.total_value, 0), 10);
 });
+
+for (const action of ['buy_put', 'sell_call']) {
+  test(`manager retains a valid tracked ${action} beyond eight hours and cancels it when its rule disappears`, async (t) => {
+    const cancellations = [];
+    const validations = [];
+    const validate = ({ order }) => { validations.push(order.order_id); return { valid: true }; };
+    const state = runtime(t, {
+      validateRestingBuyPutEntryOrder: validate,
+      validateRestingSellCallEntryOrder: validate,
+      cancelOrder: async (id) => { cancellations.push(id); return { success: true }; },
+    });
+    const { order, pendingId } = seedResting(state, {
+      action,
+      instrument_name: action === 'buy_put' ? putName : callName,
+      direction: action === 'buy_put' ? 'buy' : 'sell',
+      creation_timestamp: Date.now() - 9 * 3600000,
+    });
+    state.db.replaceActiveRules('fixture', [{ rule_type: 'entry', action, criteria: {} }]);
+    state.fetchOpenOrders = async () => [order];
+
+    await state.manageOpenOrders({}, [], [instrument(order.instrument_name)], 2000);
+    assert.deepEqual(validations, [order.order_id], 'Old tracked entries still receive current economic validation');
+    assert.deepEqual(cancellations, [], 'Age alone preserves the valid order and its queue position');
+    assert.equal(state.db.getOpenRestingOrders()[0].order_id, order.order_id);
+
+    state.db.replaceActiveRules('fixture-withdrawn', []);
+    await state.manageOpenOrders({}, [], [instrument(order.instrument_name)], 2000);
+    assert.deepEqual(cancellations, [order.order_id], 'The age exemption does not protect an orphaned entry');
+    assert.equal(state.db.getOpenRestingOrders().length, 1, 'Cancellation ACK still awaits terminal reconciliation');
+    assert.notEqual(pending(state, pendingId).status, 'cancelled');
+  });
+}
 
 test('cancellation races reconcile the final cumulative fill before releasing reservations', async (t) => {
   const terminal = venueOrder({ order_status: 'cancelled', filled_amount: '3', average_price: '13' });

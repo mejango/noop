@@ -8408,16 +8408,6 @@ const summarizeReservedEntryCapacity = (restingOrders) => {
   }, { putBudget: 0 });
 };
 
-const restingOrderNeedsAdjustment = (restingOrder, desiredPrice, desiredQty, instrument) => {
-  const currentPrice = Number(restingOrder?.limit_price) || 0;
-  const currentQty = Math.max(0, (Number(restingOrder?.amount) || 0) - (Number(restingOrder?.filled_amount) || 0));
-  const amountStep = instrument?.options?.amount_step || 0.01;
-  const priceStep = getInstrumentPriceStep(instrument, desiredPrice);
-  const priceDelta = Math.abs(currentPrice - desiredPrice);
-  const qtyDelta = Math.abs(currentQty - desiredQty);
-  return priceDelta >= Math.max(priceStep / 2, 0.0001) || qtyDelta >= Math.max(amountStep / 2, 0.0001);
-};
-
 const getMarginCapacityBase = (marginState) => {
   const collateralMarginBase = Number(marginState?.collaterals_initial_margin ?? 0);
   if (collateralMarginBase > 0) return collateralMarginBase;
@@ -8682,6 +8672,123 @@ const evaluateSellCallRetryMargin = async ({ instrumentName, amount, retryPrice,
     allowed,
     reason: `retry_margin=$${additionalMargin.toFixed(2)}, current_display_utilization=${currentUtilization != null ? `${(currentUtilization * 100).toFixed(1)}%` : 'N/A'}, projected_display_utilization=${projectedUtilization != null ? `${(projectedUtilization * 100).toFixed(1)}%` : 'N/A'}, target_cap=${(effectiveCapPct * 100).toFixed(1)}%, buffered_limit=${(effectiveLimitPct * 100).toFixed(1)}%, target_cap_headroom=$${targetCapHeadroom.toFixed(2)}, buying_power=$${buyingPowerHeadroom.toFixed(2)}`,
   };
+};
+
+// Resting entries have their own maintenance pass. Global candidate selection
+// and new-entry cooldowns must not decide whether their prices get refreshed.
+const reassessRestingEntryOrders = async ({ entryRules, instruments, tickerMap, spotPrice,
+  positions, marginState, buyPutContext = null, marketContext = null }) => {
+  const { buildRestingEntryPlan } = require('./bot/resting-entry-plan');
+  const result = { queuedCount: 0, blockedActions: new Set(), plans: new Map() };
+  const trackedOrders = getOpenRestingEntryOrders();
+  for (const tracked of trackedOrders) {
+    let rule = null;
+    const record = (plan, pendingActionId = null) => {
+      result.plans.set(tracked.order_id, plan);
+      logRuleDecisionSafe({ evaluated_at: new Date().toISOString(), rule_id: rule?.id ?? tracked.rule_id,
+        rule_type: 'entry', action: tracked.action, instrument_name: tracked.instrument_name,
+        selected_instrument: tracked.instrument_name, spot_price: spotPrice,
+        decision_status: pendingActionId != null ? 'triggered' : 'skipped',
+        reason_code: pendingActionId != null ? 'resting_entry_reprice' : `resting_entry_${plan.decision}`,
+        reason: plan.reason, price: plan.desiredOrder?.limit_price ?? tracked.limit_price,
+        amount: plan.desiredOrder?.amount ?? null, pending_action_id: pendingActionId,
+        criteria_json: rule?.criteria ?? null,
+        context_json: { existing_order_id: tracked.order_id, existing_price: tracked.limit_price,
+          desired_order: plan.desiredOrder ?? null, differences: plan.differences ?? [] } });
+    };
+    try {
+      const snapshot = await readFreshEntryOrderSnapshot({ action: tracked.action,
+        instrument_name: tracked.instrument_name });
+      const order = snapshot.orders.find(item => item.order_id === tracked.order_id);
+      if (!order) continue; // Terminal fills were reconciled by the fresh snapshot.
+      if (snapshot.orders.length !== 1) throw new Error('Multiple same-action entries need reconciliation');
+      const ticker = await fetchFreshTickerForInstrument(order.instrument_name);
+      if (!ticker) throw new Error('Fresh incumbent quote unavailable');
+      const instrument = instruments.find(item => item.instrument_name === order.instrument_name);
+      const currentSpot = Number(ticker.I) > 0 ? Number(ticker.I) : spotPrice;
+      const otherPutReserved = summarizeReservedEntryCapacity(getOpenRestingEntryOrders()
+        .filter(item => item.order_id !== order.order_id)).putBudget;
+      const putBudgetRemaining = botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought;
+      const applicableRules = entryRules.filter(item => item.action === order.action)
+        .sort((a, b) => Number(Number(b.id) === Number(order.rule_id)) - Number(Number(a.id) === Number(order.rule_id)));
+      let plan = { decision: 'unresolved', reason: 'No active rule matches the resting entry' };
+      let validation = null;
+      let research = null;
+      for (const candidateRule of applicableRules) {
+        rule = candidateRule;
+        const candidatePlan = buildRestingEntryPlan({ order, rule, instrument, ticker,
+          spotPrice: currentSpot, putBudgetRemaining, otherPutReserved });
+        plan = candidatePlan;
+        if (!candidatePlan.desiredOrder) continue;
+        const desired = candidatePlan.desiredOrder;
+        const common = { order: { ...desired, filled_amount: 0 }, activeRules: [rule], instruments,
+          tickerMap: { [order.instrument_name]: ticker }, spotPrice: currentSpot, positions, marginState };
+        validation = order.action === 'buy_put'
+          ? validateRestingBuyPutEntryOrder({ ...common, putBudgetRemaining: putBudgetRemaining - otherPutReserved })
+          : validateRestingSellCallEntryOrder(common);
+        if (!validation.valid || validation.unchecked) {
+          plan = { decision: 'unresolved', reason: validation.reason || 'Current entry rule could not be checked' };
+          continue;
+        }
+        const criteria = parseMaybeJsonObject(rule.criteria);
+        if (order.action === 'buy_put') {
+          research = classifyBuyPutEdge({ score: validation.score, rawScore: validation.rawScore,
+            dte: validation.dte, strike: Number(instrument?.option_details?.strike), spotPrice: currentSpot,
+            entryPrice: desired.limit_price, askPrice: Number(ticker.a), bidPrice: Number(ticker.b),
+            askAmount: Number(ticker.A), bidAmount: Number(ticker.B), markPrice: Number(ticker.M),
+            impliedVol: getTickerImpliedVol(ticker), marketContext });
+          if (criteria.min_edge_score != null && !(research.selection_score >= Number(criteria.min_edge_score))) {
+            plan = { decision: 'unresolved', reason: 'Incumbent replacement misses the current composite edge requirement' };
+            continue;
+          }
+        }
+        break;
+      }
+      if (plan.decision === 'keep') {
+        record(plan);
+        console.log(`📋 Keep resting ${order.action} ${order.instrument_name}: fresh venue terms aligned @ $${plan.desiredOrder.limit_price} x ${plan.desiredOrder.amount}`);
+        continue;
+      }
+      result.blockedActions.add(order.action);
+      if (plan.decision !== 'replace') {
+        record(plan);
+        console.log(`📋 Defer resting ${order.action} ${order.instrument_name} reassessment: ${plan.reason}`);
+        continue;
+      }
+      const working = [...db.getPendingActions('pending'), ...db.getPendingActions('confirmed')];
+      if (working.some(item => item.action === order.action)) {
+        record({ ...plan, decision: 'unresolved', reason: 'Entry review already pending; current order retained' });
+        continue;
+      }
+      const rejection = getRecentRejectedAction(order.action, order.instrument_name);
+      if (rejection) {
+        record({ ...plan, decision: 'unresolved', reason: `Recent replacement rejection: ${rejection.reason || 'review backoff'}` });
+        continue;
+      }
+      const desired = plan.desiredOrder;
+      const criteria = parseMaybeJsonObject(rule.criteria);
+      const pending = db.insertPendingAction({ rule_id: rule.id, action: order.action,
+        instrument_name: order.instrument_name, amount: desired.amount, price: desired.limit_price,
+        trigger_details: { entry_replacement: true, replacement_order_id: order.order_id,
+          replacement_order_snapshot: order, desired_entry_order: desired,
+          entry_approved_notional: plan.approvedNotional, advisor_limit_price: desired.limit_price,
+          preferred_order_type: desired.order_type, delta: validation.delta, dte: validation.dte,
+          strike: Number(instrument.option_details?.strike), score: validation.score, raw_score: validation.rawScore,
+          planned_score: validation.score, selection_score: research?.selection_score ?? validation.score,
+          target_score: plan.requiredScore, buy_put_research: research,
+          buy_put_signal: order.action === 'buy_put' ? buyPutContext?.action_pressure?.signal || 'standing_patient_bid' : null,
+          required_value_signal: criteria.value_signal ?? criteria.buy_put_signal ?? null,
+          price_source: 'resting_entry_reassessment', observed_at: snapshot.observedAt } });
+      result.queuedCount++;
+      record(plan, pending?.lastInsertRowid ?? null);
+      console.log(`📋 Review resting ${order.action} ${order.instrument_name}: $${order.limit_price} -> $${desired.limit_price} x ${desired.amount}; current order retained until approval`);
+    } catch (error) {
+      result.blockedActions.add(tracked.action);
+      record({ decision: 'unresolved', reason: error.message });
+      console.log(`📋 Defer resting ${tracked.action} ${tracked.instrument_name} reassessment: ${error.message}`);
+    }
+  }
+  return result;
 };
 
 const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice) => {
@@ -9013,8 +9120,20 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
       });
       return buyPutOpportunityContext;
     };
+    const entryMaintenance = await reassessRestingEntryOrders({ entryRules, instruments, tickerMap, spotPrice,
+      positions, marginState: liveMarginState,
+      buyPutContext: openRestingEntryOrders.some(order => order.action === 'buy_put') ? getBuyPutOpportunityContext() : null,
+      marketContext: sellCallMarketContext });
+    triggeredCount += entryMaintenance.queuedCount;
+    // Reconciliation may have consumed reservations, and maintenance may have
+    // queued a replacement. New-entry gates must see both changes.
+    openRestingEntryOrders = getOpenRestingEntryOrders();
+    workingEntryActions = [...db.getPendingActions('pending'), ...db.getPendingActions('confirmed')]
+      .filter(action => ['buy_put', 'sell_call'].includes(action.action));
+    buyPutOpportunityContext = null;
     for (const rule of entryRules) {
       try {
+        if (entryMaintenance.blockedActions.has(rule.action)) continue;
         let criteria;
         try { criteria = typeof rule.criteria === 'string' ? JSON.parse(rule.criteria) : rule.criteria; } catch { criteria = null; }
         if (!criteria || typeof criteria !== 'object' || !criteria.option_type) {
@@ -9599,68 +9718,22 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
         qty = venueQty;
 
-        // If the best instrument already has a resting entry order, decide whether to keep or adjust it.
+        // The incumbent has already been assessed against normalized venue
+        // terms. Do not countermand that result with a raw candidate price.
         const existingResting = openRestingEntryOrders.find(order => order.instrument_name === best.name && order.action === rule.action);
         if (existingResting) {
-          if (!restingOrderNeedsAdjustment(existingResting, price, qty, best.instrument)) {
-            console.log(`📋 Keep resting ${rule.action} ${best.name}: existing order already aligned @ $${Number(existingResting.limit_price).toFixed(4)} x ${Number(existingResting.amount).toFixed(2)}`);
-            const reason = 'Existing resting entry order already aligned with selected candidate';
-            logDecision(rule, {
-              decision_status: 'skipped',
-              reason_code: 'existing_resting_aligned',
-              reason,
-              candidates_evaluated: candidates.length,
-              selected_instrument: best.name,
-              raw_score: best.score,
-              selection_score: best.selectionScore,
-              price,
-              amount: qty,
-              pending_action_id: existingResting.pending_action_id ?? null,
-              criteria_json: criteria,
-              context_json: {
-                ...candidateTelemetryContext,
-                existing_order_id: existingResting.order_id,
-                existing_price: existingResting.limit_price,
-                existing_amount: existingResting.amount,
-              },
-            });
-            recordCandidateFrame('skipped', reason, existingResting.pending_action_id ?? null, {
-              price,
-              amount: qty,
-              existing_order_id: existingResting.order_id,
-              existing_price: existingResting.limit_price,
-              existing_amount: existingResting.amount,
-            });
-            continue;
-          }
-
-          console.log(`📋 Adjust resting ${rule.action} ${best.name}: cancel ${existingResting.order_id} @ $${Number(existingResting.limit_price).toFixed(4)} x ${Number(existingResting.amount).toFixed(2)} -> target $${price.toFixed(4)} x ${qty.toFixed(2)}`);
-          const cancelled = await cancelOrder(existingResting.order_id, existingResting.instrument_name);
-          if (!cancelled) {
-            console.log(`📋 Keep resting ${rule.action} ${best.name}: cancel failed, re-evaluate next tick`);
-            const reason = 'Existing resting order cancellation failed before adjustment';
-            logDecision(rule, {
-              decision_status: 'skipped',
-              reason_code: 'resting_cancel_failed',
-              reason,
-              candidates_evaluated: candidates.length,
-              selected_instrument: best.name,
-              raw_score: best.score,
-              selection_score: best.selectionScore,
-              price,
-              amount: qty,
-              pending_action_id: existingResting.pending_action_id ?? null,
-              criteria_json: criteria,
-              context_json: { ...candidateTelemetryContext, existing_order_id: existingResting.order_id },
-            });
-            recordCandidateFrame('skipped', reason, existingResting.pending_action_id ?? null, {
-              price,
-              amount: qty,
-              existing_order_id: existingResting.order_id,
-            });
-            continue;
-          }
-          console.log(`📋 Replacement waits for terminal fill reconciliation of ${existingResting.order_id}`);
+          const reason = 'Existing entry reassessed independently before candidate selection';
+          logDecision(rule, {
+            decision_status: 'skipped', reason_code: 'existing_resting_reassessed', reason,
+            candidates_evaluated: candidates.length, selected_instrument: best.name,
+            price: existingResting.limit_price,
+            pending_action_id: existingResting.pending_action_id ?? null,
+            context_json: { existing_order_id: existingResting.order_id,
+              maintenance: entryMaintenance.plans.get(existingResting.order_id) ?? null },
+          });
+          recordCandidateFrame('skipped', reason, existingResting.pending_action_id ?? null, {
+            price: existingResting.limit_price, existing_order_id: existingResting.order_id,
+          });
           continue;
         } else {
           const sameActionResting = openRestingEntryOrders.find(order => order.action === rule.action);
@@ -10090,8 +10163,9 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
     const tracked = trackedResting.find((item) => item.order_id === order.order_id);
     const inferredAction = inferActionFromOpenOrder(order, tracked);
 
-    // Cancel stale orders (>8h) or orphaned orders
-    const isStale = ageHours > 8;
+    // Tracked entries are reassessed every tick; age alone is not a reason to
+    // discard their queue position. Economic and orphan checks still apply.
+    const isStale = ageHours > 8 && !(tracked && isEntryAction(inferredAction));
 
     // Orphan check: is this order still backed by an active rule?
     const matchesExitRule = activeExitInstruments.has(order.instrument_name);
@@ -10840,7 +10914,7 @@ const getFinalOrderPolicy = () => ({
   putMaxTrancheFraction: PUT_MONETIZATION_MAX_TRANCHE_FRACTION,
 });
 
-const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData, ruleCriteria, orderType }) => async ({ price, amount }) => {
+const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData, ruleCriteria, orderType, tickerMap = {} }) => async ({ price, amount }) => {
   try {
     // Refresh after reviewer latency and again for any maker retry. Reads are
     // independent; no stored trigger value authorizes a later submission.
@@ -10862,16 +10936,168 @@ const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData
     const putBudgetRemaining = botData.putBudgetForCycle > 0
       ? botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought - reservedPutBudget
       : null;
-    return validateFinalOrderPolicy({
+    const validation = validateFinalOrderPolicy({
       action: action.action, instrumentName: action.instrument_name, price, amount, orderType,
       criteria: ruleCriteria, triggerData, ticker,
       instrument: instruments.find(instrument => instrument.instrument_name === action.instrument_name),
       positions, spotPrice: currentSpot, marginState, callMarginDecision, putBudgetRemaining,
       ruleBudgetLimit: activeRule.budget_limit, policy: getFinalOrderPolicy(), now: Date.now(),
     });
+    if (validation.allowed && action.action === 'buy_put' && triggerData.entry_replacement === true
+      && Number(ruleCriteria.min_edge_score) > 0) {
+      const economics = validateEntryReplacementEconomics({ action, activeRule, triggerData,
+        desiredOrder: { action: action.action, instrument_name: action.instrument_name, direction: 'buy',
+          amount, limit_price: price, order_type: orderType },
+        reviewedOrder: triggerData.replacement_order_snapshot, ticker, tickerMap, marginState,
+        positions, instruments, spotPrice: currentSpot });
+      if (!economics.allowed) return { allowed: false, code: 'put_edge_failed', reason: economics.reason };
+    }
+    if (validation.allowed && isEntryAction(action.action)) {
+      // This callback runs immediately before every submission and maker retry.
+      // Reservations remain blocking until their terminal fills are reconciled.
+      const venueOrders = await fetchOpenOrders({ throwOnError: true });
+      if ([...db.getOpenRestingOrders(), ...venueOrders].some(order => inferActionFromOpenOrder(order) === action.action)) {
+        return { allowed: false, code: 'existing_entry', reason: 'An entry for this action remains live or unreconciled' };
+      }
+    }
+    return validation;
   } catch (error) {
     return { allowed: false, code: 'fresh_state_unavailable', reason: `Unable to verify final order: ${error.message}` };
   }
+};
+
+const getEntryOrderFilledValue = (order) => {
+  const filled = Number(order?.filled_amount);
+  if (!Number.isFinite(filled) || filled < 0) throw new Error('Entry cumulative quantity is unavailable');
+  if (filled === 0) return 0;
+  const value = order.filled_value != null ? Number(order.filled_value) : filled * Number(order.average_price);
+  if (!Number.isFinite(value) || !(value > 0)) throw new Error('Entry cumulative value is unavailable');
+  return value;
+};
+
+const accountEntryOrderObservation = (tracked, live) => {
+  const result = require('./bot/order-accounting').accountRestingObservation({ db, botData, tracked, live });
+  if (result.deltaAmount > 0) notifyOrderLifecycle({ stage: result.resting ? 'partial_fill' : 'executed',
+    action: tracked.action, instrumentName: tracked.instrument_name, amount: tracked.amount,
+    filledAmount: result.deltaAmount, price: result.deltaValue / result.deltaAmount,
+    totalValue: result.deltaValue, orderId: tracked.order_id, status: live.order_status });
+  return result;
+};
+
+const readFreshEntryOrderSnapshot = async (action) => {
+  if (!isEntryAction(action.action)) throw new Error('Entry snapshot requires an entry action');
+  const relevant = order => inferActionFromOpenOrder(order) === action.action;
+  const trackedOrders = db.getOpenRestingOrders().filter(relevant);
+  const venueOrders = (await fetchOpenOrders({ throwOnError: true })).filter(relevant);
+  const byId = new Map();
+  for (const order of venueOrders) {
+    if (!order.order_id || byId.has(order.order_id) || !['open', 'untriggered'].includes(order.order_status)) {
+      throw new Error('Entry order snapshot is inconsistent');
+    }
+    if (!trackedOrders.some(tracked => tracked.order_id === order.order_id)) {
+      throw new Error(`Untracked entry ${order.order_id}; reconcile before replacing`);
+    }
+    byId.set(order.order_id, order);
+  }
+  const orders = [];
+  for (const tracked of trackedOrders) {
+    const live = byId.get(tracked.order_id) || await fetchOrderStatus(tracked.order_id);
+    if (!live) throw new Error(`Entry ${tracked.order_id} status unknown; reservations retained`);
+    const result = accountEntryOrderObservation(tracked, live);
+    if (result.resting) {
+      if (!byId.has(tracked.order_id)) throw new Error('Entry book changed during snapshot; refresh required');
+      orders.push({ ...tracked, ...live, action: tracked.action, filled_value: result.filledValue });
+    }
+  }
+  return { orders, observedAt: new Date().toISOString() };
+};
+
+const validateEntryReplacementEconomics = ({ action, activeRule, triggerData, desiredOrder, reviewedOrder,
+  ticker, tickerMap = {}, marginState, positions, instruments, spotPrice }) => {
+  if (!hasUsableMarginState(marginState) || marginState.is_under_liquidation || Number(marginState.initial_margin) < 0) {
+    return { allowed: false, reason: 'Fresh usable margin is required before reviewing replacement' };
+  }
+  const criteria = parseMaybeJsonObject(activeRule.criteria);
+  const candidate = { ...desiredOrder, filled_amount: 0 };
+  const rules = [{ ...activeRule, criteria: { ...criteria,
+    ...(action.action === 'buy_put' ? { target_score: Math.max(Number(criteria.target_score) || 0, Number(triggerData.target_score) || 0) } : {}) } }];
+  const common = { order: candidate, activeRules: rules, instruments,
+    tickerMap: { [action.instrument_name]: ticker }, spotPrice, marginState, positions };
+  let validation;
+  let research = null;
+  if (action.action === 'buy_put') {
+    if (!(Number(ticker?.a) > 0)) return { allowed: false, reason: 'Fresh put ask is unavailable' };
+    const otherReservations = summarizeReservedEntryCapacity(db.getOpenRestingOrders()
+      .filter(order => order.order_id !== reviewedOrder.order_id)).putBudget;
+    validation = validateRestingBuyPutEntryOrder({ ...common,
+      putBudgetRemaining: botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought - otherReservations });
+    if (validation.valid && !validation.unchecked) {
+      let marketOiDelta24hPct = null;
+      if (typeof db.getOpenInterestHourly === 'function') {
+        try { marketOiDelta24hPct = getLatestHourlyDeltaPct(
+          db.getOpenInterestHourly(new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString()), 24); } catch { /* optional research context */ }
+      }
+      const marketContext = buildLiveSellCallMarketContext({ ...tickerMap, [action.instrument_name]: ticker }, Date.now(),
+        { market_oi_delta_24h_pct: marketOiDelta24hPct });
+      const instrument = instruments.find(item => item.instrument_name === action.instrument_name);
+      research = classifyBuyPutEdge({ score: validation.score, rawScore: validation.rawScore,
+        dte: validation.dte, strike: Number(instrument?.option_details?.strike), spotPrice,
+        entryPrice: desiredOrder.limit_price, askPrice: Number(ticker.a), bidPrice: Number(ticker.b),
+        askAmount: Number(ticker.A), bidAmount: Number(ticker.B), markPrice: Number(ticker.M),
+        impliedVol: getTickerImpliedVol(ticker), marketContext });
+      if (Number(criteria.min_edge_score) > 0 && !(research.selection_score >= Number(criteria.min_edge_score))) {
+        return { allowed: false, reason: 'Replacement misses the current composite put edge requirement' };
+      }
+    }
+  } else {
+    if (!(Number(ticker?.b) > 0)) return { allowed: false, reason: 'Fresh call bid is unavailable' };
+    validation = validateRestingSellCallEntryOrder(common);
+    if (validation.valid && !validation.unchecked) validation = validateRestingSellCallEntryOrder({ ...common,
+      order: { ...candidate, limit_price: Number(ticker.b) } });
+  }
+  return { allowed: Boolean(validation?.valid && !validation.unchecked),
+    reason: validation?.reason || 'Replacement economics unavailable', validation, research };
+};
+
+const prepareEntryOrderReplacement = async ({ action, reviewedOrder, desiredOrder, approvedNotional = null, instrument = null }) => {
+  if (!reviewedOrder?.order_id || reviewedOrder.action !== action.action
+    || reviewedOrder.instrument_name !== action.instrument_name || desiredOrder.instrument_name !== action.instrument_name) {
+    return { allowed: false, reason: 'Replacement entry identity conflicts with the reviewed order' };
+  }
+  const reviewedFilled = Number(reviewedOrder.filled_amount);
+  const reviewedValue = getEntryOrderFilledValue(reviewedOrder);
+  const remainingApproved = (current) => {
+    const fills = Number(current.filled_amount) - reviewedFilled;
+    const value = getEntryOrderFilledValue(current) - reviewedValue;
+    if (fills < -1e-9 || value < -1e-7) throw new Error('Entry fills regressed during replacement');
+    let amount = Math.max(0, Number(desiredOrder.amount) - Math.max(0, fills));
+    if (action.action === 'buy_put') {
+      if (!Number.isFinite(Number(approvedNotional)) || !(Number(approvedNotional) > 0)) throw new Error('Entry replacement notional authorization unavailable');
+      amount = Math.min(amount, Math.max(0, Number(approvedNotional) - Math.max(0, value)) / Number(desiredOrder.limit_price));
+    }
+    const amountStep = Math.max(Number(instrument?.options?.amount_step ?? instrument?.amount_step) || 0.01, 0.01);
+    return floorOrderAmountToVenuePrecision(Math.floor((amount + 1e-9) / amountStep) * amountStep);
+  };
+  const fresh = await readFreshEntryOrderSnapshot(action);
+  if (fresh.orders.some(order => order.order_id !== reviewedOrder.order_id)) {
+    return { allowed: false, reason: 'Another entry appeared during review; replacement deferred' };
+  }
+  const current = fresh.orders.find(order => order.order_id === reviewedOrder.order_id);
+  if (current) {
+    const comparison = require('./bot/resting-entry-plan').compareRestingEntryOrder(current,
+      { ...desiredOrder, amount: remainingApproved(current) });
+    if (comparison.decision === 'keep') return { allowed: false, reason: 'Equivalent entry already resting; keep it' };
+    if (comparison.decision === 'unresolved') return { allowed: false, reason: 'Existing entry terms are unresolved' };
+    await cancelOrder(current.order_id, current.instrument_name);
+  }
+  const terminal = await fetchOrderStatus(reviewedOrder.order_id);
+  if (!terminal) return { allowed: false, reason: 'Entry cancellation status unknown; reservation retained' };
+  const accounting = accountEntryOrderObservation({ ...reviewedOrder }, terminal);
+  if (accounting.resting) return { allowed: false, reason: 'Entry remains open; replacement deferred' };
+  const amount = remainingApproved({ ...terminal, filled_value: accounting.filledValue });
+  if (!isVenueOrderAmountTradable(amount)) return { allowed: false, reason: 'No tradable approved entry remainder remains after fills' };
+  if ((await readFreshEntryOrderSnapshot(action)).orders.length) return { allowed: false, reason: 'An entry remains on the venue; replacement deferred' };
+  return { allowed: true, amount };
 };
 
 const accountExitOrderObservation = (tracked, live) => {
@@ -11046,6 +11272,93 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       const ruleCriteria = parseMaybeJsonObject(action.rule_criteria);
       let exitSnapshot = null;
       let exitOrderPlan = null;
+      let entrySnapshot = null;
+      let entryReviewedOrder = null;
+      let entryOrderPlan = null;
+      let entryApprovedNotional = null;
+      if (isEntryAction(action.action) && triggerData.entry_replacement === true) {
+        const sourceOrder = triggerData.replacement_order_snapshot;
+        if (!sourceOrder?.order_id || sourceOrder.order_id !== triggerData.replacement_order_id
+          || sourceOrder.instrument_name !== action.instrument_name || sourceOrder.action !== action.action) {
+          throw new Error('Original entry replacement authority is incomplete');
+        }
+        entrySnapshot = await readFreshEntryOrderSnapshot(action);
+        if (entrySnapshot.orders.some(order => order.order_id !== sourceOrder.order_id)) {
+          console.log(`📋 Defer entry replacement ${action.instrument_name}: another entry is active`);
+          continue;
+        }
+        const liveOrder = entrySnapshot.orders.find(order => order.order_id === sourceOrder.order_id);
+        entryReviewedOrder = liveOrder;
+        if (!entryReviewedOrder) {
+          const terminal = await fetchOrderStatus(sourceOrder.order_id);
+          if (!terminal) throw new Error('Original entry state is unknown');
+          const accounted = accountEntryOrderObservation({ ...sourceOrder }, terminal);
+          if (accounted.resting) throw new Error('Entry book changed during replacement review');
+          entryReviewedOrder = { ...sourceOrder, ...terminal, filled_value: accounted.filledValue };
+        }
+        const fillsBeforeReview = Number(entryReviewedOrder.filled_amount) - Number(sourceOrder.filled_amount);
+        const valueBeforeReview = getEntryOrderFilledValue(entryReviewedOrder) - getEntryOrderFilledValue(sourceOrder);
+        if (fillsBeforeReview < -1e-9 || valueBeforeReview < -1e-7) throw new Error('Entry accounting regressed before review');
+        const quantityAuthority = Math.max(0, Math.min(Number(action.amount) - Math.max(0, fillsBeforeReview),
+          Number(entryReviewedOrder.amount) - Number(entryReviewedOrder.filled_amount)));
+        if (!isVenueOrderAmountTradable(floorOrderAmountToVenuePrecision(quantityAuthority))) {
+          db.updatePendingAction(action.id, { status: 'cancelled', execution_result: 'No approved entry remainder remains' });
+          continue;
+        }
+        const module = require('./bot/resting-entry-plan');
+        const instrument = instruments.find(item => item.instrument_name === action.instrument_name);
+        const otherReserved = summarizeReservedEntryCapacity(db.getOpenRestingOrders()
+          .filter(order => order.order_id !== sourceOrder.order_id)).putBudget;
+        const planned = module.buildRestingEntryPlan({ order: entryReviewedOrder, rule: activeRule, instrument, ticker,
+          spotPrice: Number(ticker.I) > 0 ? Number(ticker.I) : spotPrice,
+          putBudgetRemaining: botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought,
+          otherPutReserved: otherReserved,
+          effectiveTargetScore: Math.max(Number(ruleCriteria.target_score) || 0, Number(triggerData.target_score) || 0) });
+        if (!planned.desiredOrder || ['invalid', 'unresolved'].includes(planned.decision)) {
+          console.log(`📋 Defer entry replacement ${action.instrument_name}: ${planned.reason}`);
+          continue;
+        }
+        let amount = Math.min(quantityAuthority, planned.desiredOrder.amount);
+        if (action.action === 'buy_put') {
+          const originalNotional = Number(triggerData.entry_approved_notional);
+          if (!(originalNotional > 0)) throw new Error('Original put replacement notional is unavailable');
+          entryApprovedNotional = Math.max(0, originalNotional - Math.max(0, valueBeforeReview));
+          amount = Math.min(amount, entryApprovedNotional / planned.desiredOrder.limit_price);
+        }
+        entryOrderPlan = module.normalizeDesiredEntryOrder({ action: action.action, instrumentName: action.instrument_name,
+          amount, price: planned.desiredOrder.limit_price, orderType: planned.desiredOrder.order_type, instrument, ticker });
+        if (action.action === 'buy_put') entryApprovedNotional = Math.min(entryApprovedNotional, entryOrderPlan.amount * entryOrderPlan.limit_price);
+        const economics = validateEntryReplacementEconomics({ action, activeRule, triggerData, desiredOrder: entryOrderPlan,
+          reviewedOrder: entryReviewedOrder, ticker, tickerMap, marginState, positions: livePositions, instruments,
+          spotPrice: Number(ticker.I) > 0 ? Number(ticker.I) : spotPrice });
+        if (!economics.allowed) {
+          console.log(`📋 Defer entry replacement ${action.instrument_name}: ${economics.reason}`);
+          continue;
+        }
+        const comparison = liveOrder ? module.compareRestingEntryOrder(liveOrder, entryOrderPlan) : null;
+        if (comparison?.decision === 'keep') {
+          db.updatePendingAction(action.id, { status: 'cancelled', confirmation_reasoning: 'Equivalent entry already resting; kept without reviewer calls' });
+          continue;
+        }
+        if (comparison?.decision === 'unresolved') continue;
+        action.amount = entryOrderPlan.amount;
+        action.price = entryOrderPlan.limit_price;
+        triggerData = { ...triggerData, desired_entry_order: entryOrderPlan,
+          replacement_order_snapshot: entryReviewedOrder, entry_approved_notional: entryApprovedNotional,
+          advisor_limit_price: entryOrderPlan.limit_price, preferred_order_type: entryOrderPlan.order_type,
+          delta: Number(ticker.option_pricing?.d), dte: computeDteFromInstrumentName(action.instrument_name),
+          raw_score: economics.validation?.rawScore ?? null, score: economics.validation?.score ?? null,
+          planned_score: economics.validation?.score ?? null,
+          selection_score: economics.research?.selection_score ?? economics.validation?.score ?? null,
+          buy_put_research: action.action === 'buy_put' ? economics.research : null,
+          ...(action.action === 'buy_put' ? {
+            live_score: normalizeBuyPutScore(Math.abs(Number(ticker.option_pricing?.d)) / Number(ticker.a),
+              computeDteFromInstrumentName(action.instrument_name)),
+            buy_put_signal: 'standing_patient_bid',
+          } : {}),
+          live_price: liveMarketPrice,
+          target_score: planned.requiredScore };
+      }
       if (isReduceOnlyExitAction(action.action)) {
         exitSnapshot = await readFreshExitOrderSnapshot(action);
         // Read after reconciling the order snapshot so intervening fills also
@@ -11240,10 +11553,12 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         instruments,
         spotPrice,
         action.instrument_name,
-        action.amount,
+        entrySnapshot?.orders.length ? 0 : action.amount,
         currentPrice || action.price
       );
-      const callMarginContext = getCallMarginContext(
+      const callMarginContext = entrySnapshot?.orders.length && action.action === 'sell_call'
+        ? `Current sell-call margin includes the existing entry reservation: current utilization=${callMarginDecision.currentUtilization != null ? (callMarginDecision.currentUtilization * 100).toFixed(6) + '%' : 'N/A'}, active cap=${callMarginDecision.effectiveCapPct != null ? (callMarginDecision.effectiveCapPct * 100).toFixed(6) + '%' : 'N/A'}, current reservation satisfies cap=${callMarginDecision.entryCapSatisfied ? 'yes' : 'no'}. The replacement cannot increase the unfilled quantity. Its full incremental margin will be calculated from fresh account state after the original order is terminal; no estimated cancellation credit authorizes submission.`
+        : getCallMarginContext(
         action.action,
         marginState,
         livePositions,
@@ -11251,7 +11566,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
         instruments,
         spotPrice,
         action.instrument_name,
-        action.amount,
+        entrySnapshot?.orders.length ? 0 : action.amount,
         currentPrice || action.price
       );
       if (action.action === 'sell_call' && !callMarginDecision.available) {
@@ -11283,7 +11598,9 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
 Action: ${action.action} ${action.instrument_name}
 Amount: ${action.amount || 'TBD'}
 Best available price: $${currentPrice || action.price || 'N/A'}
-	${advisorEntryLimitPrice ? `Advisor target limit price: $${advisorEntryLimitPrice} (derived from target_score=${triggerData.target_score || 'n/a'}; target_score is a limit-price target, not a minimum trigger threshold; do not bid worse than this target).` : ''}
+	${advisorEntryLimitPrice ? action.action === 'buy_put'
+    ? `Advisor target limit price: $${advisorEntryLimitPrice} (derived from target_score=${triggerData.target_score || 'n/a'}; target_score is a limit-price target, not a minimum trigger threshold; do not bid worse than this target).`
+    : `Planned sell-call offer: $${advisorEntryLimitPrice} (normalized from the fresh executable bid; any proposed price must still satisfy the current CALL EDGE and min_bid requirements).` : ''}
 	${advisorBuybackLimitPrice ? `Advisor buyback limit price: $${advisorBuybackLimitPrice} (patient profit-capture bid; do not pay more than this limit, and never pay more than the live ask).` : ''}
 	${advisorSellPutLimitPrice ? `Advisor sell-put minimum exit price: $${advisorSellPutLimitPrice} (tail-win monetization floor; do not sell below this limit merely because the visible bid is sparse).` : ''}
 	${detailsStr}
@@ -11296,8 +11613,14 @@ ${buyPutConfirmationPrompt}
 ${sellCallConfirmationPrompt}
 ${sellPutConfirmationPrompt}
 ${ruleReasoningLine}
+${entrySnapshot ? `AUTHORITATIVE CURRENT ENTRY STATE (venue checked ${entrySnapshot.observedAt}):
+Operation: REPLACE the remaining authorization from ${action.action} order ${entryReviewedOrder.order_id}; this is not an additional entry.
+Current live entry book for this action: ${entrySnapshot.orders.length ? JSON.stringify(entrySnapshot.orders.map(order => order.order_id)) : 'none; the original order is already proven terminal'}.
+Original entry at review: ${JSON.stringify({ order_id: entryReviewedOrder.order_id, instrument_name: entryReviewedOrder.instrument_name, order_status: entryReviewedOrder.order_status || entryReviewedOrder.status, limit_price: entryReviewedOrder.limit_price, remaining_amount: Number(entryReviewedOrder.amount) - Number(entryReviewedOrder.filled_amount) })}
+Concrete desired entry order: ${JSON.stringify(entryOrderPlan)}
+${entrySnapshot.orders.length ? 'The existing reservation remains until terminal cancellation and all fills are reconciled. Current margin includes that reservation.' : 'Terminal fills have been reconciled and there is no current order reservation to cancel.'} A full new-order margin and budget check runs after terminal reconciliation and again before submission. Replacement quantity cannot exceed the approved remainder${entryApprovedNotional != null ? `; fills since this review plus replacement spend cannot exceed $${entryApprovedNotional}` : ''}. A rejection leaves any existing order untouched.` : ''}
 ${exitSnapshot ? formatExitConfirmationSnapshot(action, livePosition, exitSnapshot, exitOrderPlan) : ''}
-${exitSnapshot ? 'Fresh exit trigger context' : 'Triggered because'}: ${exitSnapshot ? JSON.stringify(triggerData) : (action.trigger_details || 'N/A')}
+${exitSnapshot ? 'Fresh exit trigger context' : entrySnapshot ? 'Fresh entry replacement context' : 'Triggered because'}: ${exitSnapshot || entrySnapshot ? JSON.stringify(triggerData) : (action.trigger_details || 'N/A')}
 ${advisoryOrderPref ? `Historical advisory order type hint for this action: ${advisoryOrderPref}` : ''}
 ${formatRecentExecutionFrictionContext(action.action, recentFailedEntry)}
 ${confirmationLearningContext}
@@ -11396,7 +11719,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
       const decisionAnthropicVote = anthropicVote;
       const decisionCodexVote = codexVote;
       const decision = resolveConfirmationVotes(anthropicVote, codexVote);
-      if (decision === 'retry') {
+      if (decision === 'retry' || (entrySnapshot && decision !== 'rejected' && (!anthropicVote || !codexVote))) {
         db.updatePendingAction(action.id, { retries: (action.retries || 0) + 1 });
         console.log(`⚠️ Confirmation failed for ${action.instrument_name} (retry ${(action.retries || 0) + 1})`);
         continue;
@@ -11567,7 +11890,48 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
             instrument: executionInstrument, ticker: executionTicker }).limit_price;
         }
         let executionAmount = floorOrderAmountToVenuePrecision(Number(action.amount));
-        const validateOrder = createFinalOrderValidator({ action, instruments, spotPrice, triggerData, ruleCriteria, orderType });
+        const validateOrder = createFinalOrderValidator({ action, instruments, spotPrice, triggerData, ruleCriteria, orderType, tickerMap });
+        if (entrySnapshot) {
+          // The original order is still reserved while reviewers decide. Check
+          // the replacement's economics without adding the same exposure twice;
+          // actual incremental margin is checked only after terminal cancellation.
+          const [entryTicker, entryMargin, entryPositions] = await Promise.all([
+            fetchFreshTickerForInstrument(action.instrument_name), fetchSubaccount(),
+            fetchPositions({ throwOnError: true }),
+          ]);
+          const currentRule = db.getActiveRules().find(rule => Number(rule.id) === Number(action.rule_id));
+          if (!currentRule || currentRule.action !== action.action
+            || JSON.stringify(parseMaybeJsonObject(currentRule.criteria)) !== JSON.stringify(ruleCriteria)) {
+            db.updatePendingAction(action.id, { status: 'cancelled', confirmation_reasoning: reasoning,
+              execution_result: 'Entry replacement rule changed during review; original order retained' });
+            continue;
+          }
+          if (action.action === 'buy_put') executionAmount = Math.min(executionAmount, entryApprovedNotional / executionPrice);
+          const desired = require('./bot/resting-entry-plan').normalizeDesiredEntryOrder({
+            action: action.action, instrumentName: action.instrument_name, amount: executionAmount,
+            price: executionPrice, orderType, instrument: executionInstrument, ticker: entryTicker,
+          });
+          executionPrice = desired.limit_price;
+          executionAmount = desired.amount;
+          const economics = validateEntryReplacementEconomics({ action, activeRule: currentRule, triggerData,
+            desiredOrder: desired, reviewedOrder: entryReviewedOrder, ticker: entryTicker, tickerMap,
+            marginState: entryMargin, positions: entryPositions, instruments,
+            spotPrice: Number(entryTicker?.I) > 0 ? Number(entryTicker.I) : spotPrice });
+          if (!economics.allowed) {
+            db.updatePendingAction(action.id, { status: 'failed', confirmation_reasoning: reasoning,
+              execution_result: `Entry replacement economics rejected: ${economics.reason}; original order retained` });
+            continue;
+          }
+          const replacement = await prepareEntryOrderReplacement({ action, reviewedOrder: entryReviewedOrder,
+            desiredOrder: desired, approvedNotional: entryApprovedNotional, instrument: executionInstrument });
+          if (!replacement.allowed) {
+            db.updatePendingAction(action.id, { status: 'cancelled', confirmation_reasoning: reasoning,
+              execution_result: replacement.reason });
+            continue;
+          }
+          executionAmount = replacement.amount;
+          triggerData.desired_entry_order = { ...desired, amount: executionAmount };
+        }
         let finalPolicyCheck = await validateOrder({ price: executionPrice, amount: executionAmount });
         if (!finalPolicyCheck.allowed) {
           db.updatePendingAction(action.id, {
@@ -11597,7 +11961,7 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
         }
         db.updatePendingAction(action.id, {
           status: 'confirmed',
-          ...(exitSnapshot ? { trigger_details: triggerData } : {}),
+          ...(exitSnapshot || entrySnapshot ? { trigger_details: triggerData } : {}),
           confirmation_reasoning: `${reasoning} | order_type=${orderType} limit=$${executionPrice}${orderTypeNote ? ` | order_type_override=${orderTypeNote}` : ''}`,
           confirmed_at: new Date().toISOString(),
         });

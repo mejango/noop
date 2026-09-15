@@ -7,6 +7,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const tradePolicy = require('../bot/trade-policy');
 const pricing = require('../bot/order-pricing');
+const { loadProduction } = require('./helpers/load-production');
+const { inferActionFromOpenOrder } = loadProduction(['inferActionFromOpenOrder']);
 const source = fs.readFileSync(path.join(__dirname, '..', 'script.js'), 'utf8');
 const start = source.indexOf('const getFinalOrderPolicy =');
 const end = source.indexOf('const generateTradingAdvisory =', start);
@@ -21,13 +23,13 @@ const ticker = { b: 10, a: 11, M: 10.5, I: 2500, option_pricing: { d: 0.1 } };
 
 async function confirm(overrides = {}) {
   const updates = [], submitted = [], validationResults = [];
-  let marginReads = 0, reviewerCalls = 0, ruleReads = 0;
+  let marginReads = 0, reviewerCalls = 0, ruleReads = 0, bookReads = 0;
   const action = { id: 1, rule_id: 11, action: 'sell_call', instrument_name: name, amount: 1, price: 10, retries: 0,
     rule_criteria: { option_type: 'C', delta_range: [0.04, 0.12], dte_range: [5, 12], min_score: 65, min_bid: 8 },
     trigger_details: { dte: 8.5, delta: 0.1 } };
   const vote = { confirm: true, order_type: 'gtc', limit_price: overrides.price ?? 8, reasoning: 'Approved concrete order' };
   const ctx = {
-    ...tradePolicy, ...pricing, Date: Clock, Math, Number, JSON,
+    ...tradePolicy, ...pricing, inferActionFromOpenOrder, Date: Clock, Math, Number, JSON,
     console: { log() {}, error() {} }, process: { env: {} },
     ANTHROPIC_SONNET_MODEL: 'mock', OPENAI_CONFIRMATION_MODEL: 'mock',
     PUT_DELTA_RANGE: [-0.12, -0.02], PUT_EXPIRATION_RANGE: [45, 78], CALL_DELTA_RANGE: [0.04, 0.12], CALL_EXPIRATION_RANGE: [5, 12],
@@ -35,7 +37,7 @@ async function confirm(overrides = {}) {
     PUT_ROLL_DTE_THRESHOLD: 25, PUT_MONETIZATION_PROFIT_THRESHOLD: 1000, PUT_MONETIZATION_MAX_TRANCHE_FRACTION: 0.25,
     botData: { mediumTermMomentum: {}, putBudgetForCycle: 100, putUnspentBuyLimit: 0, putNetBought: 0 },
     db: {
-      getPendingActions: () => [action], getOpenRestingOrders: () => [], getActiveTradeLessons: () => [], getRecentTradeReviews: () => [],
+      getPendingActions: () => [action], getOpenRestingOrders: () => overrides.trackedOrders || [], getActiveTradeLessons: () => [], getRecentTradeReviews: () => [],
       getActiveRules: () => {
         ruleReads++;
         return overrides.ruleExpired || (overrides.ruleExpiresAfterReview && ruleReads > 1)
@@ -45,6 +47,13 @@ async function confirm(overrides = {}) {
     },
     fetchSubaccount: async () => { marginReads++; return overrides.marginMissingAt === marginReads ? null : margin; },
     fetchPositions: async options => { assert.equal(options.throwOnError, true); return []; },
+    fetchOpenOrders: async options => {
+      assert.equal(options.throwOnError, true);
+      bookReads++;
+      if (overrides.bookMissingAt === bookReads) throw new Error('Fresh open-order book unavailable');
+      return overrides.bookChangedAt === bookReads
+        ? [{ order_id: 'other-contract', instrument_name: 'ETH-20301211-3300-C', direction: 'sell' }] : [];
+    },
     fetchFreshTickerForInstrument: async () => overrides.tickerMissing ? null : ticker,
     estimateDisplayedMarginUtilization: () => 0.1,
     getCallMarginDecision: (_action, state) => ({ available: Boolean(state), entryCapSatisfied: true, marginPerUnit: 100 }),
@@ -113,6 +122,30 @@ test('execution revalidation catches a later outage after initial confirmation p
   assert.equal(result.submitted.length, 0);
   assert.equal(result.validationResults[0].code, 'margin_unavailable');
   assert.equal(result.updates.at(-1).status, 'failed');
+});
+
+test('action-wide entry appearing after reviewers blocks final authorization', async () => {
+  const result = await confirm({ bookChangedAt: 1 });
+  assert.equal(result.submitted.length, 0);
+  assert.ok(result.updates.some(update => update.execution_result?.includes('existing_entry')));
+});
+
+test('action-wide entry appearing at submission blocks a previously confirmed order', async () => {
+  const result = await confirm({ bookChangedAt: 2 });
+  assert.equal(result.submitted.length, 0);
+  assert.equal(result.validationResults[0].code, 'existing_entry');
+});
+
+test('a locally reserved entry blocks submission even when absent from the open venue book', async () => {
+  const result = await confirm({ trackedOrders: [{ action: 'sell_call', instrument_name: 'ETH-20301211-3300-C' }] });
+  assert.equal(result.submitted.length, 0);
+  assert.ok(result.updates.some(update => update.execution_result?.includes('existing_entry')));
+});
+
+test('unavailable fresh entry book fails closed at submission', async () => {
+  const result = await confirm({ bookMissingAt: 2 });
+  assert.equal(result.submitted.length, 0);
+  assert.equal(result.validationResults[0].code, 'fresh_state_unavailable');
 });
 
 test('pre-send execution failure clears confirmed status without claiming a submission', async () => {
