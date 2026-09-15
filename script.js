@@ -353,25 +353,7 @@ const BUY_PUT_RECENT_VALUE_MIN_SAMPLES = 4;
 const BUY_PUT_RECENT_VALUE_MIN_TREND_PCT = 8;
 const BUY_PUT_RECENT_VALUE_MIN_PERCENTILE = 80;
 const BUY_PUT_RECENT_VALUE_MIN_ROLLING_BEST_PCT = 70;
-const BUY_PUT_EDGE_BASE_SCORE = 100;
-const BUY_PUT_EDGE_PREFERRED_SCORE = 115;
-const BUY_PUT_EDGE_STRONG_SCORE = 135;
-const BUY_PUT_EDGE_SCORE_GOOD = 0.0036;
-const BUY_PUT_EDGE_SCORE_STRONG = 0.0042;
-const BUY_PUT_EDGE_CANDIDATE_SPREAD_GOOD = 0.055;
-const BUY_PUT_EDGE_CANDIDATE_SPREAD_STRONG = 0.046;
-const BUY_PUT_EDGE_MARKET_SPREAD_GOOD = 0.12;
-const BUY_PUT_EDGE_MARKET_SPREAD_WIDE = 0.18;
-const BUY_PUT_EDGE_IV_GOOD = 0.65;
-const BUY_PUT_EDGE_IV_ELEVATED = 0.78;
-const BUY_PUT_EDGE_SKEW_GOOD = 0.076;
-const BUY_PUT_EDGE_SKEW_ELEVATED = 0.16;
-const BUY_PUT_EDGE_OI_TREND_GOOD_PCT = 4;
-const BUY_PUT_EDGE_DTE_GOOD = 68;
-const BUY_PUT_EDGE_DTE_MIN_OK = 55;
 const BUY_PUT_EDGE_SHOCKS = [0.30, 0.40, 0.50];
-const BUY_PUT_EDGE_SHOCK_PAYOFF_GOOD = 2.0;
-const BUY_PUT_EDGE_SHOCK_PAYOFF_STRONG = 4.0;
 const PUT_ROLL_DTE_THRESHOLD = STRATEGY_FACTS.put_roll_dte_threshold;
 const PUT_MONETIZATION_PROFIT_THRESHOLD = STRATEGY_FACTS.put_monetization_profit_threshold_pct;
 const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = STRATEGY_FACTS.put_monetization_max_tranche_fraction;
@@ -1961,228 +1943,44 @@ const computePutShockPayoffMultiples = ({ strike, spotPrice, entryPrice }) => {
   };
 };
 
-const classifyBuyPutEdge = ({
-  score,
-  rawScore = null,
-  dte,
-  strike,
-  spotPrice,
-  entryPrice = null,
-  askPrice = null,
-  bidPrice = null,
-  markPrice = null,
-  askAmount = null,
-  bidAmount = null,
-  impliedVol = null,
-  marketContext = null,
-} = {}) => {
-  const numericScore = Number(score);
-  const numericRawScore = Number(rawScore ?? score);
+// Keep the existing telemetry shape, but rank only by continuous PUT EDGE.
+// Crash scenarios are descriptive intrinsic payoffs, not score multipliers.
+const classifyBuyPutEdge = ({ score, rawScore = null, dte, strike, spotPrice,
+  entryPrice = null, askPrice = null, bidPrice = null, markPrice = null,
+  askAmount = null, bidAmount = null, impliedVol = null, marketContext = null } = {}) => {
+  const edgeScore = Number(score) > 0 && Number.isFinite(Number(score)) ? Number(score) : 0;
   const numericDte = Number(dte);
-  const normalizationFactor = getBuyPutDteNormalizationFactor(numericDte);
-  const numericAsk = Number(askPrice);
-  const numericBid = Number(bidPrice);
-  const numericMark = Number(markPrice);
   const numericEntry = Number(entryPrice ?? askPrice);
-  const numericAskAmount = Number(askAmount);
-  const numericBidAmount = Number(bidAmount);
-  const candidateSpreadPct = numericBid > 0 && numericAsk > 0 && numericMark > 0
-    ? (numericAsk - numericBid) / numericMark
-    : null;
-  const depth = (Number.isFinite(numericAskAmount) ? numericAskAmount : 0)
-    + (Number.isFinite(numericBidAmount) ? numericBidAmount : 0);
-  const marketSpread = finiteOrNull(marketContext?.market_avg_spread);
-  const marketPutIv = finiteOrNull(marketContext?.market_put_iv);
-  const marketSkew = finiteOrNull(marketContext?.market_skew);
-  const marketOiDelta24hPct = finiteOrNull(marketContext?.market_oi_delta_24h_pct);
-  const candidateIv = finiteOrNull(impliedVol);
-  const shockPayoff = computePutShockPayoffMultiples({
-    strike,
-    spotPrice,
-    entryPrice: numericEntry,
-  });
-  const shockAnchor = finiteOrNull(shockPayoff.multiple40Pct ?? shockPayoff.avgMultiple);
-  const reasons = [];
-  const hasScore = Number.isFinite(numericScore) && numericScore > 0;
-
-  let multiplier = 1;
-  let scoreBand = 'unknown';
-  if (hasScore) {
-    if (numericScore >= BUY_PUT_EDGE_SCORE_STRONG) {
-      scoreBand = 'strong_put_edge';
-      multiplier *= 1.16;
-      reasons.push('DTE-normalized PUT EDGE is strong');
-    } else if (numericScore >= BUY_PUT_EDGE_SCORE_GOOD) {
-      scoreBand = 'good_put_edge';
-      multiplier *= 1.08;
-      reasons.push('DTE-normalized PUT EDGE is good');
-    } else {
-      scoreBand = 'weak_put_edge';
-      multiplier *= 0.88;
-      reasons.push('DTE-normalized PUT EDGE is weak');
-    }
-  }
-
-  let dteBucket = 'unknown';
-  if (Number.isFinite(numericDte)) {
-    if (numericDte >= BUY_PUT_EDGE_DTE_GOOD && numericDte <= BUY_PUT_ADVISORY_DTE_RANGE[1]) {
-      dteBucket = 'longer_68_78';
-      reasons.push('longer DTE is already accounted for continuously by PUT EDGE');
-    } else if (numericDte >= BUY_PUT_EDGE_DTE_MIN_OK) {
-      dteBucket = 'middle_55_68';
-      reasons.push('middle DTE is already accounted for continuously by PUT EDGE');
-    } else {
-      dteBucket = 'early_45_55';
-      reasons.push('nearer DTE is discounted continuously by PUT EDGE');
-    }
-  }
-
-  const tightCandidateSpread = candidateSpreadPct != null && candidateSpreadPct <= BUY_PUT_EDGE_CANDIDATE_SPREAD_GOOD;
-  const strongCandidateSpread = candidateSpreadPct != null && candidateSpreadPct <= BUY_PUT_EDGE_CANDIDATE_SPREAD_STRONG;
-  const wideCandidateSpread = candidateSpreadPct != null && candidateSpreadPct > BUY_PUT_EDGE_CANDIDATE_SPREAD_GOOD;
-  if (strongCandidateSpread) {
-    multiplier *= 1.25;
-    reasons.push('candidate spread is in the strongest historical buy-put bucket');
-  } else if (tightCandidateSpread) {
-    multiplier *= 1.15;
-    reasons.push('candidate spread is tight enough to reduce the ask-to-bid tax');
-  } else if (wideCandidateSpread) {
-    multiplier *= candidateSpreadPct > 0.12 ? 0.6 : 0.82;
-    reasons.push('candidate spread is wide; raw score may not be realizable');
-  }
-
-  if (marketSpread != null) {
-    if (marketSpread <= BUY_PUT_EDGE_MARKET_SPREAD_GOOD) {
-      multiplier *= 1.1;
-      reasons.push('market-wide option spread is favorable');
-    } else if (marketSpread > BUY_PUT_EDGE_MARKET_SPREAD_WIDE) {
-      multiplier *= 0.75;
-      reasons.push('market-wide option spread is wide');
-    } else {
-      multiplier *= 0.92;
-      reasons.push('market-wide option spread is not in the favorable bucket');
-    }
-  }
-
-  if (candidateIv != null) {
-    if (candidateIv <= BUY_PUT_EDGE_IV_GOOD) {
-      multiplier *= 1.14;
-      reasons.push('candidate IV is not already inflated');
-    } else if (candidateIv >= BUY_PUT_EDGE_IV_ELEVATED) {
-      multiplier *= 0.76;
-      reasons.push('candidate IV is elevated; avoid paying fear premium');
-    } else {
-      multiplier *= 0.96;
-      reasons.push('candidate IV is middling');
-    }
-  }
-
-  if (marketPutIv != null) {
-    if (marketPutIv <= BUY_PUT_EDGE_IV_GOOD) {
-      multiplier *= 1.1;
-      reasons.push('market put IV is favorable');
-    } else if (marketPutIv >= BUY_PUT_EDGE_IV_ELEVATED) {
-      multiplier *= 0.78;
-      reasons.push('market put IV is elevated');
-    }
-  }
-
-  if (marketSkew != null) {
-    if (marketSkew <= BUY_PUT_EDGE_SKEW_GOOD) {
-      multiplier *= 1.08;
-      reasons.push('put-call skew is not elevated');
-    } else if (marketSkew >= BUY_PUT_EDGE_SKEW_ELEVATED) {
-      multiplier *= 0.76;
-      reasons.push('put-call skew is elevated; insurance is crowded');
-    } else {
-      multiplier *= 0.92;
-      reasons.push('put-call skew is above the favorable bucket');
-    }
-  }
-
-  if (marketOiDelta24hPct != null) {
-    if (marketOiDelta24hPct >= BUY_PUT_EDGE_OI_TREND_GOOD_PCT) {
-      multiplier *= 1.12;
-      reasons.push('24h option OI is expanding');
-    } else if (marketOiDelta24hPct < 0) {
-      multiplier *= 0.92;
-      reasons.push('24h option OI is contracting');
-    }
-  }
-
-  if (shockAnchor != null) {
-    if (shockAnchor >= BUY_PUT_EDGE_SHOCK_PAYOFF_STRONG) {
-      multiplier *= 1.18;
-      reasons.push('40% drawdown payoff multiple is strong');
-    } else if (shockAnchor >= BUY_PUT_EDGE_SHOCK_PAYOFF_GOOD) {
-      multiplier *= 1.08;
-      reasons.push('40% drawdown payoff multiple is useful');
-    } else {
-      multiplier *= 0.86;
-      reasons.push('40% drawdown payoff multiple is weak');
-    }
-  }
-
-  const edgeScore = hasScore ? BUY_PUT_EDGE_BASE_SCORE * multiplier : 0;
-  const ivCaution = Boolean(
-    (candidateIv != null && candidateIv >= BUY_PUT_EDGE_IV_ELEVATED)
-    || (marketPutIv != null && marketPutIv >= BUY_PUT_EDGE_IV_ELEVATED)
-  );
-  const skewCaution = Boolean(marketSkew != null && marketSkew >= BUY_PUT_EDGE_SKEW_ELEVATED);
-  const wideSpreadCaution = Boolean(
-    (candidateSpreadPct != null && candidateSpreadPct > BUY_PUT_EDGE_CANDIDATE_SPREAD_GOOD)
-    || (marketSpread != null && marketSpread > BUY_PUT_EDGE_MARKET_SPREAD_WIDE)
-  );
-  const weakShockPayoffCaution = Boolean(shockAnchor != null && shockAnchor < BUY_PUT_EDGE_SHOCK_PAYOFF_GOOD);
-  const oiSupport = Boolean(marketOiDelta24hPct != null && marketOiDelta24hPct >= BUY_PUT_EDGE_OI_TREND_GOOD_PCT);
-  const preferred = edgeScore >= BUY_PUT_EDGE_PREFERRED_SCORE
-    && !wideSpreadCaution
-    && !ivCaution
-    && !skewCaution
-    && !weakShockPayoffCaution;
-  const strong = edgeScore >= BUY_PUT_EDGE_STRONG_SCORE
-    && preferred
-    && (oiSupport || strongCandidateSpread);
-  const recommendation = strong
-    ? 'preferred'
-    : preferred
-      ? 'acceptable'
-      : (wideSpreadCaution || ivCaution || skewCaution || weakShockPayoffCaution)
-        ? 'caution'
-        : 'neutral';
-
+  const normalizationFactor = getBuyPutDteNormalizationFactor(numericDte);
+  const shockPayoff = computePutShockPayoffMultiples({ strike, spotPrice, entryPrice: numericEntry });
+  const spread = Number(askPrice) > 0 && Number(bidPrice) > 0 && Number(markPrice) > 0
+    ? (Number(askPrice) - Number(bidPrice)) / Number(markPrice) : null;
   return {
-    recommendation,
-    preferred,
-    strong,
-    dte_bucket: dteBucket,
-    score_band: scoreBand,
-    selection_multiplier: Number(multiplier.toFixed(4)),
+    recommendation: edgeScore > 0 ? 'scored' : 'unavailable',
+    dte_bucket: 'strategy_45_78_dte',
+    score_band: 'continuous_put_edge',
+    selection_metric: 'put_edge_v1',
+    selection_multiplier: normalizationFactor,
     selection_score: edgeScore,
     edge_components: {
-      raw_score: roundForAdvisory(numericRawScore, 6),
-      put_edge_score: roundForAdvisory(numericScore, 6),
+      raw_score: roundForAdvisory(Number(rawScore ?? (normalizationFactor > 0 ? edgeScore / normalizationFactor : 0)), 6),
+      put_edge_score: roundForAdvisory(edgeScore, 6),
       dte: roundForAdvisory(numericDte, 4),
       reference_dte: BUY_PUT_EDGE_REFERENCE_DTE,
       dte_exponent: BUY_PUT_EDGE_DTE_EXPONENT,
       normalization_factor: roundForAdvisory(normalizationFactor, 6),
-      candidate_spread_pct: roundForAdvisory(candidateSpreadPct != null ? candidateSpreadPct * 100 : null, 2),
-      market_spread_pct: roundForAdvisory(marketSpread != null ? marketSpread * 100 : null, 2),
-      candidate_iv_pct: roundForAdvisory(candidateIv != null ? candidateIv * 100 : null, 2),
-      market_put_iv_pct: roundForAdvisory(marketPutIv != null ? marketPutIv * 100 : null, 2),
-      market_skew_pct: roundForAdvisory(marketSkew != null ? marketSkew * 100 : null, 2),
-      market_oi_delta_24h_pct: roundForAdvisory(marketOiDelta24hPct, 2),
+      candidate_spread_pct: roundForAdvisory(spread != null ? spread * 100 : null, 2),
+      candidate_iv_pct: roundForAdvisory(impliedVol != null ? Number(impliedVol) * 100 : null, 2),
+      market_spread_pct: roundForAdvisory(marketContext?.market_avg_spread != null ? marketContext.market_avg_spread * 100 : null, 2),
+      market_put_iv_pct: roundForAdvisory(marketContext?.market_put_iv != null ? marketContext.market_put_iv * 100 : null, 2),
+      market_skew_pct: roundForAdvisory(marketContext?.market_skew != null ? marketContext.market_skew * 100 : null, 2),
+      market_oi_delta_24h_pct: roundForAdvisory(marketContext?.market_oi_delta_24h_pct, 2),
       shock_payoff_multiple_40pct: roundForAdvisory(shockPayoff.multiple40Pct, 2),
       shock_payoff_multiples: shockPayoff.byShock,
       entry_price: roundForAdvisory(numericEntry, 4),
-      depth: roundForAdvisory(depth, 2),
+      depth: roundForAdvisory(Number(askAmount || 0) + Number(bidAmount || 0), 2),
     },
-    spread_caution: wideSpreadCaution,
-    iv_caution: ivCaution,
-    skew_caution: skewCaution,
-    weak_shock_payoff_caution: weakShockPayoffCaution,
-    oi_support: oiSupport,
-    reason: reasons.join('; '),
+    reason: `PUT EDGE = raw score × (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}; delta per premium dollar, not a crash-payoff multiple. Other observations do not alter ranking.`,
   };
 };
 
@@ -2706,7 +2504,8 @@ const buildRollingOptionValueContext = ({
       dte_range: BUY_PUT_ADVISORY_DTE_RANGE,
       raw_score: 'abs(delta) / ask_price',
       edge_score: `raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}`,
-      composite_selection_score: 'Quality score from PUT EDGE bands, spread, IV/skew, OI trend, and 30/40/50% drawdown payoff multiples; ties prefer higher continuous PUT EDGE',
+      selection_metric: 'put_edge_v1',
+      selection_price_basis: 'live_ask',
     },
     sell_call_filters: {
       delta_range: CALL_DELTA_RANGE,
@@ -2754,18 +2553,12 @@ const buildRollingOptionValueContext = ({
       } : null,
       research_context: currentPut?.research ? {
         recommendation: currentPut.research.recommendation,
-        preferred: currentPut.research.preferred,
-        strong: currentPut.research.strong,
         dte_bucket: currentPut.research.dte_bucket,
         score_band: currentPut.research.score_band,
         edge_components: currentPut.research.edge_components,
         selection_multiplier: roundForAdvisory(currentPut.research.selection_multiplier, 4),
-        selection_score: roundForAdvisory(currentPut.research.selection_score, 2),
-        spread_caution: currentPut.research.spread_caution,
-        iv_caution: currentPut.research.iv_caution,
-        skew_caution: currentPut.research.skew_caution,
-        weak_shock_payoff_caution: currentPut.research.weak_shock_payoff_caution,
-        oi_support: currentPut.research.oi_support,
+        selection_score: roundForAdvisory(currentPut.research.selection_score, 6),
+        selection_metric: 'put_edge_v1',
         reason: currentPut.research.reason,
       } : null,
       prior_window_best_detail: priorBestDetail ? {
@@ -2900,12 +2693,8 @@ const formatRollingOptionValueContext = (context) => {
     `Prior ${context.window_days}d best PUT EDGE: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (raw=${prior.raw_score ?? 'n/a'}, ${prior.instrument} at ${prior.timestamp})` : ''}.`,
     `Current PUT vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${put.is_strict_fresh_best ? 'yes' : 'no'}; samples=${put.samples}.`,
     `PUT score trend: 1h=${put.trend_1h_pct ?? 'n/a'}%, 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
-    `PUT composite selector: instrument=${selectedPut?.instrument || 'n/a'}; PUT EDGE=${selectedPut?.put_edge_score ?? 'n/a'}; recommendation=${putResearch.recommendation || 'n/a'}; preferred=${putResearch.preferred ? 'yes' : 'no'}; selection_score=${putResearch.selection_score ?? 'n/a'}; dte_bucket=${putResearch.dte_bucket || 'n/a'}; score_band=${putResearch.score_band || 'n/a'}; warnings=${[
-      putResearch.spread_caution ? 'spread' : null,
-      putResearch.iv_caution ? 'iv' : null,
-      putResearch.skew_caution ? 'skew' : null,
-      putResearch.weak_shock_payoff_caution ? 'weak_shock_payoff' : null,
-    ].filter(Boolean).join(',') || 'none'}; components={candidate_iv=${putResearch.edge_components?.candidate_iv_pct ?? 'n/a'}%, market_put_iv=${putResearch.edge_components?.market_put_iv_pct ?? 'n/a'}%, skew=${putResearch.edge_components?.market_skew_pct ?? 'n/a'}%, oi_24h=${putResearch.edge_components?.market_oi_delta_24h_pct ?? 'n/a'}%, shock40=${putResearch.edge_components?.shock_payoff_multiple_40pct ?? 'n/a'}x}; reason=${putResearch.reason || 'n/a'}.`,
+    `PUT EDGE selector: instrument=${selectedPut?.instrument || 'n/a'}; live-ask PUT EDGE=${selectedPut?.put_edge_score ?? 'n/a'}; selection_score=${putResearch.selection_score ?? 'n/a'}; formula=${putResearch.reason || 'n/a'}.`,
+    `PUT crash scenarios (informational, not ranking): intrinsic payoff per premium dollar at 30/40/50% spot declines=${JSON.stringify(putResearch.edge_components?.shock_payoff_multiples || {})}. These are expiration payoffs, not predicted resale prices during an earlier crash.`,
     `Sell-call filters: delta ${JSON.stringify(context.sell_call_filters?.delta_range)}; DTE ${JSON.stringify(context.sell_call_filters?.dte_range)}; raw_score=${context.sell_call_filters?.raw_score}; edge_score=${context.sell_call_filters?.edge_score}.`,
     `Current CALL EDGE: ${call.current_score ?? 'n/a'}${callDetail ? ` (raw=${callDetail.raw_score ?? 'n/a'}, ${callDetail.instrument}, delta=${callDetail.delta}, bid=$${callDetail.bid_price}, DTE=${callDetail.dte})` : ''}.`,
     `Prior ${context.window_days}d best CALL EDGE: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
@@ -6433,7 +6222,7 @@ const buildRulebookRequirements = ({
       action: 'buy_put',
       type: 'entry',
       applies: 'put budget remains',
-      instruction: 'Create a patient standing buy_put watcher with favorable min_score/target_score price criteria plus tight-spread, lower-IV/skew, OI-support, and crash-payoff edge context; do not chase higher delta by itself or require an immediately marketable buy.',
+      instruction: 'Create a patient standing buy_put watcher ranked directly by PUT EDGE with min_score/target_score price criteria. Legacy min_edge_score is ignored; spread, IV/skew, OI, and crash-payoff scenarios are descriptive, not another gate. Do not chase higher delta by itself or require an immediately marketable buy.',
     });
   }
 
@@ -7174,10 +6963,14 @@ const buildCandidateObservationRows = ({
       price_source: candidate?.priceSource || null,
       score_threshold_price: candidate?.scoreThresholdPrice ?? null,
       candidate_limit_price: candidate?.candidateLimitPrice ?? null,
+      raw_score_price_basis: rule.action === 'buy_put' ? 'planned_limit' : 'live_bid',
+      planned_score: rule.action === 'buy_put' ? candidate?.score ?? null : null,
       live_score: candidate?.liveScore ?? null,
       live_raw_score: candidate?.liveRawScore ?? null,
       research_reason: research?.reason || null,
-      min_edge_score: criteria.min_edge_score ?? null,
+      selection_metric: rule.action === 'buy_put' ? 'put_edge_v1' : 'call_edge_v1',
+      selection_price_basis: rule.action === 'buy_put' ? 'live_ask' : 'live_bid',
+      legacy_min_edge_score_ignored: criteria.min_edge_score ?? null,
       edge_components: research?.edge_components || null,
       buy_put_edge_score: candidate?.buyPutResearch?.selection_score ?? null,
       buy_put_recommendation: candidate?.buyPutResearch?.recommendation || null,
@@ -7835,14 +7628,8 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
   const requiredValueSignal = triggerData?.required_value_signal || criteria.value_signal || criteria.buy_put_signal || null;
   const currentValueSignal = triggerData?.buy_put_signal || null;
   const buyPutResearch = triggerData?.buy_put_research || {};
-  const edgeScore = Number(triggerData?.selection_score ?? buyPutResearch?.selection_score);
   const edgeComponents = buyPutResearch?.edge_components || {};
-  const edgeWarnings = [
-    buyPutResearch?.spread_caution ? 'spread' : null,
-    buyPutResearch?.iv_caution ? 'iv' : null,
-    buyPutResearch?.skew_caution ? 'skew' : null,
-    buyPutResearch?.weak_shock_payoff_caution ? 'weak_shock_payoff' : null,
-  ].filter(Boolean);
+  const shockMultiples = edgeComponents.shock_payoff_multiples || {};
   const isStandingPatientBid = requiredValueSignal === 'any_actionable_buy_put' && currentValueSignal === 'standing_patient_bid';
   const limitPrice = Number(advisorLimitPrice) > 0 && bestAsk > 0
     ? Math.min(Number(advisorLimitPrice), bestAsk)
@@ -7857,7 +7644,6 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     ? Number(action.amount) * plannedPrice
     : null;
   const scoreDelta = liveDelta;
-  const triggerDte = Number(triggerData?.dte);
   const plannedRawScore = Math.abs(scoreDelta) > 0 && plannedPrice > 0
     ? Math.abs(scoreDelta) / plannedPrice
     : null;
@@ -7873,7 +7659,9 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     `- Planned execution limit: ${fmtPrice(plannedPrice)}${Number(advisorLimitPrice) > 0 ? `, capped by advisor_limit_price=${fmtPrice(advisorLimitPrice)}` : ''}; planned PUT_EDGE=${fmt(plannedScore)} using fresh_delta=${fmt(liveDelta, 4)}, fresh_dte=${fmt(liveDte, 2)}, and planned limit; live PUT_EDGE=${fmt(liveScore)}.`,
     `- Planned premium outlay (excluding fees): ${fmtPrice(plannedPremium)} for amount=${action?.amount ?? 'n/a'} at the planned execution limit. ${makerPlan ? 'The planned limit, PUT EDGE, and premium above all use the computed post_only bid below.' : 'These are reference-limit economics only; a maker price has not been established.'}`,
     `- Thresholds: min_score=${fmt(minScore)}, target_score=${fmt(targetScore)}. For patient maker bids, planned PUT EDGE at our limit is the economic gate; live PUT EDGE may be below threshold because we are not willing to lift the ask.`,
-    `- Composite edge context: edge_score=${fmt(edgeScore, 2)}, recommendation=${buyPutResearch?.recommendation || 'n/a'}, warnings=${edgeWarnings.join(',') || 'none'}, components={candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, candidate_iv_pct:${fmt(edgeComponents.candidate_iv_pct, 2)}, market_put_iv_pct:${fmt(edgeComponents.market_put_iv_pct, 2)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, oi_24h:${fmt(edgeComponents.market_oi_delta_24h_pct, 2)}, shock40:${fmt(edgeComponents.shock_payoff_multiple_40pct, 2)}x}.`,
+    '- PUT EDGE is the only ranking score. Legacy min_edge_score on saved buy_put rules is ignored; do not emit it or use it as a ranking, confirmation, or execution gate. Ignore historical composite selection_score and recommendation fields.',
+    `- Recorded quote diagnostics (descriptive only; may predate this review): candidate_spread_pct:${fmt(edgeComponents.candidate_spread_pct, 2)}, candidate_iv_pct:${fmt(edgeComponents.candidate_iv_pct, 2)}, market_put_iv_pct:${fmt(edgeComponents.market_put_iv_pct, 2)}, skew_pct:${fmt(edgeComponents.market_skew_pct, 2)}, oi_24h:${fmt(edgeComponents.market_oi_delta_24h_pct, 2)}. No spread, IV/skew, OI, or shock-payoff multipliers or standalone vetoes apply.`,
+    `- Recorded 30/40/50% drawdown payoff scenarios: shock30:${fmt(shockMultiples['30pct'], 2)}x, shock40:${fmt(shockMultiples['40pct'] ?? edgeComponents.shock_payoff_multiple_40pct, 2)}x, shock50:${fmt(shockMultiples['50pct'], 2)}x. These are hypothetical intrinsic-value/premium multiples, excluding fees; they are descriptive, not ranking inputs or payoff forecasts. PUT EDGE measures DTE-normalized delta per premium dollar, not literal crash payoff.`,
     `- value_signal=${currentValueSignal || 'n/a'}, required_value_signal=${requiredValueSignal || 'n/a'}. ${isStandingPatientBid ? 'This is a standing patient bid: no spike signal is active, but the bid is still valid if planned_score meets threshold and budget/risk gates remain valid.' : 'A qualifying value_signal plus planned_score meeting the rule threshold is sufficient value evidence for confirmation unless another concrete risk fact rejects it.'}`,
     `- Live reference only: current_best_ask=${fmtPrice(bestAsk)}, live_delta=${fmt(liveDelta, 4)}. If the planned limit is below the live ask, post_only/gtc can rest there as our market; do not reject as "not achievable" merely because it is not immediately marketable.`,
     '- BUY LIMIT CONTRACT: The approved buy limit is a maximum price, not an exact required fill price. A lower tick-aligned bid preserves the contract, reduces premium outlay, and improves PUT EDGE at unchanged delta/DTE. If the limit equals or crosses the ask, the executor can lower a post_only bid below the fresh ask without raising the approved cap. Do not reject solely for crossing at the reference limit or demand a separate advisory approval for a cheaper bid. Keep all value, budget, margin, and live-data checks.',
@@ -7881,7 +7669,7 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
       ? `- Computed post_only bid on this book: ${fmtPrice(makerPlan.retryPrice)}, below live ask ${fmtPrice(makerPlan.askPrice)} and no higher than approved cap ${fmtPrice(limitPrice)}; venue tick=${fmtPrice(makerPlan.step)}. If the remaining checks pass, confirm with order_type="post_only" and this limit_price. The executor refreshes the book before placement; a fill is not guaranteed.`
       : '- No computed maker bid is available from the supplied live book/instrument; do not invent a tick or executable price.',
     '- Prior IOC zero fill, if present elsewhere in this prompt, is liquidity/routing context only. Do not reject a valid buy_put solely because the previous IOC did not fill; choose gtc/post_only at the approved limit when making the market is better than chasing the ask.',
-    '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit. Edge context helps identify stale/wide/overpriced insurance, but it does not replace the explicit min_score/target_score price contract.',
+    '- Do not invent a different target score or use stale advisory-creation score language to override the current trigger score and planned limit. Descriptive market context does not replace the explicit min_score/target_score price contract or add another PUT ranking or veto. Keep concrete live-quote, price, delta/DTE, size, budget, margin, and active-rule checks.',
   ].join('\n');
 };
 
@@ -8730,17 +8518,12 @@ const reassessRestingEntryOrders = async ({ entryRules, instruments, tickerMap, 
           plan = { decision: 'unresolved', reason: validation.reason || 'Current entry rule could not be checked' };
           continue;
         }
-        const criteria = parseMaybeJsonObject(rule.criteria);
         if (order.action === 'buy_put') {
           research = classifyBuyPutEdge({ score: validation.score, rawScore: validation.rawScore,
             dte: validation.dte, strike: Number(instrument?.option_details?.strike), spotPrice: currentSpot,
             entryPrice: desired.limit_price, askPrice: Number(ticker.a), bidPrice: Number(ticker.b),
             askAmount: Number(ticker.A), bidAmount: Number(ticker.B), markPrice: Number(ticker.M),
             impliedVol: getTickerImpliedVol(ticker), marketContext });
-          if (criteria.min_edge_score != null && !(research.selection_score >= Number(criteria.min_edge_score))) {
-            plan = { decision: 'unresolved', reason: 'Incumbent replacement misses the current composite edge requirement' };
-            continue;
-          }
         }
         break;
       }
@@ -8775,6 +8558,8 @@ const reassessRestingEntryOrders = async ({ entryRules, instruments, tickerMap, 
           preferred_order_type: desired.order_type, delta: validation.delta, dte: validation.dte,
           strike: Number(instrument.option_details?.strike), score: validation.score, raw_score: validation.rawScore,
           planned_score: validation.score, selection_score: research?.selection_score ?? validation.score,
+          selection_metric: order.action === 'buy_put' ? 'put_edge_v1' : 'call_edge_v1',
+          selection_price_basis: 'planned_limit',
           target_score: plan.requiredScore, buy_put_research: research,
           buy_put_signal: order.action === 'buy_put' ? buyPutContext?.action_pressure?.signal || 'standing_patient_bid' : null,
           required_value_signal: criteria.value_signal ?? criteria.buy_put_signal ?? null,
@@ -9287,9 +9072,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         const maxCost = rule.action === 'buy_put' ? null : criteria.max_cost ?? null;
         const minBid = Number(criteria.min_bid ?? 0) > 0 ? Number(criteria.min_bid) : null;
         const minScore = Number(criteria.min_score ?? 0) > 0 ? Number(criteria.min_score) : null;
-        const minEdgeScore = rule.action === 'buy_put' && Number(criteria.min_edge_score ?? 0) > 0
-          ? Number(criteria.min_edge_score)
-          : null;
+        // Legacy min_edge_score is retired; continuous PUT/CALL EDGE is the score contract.
         // Saved sell-call rules from the former composite-edge system only have
         // min_edge_score. Run those through the established normalized floor
         // until the next advisory replaces them with an explicit min_score.
@@ -9422,12 +9205,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               : null;
             const buyPutResearch = rule.action === 'buy_put'
               ? classifyBuyPutEdge({
-                score,
-                rawScore,
+                score: liveScore,
+                rawScore: liveRawScore,
                 dte,
                 strike,
                 spotPrice,
-                entryPrice: candidateLimitPrice || askPrice,
+                entryPrice: askPrice,
                 askPrice,
                 bidPrice,
                 markPrice: Number(ticker?.M),
@@ -9437,14 +9220,15 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
                 marketContext: sellCallMarketContext,
               })
               : null;
-            const selectionScore = sellCallResearch?.selection_score ?? buyPutResearch?.selection_score ?? score;
+            // Rank observed live quotes. Pricing every patient bid to the same
+            // target must not rank contracts by incidental rounding differences.
+            const selectionScore = rule.action === 'buy_put' ? liveScore : sellCallResearch?.selection_score ?? score;
 
-            if (optionType === 'P' && !(candidateLimitPrice > 0)) { filterStats.scoreOut++; continue; }
+            if (optionType === 'P' && (!(candidateLimitPrice > 0) || !(liveScore > 0))) { filterStats.scoreOut++; continue; }
             if (rule.action === 'sell_call') {
               if (selectionScore < sellCallMinScore) { filterStats.scoreOut++; continue; }
             } else if (rule.action === 'buy_put') {
               if (minScore != null && score < Number(minScore)) { filterStats.scoreOut++; continue; }
-              if (minEdgeScore != null && selectionScore < Number(minEdgeScore)) { filterStats.scoreOut++; continue; }
             } else if (minScore != null && score < Number(minScore)) { filterStats.scoreOut++; continue; }
             if (optionType === 'P' && targetScore != null && score < targetScore) { filterStats.scoreOut++; continue; }
 
@@ -9513,12 +9297,13 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
-        // Pick the best market-quality-adjusted candidate after applying each
-        // side's DTE-normalized price edge.
+        // Rank each side by continuous EDGE from its live executable quote.
         candidates.sort((a, b) => {
           const aRank = ['sell_call', 'buy_put'].includes(rule.action) ? (a.selectionScore ?? a.score) : a.score;
           const bRank = ['sell_call', 'buy_put'].includes(rule.action) ? (b.selectionScore ?? b.score) : b.score;
-          return bRank - aRank || b.score - a.score || a.name.localeCompare(b.name);
+          // For puts, even ties must not depend on patient-price rounding.
+          return bRank - aRank || (rule.action === 'buy_put' ? 0 : b.score - a.score)
+            || a.name.localeCompare(b.name);
         });
         let blockedByRestingOrder = 0;
         const best = candidates.find((candidate) => {
@@ -9558,6 +9343,8 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
         const candidateTelemetryContext = {
           filter_stats: filterStats,
+          selection_metric: rule.action === 'buy_put' ? 'put_edge_v1' : 'call_edge_v1',
+          selection_price_basis: rule.action === 'buy_put' ? 'live_ask' : 'live_bid',
           blocked_by_resting_order: blockedByRestingOrder,
           required_value_signal: rule.action === 'buy_put' ? valueSignal || null : null,
           current_buy_put_signal: rule.action === 'buy_put' ? currentBuyPutSignal || null : null,
@@ -9913,20 +9700,16 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             live_score: rule.action === 'buy_put' ? best.liveScore : null,
             planned_score: rule.action === 'buy_put' ? best.score : null,
             price_source: rule.action === 'buy_put' ? best.priceSource : null,
-            selection_score: ['sell_call', 'buy_put'].includes(rule.action) ? roundForAdvisory(best.selectionScore, 2) : null,
+            selection_score: ['sell_call', 'buy_put'].includes(rule.action) ? roundForAdvisory(best.selectionScore, rule.action === 'buy_put' ? 6 : 2) : null,
+            selection_metric: rule.action === 'buy_put' ? 'put_edge_v1' : 'call_edge_v1',
+            selection_price_basis: rule.action === 'buy_put' ? 'live_ask' : 'live_bid',
             buy_put_research: rule.action === 'buy_put' && best.buyPutResearch ? {
               recommendation: best.buyPutResearch.recommendation,
-              preferred: best.buyPutResearch.preferred,
-              strong: best.buyPutResearch.strong,
               dte_bucket: best.buyPutResearch.dte_bucket,
               score_band: best.buyPutResearch.score_band,
               edge_components: best.buyPutResearch.edge_components,
               selection_multiplier: best.buyPutResearch.selection_multiplier,
-              spread_caution: best.buyPutResearch.spread_caution,
-              iv_caution: best.buyPutResearch.iv_caution,
-              skew_caution: best.buyPutResearch.skew_caution,
-              weak_shock_payoff_caution: best.buyPutResearch.weak_shock_payoff_caution,
-              oi_support: best.buyPutResearch.oi_support,
+              selection_metric: 'put_edge_v1',
               reason: best.buyPutResearch.reason,
             } : null,
             sell_call_research: rule.action === 'sell_call' && best.sellCallResearch ? {
@@ -10383,6 +10166,7 @@ const getSharedActionPolicyPrompt = () => [
   `EXIT SEMANTICS: ${describeActionSemantics('sell_put')} ${describeActionSemantics('buyback_call')}`,
   `ORDER-TYPE RULE: Derive rejects exchange reduce_only resting orders. IOC exits stay exchange reduce_only. Resting sell_put/buyback_call exits are allowed only as synthetic reduce-only in narrow patient cases: buyback_call profit_capture and sell_put monetize_tail_win. Synthetic exits must have live closeable position, one open exit order max per instrument, and amount capped to the live closeable amount.`,
   `ENTRY ORDER-TYPE RULE: ${ENTRY_ACTIONS.join(' and ')} are entry actions, not reduce_only exits. Resting order types like gtc and post_only are valid for entries when patience and pricing matter.`,
+  getBuyPutEntryPriceDisciplinePrompt(),
 ].join('\n');
 
 const getMomentumEvidenceDisciplinePrompt = () => [
@@ -10393,29 +10177,38 @@ const getMomentumEvidenceDisciplinePrompt = () => [
   '- If momentum conflicts with option-market structure, trust executable option economics first and state the mismatch plainly.',
 ].join('\n');
 
+const getBuyPutEntryPriceDisciplinePrompt = () => [
+  'BUY-PUT PRICE DISCIPLINE:',
+  '- Rank eligible puts directly by DTE-normalized PUT EDGE. Judge premium against the approved min_score/target_score using fresh delta, DTE, and the proposed executable bid, not the headline IV or the live ask when a cheaper patient bid is proposed.',
+  '- IV, skew, spread, OI, crowd sentiment, and 30/40/50% shock scenarios are descriptive diagnostics. High or spiked IV alone does not establish overpayment and cannot add a standalone PUT veto, multiplier, or alternative ranking.',
+  '- Ignore legacy min_edge_score and historical composite recommendations. Do not invent another PUT quality threshold or replace the approved price contract with a volatility judgment.',
+  '- Keep concrete active-rule, delta/DTE, live-quote, venue-price, quantity, budget, margin, and liquidation checks. A violation of those constraints can reject an entry; diagnostic IV or shock-payoff commentary cannot.',
+].join('\n');
+
 const getFreshBestBuyPutDisciplinePrompt = () => [
   'FRESH-BEST BUY-PUT DISCIPLINE:',
-  `- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d window using buy-put DTE discipline (${BUY_PUT_ADVISORY_DTE_RANGE[0]}-${BUY_PUT_ADVISORY_DTE_RANGE[1]} DTE). A strict fresh best means the market is offering the best delta-per-dollar protection seen in that window.`,
-  `- PUT EDGE is the price primitive: (abs(delta) / ask) * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}. The composite selector then adjusts PUT EDGE for candidate spread, market spread, IV/skew, OI trend, and 30/40/50% drawdown payoff multiples.`,
-  '- Do not treat higher delta as a standalone buy-put advantage. Delta is a range constraint; tail payoff under severe drawdown and option-market quality decide whether the protection is worth buying.',
-  '- Favor tight spreads, lower IV/skew, supportive/rising OI, and useful 40%+ drawdown payoff multiples. Penalize wide books and already-inflated insurance even when spot is falling.',
+  `- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d window using buy-put DTE discipline (${BUY_PUT_ADVISORY_DTE_RANGE[0]}-${BUY_PUT_ADVISORY_DTE_RANGE[1]} DTE). A strict fresh best means the highest observed DTE-normalized delta per premium dollar in that window.`,
+  `- PUT EDGE is the only ranking score: (abs(delta) / ask) * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}. Normalize each eligible candidate before ranking; higher PUT EDGE wins. It measures DTE-normalized delta per premium dollar, not literal crash payoff.`,
+  '- Do not treat higher delta as a standalone buy-put advantage. Keep the approved delta/DTE ranges and rank eligible puts directly by PUT EDGE.',
+  '- Spread, IV/skew, OI, and 30/40/50% drawdown payoff scenarios are descriptive diagnostics. Do not apply another multiplier, reorder candidates, or create a standalone veto from them. Keep concrete live-quote, price, size, budget, margin, and active-rule checks.',
+  '- Legacy min_edge_score on saved buy_put rules is ignored; do not emit it or use it as a ranking, confirmation, or execution gate.',
   '- The spot-lag repricing check catches a different cheap-convexity window: spot has dropped and the put score has locally jumped or moved near the rolling best before asks fully recalibrate.',
   `- The recent-relative value check catches a local value window versus the last ${BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS}h, but it is weaker than a ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d fresh best because the local window may simply be less bad. Use stricter min_score/target_score, budget discipline, and a concrete reason it is true value rather than locally expensive insurance.`,
   '- If requires_buy_put_decision=yes, explicitly evaluate whether to emit a buy_put rule or explain why patience/no-buy is still the better stance. This is a value signal, not an instruction to override discipline.',
   '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch strict_fresh_best, spot_drop_option_repricing_lag, recent_relative_value, or a patient maker bid at the rule price without waiting for a new advisory. Signal absence means quote patiently at the score-derived price; it does not mean no possible bid. Use min_score and target_score to keep this wildcard disciplined.',
-  '- If value_signal is present, still include option_type, delta_range, dte_range, budget_limit, and sane min_score/target_score bounds so the watcher cannot buy low-quality protection.',
+  '- If value_signal is present, still include option_type, delta_range, dte_range, budget_limit, and min_score/target_score bounds so the watcher respects the approved universe, price and spend constraints.',
   '- If signal=spot_drop_option_repricing_lag, the edge may vanish quickly; prefer ioc or gtc with the supplied near-live target_score instead of a deeply patient post_only bid.',
   '- If signal=recent_relative_value, prefer post_only or gtc with the supplied target_score unless other facts show urgency.',
   '- If you choose buy_put and spot price action is downward, use less_patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "gtc" or "post_only".',
   '- If you choose buy_put and spot price action is stable, use patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "post_only" or "gtc".',
-  '- target_score means the executor will bid abs(delta) / target_score. It is usually below the live ask to improve the observed score; for spot-lag repricing it may be near the live ask because speed matters.',
+  `- target_score means a maximum bid of abs(delta) * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT} / target_score. The executor uses this cap and the live book to compute a tick-aligned price. It may rest below the ask; for spot-lag repricing it may be near the ask.`,
 ].join('\n');
 
 const getStandingRulebookDisciplinePrompt = () => [
   'STANDING RULEBOOK DISCIPLINE:',
   '- The advisory output is a standing rulebook for tick-by-tick execution, not only a list of trades that should execute at the current tick.',
   '- Every REQUIRED STANDING RULEBOOK COVERAGE item must have a corresponding rule in the final agenda. If the favorable condition is not true now, encode the condition that would make it favorable later.',
-  '- buy_put rules define a price/score where insurance is worth buying while put budget remains. Use min_score/target_score as the hard price contract, and use the PUT edge gate to decide whether raw score is actually good insurance value.',
+  '- buy_put rules define a price/score where insurance is worth buying while put budget remains. Rank directly by PUT EDGE and use min_score/target_score as the hard price contract. Do not emit min_edge_score for buy_put; legacy values on saved rules are ignored. Spread, IV/skew, OI, and shock scenarios do not add another ranking or veto.',
   `- sell_call rules must include min_score for CALL EDGE, where CALL EDGE = (bid / abs(delta)) * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}. This light correction reduces the mechanical Sunday jump when the available expiry range rolls forward.`,
   '- min_bid is the executable premium/liquidity floor. min_score is compared with CALL EDGE; do not emit min_edge_score for sell_call.',
   '- If the sell_call thesis is patience or margin is near its cap, encode that stance through a stricter min_score/min_bid, lower priority, or narrower delta/DTE range. The written reasoning and JSON trigger must not contradict each other.',
@@ -10943,15 +10736,6 @@ const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData
       positions, spotPrice: currentSpot, marginState, callMarginDecision, putBudgetRemaining,
       ruleBudgetLimit: activeRule.budget_limit, policy: getFinalOrderPolicy(), now: Date.now(),
     });
-    if (validation.allowed && action.action === 'buy_put' && triggerData.entry_replacement === true
-      && Number(ruleCriteria.min_edge_score) > 0) {
-      const economics = validateEntryReplacementEconomics({ action, activeRule, triggerData,
-        desiredOrder: { action: action.action, instrument_name: action.instrument_name, direction: 'buy',
-          amount, limit_price: price, order_type: orderType },
-        reviewedOrder: triggerData.replacement_order_snapshot, ticker, tickerMap, marginState,
-        positions, instruments, spotPrice: currentSpot });
-      if (!economics.allowed) return { allowed: false, code: 'put_edge_failed', reason: economics.reason };
-    }
     if (validation.allowed && isEntryAction(action.action)) {
       // This callback runs immediately before every submission and maker retry.
       // Reservations remain blocking until their terminal fills are reconciled.
@@ -11045,9 +10829,6 @@ const validateEntryReplacementEconomics = ({ action, activeRule, triggerData, de
         entryPrice: desiredOrder.limit_price, askPrice: Number(ticker.a), bidPrice: Number(ticker.b),
         askAmount: Number(ticker.A), bidAmount: Number(ticker.B), markPrice: Number(ticker.M),
         impliedVol: getTickerImpliedVol(ticker), marketContext });
-      if (Number(criteria.min_edge_score) > 0 && !(research.selection_score >= Number(criteria.min_edge_score))) {
-        return { allowed: false, reason: 'Replacement misses the current composite put edge requirement' };
-      }
     }
   } else {
     if (!(Number(ticker?.b) > 0)) return { allowed: false, reason: 'Fresh call bid is unavailable' };
@@ -11350,6 +11131,8 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
           raw_score: economics.validation?.rawScore ?? null, score: economics.validation?.score ?? null,
           planned_score: economics.validation?.score ?? null,
           selection_score: economics.research?.selection_score ?? economics.validation?.score ?? null,
+          selection_metric: action.action === 'buy_put' ? 'put_edge_v1' : 'call_edge_v1',
+          selection_price_basis: 'planned_limit',
           buy_put_research: action.action === 'buy_put' ? economics.research : null,
           ...(action.action === 'buy_put' ? {
             live_score: normalizeBuyPutScore(Math.abs(Number(ticker.option_pricing?.d)) / Number(ticker.a),
@@ -11643,14 +11426,14 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
           model: ANTHROPIC_SONNET_MODEL,
           thinking: { type: 'disabled' },
           max_tokens: 1024,
-          system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. Reject trades that overpay for insurance or chase expensive protection. Be conservative — when in doubt, reject.
+          system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. For buy_put, assess overpayment through the approved PUT EDGE price contract at the proposed bid. Reject concrete price-contract or risk-constraint failures.
 ${getConfirmationScopePrompt()}
 ${getSharedActionPolicyPrompt()}
 MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure in margin. Reject trades that would push initial_margin dangerously low. If the account is under liquidation, reject all new entries.
 ${getCallMarginDisciplinePrompt()}
 ${getCallBuybackDisciplinePrompt()}
 ${getPutExitDisciplinePrompt()}
-REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Consider whether buying puts at spiked IV overpays for insurance. Use the actual Greeks, DTE, and momentum to judge — no rigid rules, just awareness that selloffs go deeper and faster than expected.
+REGIME AWARENESS: ETH crashes cascade and accelerate. Consider whether selling profitable puts is premature if the crash has further to go. Use the actual Greeks, DTE, and momentum to assess owned-position and short-call risk, with awareness that selloffs can go deeper and faster than expected.
 ${getConfirmationJsonOnlyPrompt()}`,
           messages: [{ role: 'user', content: confirmPrompt }],
         }, {
@@ -11690,7 +11473,7 @@ ${getConfirmationJsonOnlyPrompt()}`,
       try {
         const codexText = await callOpenAI(
           `You are a Taleb-style risk advisor. Your philosophy has TWO sides:
-1. BUY CONVEXITY CHEAP: Long puts are insurance — bounded cost, unbounded upside. Confirm puts that are cheap relative to the tail risk they cover. Reject puts that overpay for protection (high IV, crowd panic).
+1. BUY CONVEXITY CHEAP: Long puts have limited premium loss and provide nonlinear downside protection. Their intrinsic payoff is bounded by the strike when the underlying reaches zero. For buy_put, judge premium through the approved min_score/target_score at the proposed bid using fresh delta and DTE.
 2. SELL THE CROWD'S GREED: Selling calls is routine — exploit mispriced optimism to fund insurance. Confirm call sells when the premium is irrational relative to the actual probability, the strike gives real cushion, and exposure is sized to survive the worst case. Reject when the premium doesn't justify the risk or margin can't absorb an adverse move.
 ${getConfirmationScopePrompt()}
 ${getSharedActionPolicyPrompt()}
@@ -11699,7 +11482,7 @@ MARGIN AWARENESS: Account is ETH-collateralized. Long puts offset ETH exposure i
 ${getCallMarginDisciplinePrompt()}
 ${getCallBuybackDisciplinePrompt()}
 ${getPutExitDisciplinePrompt()}
-REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Buying puts at spiked IV overpays alongside the crowd. Use actual Greeks, DTE, and momentum to judge.
+REGIME AWARENESS: ETH crashes cascade fast. Selling puts during an active crash may be selling convexity prematurely. Use actual Greeks, DTE, and momentum to assess owned-position and short-call risk.
 ${getConfirmationJsonOnlyPrompt()}
 Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, "limit_price": <number or null>, "reasoning": "..." }`,
           confirmPrompt,
@@ -12323,21 +12106,12 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
           delta,
           askPrice,
           bidPrice,
-          dte: Math.round(parsed.dte),
+          dte: parsed.dte,
           strike: parsed.strike,
           rawScore,
           score,
-          selectionScore: research.selection_score,
-          research: research.recommendation,
-          dteBucket: research.dte_bucket,
-          scoreBand: research.score_band,
-          warnings: [
-            research.spread_caution ? 'spread' : null,
-            research.iv_caution ? 'iv' : null,
-            research.skew_caution ? 'skew' : null,
-            research.weak_shock_payoff_caution ? 'weak_shock_payoff' : null,
-          ].filter(Boolean),
-          shock40: research.edge_components?.shock_payoff_multiple_40pct,
+          diagnostics: research.edge_components || {},
+          shockMultiples: research.edge_components?.shock_payoff_multiples || {},
         });
       }
     } else if (parsed.optionType === 'C') {
@@ -12373,8 +12147,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
     }
   }
 
-  scoredPuts.sort((a, b) => (b.selectionScore || b.score) - (a.selectionScore || a.score)
-    || b.score - a.score || a.name.localeCompare(b.name));
+  scoredPuts.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
   scoredCalls.sort((a, b) => (b.selectionScore || b.score) - (a.selectionScore || a.score));
   const top5Puts = scoredPuts.slice(0, 8);
   const top5Calls = scoredCalls.slice(0, 8);
@@ -12410,9 +12183,9 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
   console.log('📋 Advisory Step 1: Primary advisor (Claude Fable 5.1)...');
 
   const primarySystemPrompt = `You are a senior options strategist with Mark Spitznagel's temperament. Your philosophy:
-- Arithmetic discipline above all: every trade must have positive expected value in crash scenarios
+- Arithmetic discipline above all: PUT entries follow the direct PUT EDGE price contract, budget, margin, and execution checks
 - Patience is the edge: being willing to sit on hands when pricing is unfavorable
-- Insurance must be well-priced: never overpay for puts, never undersell calls
+- Insurance must be well-priced: judge put premiums through the approved PUT EDGE price contract; never undersell calls
 - Tail risk is the real risk: the portfolio must survive a 40%+ drawdown
 - Premium collection supplements, not replaces, insurance accumulation
 
@@ -12420,10 +12193,12 @@ Interpret "Spitznagel" operationally, not stylistically:
 - Think in portfolio geometry, not prediction. The main question is whether protection is cheap enough or premium is rich enough to justify action.
 - Prefer waiting over paying up. "No action" is often the correct answer when asymmetry is weak.
 - Evaluate trades by expected payoff asymmetry under stress, cost discipline, and contribution to long-run convexity, not by recent price moves.
-- Cheap insurance in calm, expensive insurance in fear. Do not confuse urgency with value.
+- Calm and fear describe market conditions; the approved PUT EDGE price contract determines whether a proposed put bid is acceptable. Do not substitute urgency or IV labels for that arithmetic.
 - Premium harvesting is acceptable only when it does not compromise survival. Calls finance the bleed; they are not the core mission.
 - Favor disciplined sizing, repeatable budget use, and survivability over opportunistic aggressiveness.
 - Evidence that matters most: option pricing quality, IV/skew regime, tail-risk geometry, margin resilience, and whether the position improves or worsens fragility.
+For buy_put specifically, rank directly by DTE-normalized PUT EDGE. The 30/40/50% shock scenarios and spread/IV/skew/OI observations are descriptive; they neither alter ranking nor add a standalone veto. A hypothetical scenario payoff is not an expected return estimate.
+${getBuyPutEntryPriceDisciplinePrompt()}
 
 You advise a bot that accumulates OTM ETH puts (long insurance) and sells OTM ETH calls (premium harvesting).
 
@@ -12457,10 +12232,10 @@ We sell short-dated calls. The arithmetic of buybacks is simple: don't pay fear 
 ETH crashes tend to cascade — they accelerate, not slow down. Your decisions should reflect the shape of the moment.
 
 Things to consider in your assessment:
-- In calm markets, insurance is cheap. That's when to accumulate it. If puts are expensive, patience is the edge.
+- In calm markets, evaluate accumulation using PUT EDGE at the proposed bid. If the approved min_score/target_score cannot be met, quote patiently within that price contract.
 - In crashing markets, our puts become increasingly valuable. The temptation is to sell early. Consider whether the crash has further to go — ETH selloffs often have multiple legs.
 - In severe crashes, option books can get sparse and visible bids may stop representing fair value. If monetizing a tail-win put, do not undersell just because the best bid is thin or stale. If we are effectively making the market, name a responsible min_exit_price/limit_price from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and the position's payoff role, then use patient maker-style execution when appropriate.
-- In recovery, fear lingers and IV stays elevated even as price stabilizes. Panickers overpay for protection they no longer need as urgently. This can be an opportunity.
+- In recovery, IV can remain elevated even as price stabilizes. Treat that as descriptive context; judge a new put entry by its approved PUT EDGE price contract.
 - The full cycle: cash → cheap puts → crash → puts print → sell at the right time → buy cheap ETH → sell calls → premium → repeat.
 
 Use your judgment. Look at the actual Greeks, DTE, IV/skew, spread/depth, OI, executable bid/ask, position characteristics, and only then momentum as secondary path context. There are no absolute directional rules; hard execution, sizing, DTE, and risk constraints still apply.
@@ -12494,7 +12269,6 @@ Given market data, produce a JSON trading agenda with:
         "min_score": 0.004,
         "target_score": 0.0042,
         "value_signal": "strict_fresh_best" | "spot_drop_option_repricing_lag" | "recent_relative_value" | "any_actionable_buy_put",
-        "min_edge_score": 80,
         "min_bid": 2.00,
         "market_conditions": [{"field": "spot_price", "op": "lt"|"gt"|"gte"|"lte", "value": 2000}]
       },
@@ -12528,13 +12302,13 @@ Given market data, produce a JSON trading agenda with:
   ]
 }
 
-CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, min_edge_score, min_bid, market_conditions. Exit criteria uses typed intents plus conditions. sell_put criteria must include put_exit_intent. buyback_call criteria must include buyback_intent.
+CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, min_bid, market_conditions. Do not emit min_edge_score. Exit criteria uses typed intents plus conditions. sell_put criteria must include put_exit_intent. buyback_call criteria must include buyback_intent.
 
 Rules:
-- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_edge_score (optional hard buy_put edge floor only), min_bid (for sell_call), market_conditions. For sell_call, include min_score as the CALL EDGE gate and min_bid as the executable premium floor; do not emit min_edge_score. For buy_put, include min_edge_score only when you want an explicit spread/IV/skew/OI/shock-payoff floor in addition to min_score/target_score. For sell_call, market_conditions may only contain spot_price conditions; translate other selectivity into min_score, min_bid, priority, delta_range, or dte_range instead.
+- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_bid (for sell_call), market_conditions. For sell_call, include min_score as the CALL EDGE gate and min_bid as the executable premium floor. For buy_put, rank directly by PUT EDGE and use min_score/target_score for price discipline. Do not emit min_edge_score for either action; legacy min_edge_score on saved buy_put rules is ignored. Do not add spread/IV/skew/OI/shock-payoff gates. For sell_call, market_conditions may only contain spot_price conditions; translate other selectivity into min_score, min_bid, priority, delta_range, or dte_range instead.
 - Exit criteria MUST include: conditions (array of {field, op, value}) and condition_logic ("any" or "all"). Fields: dte, delta, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte. Do not use mark_price as a strategy trigger. For sell_put, include put_exit_intent. For monetize_tail_win, also include min_exit_price or limit_price. For buyback_call, include buyback_intent; set allow_below_profit_floor true only for threat_management.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: roll_protection sell_put and threat_management buyback_call should use preferred_order_type "ioc". Patient monetize_tail_win sell_put and profit_capture buyback_call may use "gtc" or "post_only" as synthetic reduce-only resting exits, with limit_price/min_exit_price/max_buyback_price carrying the price discipline.
-- For buy_put: set option_type "P", negative delta_range (e.g. [-0.12, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. Raw score is abs(delta)/ask. PUT EDGE = raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT} and controls price/value comparisons; the composite selection score then adjusts PUT EDGE for spread, IV/skew, OI trend, and 30/40/50% drawdown payoff checks. Do not prefer higher delta by itself; use broad tail-convexity math and market-quality facts. DTE DISCIPLINE: buy puts at 45-78 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 78].
+- For buy_put: set option_type "P", negative delta_range (e.g. [-0.12, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. Raw score is abs(delta)/ask. PUT EDGE = raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}; normalize every eligible candidate before ranking directly by PUT EDGE. It measures DTE-normalized delta per premium dollar, not literal crash payoff. Keep 30/40/50% drawdown payoff scenarios as descriptive intrinsic-value/premium illustrations, excluding fees; do not use spread, IV/skew, OI, or shock scenarios as another ranking multiplier or standalone veto. DTE DISCIPLINE: buy puts at 45-78 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 78].
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~${PUT_ROLL_DTE_THRESHOLD} only if the book already holds longer-dated long puts. Use put_exit_intent="roll_protection", requires_longer_dated_protection=true, condition dte lte ${PUT_ROLL_DTE_THRESHOLD}. This roll trigger is independent of the ${PUT_MONETIZATION_PROFIT_THRESHOLD}% monetization threshold.
@@ -12545,7 +12319,7 @@ ${getStandingRulebookDisciplinePrompt()}
 - The account is ETH-collateralized. Long puts OFFSET ETH exposure in Derive's margin engine. But the premium cost is real — respect the put budget discipline.
 - Put budget is an arithmetic commitment, not a cash constraint. We buy puts on leverage. The budget prevents impulse buying or underspending. Selling owned puts realizes cash but does not replenish the current cycle's put-buying budget.
 - For calls: the normal target cap is ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization; the ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% is last-mile execution safety, not planned sell-call capacity. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold; the code may size down within that zone but must not deliberately fill the buffer with dust orders. In the specific case of an upside breakout with short calls already open, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit so the bot can sell into richer bullish premium rather than paying up for fear-driven buybacks. This override is for breakout add-ons only, not generic leverage creep.
-- Entry rules should target the best action-specific score after hard price, DTE, delta, budget, and risk gates pass. Sell calls use DTE-normalized CALL EDGE; buy_put keeps its separate insurance edge model.
+- Entry rules should target the best action-specific score after hard price, DTE, delta, budget, and risk gates pass. Sell calls use DTE-normalized CALL EDGE; buy_put ranks directly by DTE-normalized PUT EDGE without a composite gate.
 - Exit rules MUST reference specific instrument_name from current positions
 - If the market is unclear, tighten the watcher criteria and lower priority. Do not omit required standing watchers solely because they are not currently triggered.
 - Maximum 5 entry rules; exit rules should cover each required open-position watcher from REQUIRED STANDING RULEBOOK COVERAGE.
@@ -12594,8 +12368,9 @@ ${JSON.stringify(accountHealth, null, 2)}
 3. Momentum labels are secondary path context and must not outrank executable option economics, spread/depth, IV/skew, OI, funding, or position-specific risk.
 4. The knowledge wiki is compiled long-term memory. Use it for pattern recognition and discipline, but if live state conflicts with wiki memory, trust the live state and note the mismatch.
 
-=== TOP PUT CANDIDATES (execution scan; rolling context is authoritative for buy-put timing) ===
-${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte} | raw_score=${p.score.toFixed(4)} | edge=${Number(p.selectionScore || 0).toFixed(1)} | shock40=${p.shock40 ?? 'n/a'}x | research=${p.research}/${p.dteBucket}/${p.scoreBand}${p.warnings?.length ? ` warnings=${p.warnings.join(',')}` : ''}`).join('\n') : 'No qualifying puts found'}
+=== TOP PUT CANDIDATES (ranked directly by PUT EDGE; rolling context supplies timing) ===
+Quote and 30/40/50% drawdown diagnostics are descriptive only; they do not alter ranking or add vetoes. Shock multiples are hypothetical intrinsic value divided by premium, excluding fees.
+${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte.toFixed(2)} | raw_score=${p.rawScore.toFixed(6)} | PUT_EDGE=${p.score.toFixed(6)} | shock30=${p.shockMultiples['30pct'] ?? 'n/a'}x | shock40=${p.shockMultiples['40pct'] ?? 'n/a'}x | shock50=${p.shockMultiples['50pct'] ?? 'n/a'}x | diagnostics=${JSON.stringify(p.diagnostics)}`).join('\n') : 'No qualifying puts found'}
 
 === TOP CALL CANDIDATES (by bid/delta ratio, wide scan) ===
 ${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${c.delta.toFixed(4)} | bid=$${c.bidPrice.toFixed(2)} | DTE=${c.dte} | score=${c.score.toFixed(4)} | research=${c.research}/${c.dteBucket}/${c.scoreBand}`).join('\n') : 'No qualifying calls found'}
@@ -12677,7 +12452,7 @@ Produce your trading agenda JSON now.`;
 ## Your Temperament
 You think like Nassim Taleb. You believe in:
 - Antifragility. Position to BENEFIT from disorder, not just survive it.
-- Convexity. Every trade should have bounded downside and unbounded upside.
+- Payoff shape. Assess each action's actual option payoff and portfolio exposure; require survival within the stated position, margin, and budget constraints, not unbounded upside from every trade.
 - Skin in the game. If a trade goes wrong, the cost must be small and known.
 - Fat tails. The market is more volatile than anyone thinks. Events that "shouldn't happen" happen regularly.
 - Via negativa. What you DON'T do matters more than what you do. Avoid ruin above all.
@@ -12700,6 +12475,7 @@ ${getMomentumEvidenceDisciplinePrompt()}
 - Sell calls at 5-12 DTE. Short-dated calls maximize theta harvesting. Veto any sell_call rule with dte above 14.
 
 ## Fresh-Best Put Value Discipline
+${getBuyPutEntryPriceDisciplinePrompt()}
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
 
@@ -12714,7 +12490,7 @@ Panic buybacks are the opposite of antifragility. The crowd buys back calls when
 ## Market Regime Awareness
 ETH crashes cascade — they accelerate, not slow down. Your critique should consider:
 - Selling puts during an active crash means selling convexity that could multiply further. Scrutinize the timing.
-- Buying puts when IV is spiked means overpaying for insurance alongside the crowd. Question the arithmetic.
+- For buy_put, verify fresh PUT EDGE at the proposed bid against the approved min_score/target_score; spiked IV is descriptive and is not a standalone veto.
 - In recovery (price stabilizing, IV still elevated), selling puts to fearful buyers can capture inflated premiums.
 - But these are tendencies, not absolutes. The actual Greeks, DTE, position size, and portfolio shape matter. Use your judgment.
 - Ask: is this trade benefiting from disorder (antifragile) or just reacting to it (fragile)?
@@ -12947,8 +12723,9 @@ ${JSON.stringify(accountHealth, null, 2)}
 === OPEN POSITIONS REQUIRING WATCHERS ===
 ${positionAdviceSnapshots.length > 0 ? JSON.stringify(positionAdviceSnapshots, null, 2) : 'No open positions'}
 
-=== TOP PUT CANDIDATES ===
-${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte} | raw_score=${p.score.toFixed(4)} | edge=${Number(p.selectionScore || 0).toFixed(1)} | shock40=${p.shock40 ?? 'n/a'}x | research=${p.research}/${p.dteBucket}/${p.scoreBand}${p.warnings?.length ? ` warnings=${p.warnings.join(',')}` : ''}`).join('\n') : 'No qualifying puts found'}
+=== TOP PUT CANDIDATES (ranked directly by PUT EDGE) ===
+The 30/40/50% drawdown scenarios and other quote diagnostics are descriptive only, not additional ranking inputs or vetoes.
+${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte.toFixed(2)} | raw_score=${p.rawScore.toFixed(6)} | PUT_EDGE=${p.score.toFixed(6)} | shock30=${p.shockMultiples['30pct'] ?? 'n/a'}x | shock40=${p.shockMultiples['40pct'] ?? 'n/a'}x | shock50=${p.shockMultiples['50pct'] ?? 'n/a'}x | diagnostics=${JSON.stringify(p.diagnostics)}`).join('\n') : 'No qualifying puts found'}
 
 === TOP CALL CANDIDATES ===
 ${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${c.delta.toFixed(4)} | bid=$${c.bidPrice.toFixed(2)} | DTE=${c.dte} | score=${c.score.toFixed(4)} | research=${c.research}/${c.dteBucket}/${c.scoreBand}`).join('\n') : 'No qualifying calls found'}

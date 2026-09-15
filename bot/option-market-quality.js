@@ -1,13 +1,9 @@
 'use strict';
 
-// Preserve the configured quality ranking, then prefer better continuous PUT
-// EDGE within the same quality bucket. Instrument name settles exact ties so
-// the exchange's ticker insertion order cannot decide which option wins.
+// Rank continuous PUT EDGE directly. Retired composite selection_score values
+// must never override price economics. Instrument name settles exact ties.
 function isBetterBuyPutCandidate(candidate, incumbent) {
   if (!incumbent) return true;
-  const qualityDifference = (candidate.selection_score ?? candidate.edge_score ?? candidate.score)
-    - (incumbent.selection_score ?? incumbent.edge_score ?? incumbent.score);
-  if (qualityDifference !== 0) return qualityDifference > 0;
   const edgeDifference = (candidate.edge_score ?? candidate.score)
     - (incumbent.edge_score ?? incumbent.score);
   if (edgeDifference !== 0) return edgeDifference > 0;

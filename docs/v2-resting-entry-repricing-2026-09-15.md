@@ -1,5 +1,9 @@
 # V2 resting entry repricing
 
+Subsequent change: [direct PUT EDGE selection](v2-put-edge-selection-2026-09-15.md)
+removes the composite quality requirement described below. The repricing and
+reconciliation safeguards in this report remain in place.
+
 ## Problem and production evidence
 
 Production `99c72c1` maintained resting entry validity but only compared its

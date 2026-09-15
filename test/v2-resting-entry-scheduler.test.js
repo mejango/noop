@@ -122,6 +122,57 @@ for (const action of ['buy_put', 'sell_call']) {
   });
 }
 
+for (const replace of [false, true]) {
+  test(`saved composite floor 78 cannot block ${replace ? 'replacing' : 'keeping'} a resting put with fractional PUT EDGE`, async () => {
+    const f = fixture('buy_put');
+    Object.assign(f.rule.criteria, { min_score: 0.004, target_score: 0.004, min_edge_score: 78 });
+    f.ticker.option_pricing.d = replace ? -0.044 : -0.04;
+    const research = [];
+    const classify = f.bindings.classifyBuyPutEdge;
+    f.bindings.classifyBuyPutEdge = input => {
+      const result = classify(input); // The production classifier returns actual fractional PUT EDGE.
+      research.push(result);
+      return result;
+    };
+
+    const result = await f.run();
+    const plan = result.plans.get('incumbent');
+    assert.equal(plan.decision, replace ? 'replace' : 'keep', plan.reason);
+    assert.equal(research.length, 1);
+    assert.ok(research[0].selection_score >= 0.004 && research[0].selection_score < 0.0041,
+      `Expected the current PUT EDGE near 0.004, got ${research[0].selection_score}`);
+    assert.equal(f.rule.criteria.min_edge_score, 78, 'Saved historical criteria remain intact');
+    assert.equal(result.queuedCount, replace ? 1 : 0);
+    assert.equal(f.inserted.length, replace ? 1 : 0);
+    assert.equal(f.decisions[0].reason_code, replace ? 'resting_entry_reprice' : 'resting_entry_keep');
+    assert.equal(f.order.status, 'open');
+    if (replace) {
+      assert.equal(f.inserted[0].price, 10.9);
+      assert.equal(f.inserted[0].trigger_details.replacement_order_id, 'incumbent');
+      assert.equal(f.inserted[0].trigger_details.buy_put_research.selection_score, research[0].selection_score);
+    } else {
+      assert.equal(plan.desiredOrder.limit_price, 9.9);
+      assert.deepEqual(f.events, ['snapshot', 'fresh-quote']);
+    }
+  });
+}
+
+test('ignoring saved composite floors preserves current minimum PUT EDGE and target-price discipline', async () => {
+  for (const field of ['min_score', 'target_score']) {
+    const f = fixture('buy_put');
+    Object.assign(f.rule.criteria, { min_score: 0.004, target_score: 0.004, min_edge_score: 78, [field]: 0.006 });
+    f.ticker.option_pricing.d = -0.04;
+    const result = await f.run();
+    assert.equal(result.queuedCount, 1, result.plans.get('incumbent').reason);
+    const queued = f.inserted[0];
+    assert.equal(queued.price, 6.6, `${field} still tightens the replacement bid`);
+    assert.ok(queued.trigger_details.planned_score >= 0.006);
+    assert.equal(queued.trigger_details.target_score, 0.006);
+    assert.equal(f.rule.criteria.min_edge_score, 78);
+    assert.equal(f.order.status, 'open');
+  }
+});
+
 test('the current active rule has priority; an applicable successor replaces a withdrawn or invalid rule', async () => {
   const current = fixture('buy_put', { rules: rule => [{ ...rule, id: 22,
     criteria: { ...rule.criteria, min_score: 0.006 } }, rule] });

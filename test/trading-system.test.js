@@ -786,17 +786,16 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(requirement.instruction.includes('min_bid'));
   });
 
-  test('buy_put watcher requirement demands edge-quality context without delta chasing', () => {
+  test('buy_put watcher requirement ranks PUT EDGE without a composite gate', () => {
     const requirements = buildRulebookRequirements({ putBudgetRemaining: 123 });
     const requirement = requirements.find((req) => req.type === 'entry' && req.action === 'buy_put');
 
     assert.ok(requirement);
     assert.ok(requirement.instruction.includes('min_score/target_score'));
-    assert.ok(requirement.instruction.includes('tight-spread'));
-    assert.ok(requirement.instruction.includes('lower-IV/skew'));
-    assert.ok(requirement.instruction.includes('OI-support'));
-    assert.ok(requirement.instruction.includes('crash-payoff'));
-    assert.ok(requirement.instruction.includes('do not chase higher delta by itself'));
+    assert.ok(requirement.instruction.includes('ranked directly by PUT EDGE'));
+    assert.ok(requirement.instruction.includes('Legacy min_edge_score is ignored'));
+    assert.ok(requirement.instruction.includes('descriptive, not another gate'));
+    assert.ok(requirement.instruction.includes('Do not chase higher delta by itself'));
   });
 
   test('advisor prompt forbids non-spot sell-call market conditions', () => {
@@ -814,13 +813,19 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(SCRIPT_SOURCE.includes('CALL EDGE = raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}'));
   });
 
-  test('advisor prompt anchors buy-put edge to spread IV skew OI and shock payoff', () => {
-    assert.ok(SCRIPT_SOURCE.includes('PUT composite selector:'));
-    assert.ok(SCRIPT_SOURCE.includes('PUT EDGE is the price primitive'));
-    assert.ok(SCRIPT_SOURCE.includes('(DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}'));
-    assert.ok(SCRIPT_SOURCE.includes('Do not treat higher delta as a standalone buy-put advantage'));
-    assert.ok(SCRIPT_SOURCE.includes('30/40/50% drawdown payoff'));
-    assert.ok(SCRIPT_SOURCE.includes('For buy_put, include min_edge_score only when you want an explicit spread/IV/skew/OI/shock-payoff floor'));
+  test('advisor prompt ranks buy puts directly by normalized PUT EDGE with descriptive diagnostics', () => {
+    const { getFreshBestBuyPutDisciplinePrompt } = loadProduction(['getFreshBestBuyPutDisciplinePrompt']);
+    const prompt = getFreshBestBuyPutDisciplinePrompt();
+    assert.ok(prompt.includes('PUT EDGE is the only ranking score'));
+    assert.ok(prompt.includes(`(DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}`));
+    assert.ok(prompt.includes('Normalize each eligible candidate before ranking; higher PUT EDGE wins.'));
+    assert.ok(prompt.includes('Do not treat higher delta as a standalone buy-put advantage'));
+    assert.ok(prompt.includes('30/40/50% drawdown payoff scenarios are descriptive diagnostics'));
+    assert.ok(prompt.includes('Do not apply another multiplier, reorder candidates, or create a standalone veto'));
+    assert.ok(prompt.includes('Legacy min_edge_score on saved buy_put rules is ignored'));
+    assert.ok(prompt.includes('do not emit it or use it as a ranking, confirmation, or execution gate'));
+    assert.ok(prompt.includes('not literal crash payoff'));
+    assert.doesNotMatch(prompt, /PUT composite selector|The composite selector then adjusts|include min_edge_score only/);
   });
 
   test('Mandelbrot prompt uses 30-day hourly spot path instead of momentum labels', () => {
@@ -5946,7 +5951,8 @@ describe('confirmation prompt margin context', () => {
       ['formatBuyPutConfirmationContext'], { bindings: { Date: EvaluationDate } }
     );
     const context = formatAtTestTime({
-      action: { action: 'buy_put', price: 21, instrument_name: 'ETH-20300302-1600-P' },
+      action: { action: 'buy_put', price: 21, instrument_name: 'ETH-20300302-1600-P',
+        rule_criteria: { min_score: 0.0031, min_edge_score: 999 } },
       triggerData: {
         score: 0.004014,
         delta: -0.0843,
@@ -5967,6 +5973,7 @@ describe('confirmation prompt margin context', () => {
             market_skew_pct: 5.8,
             market_oi_delta_24h_pct: 4.7,
             shock_payoff_multiple_40pct: 3.2,
+            shock_payoff_multiples: { '30pct': 1.2, '40pct': 3.2, '50pct': 5.6 },
           },
         },
       },
@@ -5981,9 +5988,15 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('live PUT_EDGE=0.003510'));
     assert.ok(context.includes('planned PUT EDGE at our limit is the economic gate'));
     assert.ok(context.includes('live PUT EDGE may be below threshold'));
-    assert.ok(context.includes('Composite edge context'));
-    assert.ok(context.includes('edge_score=128.40'));
-    assert.ok(context.includes('shock40:3.20x'));
+    assert.ok(context.includes('PUT EDGE is the only ranking score'));
+    assert.ok(context.includes('Legacy min_edge_score on saved buy_put rules is ignored'));
+    assert.ok(context.includes('Ignore historical composite selection_score and recommendation fields'));
+    assert.doesNotMatch(context, /Composite edge context|edge_score=128\.40|min_edge_score=999/);
+    assert.ok(context.includes('Recorded quote diagnostics (descriptive only; may predate this review)'));
+    assert.ok(context.includes('No spread, IV/skew, OI, or shock-payoff multipliers or standalone vetoes apply'));
+    assert.ok(context.includes('Recorded 30/40/50% drawdown payoff scenarios: shock30:1.20x, shock40:3.20x, shock50:5.60x'));
+    assert.ok(context.includes('descriptive, not ranking inputs or payoff forecasts'));
+    assert.ok(context.includes('not literal crash payoff'));
     assert.ok(context.includes('oi_24h:4.70'));
     assert.ok(context.includes('post_only/gtc can rest there'));
     assert.ok(context.includes('live_delta=-0.0737'));
@@ -5998,7 +6011,7 @@ describe('confirmation prompt margin context', () => {
       action: {
         action: 'buy_put',
         price: 23.6,
-        rule_criteria: { value_signal: 'any_actionable_buy_put' },
+        rule_criteria: { value_signal: 'any_actionable_buy_put', min_edge_score: 999 },
       },
       triggerData: {
         score: 0.003102,
@@ -6017,6 +6030,9 @@ describe('confirmation prompt margin context', () => {
     assert.ok(context.includes('required_value_signal=any_actionable_buy_put'));
     assert.ok(context.includes('no spike signal is active'));
     assert.ok(context.includes('bid is still valid if planned_score meets threshold'));
+    assert.ok(context.includes('budget/risk gates remain valid'));
+    assert.ok(context.includes('Legacy min_edge_score on saved buy_put rules is ignored'));
+    assert.ok(context.includes('do not emit it or use it as a ranking, confirmation, or execution gate'));
   });
 
   test('sell_call confirmation context carries advisor score gates', () => {

@@ -68,13 +68,13 @@ test('duplicate delta rows and ticker order do not change matched skew', () => {
   assert.deepEqual(computeMatchedPutCallSkew(puts, calls), computeMatchedPutCallSkew(puts.reverse(), calls.reverse()));
 });
 
-test('quality ties prefer continuous economics, then deterministic instrument order', () => {
-  const cheaper = { instrument: 'ETH-20261031-1600-P', selection_score: 195, edge_score: 0.00625 };
-  const dearer = { instrument: 'ETH-20261031-1650-P', selection_score: 195, edge_score: 0.00422535 };
+test('PUT EDGE outranks legacy composite scores and exact ties use deterministic instrument order', () => {
+  const cheaper = { instrument: 'ETH-20261031-1600-P', selection_score: 1, edge_score: 0.00625 };
+  const dearer = { instrument: 'ETH-20261031-1650-P', selection_score: 999, edge_score: 0.00422535 };
   assert.equal(isBetterBuyPutCandidate(cheaper, dearer), true);
   assert.equal(isBetterBuyPutCandidate(dearer, cheaper), false);
   assert.equal(isBetterBuyPutCandidate(cheaper, { ...dearer, edge_score: cheaper.edge_score }), true);
-  assert.equal(isBetterBuyPutCandidate(dearer, { ...cheaper, selection_score: 196 }), false);
+  assert.equal(isBetterBuyPutCandidate(dearer, { ...cheaper, selection_score: 0 }), false);
 });
 
 // Execute the current production declarations for integration coverage. This
@@ -134,6 +134,9 @@ test('both market selectors normalize every option before choosing the winner', 
     const winner = api.getBestCurrentBuyPutEdgeCandidate(Object.fromEntries(entries), nowMs);
     assert.equal(winner.instrument, puts[1][0]);
     closeTo(winner.edge_score, putScore.normalizeBuyPutScore(0.0032, 78));
+    const selected = api.getBestCurrentBuyPutCandidate(Object.fromEntries(entries), nowMs, null, 2500);
+    assert.equal(selected.instrument, winner.instrument);
+    closeTo(selected.selection_score, winner.edge_score);
   }
   for (const entries of [calls, [...calls].reverse()]) {
     const winner = api.getBestCurrentSellCallCandidate(Object.fromEntries(entries), nowMs);
@@ -142,7 +145,7 @@ test('both market selectors normalize every option before choosing the winner', 
   }
 });
 
-test('production quality selector resolves same-bucket candidates by economics in either input order', () => {
+test('production PUT selectors use continuous EDGE and deterministic ties in either input order', () => {
   const api = productionContext();
   const dearer = nameAt(60, 1600, 'P');
   const cheaper = nameAt(60, 1650, 'P');
@@ -157,7 +160,7 @@ test('production quality selector resolves same-bucket candidates by economics i
   }
 });
 
-test('production rolling comparison uses market maximum while identifying the quality-selected order separately', () => {
+test('production rolling comparison and suggested order use the same maximum PUT EDGE as chart telemetry', () => {
   const api = productionContext([{ timestamp: new Date(nowMs - 1800000).toISOString(), score: 0.006 }]);
   const selected = nameAt(60, 1600, 'P');
   const maximum = nameAt(60, 1650, 'P');
@@ -169,21 +172,21 @@ test('production rolling comparison uses market maximum while identifying the qu
     });
     assert.equal(result.put_value_context.current_score, 0.0075);
     assert.equal(result.put_value_context.current_detail.instrument, maximum);
-    assert.equal(result.put_value_context.selected_candidate_detail.instrument, selected);
-    assert.equal(result.put_value_context.selected_candidate_detail.put_edge_score, 0.005);
+    assert.equal(result.put_value_context.selected_candidate_detail.instrument, maximum);
+    assert.equal(result.put_value_context.selected_candidate_detail.put_edge_score, 0.0075);
     assert.equal(result.put_value_context.current_vs_prior_best_pct, 125);
     assert.equal(result.put_value_context.is_strict_fresh_best, true);
     assert.equal(result.put_value_context.trend_1h_pct, 25);
-    assert.equal(result.action_pressure.suggested_instrument, selected);
+    assert.equal(result.action_pressure.suggested_instrument, maximum);
     assert.equal(result.action_pressure.signal, 'strict_fresh_best');
-    assert.ok(result.action_pressure.suggested_limit_price < 12);
+    assert.ok(result.action_pressure.suggested_limit_price < 8);
     const prompt = api.formatRollingOptionValueContext(result);
-    assert.ok(prompt.includes(`PUT composite selector: instrument=${selected}; PUT EDGE=0.005`));
-    assert.ok(prompt.includes(`suggested_instrument=${selected}`));
+    assert.equal(prompt.includes('PUT composite selector:'), false);
+    assert.ok(prompt.includes(`suggested_instrument=${maximum}`));
   }
 });
 
-test('production market context and quality flags ignore pure term structure but retain matched skew risk', () => {
+test('matched skew remains observable without changing the PUT EDGE score or selected contract', () => {
   const api = productionContext();
   const putName = nameAt(60, 1600, 'P');
   const callName = nameAt(60, 3000, 'C');
@@ -197,15 +200,50 @@ test('production market context and quality flags ignore pure term structure but
   assert.equal(matched.market_put_iv, 0.6);
   assert.equal(matched.market_skew, 0);
   assert.equal(matched.market_skew_matched_pairs, 1);
-  assert.equal(api.getBestCurrentBuyPutCandidate(tickers, nowMs, matched, 2500).research.skew_caution, false);
+  const baseline = api.getBestCurrentBuyPutCandidate(tickers, nowMs, matched, 2500);
+  assert.equal(baseline.selection_score, 0.006);
 
   tickers[callName] = ticker(10, 9.8, 0.06, 0.4);
   const elevated = api.buildLiveSellCallMarketContext(tickers, nowMs);
   closeTo(elevated.market_skew, 0.2);
-  assert.equal(api.getBestCurrentBuyPutCandidate(tickers, nowMs, elevated, 2500).research.skew_caution, true);
+  const withElevatedSkew = api.getBestCurrentBuyPutCandidate(tickers, nowMs, elevated, 2500);
+  assert.equal(withElevatedSkew.instrument, baseline.instrument);
+  assert.equal(withElevatedSkew.selection_score, baseline.selection_score);
 
   delete tickers[callName];
   const missing = api.buildLiveSellCallMarketContext(tickers, nowMs);
   assert.equal(missing.market_skew, null);
-  assert.equal(api.getBestCurrentBuyPutCandidate(tickers, nowMs, missing, 2500).research.skew_caution, false);
+  assert.equal(api.getBestCurrentBuyPutCandidate(tickers, nowMs, missing, 2500).selection_score, baseline.selection_score);
+});
+
+test('wide spread, elevated IV, negative OI trend and weak shock diagnostics cannot veto higher live PUT EDGE', () => {
+  const api = productionContext();
+  const lower = nameAt(60, 1900, 'P');
+  const higher = nameAt(60, 1000, 'P');
+  const entries = [[lower, ticker(12, 11.9, -0.06, 0.2)], [higher, ticker(8, 0.1, -0.06, 2)]];
+  for (const ordered of [entries, [...entries].reverse()]) {
+    for (const marketContext of [null, {
+      market_avg_spread: 0.99, market_put_iv: 2, market_skew: 0.8, market_oi_delta_24h_pct: -80,
+    }]) {
+      const tickers = Object.fromEntries(ordered);
+      const expected = api.getBestCurrentBuyPutEdgeCandidate(tickers, nowMs);
+      const actual = api.getBestCurrentBuyPutCandidate(tickers, nowMs, marketContext, 2500);
+      assert.equal(actual.instrument, higher);
+      assert.equal(actual.instrument, expected.instrument);
+      assert.equal(actual.selection_score, expected.edge_score);
+      assert.equal(actual.research.selection_score, expected.edge_score);
+    }
+  }
+});
+
+test('PUT selection preserves fractional EDGE precision without adding a second normalization or multiplier', () => {
+  const api = productionContext();
+  const score = 0.00323456789123;
+  for (const dte of [45, 60, 78]) {
+    const result = api.classifyBuyPutEdge({ score, rawScore: 0.003, dte, strike: 1600,
+      spotPrice: 2500, entryPrice: 10, askPrice: 10, bidPrice: 1, markPrice: 9, impliedVol: 2,
+      marketContext: { market_skew: 1, market_oi_delta_24h_pct: -99 } });
+    assert.equal(result.selection_score, score);
+    assert.ok(result.selection_score > 0 && result.selection_score < 0.01);
+  }
 });
