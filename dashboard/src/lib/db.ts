@@ -1227,7 +1227,9 @@ export function getSpotPricesHourly_rollup(since: string) {
 export function getBestOptionsHourly_rollup(since: string) {
   // Existing rollups omit expiry and cannot establish entry eligibility. Read
   // retained quotes instead; leave both the observations and rollups untouched.
-  return getBestOptionsBucketed(since, 60 * 60 * 1000);
+  return getBestOptionsBucketed(since, 60 * 60 * 1000).map(({ timestamp, best_put_value, best_call_value }) => ({
+    timestamp, best_put_value, best_call_value,
+  }));
 }
 
 export function getLiquidityHourly_rollup(since: string) {
