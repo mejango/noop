@@ -22,6 +22,26 @@ const BUY_PUT_EDGE_REFERENCE_DTE = 60;
 const BUY_PUT_EDGE_DTE_EXPONENT = 0.8;
 const BUY_PUT_EDGE_MIN_DTE = 45;
 const BUY_PUT_EDGE_MAX_DTE = 78;
+const SELL_CALL_EDGE_MIN_DTE = 5;
+const SELL_CALL_EDGE_MAX_DTE = 12;
+
+function optionDteSql(alias = '') {
+  const column = alias ? `${alias}.` : '';
+  return `((${column}expiry - unixepoch(${column}timestamp, 'subsec')) / 86400.0)`;
+}
+
+// Observations also retain owned and previously evaluated contracts after they
+// leave entry eligibility. Chart candidates must use the observation-time
+// entry window, independently for the maximum RAW and maximum EDGE scores.
+function optionEntryPredicate(optionType: 'P' | 'C', alias = '') {
+  const column = alias ? `${alias}.` : '';
+  const isPut = optionType === 'P';
+  return `(${column}option_type = '${optionType}' OR ${column}instrument_name LIKE '%-${optionType}')
+    AND ${column}delta BETWEEN ${isPut ? '-0.12 AND -0.02' : '0.04 AND 0.12'}
+    AND ${optionDteSql(alias)} BETWEEN ${isPut ? BUY_PUT_EDGE_MIN_DTE : SELL_CALL_EDGE_MIN_DTE} AND ${isPut ? BUY_PUT_EDGE_MAX_DTE : SELL_CALL_EDGE_MAX_DTE}
+    AND ${column}${isPut ? 'ask_price' : 'bid_price'} > 0
+    AND ${column}${isPut ? 'ask_delta_value' : 'bid_delta_value'} > 0`;
+}
 
 function getPutBudgetPortfolioValue(snapshot: {
   spot_price: number;
@@ -88,9 +108,9 @@ function prepareAll(d: Database.Database) {
         FROM options_snapshots
         WHERE timestamp > ?
           AND (
-            ((option_type = 'P' OR instrument_name LIKE '%-P') AND delta <= -0.02 AND delta >= -0.12)
+            (${optionEntryPredicate('P')})
             OR
-            ((option_type = 'C' OR instrument_name LIKE '%-C') AND delta >= 0.04 AND delta <= 0.12)
+            (${optionEntryPredicate('C')})
           )
         ORDER BY timestamp DESC
         LIMIT ?
@@ -115,11 +135,9 @@ function prepareAll(d: Database.Database) {
 
     getBestOptionsOverTime: d.prepare(`
       SELECT timestamp,
-        MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
-          AND delta <= -0.02 AND delta >= -0.12
+        MAX(CASE WHEN ${optionEntryPredicate('P')}
           THEN ask_delta_value END) as best_put_value,
-        MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
-          AND delta >= 0.04 AND delta <= 0.12
+        MAX(CASE WHEN ${optionEntryPredicate('C')}
           THEN bid_delta_value END) as best_call_value,
         MAX(CASE WHEN index_price BETWEEN 100 AND 20000 THEN index_price END) as lyra_spot
       FROM options_snapshots
@@ -137,15 +155,9 @@ function prepareAll(d: Database.Database) {
 
     getBestScoresAgg: d.prepare(`
       SELECT
-        MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
-          AND delta <= -0.02 AND delta >= -0.12
-          AND expiry IS NOT NULL
-          AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
+        MAX(CASE WHEN ${optionEntryPredicate('P')}
           THEN ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) END) as best_put_score,
-        MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
-          AND delta >= 0.04 AND delta <= 0.12
-          AND expiry IS NOT NULL
-          AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN 5 AND 12
+        MAX(CASE WHEN ${optionEntryPredicate('C')}
           THEN bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) END) as best_call_score
       FROM options_snapshots
       WHERE timestamp > ?
@@ -157,10 +169,7 @@ function prepareAll(d: Database.Database) {
         ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) as edge_score
       FROM options_snapshots
       WHERE timestamp > ?
-        AND (option_type = 'P' OR instrument_name LIKE '%-P')
-        AND delta <= -0.02 AND delta >= -0.12
-        AND expiry IS NOT NULL
-        AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
+        AND ${optionEntryPredicate('P')}
         AND abs((ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT})) - ?) < 0.000000000001
       LIMIT 1
     `),
@@ -171,10 +180,7 @@ function prepareAll(d: Database.Database) {
         bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) as edge_score
       FROM options_snapshots
       WHERE timestamp > ?
-        AND (option_type = 'C' OR instrument_name LIKE '%-C')
-        AND delta >= 0.04 AND delta <= 0.12
-        AND expiry IS NOT NULL
-        AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN 5 AND 12
+        AND ${optionEntryPredicate('C')}
         AND abs((bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT})) - ?) < 0.000001
       LIMIT 1
     `),
@@ -449,11 +455,6 @@ function prepareAll(d: Database.Database) {
       WHERE hour > ?
         AND open BETWEEN 100 AND 20000
       ORDER BY hour ASC
-    `),
-
-    getBestOptionsHourlyRollup: d.prepare(`
-      SELECT hour as timestamp, best_put_dv as best_put_value, best_call_dv as best_call_value
-      FROM options_hourly WHERE hour > ? ORDER BY hour ASC
     `),
 
     getLiquidityHourlyRollup: d.prepare(`
@@ -741,9 +742,9 @@ export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
     CROSS JOIN options_snapshots snapshots
     WHERE snapshots.timestamp = samples.sample_timestamp
       AND (
-        ((snapshots.option_type = 'P' OR snapshots.instrument_name LIKE '%-P') AND snapshots.delta BETWEEN -0.12 AND -0.02)
+        (${optionEntryPredicate('P', 'snapshots')})
         OR
-        ((snapshots.option_type = 'C' OR snapshots.instrument_name LIKE '%-C') AND snapshots.delta BETWEEN 0.04 AND 0.12)
+        (${optionEntryPredicate('C', 'snapshots')})
       )
     ORDER BY samples.bucket_epoch ASC, snapshots.instrument_name ASC
     LIMIT @point_limit
@@ -987,20 +988,21 @@ export function getBestOptionsBucketed(since: string, bucketMs: number) {
         option_type,
         instrument_name,
         delta,
+        expiry,
+        ask_price,
+        bid_price,
         ask_delta_value,
         bid_delta_value,
         index_price,
-        (CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds) * @bucket_seconds AS bucket_epoch
+        CAST(CAST(strftime('%s', timestamp) AS INTEGER) / @bucket_seconds AS INTEGER) * @bucket_seconds AS bucket_epoch
       FROM options_snapshots
       WHERE timestamp > @since
     )
     SELECT
       strftime('%Y-%m-%dT%H:%M:%SZ', bucket_epoch, 'unixepoch') AS timestamp,
-      MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
-        AND delta <= -0.02 AND delta >= -0.12
+      MAX(CASE WHEN ${optionEntryPredicate('P')}
         THEN ask_delta_value END) AS best_put_value,
-      MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
-        AND delta >= 0.04 AND delta <= 0.12
+      MAX(CASE WHEN ${optionEntryPredicate('C')}
         THEN bid_delta_value END) AS best_call_value,
       AVG(CASE WHEN index_price BETWEEN 100 AND 20000 THEN index_price END) AS lyra_spot
     FROM source
@@ -1223,9 +1225,9 @@ export function getSpotPricesHourly_rollup(since: string) {
 }
 
 export function getBestOptionsHourly_rollup(since: string) {
-  return getStmts().getBestOptionsHourlyRollup.all(since) as {
-    timestamp: string; best_put_value: number | null; best_call_value: number | null;
-  }[];
+  // Existing rollups omit expiry and cannot establish entry eligibility. Read
+  // retained quotes instead; leave both the observations and rollups untouched.
+  return getBestOptionsBucketed(since, 60 * 60 * 1000);
 }
 
 export function getLiquidityHourly_rollup(since: string) {
