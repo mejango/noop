@@ -248,6 +248,30 @@ const sendTelegram = async (message) => {
   }
 };
 
+const formatAdvisoryRunNotification = ({ advisoryId, trigger, attempt, retryCount = 0 }) => {
+  const extraReview = attempt > 1;
+  const reason = extraReview
+    ? 'Additional review: market data or positions changed during deliberation.'
+    : trigger === 'retry'
+    ? `Retry after failed or deferred advisory (${retryCount} prior failure${retryCount === 1 ? '' : 's'}).`
+    : 'Normal schedule.';
+  return [
+    extraReview ? '📋 *ADVISORY EXTRA REVIEW*' : '📋 *ADVISORY STARTED*',
+    reason,
+    `Full AI review: ${attempt}`,
+    `Run: \`${advisoryId}\``,
+  ].join('\n');
+};
+
+const notifyAdvisoryRun = async (details) => {
+  try {
+    await sendTelegram(formatAdvisoryRunNotification(details));
+  } catch (e) {
+    // Notification delivery must not fail or retry an otherwise valid advisory.
+    console.log('📱 Advisory notification failed:', e.message);
+  }
+};
+
 const ORDER_NOTIFICATION_LABELS = Object.freeze({
   buy_put: Object.freeze({ order: 'BUY PUT', executed: 'BOUGHT PUT' }),
   sell_put: Object.freeze({ order: 'SELL PUT', executed: 'SOLD PUT' }),
@@ -12997,7 +13021,7 @@ const readFreshTradingAdvisorySnapshot = () => readAdvisoryMarketSnapshot({
   fetchTickers: expiry => fetchTickersByExpiry(expiry, { throwOnError: true }),
 });
 
-const generateTradingAdvisory = async () => {
+const generateTradingAdvisory = async ({ trigger = 'scheduled' } = {}) => {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.log('📋 Advisory: skipped — no ANTHROPIC_API_KEY');
     return null;
@@ -13015,7 +13039,12 @@ const generateTradingAdvisory = async () => {
     console.log(`📋 Advisory ${advisoryId}: starting deliberation with fresh market inputs...`);
     return await runReviewedPublication({
       readSnapshot: readFreshTradingAdvisorySnapshot,
-      review: snapshot => buildTradingAdvisoryDraft(snapshot, advisoryId),
+      review: (snapshot, { attempt }) => {
+        // Notify only actual reviews, after a valid snapshot and the run mutex.
+        // Keep delivery independent of model work and publication success.
+        void notifyAdvisoryRun({ advisoryId, trigger, attempt, retryCount: botData.advisoryRetryCount || 0 });
+        return buildTradingAdvisoryDraft(snapshot, advisoryId);
+      },
       publish: publishTradingAdvisoryDraft,
       maxAttempts: 2,
       onRefresh: ({ comparison }) => console.log(`📋 Advisory ${advisoryId}: refreshing all reviews before publication — ${comparison.reason}`),
@@ -13599,7 +13628,7 @@ const runBot = async () => {
       ) {
         const retryCount = botData.advisoryRetryCount || 0;
         console.log(`📋 Advisory retry due now (${retryCount} prior failure${retryCount === 1 ? '' : 's'}) — reattempting`);
-        generateTradingAdvisory().catch(e => {
+        generateTradingAdvisory({ trigger: 'retry' }).catch(e => {
           console.log(`📋 Scheduled advisory retry failed (non-fatal): ${e.message}`);
         });
       }
@@ -13622,7 +13651,7 @@ const runBot = async () => {
             _wikiIngestInFlight = false;
           }
           // Generate trading advisory alongside journal
-          try { await generateTradingAdvisory(); }
+          try { await generateTradingAdvisory({ trigger: 'scheduled' }); }
           catch (e) { console.log('📋 Advisory failed (non-fatal):', e.message); }
           // Review hypotheses and extract lessons on the journal cadence
           await reviewExpiredHypotheses();

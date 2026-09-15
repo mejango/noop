@@ -21,14 +21,20 @@ The broad spread headline was a separate data-scope problem: a mean over the lat
 
 The final check deliberately compares availability and position identity, not every numeric price movement. It does not make a multi-minute assessment tick-current, and it does not replace the executor's fresh economics, margin and position checks. Under unstable quotes, the extra review can increase latency and model usage; a second availability change leaves the existing rulebook in place.
 
+## Telegram run notices
+
+Each full advisory review sends a start notice to the existing Telegram chat. Notices distinguish the normal eight-hour schedule, retries after failed/deferred advisories, and additional reviews after market data or position changes. The run ID and review number let the two passes be grouped together.
+
+Notifications start after a valid initial snapshot and the advisory mutex check. Missing API keys, an already-running advisory, and failed initial data reads do not send a notice. Telegram delivery runs independently: a delivery failure cannot abort publication or cause another AI review. These notices do not change scheduling or add model calls.
+
 ## Data and strategy scope
 
 V2 only. No migrations, historical row repairs, historical score backfills, or changes to PUT/CALL formulas, ranking, entry bounds, execution price gates or cooldowns. Normal advisory publication still retires the prior active rules and appends new rules and journal entries, now atomically. Existing misleading historical advisory text remains unchanged.
 
 ## Validation
 
-- 54 focused tests exercise actual quote/context/formatter declarations, strict fetch adapters, snapshot coverage, publication orchestration, the real advisory wrapper and publisher, and SQLite rollback after a mid-publication journal failure.
-- Full suite: 1,078 passed (481 trading, 551 Node test cases, 46 backtest cases).
+- 57 focused tests exercise actual quote/context/formatter declarations, strict fetch adapters, snapshot coverage, publication orchestration, the real advisory wrapper and publisher, Telegram run notices and delivery failures, and SQLite rollback after a mid-publication journal failure.
+- Full suite: 1,081 passed (481 trading, 554 Node test cases, 46 backtest cases).
 - Dashboard production build passed, including TypeScript validation.
 - Read-only replay of the three captured November PUT contracts: the initial absent score becomes null; recovered quotes produce 0.003028 for the 1600 PUT; the first draft is discarded and only the second review publishes. This replay covers those captured contracts, not full-exchange historical coverage.
 

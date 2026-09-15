@@ -24,23 +24,35 @@ function snapshot({ ask = 20, putName = put, minute = 0, positions = [] } = {}) 
     quoteAvailability: summarizeAdvisoryQuotes(tickerMap, { nowMs, inputTimestamp: marketTimestamp, expectedInstruments: instruments }) };
 }
 
-function productionFlow(reads, { storageFailure = false } = {}) {
-  const reviews = [], publications = [], saves = [];
-  const botData = { lastAdvisorySuccess: 1, advisoryRetryCount: 0 };
+function productionFlow(reads, { storageFailure = false, notificationFailure = null,
+  retryCount = 0, missingApiKey = false, initiallyInFlight = false } = {}) {
+  const reviews = [], publications = [], saves = [], notifications = [], events = [];
+  let snapshotReads = 0;
+  const botData = { lastAdvisorySuccess: 1, advisoryRetryCount: retryCount };
   const bindings = {
-    process: { env: { ANTHROPIC_API_KEY: 'fixture' } },
+    process: { env: missingApiKey ? {} : { ANTHROPIC_API_KEY: 'fixture' } },
     console: { log() {} }, botData,
+    sendTelegram: message => {
+      notifications.push(message);
+      events.push('notification');
+      if (notificationFailure === 'throw') throw new Error('fixture Telegram synchronous failure');
+      if (notificationFailure === 'reject') return Promise.reject(new Error('fixture Telegram rejected'));
+      if (notificationFailure === 'pending') return new Promise(() => {});
+      return Promise.resolve();
+    },
     persistCycleState: () => saves.push(structuredClone(botData)),
     getAdvisoryRetryDelayMs: n => n * 60000,
     selectAssessmentText: (a, b) => a || b,
     runReviewedPublication,
     readFreshTradingAdvisorySnapshot: async () => {
+      snapshotReads++;
       const value = reads.shift();
       if (value instanceof Error) throw value;
       assert.ok(value, 'fixture supplies every refresh');
       return value;
     },
     buildTradingAdvisoryDraft: async (input, advisoryId) => {
+      events.push('review');
       reviews.push(input);
       const assessment = `PUT quote status ${input.quoteAvailability.put.status}`;
       return { advisoryId, allRules: [{ action: 'buy_put' }], finalAgenda: { assessment }, primaryAgenda: { assessment },
@@ -53,8 +65,9 @@ function productionFlow(reads, { storageFailure = false } = {}) {
       publications.push(args);
     } },
   };
-  const source = `let _advisoryInFlight = false;\n${declaration(SCRIPT_SOURCE, 'publishTradingAdvisoryDraft')}\n${declaration(SCRIPT_SOURCE, 'generateTradingAdvisory')}\nreturn { run: generateTradingAdvisory, inFlight: () => _advisoryInFlight };`;
-  return { ...vm.compileFunction(source, Object.keys(bindings))(...Object.values(bindings)), botData, reviews, publications, saves };
+  const source = `let _advisoryInFlight = ${Boolean(initiallyInFlight)};\n${declaration(SCRIPT_SOURCE, 'formatAdvisoryRunNotification')}\n${declaration(SCRIPT_SOURCE, 'notifyAdvisoryRun')}\n${declaration(SCRIPT_SOURCE, 'publishTradingAdvisoryDraft')}\n${declaration(SCRIPT_SOURCE, 'generateTradingAdvisory')}\nreturn { run: generateTradingAdvisory, inFlight: () => _advisoryInFlight };`;
+  return { ...vm.compileFunction(source, Object.keys(bindings))(...Object.values(bindings)),
+    botData, reviews, publications, saves, notifications, events, snapshotReads: () => snapshotReads };
 }
 
 test('actual advisory wrapper publishes once with separate input and final-check clocks', async () => {
@@ -74,6 +87,12 @@ test('actual advisory wrapper publishes once with separate input and final-check
   assert.equal(f.botData.advisoryRetryCount, 0);
   assert.ok(f.botData.lastAdvisorySuccess > 1);
   assert.equal(f.inFlight(), false);
+  assert.equal(f.notifications.length, 1);
+  assert.match(f.notifications[0], /ADVISORY STARTED/);
+  assert.match(f.notifications[0], /Normal schedule/);
+  assert.match(f.notifications[0], /Full AI review: 1/);
+  assert.ok(f.notifications[0].includes(`Run: \`${result.advisoryId}\``));
+  assert.deepEqual(f.events, ['notification', 'review'], 'Notify immediately before starting model work');
 });
 
 test('quotes recovering during review rerun the full draft and publish only the refreshed assessment', async () => {
@@ -87,6 +106,14 @@ test('quotes recovering during review rerun the full draft and publish only the 
   assert.match(entries.find(e => e.entry_type === 'advisory_main').content, /PUT quote status available/);
   assert.doesNotMatch(entries.find(e => e.entry_type === 'advisory_main').content, /quotes_unavailable/);
   assert.equal(JSON.parse(entries.find(e => e.entry_type === 'advisory_context').content).publication.review_attempts, 2);
+  assert.equal(f.notifications.length, 2);
+  assert.match(f.notifications[0], /ADVISORY STARTED/);
+  assert.match(f.notifications[1], /ADVISORY EXTRA REVIEW/);
+  assert.match(f.notifications[1], /Additional review: market data or positions changed/);
+  assert.match(f.notifications[1], /Full AI review: 2/);
+  const runLine = text => text.split('\n').find(line => line.startsWith('Run:'));
+  assert.equal(runLine(f.notifications[0]), runLine(f.notifications[1]), 'Extra model work belongs to the same advisory run');
+  assert.deepEqual(f.events, ['notification', 'review', 'notification', 'review']);
 });
 
 test('second quote change aborts without writing rules or assessment and schedules the existing retry', async () => {
@@ -102,11 +129,49 @@ test('second quote change aborts without writing rules or assessment and schedul
 
 test('initial and final refresh errors preserve successful state and release the advisory mutex', async () => {
   for (const reads of [[new Error('refresh failed')], [snapshot(), new Error('refresh failed')]]) {
+    const expectedNotifications = reads.length - 1;
     const f = productionFlow(reads);
     await assert.rejects(f.run(), /refresh failed/);
     assert.equal(f.publications.length, 0);
     assert.equal(f.botData.lastAdvisorySuccess, 1);
     assert.equal(f.botData.advisoryRetryCount, 1);
+    assert.equal(f.inFlight(), false);
+    assert.equal(f.notifications.length, expectedNotifications, 'No notification before a valid initial snapshot');
+  }
+});
+
+test('actual retry run announces the failed or deferred advisory and prior failure count', async () => {
+  const f = productionFlow([snapshot(), snapshot({ minute: 4 })], { retryCount: 2 });
+  await f.run({ trigger: 'retry' });
+  assert.equal(f.notifications.length, 1);
+  assert.match(f.notifications[0], /ADVISORY STARTED/);
+  assert.match(f.notifications[0], /Retry after failed or deferred advisory \(2 prior failures\)/);
+  assert.doesNotMatch(f.notifications[0], /Normal schedule|ADVISORY EXTRA REVIEW/);
+  assert.equal(f.publications.length, 1);
+});
+
+test('missing API key and an occupied advisory mutex skip notifications, reads and model work', async () => {
+  for (const options of [{ missingApiKey: true }, { initiallyInFlight: true }]) {
+    const f = productionFlow([], options);
+    assert.equal(await f.run(), null);
+    assert.equal(f.notifications.length, 0);
+    assert.equal(f.snapshotReads(), 0);
+    assert.equal(f.reviews.length, 0);
+    assert.equal(f.publications.length, 0);
+    assert.equal(f.botData.lastAdvisorySuccess, 1);
+    assert.equal(f.botData.advisoryRetryCount, 0);
+  }
+});
+
+test('Telegram exceptions, rejected delivery and slow delivery cannot prevent successful publication', async () => {
+  for (const notificationFailure of ['throw', 'reject', 'pending']) {
+    const f = productionFlow([snapshot(), snapshot({ minute: 4 })], { notificationFailure });
+    const result = await f.run();
+    assert.equal(result.rulesCount, 1, notificationFailure);
+    assert.equal(f.notifications.length, 1);
+    assert.equal(f.publications.length, 1);
+    assert.equal(f.botData.lastAdvisoryError, null);
+    assert.equal(f.botData.advisoryRetryCount, 0);
     assert.equal(f.inFlight(), false);
   }
 });
