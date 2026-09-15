@@ -133,6 +133,9 @@ const {
 } = require('./bot/put-score');
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
 const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
+const { summarizeAdvisoryQuotes, candidateSpreadPct } = require('./bot/advisory-quotes');
+const { readAdvisoryMarketSnapshot } = require('./bot/advisory-market-snapshot');
+const { runReviewedPublication } = require('./bot/advisory-publication');
 
 const encoder = new AbiCoder();
 
@@ -1623,16 +1626,22 @@ const fetchFundingRates = async () => {
 
 // Fetch option details
 // Fetch all tickers for a given expiry date (batch call — returns AMM prices)
-const fetchTickersByExpiry = async (expiryDate) => {
+const fetchTickersByExpiry = async (expiryDate, { throwOnError = false } = {}) => {
   try {
     const response = await axios.post(API_URL.GET_TICKERS, {
       instrument_type: 'option',
       currency: 'ETH',
       expiry_date: expiryDate,
-    });
-    if (!response.data.result?.tickers) {
+    }, throwOnError ? { timeout: 15000 } : undefined);
+    if (!response.data.result?.tickers || typeof response.data.result.tickers !== 'object'
+      || Array.isArray(response.data.result.tickers)) {
+      if (throwOnError) throw new Error(`Ticker response unavailable for ${expiryDate}`);
       console.error(`No tickers found for expiry ${expiryDate}`);
       return {};
+    }
+    if (throwOnError && (response.data.error || Object.values(response.data.result.tickers).some(ticker =>
+      !ticker || typeof ticker !== 'object' || Array.isArray(ticker)))) {
+      throw new Error(`Malformed ticker response for ${expiryDate}`);
     }
     const receivedAt = new Date().toISOString();
     return Object.fromEntries(Object.entries(response.data.result.tickers).map(([name, ticker]) => (
@@ -1641,6 +1650,7 @@ const fetchTickersByExpiry = async (expiryDate) => {
   } catch (error) {
     const status = error.response?.status;
     console.error(`Error fetching tickers for expiry ${expiryDate}: ${error.message} | status: ${status || 'N/A'}${status === 429 ? ' (RATE LIMITED)' : ''}`);
+    if (throwOnError) throw error;
     return {};
   }
 };
@@ -1808,10 +1818,8 @@ const getTickerImpliedVol = (ticker) => finiteOrNull(
 );
 
 const getTickerSpreadPct = (ticker) => {
-  const bid = finiteOrNull(ticker?.b);
-  const ask = finiteOrNull(ticker?.a);
-  const mark = finiteOrNull(ticker?.M);
-  return bid != null && ask != null && mark > 0 ? (ask - bid) / mark : null;
+  const pct = candidateSpreadPct({ askPrice: ticker?.a, bidPrice: ticker?.b, markPrice: ticker?.M });
+  return pct == null ? null : pct / 100;
 };
 
 const getLatestHourlyDeltaPct = (rows = [], lookbackHours = 24, nowMs = Date.now()) => {
@@ -2339,9 +2347,16 @@ const buildRollingOptionValueContext = ({
   openRestingOrders = [],
   currentTickTimestamp = null,
   spotPrice = null,
+  expectedInstruments = null,
+  quoteAvailability = null,
+  nowMs = Date.now(),
 }) => {
   const before = currentTickTimestamp || new Date().toISOString();
-  const nowMs = Date.now();
+  const quoteSummary = quoteAvailability || summarizeAdvisoryQuotes(tickerMap, {
+    nowMs, inputTimestamp: currentTickTimestamp, expectedInstruments,
+    putDeltaRange: PUT_DELTA_RANGE, putDteRange: BUY_PUT_ADVISORY_DTE_RANGE,
+    callDeltaRange: CALL_DELTA_RANGE, callDteRange: CALL_EXPIRATION_RANGE,
+  });
   const since = new Date(nowMs - ADVISORY_OPTION_VALUE_WINDOW_DAYS * 86400000).toISOString();
   let marketOiDelta24hPct = null;
   if (db && typeof db.getOpenInterestHourly === 'function') {
@@ -2420,12 +2435,12 @@ const buildRollingOptionValueContext = ({
 
   const priorScores = priorSamples.map((row) => Number(row.score)).filter((score) => score > 0);
   const priorBestScore = priorScores.length > 0 ? Math.max(...priorScores) : null;
-  const currentScore = Number(currentPutEdge?.edge_score || 0);
-  const currentVsPriorBestPct = priorBestScore > 0 ? (currentScore / priorBestScore) * 100 : null;
+  const currentScore = currentPutEdge ? finiteOrNull(currentPutEdge.edge_score) : null;
+  const currentVsPriorBestPct = currentScore != null && priorBestScore > 0 ? (currentScore / priorBestScore) * 100 : null;
   const percentile = currentScore > 0 && priorScores.length > 0
     ? (priorScores.filter((score) => score <= currentScore).length / priorScores.length) * 100
     : null;
-  const freshBest = currentScore > 0 && priorBestScore > 0 && currentScore > priorBestScore;
+  const freshBest = currentScore == null ? null : currentScore > 0 && priorBestScore > 0 && currentScore > priorBestScore;
   const priorCallScores = priorCallSamples.map((row) => Number(row.score)).filter((score) => score > 0);
   const priorCallBestScore = priorCallScores.length > 0 ? Math.max(...priorCallScores) : null;
   const currentCallScore = currentCall ? finiteOrNull(currentCall.selection_score) : null;
@@ -2435,7 +2450,7 @@ const buildRollingOptionValueContext = ({
   const callPercentile = currentCallScore > 0 && priorCallScores.length > 0
     ? (priorCallScores.filter((score) => score <= currentCallScore).length / priorCallScores.length) * 100
     : null;
-  const callFreshBest = currentCallScore > 0 && priorCallBestScore > 0 && currentCallScore > priorCallBestScore;
+  const callFreshBest = currentCallScore == null ? null : currentCallScore > 0 && priorCallBestScore > 0 && currentCallScore > priorCallBestScore;
   const callTrend1hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 1);
   const callTrend6hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 6);
   const callTrend24hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 24);
@@ -2470,6 +2485,23 @@ const buildRollingOptionValueContext = ({
     priorBestScore,
     spotAction,
   });
+  if (currentScore == null) {
+    Object.assign(repricingLag, {
+      is_detected: null,
+      current_vs_prior_best_pct: null,
+      score_trend_1h_pct: null,
+      reason: `PUT value comparison unavailable: ${quoteSummary.put.reason}`,
+    });
+    Object.assign(recentRelativeValue, {
+      is_detected: null,
+      samples: null,
+      percentile: null,
+      current_vs_recent_avg_pct: null,
+      current_vs_recent_best_pct: null,
+      current_vs_rolling_best_pct: null,
+      reason: `PUT value comparison unavailable: ${quoteSummary.put.reason}`,
+    });
+  }
   const repricingLagSignal = Boolean(!freshBest && repricingLag.is_detected);
   const recentRelativeValueSignal = Boolean(!freshBest && !repricingLagSignal && recentRelativeValue.is_detected);
   const actionSignal = freshBest
@@ -2489,7 +2521,7 @@ const buildRollingOptionValueContext = ({
   const suggestedLimitPrice = currentPut && targetScore > 0
     ? floorOptionPriceCents(getBuyPutPriceForEdgeScore(Math.abs(currentPut.delta), targetScore, currentPut.dte))
     : null;
-  const executionStyle = repricingLagSignal
+  const executionStyle = currentScore == null ? 'unavailable' : repricingLagSignal
     ? 'spot_lag_near_live_limit'
     : spotAction.state === 'downward'
     ? 'less_patient_limit'
@@ -2499,6 +2531,7 @@ const buildRollingOptionValueContext = ({
 
   return {
     window_days: ADVISORY_OPTION_VALUE_WINDOW_DAYS,
+    quote_availability: quoteSummary,
     buy_put_filters: {
       delta_range: PUT_DELTA_RANGE,
       dte_range: BUY_PUT_ADVISORY_DTE_RANGE,
@@ -2514,6 +2547,7 @@ const buildRollingOptionValueContext = ({
       edge_score: `raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}`,
     },
     put_value_context: {
+      availability: quoteSummary.put,
       comparison_basis: 'maximum_eligible_put_edge_per_observation',
       current_score: roundForAdvisory(currentScore, 6),
       prior_window_best_score: roundForAdvisory(priorBestScore, 6),
@@ -2532,7 +2566,9 @@ const buildRollingOptionValueContext = ({
         bid_price: roundForAdvisory(currentPutEdge.bid_price, 4),
         mark_price: roundForAdvisory(currentPutEdge.mark_price, 4),
         ask_amount: roundForAdvisory(currentPutEdge.ask_amount, 2),
-        spread_pct: roundForAdvisory(currentPutEdge.mark_price > 0 ? ((currentPutEdge.ask_price - currentPutEdge.bid_price) / currentPutEdge.mark_price) * 100 : null, 2),
+        spread_pct: roundForAdvisory(candidateSpreadPct({ askPrice: currentPutEdge.ask_price, bidPrice: currentPutEdge.bid_price, markPrice: currentPutEdge.mark_price }), 2),
+        spread_basis: 'bid_ask_difference_over_mark',
+        quote_received_at: tickerMap?.[currentPutEdge.instrument]?.quote_received_at || null,
         strike: currentPutEdge.strike,
         expiry: currentPutEdge.expiry,
         dte: roundForAdvisory(currentPutEdge.dte, 1),
@@ -2546,7 +2582,9 @@ const buildRollingOptionValueContext = ({
         bid_price: roundForAdvisory(currentPut.bid_price, 4),
         mark_price: roundForAdvisory(currentPut.mark_price, 4),
         ask_amount: roundForAdvisory(currentPut.ask_amount, 2),
-        spread_pct: roundForAdvisory(currentPut.mark_price > 0 ? ((currentPut.ask_price - currentPut.bid_price) / currentPut.mark_price) * 100 : null, 2),
+        spread_pct: roundForAdvisory(candidateSpreadPct({ askPrice: currentPut.ask_price, bidPrice: currentPut.bid_price, markPrice: currentPut.mark_price }), 2),
+        spread_basis: 'bid_ask_difference_over_mark',
+        quote_received_at: tickerMap?.[currentPut.instrument]?.quote_received_at || null,
         strike: currentPut.strike,
         expiry: currentPut.expiry,
         dte: roundForAdvisory(currentPut.dte, 1),
@@ -2575,6 +2613,7 @@ const buildRollingOptionValueContext = ({
       samples: priorScores.length,
     },
     call_value_context: {
+      availability: quoteSummary.call,
       current_score: roundForAdvisory(currentCallScore, 2),
       prior_window_best_score: roundForAdvisory(priorCallBestScore, 2),
       current_vs_prior_best_pct: roundForAdvisory(currentCallVsPriorBestPct, 2),
@@ -2622,7 +2661,9 @@ const buildRollingOptionValueContext = ({
         mark_price: roundForAdvisory(currentCall.mark_price, 4),
         bid_amount: roundForAdvisory(currentCall.bid_amount, 2),
         ask_amount: roundForAdvisory(currentCall.ask_amount, 2),
-        spread_pct: roundForAdvisory(currentCall.mark_price > 0 ? ((currentCall.ask_price - currentCall.bid_price) / currentCall.mark_price) * 100 : null, 2),
+        spread_pct: roundForAdvisory(candidateSpreadPct({ askPrice: currentCall.ask_price, bidPrice: currentCall.bid_price, markPrice: currentCall.mark_price }), 2),
+        spread_basis: 'bid_ask_difference_over_mark',
+        quote_received_at: tickerMap?.[currentCall.instrument]?.quote_received_at || null,
         strike: currentCall.strike,
         expiry: currentCall.expiry,
         dte: roundForAdvisory(currentCall.dte, 1),
@@ -2658,8 +2699,8 @@ const buildRollingOptionValueContext = ({
       target_score: roundForAdvisory(targetScore, 6),
       suggested_instrument: currentPut?.instrument || null,
       suggested_limit_price: roundForAdvisory(suggestedLimitPrice, 4),
-      score_nudge_pct: roundForAdvisory((scoreNudge - 1) * 100, 2),
-      explanation: requiresDecision
+      score_nudge_pct: currentScore == null ? null : roundForAdvisory((scoreNudge - 1) * 100, 2),
+      explanation: currentScore == null ? `PUT value review unavailable: ${quoteSummary.put.reason}` : requiresDecision
         ? actionSignal === 'spot_drop_option_repricing_lag'
           ? 'Current buy-put value score is locally spiking while spot is dropping, indicating a possible option-repricing lag before asks reset. This requires explicit review, not automatic execution.'
           : actionSignal === 'recent_relative_value'
@@ -2687,23 +2728,29 @@ const formatRollingOptionValueContext = (context) => {
   const callPrior = call.prior_window_best_detail;
   const callResearch = call.research_context || {};
   const callMarket = call.market_context || {};
+  const availability = context.quote_availability || {};
+  const formatAvailability = (label, value = {}) => `${label} quote availability: ${value.status || 'unknown'}; DTE/delta eligible=${value.in_dte_delta_count ?? 'n/a'}; positive ${value.quote_side || 'quote'}=${value.quoted_count ?? 'n/a'}; missing quotes=${value.missing_quote_count ?? 'n/a'}; coverage=${value.coverage_status || 'unknown'}; reason=${value.reason || 'not recorded'}.`;
+  const formatDetection = value => value == null ? 'unavailable' : value ? 'yes' : 'no';
   return [
+    `Quote input: tick=${availability.input_timestamp || 'unknown'}; received=${availability.quote_received_at_oldest || 'unknown'} through ${availability.quote_received_at_latest || 'unknown'}; evaluated=${availability.evaluated_at || 'unknown'}. Missing current quotes mean EDGE is unavailable, not zero; no relative-value conclusion follows from missing quotes.`,
+    formatAvailability('PUT', put.availability),
     `Buy-put filters: delta ${JSON.stringify(context.buy_put_filters?.delta_range)}; DTE ${JSON.stringify(context.buy_put_filters?.dte_range)}; raw_score=${context.buy_put_filters?.raw_score}; edge_score=${context.buy_put_filters?.edge_score}.`,
-    `Current PUT EDGE: ${put.current_score ?? 'n/a'}${detail ? ` (raw=${detail.raw_score ?? 'n/a'}, ${detail.instrument}, delta=${detail.delta}, ask=$${detail.ask_price}, spread=${detail.spread_pct ?? 'n/a'}%, DTE=${detail.dte})` : ''}.`,
+    `Current PUT EDGE: ${put.current_score ?? 'unavailable'}${detail ? ` (raw=${detail.raw_score ?? 'n/a'}, ${detail.instrument}, delta=${detail.delta}, ask=$${detail.ask_price}, two-sided spread/mark=${detail.spread_pct ?? 'n/a'}%, DTE=${detail.dte}, quote=${detail.quote_received_at || 'unknown'})` : ''}.`,
     `Prior ${context.window_days}d best PUT EDGE: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (raw=${prior.raw_score ?? 'n/a'}, ${prior.instrument} at ${prior.timestamp})` : ''}.`,
-    `Current PUT vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${put.is_strict_fresh_best ? 'yes' : 'no'}; samples=${put.samples}.`,
+    `Current PUT vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${formatDetection(put.is_strict_fresh_best)}; samples=${put.samples}.`,
     `PUT score trend: 1h=${put.trend_1h_pct ?? 'n/a'}%, 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
     `PUT EDGE selector: instrument=${selectedPut?.instrument || 'n/a'}; live-ask PUT EDGE=${selectedPut?.put_edge_score ?? 'n/a'}; selection_score=${putResearch.selection_score ?? 'n/a'}; formula=${putResearch.reason || 'n/a'}.`,
     `PUT crash scenarios (informational, not ranking): intrinsic payoff per premium dollar at 30/40/50% spot declines=${JSON.stringify(putResearch.edge_components?.shock_payoff_multiples || {})}. These are expiration payoffs, not predicted resale prices during an earlier crash.`,
     `Sell-call filters: delta ${JSON.stringify(context.sell_call_filters?.delta_range)}; DTE ${JSON.stringify(context.sell_call_filters?.dte_range)}; raw_score=${context.sell_call_filters?.raw_score}; edge_score=${context.sell_call_filters?.edge_score}.`,
-    `Current CALL EDGE: ${call.current_score ?? 'n/a'}${callDetail ? ` (raw=${callDetail.raw_score ?? 'n/a'}, ${callDetail.instrument}, delta=${callDetail.delta}, bid=$${callDetail.bid_price}, DTE=${callDetail.dte})` : ''}.`,
+    formatAvailability('CALL', call.availability),
+    `Current CALL EDGE: ${call.current_score ?? 'unavailable'}${callDetail ? ` (raw=${callDetail.raw_score ?? 'n/a'}, ${callDetail.instrument}, delta=${callDetail.delta}, bid=$${callDetail.bid_price}, two-sided spread/mark=${callDetail.spread_pct ?? 'n/a'}%, DTE=${callDetail.dte}, quote=${callDetail.quote_received_at || 'unknown'})` : ''}.`,
     `Prior ${context.window_days}d best CALL EDGE: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
-    `Current CALL vs prior best: ${call.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${call.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${call.is_strict_fresh_best ? 'yes' : 'no'}; samples=${call.samples ?? 0}.`,
+    `Current CALL vs prior best: ${call.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${call.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${formatDetection(call.is_strict_fresh_best)}; samples=${call.samples ?? 0}.`,
     `CALL score trend: 1h=${call.trend_1h_pct ?? 'n/a'}%, 6h=${call.trend_6h_pct ?? 'n/a'}%, 24h=${call.trend_24h_pct ?? 'n/a'}%.`,
     `CALL market context (not part of CALL EDGE): avg_spread=${callMarket.market_avg_spread_pct ?? 'n/a'}%; best_put_score=${callMarket.market_best_put_score ?? 'n/a'}; matched-expiry/delta skew=${callMarket.put_call_iv_skew_pct ?? 'n/a'}% (${callMarket.put_call_iv_skew_matched_pairs ?? 0} matched puts); oi_24h=${callMarket.market_oi_delta_24h_pct ?? 'n/a'}%; pc_oi=${callMarket.market_pc_oi ?? 'n/a'}.`,
     `CALL EDGE normalization: edge_score=${callResearch.selection_score ?? 'n/a'}; raw_score=${callResearch.edge_components?.raw_score ?? 'n/a'}; DTE=${callResearch.edge_components?.dte ?? 'n/a'}; factor=${callResearch.edge_components?.normalization_factor ?? 'n/a'}; formula=${callResearch.reason || 'n/a'}.`,
-    `Spot-lag repricing check: detected=${lag.is_detected ? 'yes' : 'no'}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%; spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%; near_best=${lag.current_vs_prior_best_pct ?? 'n/a'}%; reason=${lag.reason || 'n/a'}.`,
-    `Recent-relative value check: detected=${recent.is_detected ? 'yes' : 'no'}; lookback=${recent.lookback_hours ?? 'n/a'}h; samples=${recent.samples ?? 0}; percentile=${recent.percentile ?? 'n/a'}; vs_recent_avg=${recent.current_vs_recent_avg_pct ?? 'n/a'}%; vs_rolling_best=${recent.current_vs_rolling_best_pct ?? 'n/a'}%; reason=${recent.reason || 'n/a'}.`,
+    `Spot-lag repricing check: detected=${formatDetection(lag.is_detected)}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%; spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%; near_best=${lag.current_vs_prior_best_pct ?? 'n/a'}%; reason=${lag.reason || 'n/a'}.`,
+    `Recent-relative value check: detected=${formatDetection(recent.is_detected)}; lookback=${recent.lookback_hours ?? 'n/a'}h; samples=${recent.samples ?? 'n/a'}; percentile=${recent.percentile ?? 'n/a'}; vs_recent_avg=${recent.current_vs_recent_avg_pct ?? 'n/a'}%; vs_rolling_best=${recent.current_vs_rolling_best_pct ?? 'n/a'}%; reason=${recent.reason || 'n/a'}.`,
     `Put budget: remaining=$${budget.remaining ?? 'n/a'}; active_buy_put_rules=${budget.active_buy_put_rules ?? 0}; blocking_buy_put_actions=${budget.blocking_buy_put_actions ?? 0}; working_buy_put_actions=${budget.working_buy_put_actions ?? 0}; resting_buy_put_orders=${budget.resting_buy_put_orders ?? 0}.`,
     `Spot price action: ${spotAction.state || 'unknown'}${spotAction.slope_pct_6h != null ? ` (${spotAction.slope_pct_6h}% over recent 6h)` : ''}; reason=${spotAction.reason || 'n/a'}.`,
     `Buy-put review: signal=${action.signal || 'none'}; requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; supports_buy_put_review=${action.supports_buy_put_review ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_instrument=${action.suggested_instrument || 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
@@ -3291,16 +3338,17 @@ const fetchSubaccount = async ({ forObservation = false } = {}) => {
 };
 
 // Fetch all instruments once and filter for both strategies
-const fetchAndFilterInstruments = async (spotPrice) => {
+const fetchAndFilterInstruments = async (spotPrice, { throwOnError = false } = {}) => {
   try {
     console.log('🔍 Fetching all instruments...');
     const response = await axios.post(API_URL.GET_INSTRUMENTS, {
       currency: 'ETH',
       expired: false,
       instrument_type: 'option'
-    });
+    }, throwOnError ? { timeout: 15000 } : undefined);
 
     if (!response.data.result) {
+      if (throwOnError) throw new Error('Instrument response unavailable');
       console.log('No instruments found');
       return { putCandidates: [], callCandidates: [] };
     }
@@ -3342,6 +3390,7 @@ const fetchAndFilterInstruments = async (spotPrice) => {
   } catch (error) {
     const status = error.response?.status;
     console.error(`Error fetching instruments: ${error.message} | status: ${status || 'N/A'}${status === 429 ? ' (RATE LIMITED)' : ''}`);
+    if (throwOnError) throw error;
     return { putCandidates: [], callCandidates: [] };
   }
 };
@@ -5555,22 +5604,7 @@ const generateJournalEntries = async (tickSummary, botData) => {
       options_market: {
         distribution: optionsDistribution,
         avg_call_premium_7d: avgCallPremium?.avg_premium ?? null,
-        market_quality: (() => {
-          try {
-            if (!marketQuality.length) return null;
-            const byType = {};
-            for (const r of marketQuality) {
-              const key = r.option_type === 'P' ? 'put' : 'call';
-              byType[key] = {
-                instruments_in_range: r.count,
-                avg_spread_pct: r.avg_spread != null ? +(r.avg_spread * 100).toFixed(2) : null,
-                avg_implied_vol_pct: r.avg_iv != null ? +(r.avg_iv * 100).toFixed(1) : null,
-                avg_depth: r.avg_depth != null ? +r.avg_depth.toFixed(2) : null,
-              };
-            }
-            return byType;
-          } catch { return null; }
-        })(),
+        broad_quote_snapshot: summarizeMarketQualitySnapshotForLLM(marketQuality),
       },
       pool_breakdown: (() => {
         try {
@@ -6031,15 +6065,6 @@ const summarizeSentimentWindowForLLM = (windowLabel, sentiment) => {
 
   const funding = summarizeFundingRates(sentiment?.fundingRates);
 
-  const marketQuality = Array.isArray(sentiment?.marketQuality) ? sentiment.marketQuality : [];
-  const marketQualitySummary = marketQuality.map(row => ({
-    option_type: row.option_type,
-    count: row.count,
-    avg_spread_pct: row.avg_spread != null ? +(row.avg_spread * 100).toFixed(2) : null,
-    avg_iv_pct: row.avg_iv != null ? +(row.avg_iv * 100).toFixed(1) : null,
-    avg_depth: row.avg_depth != null ? +Number(row.avg_depth).toFixed(2) : null,
-  }));
-
   return {
     window: windowLabel,
     funding_rate: funding,
@@ -6054,8 +6079,59 @@ const summarizeSentimentWindowForLLM = (windowLabel, sentiment) => {
       change_pct: oiChangePct,
       samples: oiRows.length,
     },
-    market_quality: marketQualitySummary,
   };
+};
+
+const summarizeMarketQualitySnapshotForLLM = (marketQualityRows = []) => {
+  const rows = Array.isArray(marketQualityRows) ? marketQualityRows : [];
+  if (rows.length === 0) return null;
+  const numeric = (value, multiplier = 1, digits = 2) => {
+    if (value == null || value === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? +((number * multiplier).toFixed(digits)) : null;
+  };
+  const timestamps = rows.map(row => row.snapshot_timestamp);
+  const oneTimestamp = timestamps.every(value => value === timestamps[0])
+    && Number.isFinite(Date.parse(timestamps[0]));
+  const universe = rows.every(row => row.universe === rows[0].universe)
+    ? rows[0].universe || 'unknown' : 'mixed_or_unknown';
+  return {
+    as_of: oneTimestamp ? timestamps[0] : null,
+    universe,
+    scope: universe === 'observed_all_tenors_abs_delta_0.02_to_0.12'
+      ? 'All recorded tenors with |delta| 0.02–0.12; no entry DTE filter; recorded observations are not full-exchange coverage'
+      : 'Snapshot universe unavailable',
+    measurement: 'Single latest snapshot; spread = (ask − bid) / mark. Not a time-window average or an eligible-candidate execution estimate.',
+    sides: rows.map(row => ({
+      option_type: row.option_type,
+      observed_count: numeric(row.observed_count, 1, 0),
+      quoted_count: numeric(row.quoted_count, 1, 0),
+      spread_count: numeric(row.spread_count ?? row.count, 1, 0),
+      avg_spread_pct: numeric(row.avg_spread, 100),
+      median_spread_pct: numeric(row.median_spread, 100),
+      min_spread_pct: numeric(row.min_spread, 100),
+      max_spread_pct: numeric(row.max_spread, 100),
+      avg_iv_pct: numeric(row.avg_iv, 100, 1),
+      avg_depth: numeric(row.avg_depth),
+    })),
+  };
+};
+
+const formatMarketQualitySnapshotForAdvisor = (marketQualityRows = []) => {
+  const snapshot = summarizeMarketQualitySnapshotForLLM(marketQualityRows);
+  if (!snapshot) return 'Broad observed quote snapshot: unavailable.';
+  const show = value => value == null ? 'n/a' : value;
+  const lines = [
+    `Broad observed quote snapshot: as of ${snapshot.as_of || 'unknown'}; ${snapshot.scope}.`,
+    snapshot.measurement,
+  ];
+  for (const row of snapshot.sides) {
+    const side = row.option_type === 'P' ? 'PUT' : row.option_type === 'C' ? 'CALL' : String(row.option_type || 'unknown');
+    lines.push(`${side}: recorded ${show(row.observed_count)}, two-sided quoted ${show(row.quoted_count)}, spread samples ${show(row.spread_count)}; `
+      + `spread/mark mean ${show(row.avg_spread_pct)}%, median ${show(row.median_spread_pct)}%, range ${show(row.min_spread_pct)}%–${show(row.max_spread_pct)}%; `
+      + `mean IV ${show(row.avg_iv_pct)}%, mean visible bid+ask depth ${show(row.avg_depth)} contracts (spread-sample population).`);
+  }
+  return lines.join('\n');
 };
 
 const summarizeSentimentWindowsForLLM = (sentimentWindows) => {
@@ -6070,7 +6146,7 @@ const formatSignedPct = (value, digits = 1) => {
   return `${value > 0 ? '+' : ''}${Number(value).toFixed(digits)}%`;
 };
 
-const summarizeSentimentForAdvisor = (sentimentWindows) => {
+const summarizeSentimentForAdvisor = (sentimentWindows, marketQualityRows = []) => {
   const summary = summarizeSentimentWindowsForLLM(sentimentWindows);
   const windowOrder = ['6h', '24h', '7d', '30d'];
   const lines = [];
@@ -6078,22 +6154,14 @@ const summarizeSentimentForAdvisor = (sentimentWindows) => {
   for (const label of windowOrder) {
     const row = summary[label];
     if (!row) continue;
-    const callQuality = Array.isArray(row.market_quality)
-      ? row.market_quality.find((item) => item.option_type === 'C')
-      : null;
-    const putQuality = Array.isArray(row.market_quality)
-      ? row.market_quality.find((item) => item.option_type === 'P')
-      : null;
-
     lines.push(
       `${label}: funding ${row.funding_rate.current != null ? row.funding_rate.current : 'n/a'} vs avg ${row.funding_rate.avg != null ? row.funding_rate.avg : 'n/a'} (${row.funding_rate.trend}; Derive ETH-PERP hourly rate), ` +
       `skew ${row.options_skew.current_pct != null ? `${formatSignedPct(row.options_skew.current_pct, 2)} current` : 'n/a'} vs ${row.options_skew.avg_pct != null ? `${formatSignedPct(row.options_skew.avg_pct, 2)} avg` : 'n/a'} (${row.options_skew.direction}), ` +
-      `OI ${row.aggregate_oi.current != null ? row.aggregate_oi.current : 'n/a'} (${row.aggregate_oi.change_pct != null ? formatSignedPct(row.aggregate_oi.change_pct, 1) : 'n/a'}), ` +
-      `put mkt ${putQuality ? `spread ${putQuality.avg_spread_pct ?? 'n/a'}%, iv ${putQuality.avg_iv_pct ?? 'n/a'}%, depth ${putQuality.avg_depth ?? 'n/a'}` : 'n/a'}, ` +
-      `call mkt ${callQuality ? `spread ${callQuality.avg_spread_pct ?? 'n/a'}%, iv ${callQuality.avg_iv_pct ?? 'n/a'}%, depth ${callQuality.avg_depth ?? 'n/a'}` : 'n/a'}`
+      `OI ${row.aggregate_oi.current != null ? row.aggregate_oi.current : 'n/a'} (${row.aggregate_oi.change_pct != null ? formatSignedPct(row.aggregate_oi.change_pct, 1) : 'n/a'})`
     );
   }
 
+  lines.push(formatMarketQualitySnapshotForAdvisor(marketQualityRows));
   return lines.join('\n');
 };
 
@@ -6790,6 +6858,9 @@ Return JSON only:
 
 === SENTIMENT / DISTRIBUTION BY WINDOW ===
 ${JSON.stringify(summarizeSentimentWindowsForLLM(sentiment?.windows || {}), null, 2)}
+
+=== BROAD QUOTE SNAPSHOT (all recorded tenors, not the entry candidate pool) ===
+${JSON.stringify(summarizeMarketQualitySnapshotForLLM(sentiment?.latest?.marketQuality || []), null, 2)}
 
 === SPOT PATH CONTEXT (30D, HOURLY) ===
 ${JSON.stringify(spotPathContext || buildMandelbrotSpotPathContext({ spotPrice, spotRows: [] }), null, 2)}
@@ -11834,26 +11905,15 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
 
 // ─── LLM-Driven Trading Advisory ─────────────────────────────────────────────
 
-const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentTickTimestamp = null) => {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.log('📋 Advisory: skipped — no ANTHROPIC_API_KEY');
-    return null;
-  }
+const getAdvisoryDataQualityPrompt = () => [
+  '- Missing live quotes make EDGE unavailable, not zero or evidence of poor value. Distinguish no DTE/delta-eligible contracts from eligible contracts without a usable ask (puts) or bid (calls), and from incomplete instrument coverage.',
+  '- Use the supplied quote timestamp and coverage counts. A zero or missing venue quote is not a zero-cost offer. Marks and Greeks do not substitute for executable quotes.',
+  '- Candidate spreads apply to the named contract. The broad quote snapshot spans all recorded tenors and uses (ask - bid) / mark; its outliers, mean, and median do not describe the eligible candidate pool or actual execution loss. Spread observations do not add an entry veto.',
+  '- Current account margin headroom is not a severe-crash survival result. No crash-survival simulation is supplied; do not infer one from margin utilization being below its operating cap.',
+].join('\n');
 
-  // Mutex: prevent overlapping advisory runs
-  if (_advisoryInFlight) {
-    console.log('📋 Advisory: skipped — already in flight');
-    return null;
-  }
-  _advisoryInFlight = true;
-
-  try {
-  const advisoryId = `adv_${Date.now()}`;
-  botData.lastAdvisoryRun = Date.now();
-  botData.lastAdvisoryError = null;
-  persistCycleState();
-  console.log(`📋 Advisory ${advisoryId}: starting 3-step deliberation...`);
-
+const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
+  const { positions, spotPrice, tickerMap, instruments, marketTimestamp: currentTickTimestamp, quoteAvailability } = snapshot;
   // ── Gather context ──────────────────────────────────────────────────────────
 
   // Balances
@@ -11873,7 +11933,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
   const wikiSignals = getWikiSignalContext();
 
   // Market sentiment
-  const nowMs = Date.now();
+  const nowMs = Date.parse(currentTickTimestamp);
   const since6h = new Date(nowMs - 6 * 60 * 60 * 1000).toISOString();
   const since24h = new Date(nowMs - 24 * 60 * 60 * 1000).toISOString();
   const since7dSentiment = new Date(nowMs - 7 * 24 * 60 * 60 * 1000).toISOString();
@@ -11885,31 +11945,28 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
         latest: {
           fundingRate: db.getFundingRateLatest(),
           fundingAvg24h: db.getFundingRateAvg24h(),
+          marketQuality: db.getMarketQualitySummary(since24h),
         },
         windows: {
           '6h': {
             fundingRates: db.getFundingRates(since6h),
             optionsSkew: db.getOptionsSkew(since6h),
             aggregateOI: db.getAggregateOI(since6h),
-            marketQuality: db.getMarketQualitySummary(since6h),
           },
           '24h': {
             fundingRates: db.getFundingRates(since24h),
             optionsSkew: db.getOptionsSkew(since24h),
             aggregateOI: db.getAggregateOI(since24h),
-            marketQuality: db.getMarketQualitySummary(since24h),
           },
           '7d': {
             fundingRates: db.getFundingRates(since7dSentiment),
             optionsSkew: db.getOptionsSkew(since7dSentiment),
             aggregateOI: db.getAggregateOI(since7dSentiment),
-            marketQuality: db.getMarketQualitySummary(since7dSentiment),
           },
           '30d': {
             fundingRates: db.getFundingRates(since30dSentiment),
             optionsSkew: db.getOptionsSkew(since30dSentiment),
             aggregateOI: db.getAggregateOI(since30dSentiment),
-            marketQuality: db.getMarketQualitySummary(since30dSentiment),
           },
         },
       };
@@ -11963,6 +12020,8 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
   const insuredPortfolioBaseUsd = getPutBudgetPortfolioValue(ethBalance, usdcBalance, spotPrice);
 
   const accountHealth = {
+    margin_as_of: new Date().toISOString(),
+    crash_survival_assessment: 'not_performed',
     ethBalance,
     usdcBalance,
     shortCallExposure: totalCallExposure,
@@ -12004,7 +12063,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
       insuredExternalEth: PUT_INSURED_EXTERNAL_ETH,
       note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of insured base per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Budget base = Derive USDC plus total insured ETH marked at spot, where external insured ETH is fixed at ${PUT_INSURED_EXTERNAL_ETH.toFixed(4)}. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once. Selling puts realizes cash but does not replenish this cycle's put-buying budget.`,
     },
-    note: 'Account is ETH-collateralized on Derive. buying_power = available initial margin for new trades. margin_usage_pct mirrors the Derive display metric. Projected trade sizing still uses the bot internal margin estimate. Sizing must respect buying power, put budget discipline, and the active call margin-utilization cap, which can widen during an upside breakout when the bot already has short calls on.',
+    note: 'These fields describe current margin headroom; they do not establish severe-crash survival or a modeled liquidation path. Account is ETH-collateralized on Derive. buying_power = available initial margin for new trades. margin_usage_pct mirrors the Derive display metric. Projected trade sizing still uses the bot internal margin estimate. Sizing must respect buying power, put budget discipline, and the active call margin-utilization cap, which can widen during an upside breakout when the bot already has short calls on.',
   };
 
   // Recent orders
@@ -12043,6 +12102,9 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
     openRestingOrders,
     currentTickTimestamp,
     spotPrice,
+    nowMs,
+    expectedInstruments: instruments,
+    quoteAvailability,
   });
 
   // ── Score and rank top 5 puts and calls from tickerMap ──────────────────────
@@ -12059,7 +12121,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
       expiry,
       strike: Number(parts[2]),
       optionType: parts[3], // 'P' or 'C'
-      dte: Math.max(0, (expiry.getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
+      dte: Math.max(0, (expiry.getTime() - nowMs) / (24 * 60 * 60 * 1000)),
     };
   };
 
@@ -12067,7 +12129,7 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
   // use the same strategy universe the executor is allowed to trade.
   const scoredPuts = [];
   const scoredCalls = [];
-  const advisorySellCallMarketContext = buildLiveSellCallMarketContext(tickerMap, Date.now(), {
+  const advisorySellCallMarketContext = buildLiveSellCallMarketContext(tickerMap, nowMs, {
     market_oi_delta_24h_pct: rollingOptionValueContext?.call_value_context?.market_context?.market_oi_delta_24h_pct,
   });
 
@@ -12112,6 +12174,8 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
           score,
           diagnostics: research.edge_components || {},
           shockMultiples: research.edge_components?.shock_payoff_multiples || {},
+          spreadPct: candidateSpreadPct({ askPrice, bidPrice, markPrice: ticker.M }),
+          quoteReceivedAt: ticker.quote_received_at || null,
         });
       }
     } else if (parsed.optionType === 'C') {
@@ -12141,6 +12205,8 @@ const generateTradingAdvisory = async (positions, spotPrice, tickerMap, currentT
           research: research.recommendation,
           dteBucket: research.dte_bucket,
           scoreBand: research.score_band,
+          spreadPct: candidateSpreadPct({ askPrice, bidPrice, markPrice: ticker.M }),
+          quoteReceivedAt: ticker.quote_received_at || null,
           warnings: [],
         });
       }
@@ -12206,6 +12272,7 @@ You advise a bot that accumulates OTM ETH puts (long insurance) and sells OTM ET
 Your output is a standing rulebook. A rule does not need to fire immediately; it should define the favorable future condition that would make the action worth taking before the next advisory run. Each advisory run replaces the prior rulebook, so required watcher conditions must be reassessed and restated every time.
 
 ## Evidence Priority
+${getAdvisoryDataQualityPrompt()}
 ${getMomentumEvidenceDisciplinePrompt()}
 
 ## Account Model
@@ -12334,10 +12401,11 @@ Order type guidance:
 - Return ONLY valid JSON, no markdown fences`;
 
   const sharedAdvisoryInputBlock = `=== CURRENT MARKET STATE ===
+Quote snapshot as of ${currentTickTimestamp}. Availability applies to this observation, not the entire advisory interval.
 Spot Price: $${spotPrice.toFixed(2)}
 
 === OPTIONS MARKET STRUCTURE (PRIMARY ADVISORY EVIDENCE) ===
-${summarizeSentimentForAdvisor(sentiment?.windows || {})}
+${summarizeSentimentForAdvisor(sentiment?.windows || {}, sentiment?.latest?.marketQuality || [])}
 
 === ROLLING OPTION VALUE CONTEXT (PRIMARY ENTRY VALUE EVIDENCE) ===
 ${formatRollingOptionValueContext(rollingOptionValueContext)}
@@ -12370,10 +12438,10 @@ ${JSON.stringify(accountHealth, null, 2)}
 
 === TOP PUT CANDIDATES (ranked directly by PUT EDGE; rolling context supplies timing) ===
 Quote and 30/40/50% drawdown diagnostics are descriptive only; they do not alter ranking or add vetoes. Shock multiples are hypothetical intrinsic value divided by premium, excluding fees.
-${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte.toFixed(2)} | raw_score=${p.rawScore.toFixed(6)} | PUT_EDGE=${p.score.toFixed(6)} | shock30=${p.shockMultiples['30pct'] ?? 'n/a'}x | shock40=${p.shockMultiples['40pct'] ?? 'n/a'}x | shock50=${p.shockMultiples['50pct'] ?? 'n/a'}x | diagnostics=${JSON.stringify(p.diagnostics)}`).join('\n') : 'No qualifying puts found'}
+${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte.toFixed(2)} | raw_score=${p.rawScore.toFixed(6)} | PUT_EDGE=${p.score.toFixed(6)} | spread_pct_of_mark=${p.spreadPct ?? 'unavailable'} | quote_as_of=${p.quoteReceivedAt ?? 'unavailable'} | shock30=${p.shockMultiples['30pct'] ?? 'n/a'}x | shock40=${p.shockMultiples['40pct'] ?? 'n/a'}x | shock50=${p.shockMultiples['50pct'] ?? 'n/a'}x | diagnostics=${JSON.stringify(p.diagnostics)}`).join('\n') : `PUT EDGE unavailable: ${rollingOptionValueContext.put_value_context.availability.reason}`}
 
-=== TOP CALL CANDIDATES (by bid/delta ratio, wide scan) ===
-${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${c.delta.toFixed(4)} | bid=$${c.bidPrice.toFixed(2)} | DTE=${c.dte} | score=${c.score.toFixed(4)} | research=${c.research}/${c.dteBucket}/${c.scoreBand}`).join('\n') : 'No qualifying calls found'}
+=== TOP CALL CANDIDATES (ranked by CALL EDGE within entry DTE/delta limits) ===
+${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${c.delta.toFixed(4)} | bid=$${c.bidPrice.toFixed(2)} | DTE=${c.dte} | raw_score=${c.score.toFixed(4)} | CALL_EDGE=${c.selectionScore.toFixed(4)} | spread_pct_of_mark=${c.spreadPct ?? 'unavailable'} | quote_as_of=${c.quoteReceivedAt ?? 'unavailable'} | research=${c.research}/${c.dteBucket}/${c.scoreBand}`).join('\n') : `CALL EDGE unavailable: ${rollingOptionValueContext.call_value_context.availability.reason}`}
 
 === RECENT ORDERS (last 7d) ===
 ${recentOrders.length > 0 ? recentOrders.map(o => `${o.timestamp} | ${o.action} ${o.instrument_name} | ${o.success ? 'OK' : 'FAIL'} | $${o.total_value || '?'}`).join('\n') : 'No recent orders'}
@@ -12467,6 +12535,7 @@ Interpret "Taleb" operationally, not stylistically:
 - Evidence that matters most: bounded downside, tail sensitivity, concentration risk, hidden path dependence, and whether the portfolio becomes more fragile if the market gets wilder.
 
 ## Shared Evidence Discipline
+${getAdvisoryDataQualityPrompt()}
 ${getMomentumEvidenceDisciplinePrompt()}
 
 ## DTE Discipline (Non-Negotiable)
@@ -12552,6 +12621,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
+${getAdvisoryDataQualityPrompt()}
 ${getMomentumEvidenceDisciplinePrompt()}
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
@@ -12577,6 +12647,7 @@ CRITICAL: criteria must be a JSON OBJECT, not a string.
 - The "assessment" must include both the market observation/thesis and the operational stance. If the stance is patience, say so plainly.
 - The "assessment" must include a "Thesis breakdown:" section with one bullet for every current open position, naming each instrument exactly and stating the position-specific stance and rationale.
 - In "assessment", use only facts and metric names explicitly present in the advisor inputs or policy constants. Never invent efficiency labels, scores, or thresholds.
+${getAdvisoryDataQualityPrompt()}
 ${getMomentumEvidenceDisciplinePrompt()}
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
@@ -12700,6 +12771,7 @@ Synthesize the final agenda now.`;
         model: synthesisAnthropicModel,
         maxTokens: 3072,
         system: `You repair an options bot standing rulebook. Add or amend only the missing watcher rules needed to satisfy REQUIRED STANDING RULEBOOK COVERAGE. The favorable conditions must come from the supplied market, account, and position facts. Preserve valid existing rules unless they contradict risk discipline.
+${getAdvisoryDataQualityPrompt()}
 ${getMomentumEvidenceDisciplinePrompt()}
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
@@ -12725,10 +12797,10 @@ ${positionAdviceSnapshots.length > 0 ? JSON.stringify(positionAdviceSnapshots, n
 
 === TOP PUT CANDIDATES (ranked directly by PUT EDGE) ===
 The 30/40/50% drawdown scenarios and other quote diagnostics are descriptive only, not additional ranking inputs or vetoes.
-${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte.toFixed(2)} | raw_score=${p.rawScore.toFixed(6)} | PUT_EDGE=${p.score.toFixed(6)} | shock30=${p.shockMultiples['30pct'] ?? 'n/a'}x | shock40=${p.shockMultiples['40pct'] ?? 'n/a'}x | shock50=${p.shockMultiples['50pct'] ?? 'n/a'}x | diagnostics=${JSON.stringify(p.diagnostics)}`).join('\n') : 'No qualifying puts found'}
+${top5Puts.length > 0 ? top5Puts.map((p, i) => `${i + 1}. ${p.name} | delta=${p.delta.toFixed(4)} | ask=$${p.askPrice.toFixed(2)} | DTE=${p.dte.toFixed(2)} | raw_score=${p.rawScore.toFixed(6)} | PUT_EDGE=${p.score.toFixed(6)} | spread_pct_of_mark=${p.spreadPct ?? 'unavailable'} | quote_as_of=${p.quoteReceivedAt ?? 'unavailable'} | shock30=${p.shockMultiples['30pct'] ?? 'n/a'}x | shock40=${p.shockMultiples['40pct'] ?? 'n/a'}x | shock50=${p.shockMultiples['50pct'] ?? 'n/a'}x | diagnostics=${JSON.stringify(p.diagnostics)}`).join('\n') : `PUT EDGE unavailable: ${rollingOptionValueContext.put_value_context.availability.reason}`}
 
 === TOP CALL CANDIDATES ===
-${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${c.delta.toFixed(4)} | bid=$${c.bidPrice.toFixed(2)} | DTE=${c.dte} | score=${c.score.toFixed(4)} | research=${c.research}/${c.dteBucket}/${c.scoreBand}`).join('\n') : 'No qualifying calls found'}
+${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${c.delta.toFixed(4)} | bid=$${c.bidPrice.toFixed(2)} | DTE=${c.dte} | raw_score=${c.score.toFixed(4)} | CALL_EDGE=${c.selectionScore.toFixed(4)} | spread_pct_of_mark=${c.spreadPct ?? 'unavailable'} | quote_as_of=${c.quoteReceivedAt ?? 'unavailable'} | research=${c.research}/${c.dteBucket}/${c.scoreBand}`).join('\n') : `CALL EDGE unavailable: ${rollingOptionValueContext.call_value_context.availability.reason}`}
 
 Return the full repaired agenda JSON.`,
         }],
@@ -12871,39 +12943,34 @@ Return the full repaired agenda JSON.`,
     exitRules: persistedAgenda.exit_rules,
   });
 
-  // Write rules to database
-  if (db) {
-    try {
-      db.replaceActiveRules(advisoryId, allRules);
-      console.log(`📋 Advisory ${advisoryId}: persisted ${allRules.length} rules to database`);
-    } catch (e) {
-      console.log('📋 Advisory: failed to persist rules:', e.message);
-    }
-  }
+  return { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion, mandelbrotContext,
+    rollingOptionValueContext, persistedAgenda, spotPrice };
+};
 
-  // Journal the assessment
-  const assessmentText = selectAssessmentText(finalAgenda.assessment, primaryAgenda.assessment);
-  if (db) {
-    try {
-      db.insertJournalEntry('advisory', assessmentText);
-      db.insertJournalEntry('advisory_main', assessmentText);
-      if (primaryAgenda?.assessment) {
-        db.insertJournalEntry('advisory_spitznagel', primaryAgenda.assessment);
-      }
-      if (secondOpinion) {
-        db.insertJournalEntry('advisory_taleb', JSON.stringify(secondOpinion, null, 2));
-      }
-      if (mandelbrotContext) {
-        db.insertJournalEntry('mandelbrot_archive', JSON.stringify(mandelbrotContext, null, 2));
-      }
-      db.insertJournalEntry('advisory_context', JSON.stringify({
-        advisory_id: advisoryId,
-        rolling_option_value_context: rollingOptionValueContext,
-      }, null, 2));
-    } catch (e) {
-      console.log('📋 Advisory: failed to journal assessment:', e.message);
-    }
-  }
+const publishTradingAdvisoryDraft = (draft, { inputSnapshot, checkedSnapshot, attempt }) => {
+  const { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion, mandelbrotContext,
+    rollingOptionValueContext, persistedAgenda, spotPrice } = draft;
+  const publication = {
+    input_as_of: inputSnapshot.marketTimestamp,
+    quote_state_checked_at: checkedSnapshot.marketTimestamp,
+    review_attempts: attempt,
+    input_quote_availability: inputSnapshot.quoteAvailability,
+    checked_quote_availability: checkedSnapshot.quoteAvailability,
+  };
+  const assessmentText = `Market inputs as of ${publication.input_as_of}; quote availability rechecked ${publication.quote_state_checked_at}.\n\n${selectAssessmentText(finalAgenda.assessment, primaryAgenda.assessment)}`;
+  const journalEntries = [
+    { entry_type: 'advisory', content: assessmentText },
+    { entry_type: 'advisory_main', content: assessmentText },
+  ];
+  if (primaryAgenda?.assessment) journalEntries.push({ entry_type: 'advisory_spitznagel', content: primaryAgenda.assessment });
+  if (secondOpinion) journalEntries.push({ entry_type: 'advisory_taleb', content: JSON.stringify(secondOpinion, null, 2) });
+  if (mandelbrotContext) journalEntries.push({ entry_type: 'mandelbrot_archive', content: JSON.stringify(mandelbrotContext, null, 2) });
+  journalEntries.push({ entry_type: 'advisory_context', content: JSON.stringify({
+    advisory_id: advisoryId, rolling_option_value_context: rollingOptionValueContext, publication,
+  }, null, 2) });
+  if (!db?.publishAdvisory) throw new Error('Advisory publication storage unavailable');
+  db.publishAdvisory(advisoryId, allRules, journalEntries);
+  console.log(`📋 Advisory ${advisoryId}: published ${allRules.length} rules and matching assessment`);
 
   const entryCount = persistedAgenda.entry_rules.length;
   const exitCount = persistedAgenda.exit_rules.length;
@@ -12921,6 +12988,38 @@ Return the full repaired agenda JSON.`,
   persistCycleState();
 
   return { advisoryId, agenda: finalAgenda, rulesCount: allRules.length };
+};
+
+const readFreshTradingAdvisorySnapshot = () => readAdvisoryMarketSnapshot({
+  fetchSpot: async () => normalizeEthSpotPrice(await fetchDeriveSpotPrice() || await fetchCoinGeckoSpotPrice()),
+  fetchInstruments: async () => (await fetchAndFilterInstruments(null, { throwOnError: true })).instruments,
+  fetchPositions: () => fetchPositions({ throwOnError: true }),
+  fetchTickers: expiry => fetchTickersByExpiry(expiry, { throwOnError: true }),
+});
+
+const generateTradingAdvisory = async () => {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.log('📋 Advisory: skipped — no ANTHROPIC_API_KEY');
+    return null;
+  }
+  if (_advisoryInFlight) {
+    console.log('📋 Advisory: skipped — already in flight');
+    return null;
+  }
+  _advisoryInFlight = true;
+  try {
+    const advisoryId = `adv_${Date.now()}`;
+    botData.lastAdvisoryRun = Date.now();
+    botData.lastAdvisoryError = null;
+    persistCycleState();
+    console.log(`📋 Advisory ${advisoryId}: starting deliberation with fresh market inputs...`);
+    return await runReviewedPublication({
+      readSnapshot: readFreshTradingAdvisorySnapshot,
+      review: snapshot => buildTradingAdvisoryDraft(snapshot, advisoryId),
+      publish: publishTradingAdvisoryDraft,
+      maxAttempts: 2,
+      onRefresh: ({ comparison }) => console.log(`📋 Advisory ${advisoryId}: refreshing all reviews before publication — ${comparison.reason}`),
+    });
   } catch (e) {
     botData.lastAdvisoryError = e.message;
     botData.advisoryRetryCount = (botData.advisoryRetryCount || 0) + 1;
@@ -13500,7 +13599,7 @@ const runBot = async () => {
       ) {
         const retryCount = botData.advisoryRetryCount || 0;
         console.log(`📋 Advisory retry due now (${retryCount} prior failure${retryCount === 1 ? '' : 's'}) — reattempting`);
-        generateTradingAdvisory(positions, spotPrice, tickerMap, tickTimestamp).catch(e => {
+        generateTradingAdvisory().catch(e => {
           console.log(`📋 Scheduled advisory retry failed (non-fatal): ${e.message}`);
         });
       }
@@ -13523,7 +13622,7 @@ const runBot = async () => {
             _wikiIngestInFlight = false;
           }
           // Generate trading advisory alongside journal
-          try { await generateTradingAdvisory(positions, spotPrice, tickerMap, tickTimestamp); }
+          try { await generateTradingAdvisory(); }
           catch (e) { console.log('📋 Advisory failed (non-fatal):', e.message); }
           // Review hypotheses and extract lessons on the journal cadence
           await reviewExpiredHypotheses();

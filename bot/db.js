@@ -1416,22 +1416,45 @@ const stmts = {
   `),
 
   getMarketQualitySummary: db.prepare(`
-    SELECT
-      option_type,
-      COUNT(*) as count,
-      AVG(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as avg_spread,
-      MIN(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as min_spread,
-      MAX(CASE WHEN mark_price > 0 THEN (ask_price - bid_price) / mark_price END) as max_spread,
-      AVG(implied_vol) as avg_iv,
-      AVG(ask_amount + bid_amount) as avg_depth,
-      SUM(ask_amount + bid_amount) as total_depth
-    FROM options_snapshots
-    WHERE timestamp = (SELECT MAX(timestamp) FROM options_snapshots WHERE timestamp > @since)
-      AND mark_price > 0
-      AND ask_price > 0
-      AND bid_price > 0
-      AND ABS(delta) BETWEEN 0.02 AND 0.12
-    GROUP BY option_type
+    WITH observed AS (
+      SELECT *,
+        CASE WHEN option_type IN ('P', 'put') OR instrument_name LIKE '%-P' THEN 'P'
+          WHEN option_type IN ('C', 'call') OR instrument_name LIKE '%-C' THEN 'C' END AS side
+      FROM options_snapshots
+      WHERE timestamp = (SELECT MAX(timestamp) FROM options_snapshots WHERE timestamp > @since)
+        AND ABS(delta) BETWEEN 0.02 AND 0.12
+    ), measured AS (
+      SELECT *,
+        CASE WHEN ask_price > 0 AND bid_price > 0 AND ask_price >= bid_price THEN 1 ELSE 0 END AS quoted,
+        CASE WHEN ask_price > 0 AND bid_price > 0 AND ask_price >= bid_price AND mark_price > 0
+          THEN (ask_price - bid_price) / mark_price END AS spread
+      FROM observed WHERE side IS NOT NULL
+    ), ranked_spreads AS (
+      SELECT side, spread,
+        ROW_NUMBER() OVER (PARTITION BY side ORDER BY spread) AS rn,
+        COUNT(*) OVER (PARTITION BY side) AS n
+      FROM measured WHERE spread IS NOT NULL
+    )
+    SELECT side AS option_type,
+      MAX(timestamp) AS snapshot_timestamp,
+      'observed_all_tenors_abs_delta_0.02_to_0.12' AS universe,
+      COUNT(*) AS observed_count,
+      SUM(quoted) AS quoted_count,
+      COUNT(spread) AS spread_count,
+      COUNT(spread) AS count,
+      AVG(spread) AS avg_spread,
+      MIN(spread) AS min_spread,
+      MAX(spread) AS max_spread,
+      (SELECT AVG(spread) FROM ranked_spreads r
+        WHERE r.side = measured.side AND r.rn IN ((r.n + 1) / 2, (r.n + 2) / 2)) AS median_spread,
+      AVG(CASE WHEN spread IS NOT NULL THEN implied_vol END) AS avg_iv,
+      AVG(CASE WHEN spread IS NOT NULL AND ask_amount >= 0 AND bid_amount >= 0
+        THEN ask_amount + bid_amount END) AS avg_depth,
+      SUM(CASE WHEN spread IS NOT NULL AND ask_amount >= 0 AND bid_amount >= 0
+        THEN ask_amount + bid_amount END) AS total_depth
+    FROM measured
+    GROUP BY side
+    ORDER BY side
   `),
 
   insertOISnapshot: db.prepare(`
@@ -2715,6 +2738,13 @@ const replaceActiveRules = (advisoryId, rules) => {
   replace(rules);
 };
 
+// Publish the reviewed rulebook and its evidence together. A journal failure
+// must not leave new rules active with the old assessment still displayed.
+const publishAdvisory = db.transaction((advisoryId, rules, journalEntries) => {
+  replaceActiveRules(advisoryId, rules);
+  for (const entry of journalEntries) insertJournalEntry(entry.entry_type, entry.content);
+});
+
 const insertPendingAction = (action) => {
   return stmts.insertPendingAction.run({
     rule_id: action.rule_id ?? null,
@@ -2984,6 +3014,7 @@ module.exports = {
   getMarketQualitySummary,
   // Trading rules & pending actions
   replaceActiveRules,
+  publishAdvisory,
   insertPendingAction,
   updatePendingAction,
   getActiveRules,

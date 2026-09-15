@@ -96,6 +96,7 @@ function productionContext(samples = []) {
   const context = vm.createContext({
     ...putScore,
     ...callScore,
+    ...require('../bot/advisory-quotes'),
     STRATEGY_FACTS: require('../bot/strategy-facts.json'),
     ...(fs.existsSync(sharedFactsPath) ? require(sharedFactsPath) : {}),
     isBetterBuyPutCandidate,

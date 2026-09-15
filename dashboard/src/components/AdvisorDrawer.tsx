@@ -392,20 +392,31 @@ function renderAdvisoryContextArtifact(content: string) {
   const spot = isPlainObject(rolling.spot_price_action) ? rolling.spot_price_action : {};
   const current = isPlainObject(put.current_detail) ? put.current_detail : null;
   const currentCall = isPlainObject(call.current_detail) ? call.current_detail : null;
+  const putAvailability = isPlainObject(put.availability) ? put.availability : {};
+  const callAvailability = isPlainObject(call.availability) ? call.availability : {};
+  const publication = isPlainObject(parsed.publication) ? parsed.publication : {};
 
   const rows = ([
-    ['PUT score', put.current_score],
+    ['Inputs as of', publication.input_as_of],
+    ['Availability checked', publication.quote_state_checked_at],
+    ['PUT score', put.current_score ?? 'unavailable'],
+    ['PUT quotes', typeof putAvailability.status === 'string' ? putAvailability.status.replace(/_/g, ' ') : null],
+    ['PUT quoted / eligible', putAvailability.quoted_count != null ? `${putAvailability.quoted_count} / ${putAvailability.in_dte_delta_count}` : null],
+    ['PUT coverage', putAvailability.coverage_status],
     ['Prior best', put.prior_window_best_score],
     ['Vs prior best', put.current_vs_prior_best_pct != null ? `${put.current_vs_prior_best_pct}%` : null],
-    ['Fresh best', put.is_strict_fresh_best ? 'yes' : 'no'],
-    ['CALL score', call.current_score],
+    ['Fresh best', put.is_strict_fresh_best == null ? 'unavailable' : put.is_strict_fresh_best ? 'yes' : 'no'],
+    ['CALL score', call.current_score ?? 'unavailable'],
+    ['CALL quotes', typeof callAvailability.status === 'string' ? callAvailability.status.replace(/_/g, ' ') : null],
+    ['CALL quoted / eligible', callAvailability.quoted_count != null ? `${callAvailability.quoted_count} / ${callAvailability.in_dte_delta_count}` : null],
+    ['CALL coverage', callAvailability.coverage_status],
     ['CALL prior best', call.prior_window_best_score],
     ['CALL vs best', call.current_vs_prior_best_pct != null ? `${call.current_vs_prior_best_pct}%` : null],
     ['CALL percentile', call.percentile_vs_prior_window],
     ['Spot action', spot.state],
     ['Budget left', budget.remaining != null ? `$${budget.remaining}` : null],
-    ['Fresh-best review', action.requires_buy_put_decision ? 'yes' : 'no'],
-    ['Supports PUT review', action.supports_buy_put_review ? 'yes' : 'no'],
+    ['Fresh-best review', put.current_score == null ? 'unavailable' : action.requires_buy_put_decision ? 'yes' : 'no'],
+    ['Supports PUT review', put.current_score == null ? 'unavailable' : action.supports_buy_put_review ? 'yes' : 'no'],
     ['Execution style', action.execution_style],
     ['Target score', action.target_score],
     ['Suggested limit', action.suggested_limit_price != null ? `$${action.suggested_limit_price}` : null],
