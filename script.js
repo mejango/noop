@@ -12758,7 +12758,7 @@ Synthesize the final agenda now.`;
       maxTokens: 3072,
       system: synthesisSystemPrompt,
       messages: [{ role: 'user', content: synthesisUserPrompt }],
-      timeout: 60000,
+      timeout: 120000, // Step 3 writes a full 3072-token agenda; 60s was timing out every run
       spreadAfterBoundary: true,
     });
 
@@ -12832,7 +12832,7 @@ ${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${
 
 Return the full repaired agenda JSON.`,
         }],
-        timeout: 60000,
+        timeout: 120000,
       });
       const repairedText = getAnthropicResponseText(repairResponse.data);
       const repairedAgenda = extractJSON(repairedText);
