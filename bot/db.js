@@ -1033,9 +1033,14 @@ const stmts = {
   `),
 
   countSellPutTranches: db.prepare(`
-    SELECT COUNT(DISTINCT COALESCE(pending_action_id, id)) AS tranches
-    FROM orders
-    WHERE action = 'sell_put' AND success = 1 AND filled_amount > 0 AND instrument_name = ?
+    SELECT COUNT(DISTINCT COALESCE(o.pending_action_id, o.id)) AS tranches
+    FROM orders o
+    WHERE o.action = 'sell_put' AND o.success = 1 AND o.filled_amount > 0 AND o.instrument_name = ?
+      AND COALESCE(o.reason, '') NOT LIKE 'DRY RUN%'
+      AND NOT EXISTS (
+        SELECT 1 FROM resting_orders ro
+        WHERE ro.status = 'open' AND ro.pending_action_id IS NOT NULL AND ro.pending_action_id = o.pending_action_id
+      )
   `),
 
   getOrdersInWindow: db.prepare(`

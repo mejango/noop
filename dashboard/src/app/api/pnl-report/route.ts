@@ -96,7 +96,10 @@ function coveredCallSummary(legs: CoveredCallLeg[], fromIso: string, openingSpot
     // A recorded settlement may not know its quantity: it closes whatever is still open.
     const quantity = Number(leg.filled_amount) > 0 ? Number(leg.filled_amount) : (opened ? 0 : open.get(key) ?? 0);
     if (inWindow) {
-      const spot = leg.spot_price && leg.spot_price > 0 ? leg.spot_price : spotAt(leg.timestamp);
+      // A recorded settlement carries the exchange's booking time; the expiry print is the honest spot for it.
+      const expiryIso = !opened && leg.instrument_name ? (() => { const parsed = parseInstrument(leg.instrument_name); return parsed ? new Date(parsed.expiryMs).toISOString() : null; })() : null;
+      const spot = leg.spot_price && leg.spot_price > 0 ? leg.spot_price
+        : spotAt(leg.timestamp) ?? (expiryIso ? spotAt(expiryIso) : null);
       callPnl += leg.cashflow;
       if (spot && spot > 0) ethMove += opened ? -quantity * spot : quantity * spot; else unpriced += 1;
     }

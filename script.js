@@ -7294,7 +7294,8 @@ const getSellPutExitAmount = (rule, criteria, position, values) => {
 };
 
 // null once every ladder rung has been sold: the remainder is held to settlement.
-// ponytail: counts distinct sell_put fill orders, so a repriced partial tranche can count twice — that only makes us hold more.
+// A tranche counts once its resting order is no longer open, so a partial fill cannot advance the rung
+// and cancel its own remainder. A repriced partial tranche can still count twice — that only makes us hold more.
 const getPutMonetizationThresholdPct = (instrumentName) => {
   const sold = db && typeof db.countSellPutTranches === 'function' && instrumentName ? db.countSellPutTranches(instrumentName) : 0;
   return sold < PUT_MONETIZATION_LADDER_PCT.length ? PUT_MONETIZATION_LADDER_PCT[sold] : null;
@@ -11350,7 +11351,11 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
           continue;
         }
         const intent = getSyntheticExitIntent(action.action, triggerData, ruleCriteria);
-        const desiredPrice = livePatientBuyback?.limitPrice ?? livePatientPut?.limitPrice ?? currentPrice;
+        let desiredPrice = livePatientBuyback?.limitPrice ?? livePatientPut?.limitPrice ?? currentPrice;
+        // Same rule as rule evaluation: a resting monetization offer is raised, never chased down.
+        const restingMonetizationPrice = Number(exitSnapshot.orders[0]?.limit_price);
+        if (intent === 'monetize_tail_win' && exitSnapshot.orders[0]?.exit_intent === 'monetize_tail_win'
+          && restingMonetizationPrice > desiredPrice) desiredPrice = restingMonetizationPrice;
         exitOrderPlan = normalizeDesiredExitOrder({ action: action.action, instrumentName: action.instrument_name,
           amount: action.amount, price: desiredPrice, intent,
           orderType: resolveDesiredExitOrderType({ action: action.action, intent,

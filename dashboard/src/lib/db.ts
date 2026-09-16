@@ -626,6 +626,7 @@ function prepareAll(d: Database.Database) {
         COUNT(CASE WHEN success = 1 AND COALESCE(filled_amount, 0) > 0 THEN 1 END) as successful_orders,
         COUNT(*) as total_orders
       FROM orders
+      WHERE COALESCE(reason, '') NOT LIKE 'DRY RUN%'
     `),
   };
 }

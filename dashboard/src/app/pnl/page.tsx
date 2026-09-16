@@ -397,7 +397,7 @@ export default function PnlReportPage() {
                     <span className="text-zinc-500">Calls incl. backing ETH</span>
                     <span className={report.summary.coveredCall.net >= 0 ? 'text-emerald-600' : 'text-red-600'}>
                       {fmtSignedUsd(report.summary.coveredCall.net)}
-                      <span className="text-zinc-400"> ({fmtSignedUsd(report.summary.coveredCall.callPnl)} calls {fmtSignedUsd(report.summary.coveredCall.ethMove)} ETH)</span>
+                      <span className="text-zinc-400"> ({fmtSignedUsd(report.summary.coveredCall.callPnl)} calls {fmtSignedUsd(report.summary.coveredCall.ethMove)} ETH{report.summary.coveredCall.unpricedLegs > 0 ? `; ${report.summary.coveredCall.unpricedLegs} leg(s) without spot` : ''})</span>
                     </span>
                   </div>
                 )}

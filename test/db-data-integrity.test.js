@@ -223,3 +223,19 @@ test('portfolio storage preserves unknown profit and truthful gross cashflow sep
   assert.equal(row.portfolio_value_usd, -5);
   assert.equal(row.usdc_balance, 0);
 });
+
+test('monetization tranche count ignores open resting tranches and dry runs', () => {
+  const put = 'ETH-20261030-1900-P';
+  const pending = store.insertPendingAction({ rule_id: null, action: 'sell_put', instrument_name: put, amount: 1, price: 250 });
+  const pendingId = Number(pending.lastInsertRowid);
+  store.insertRestingOrder({ order_id: 'm1', instrument_name: put, action: 'sell_put', direction: 'sell', amount: 1, limit_price: 250, filled_amount: 0, exit_intent: 'monetize_tail_win', pending_action_id: pendingId });
+  const fill = (amount, extra = {}) => store.insertOrder({ timestamp: now, action: 'sell_put', success: true, instrument_name: put, filled_amount: amount, total_value: 250 * amount, pending_action_id: pendingId, ...extra });
+  assert.equal(store.countSellPutTranches(put), 0);
+  fill(0.3);                                   // partial fill while the tranche still rests
+  assert.equal(store.countSellPutTranches(put), 0);
+  fill(0.7);
+  store.updateRestingOrder('m1', 'filled', 1, 250);
+  assert.equal(store.countSellPutTranches(put), 1); // one tranche, two fill rows
+  store.insertOrder({ timestamp: now, action: 'sell_put', success: true, reason: 'DRY RUN: simulated sell_put (post_only)', instrument_name: put, filled_amount: 1, total_value: 250 });
+  assert.equal(store.countSellPutTranches(put), 1);
+});
