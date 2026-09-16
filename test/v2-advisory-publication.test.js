@@ -184,8 +184,11 @@ test('publication storage failure is propagated, never reported as advisory succ
   assert.equal(f.inFlight(), false);
 });
 
-test('same-count contract replacement and changed position quantity or cost basis require another review', async () => {
-  assert.equal(compareAdvisorySnapshots(snapshot(), snapshot({ putName: 'ETH-20261127-1800-P' })).fresh, false);
+test('changed position quantity or cost basis requires another review; candidate churn and held quote flicker do not', async () => {
+  assert.equal(compareAdvisorySnapshots(snapshot(), snapshot({ putName: 'ETH-20261127-1800-P' })).fresh, true);
+  const heldFlicker = snapshot({ positions: [{ instrument_name: call, direction: 'short', amount: 1 }] });
+  heldFlicker.tickerMap[call] = { a: 0, b: 0, M: 5.5, option_pricing: {} };
+  assert.equal(compareAdvisorySnapshots(snapshot({ positions: heldFlicker.positions }), heldFlicker).fresh, true);
   const position = { instrument_name: put, direction: 'long', amount: 1, average_price: 20 };
   for (const change of [{ amount: 2 }, { average_price: 21 }, { direction: 'short' }]) {
     const a = snapshot({ positions: [position] });
@@ -197,10 +200,12 @@ test('same-count contract replacement and changed position quantity or cost basi
   }
 });
 
-test('coverage changes at fixed candidate counts and missing identities fail freshness', () => {
+test('coverage changes stay fresh; side status changes and missing identities do not', () => {
   const a = snapshot(), b = snapshot();
   b.quoteAvailability.put.coverage_status = 'partial';
   b.quoteAvailability.put.missing_expected_instruments = ['ETH-20261127-1800-P'];
+  assert.equal(compareAdvisorySnapshots(a, b).fresh, true);
+  b.quoteAvailability.put.status = 'quotes_unavailable';
   assert.equal(compareAdvisorySnapshots(a, b).fresh, false);
   delete b.quoteAvailability.put.quoted_instruments;
   assert.throws(() => compareAdvisorySnapshots(a, b), { code: 'ADVISORY_SNAPSHOT_INVALID' });

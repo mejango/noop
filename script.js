@@ -236,7 +236,9 @@ const sendTelegram = async (message) => {
       parse_mode: 'Markdown',
     }, { timeout: 5000 });
   } catch (e) {
-    // Retry without Markdown if parsing fails (unescaped _ * [ etc)
+    // Retry without Markdown only if Telegram rejected the parse (unescaped _ * [ etc).
+    // A timeout usually means it was delivered; resending would duplicate it.
+    if (e.response?.status !== 400) return console.log('📱 Telegram failed:', e.message);
     try {
       await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
         chat_id: chatId,

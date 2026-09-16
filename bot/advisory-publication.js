@@ -1,7 +1,5 @@
 'use strict';
 
-const { instrumentFromName } = require('./observations');
-
 function failure(message, code = 'ADVISORY_SNAPSHOT_INVALID') {
   const error = new Error(message);
   error.code = code;
@@ -31,7 +29,6 @@ function validateSnapshot(snapshot) {
     || !Number.isFinite(Number(position.amount)))) throw failure('Advisory publication position state is malformed');
 }
 
-const normalizedIds = values => [...new Set(values)].sort();
 const positionIdentity = positions => positions.map(position => ({
   instrument: position.instrument_name,
   direction: position.direction,
@@ -39,48 +36,20 @@ const positionIdentity = positions => positions.map(position => ({
   entry_price: position.avg_entry_price ?? position.avg_price ?? position.average_price ?? null,
 })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 
-const usableNumber = value => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
-  && Number.isFinite(Number(value));
-const usablePrice = value => usableNumber(value) && Number(value) > 0;
-const heldOptionQuoteAvailability = snapshot => normalizedIds(snapshot.positions
-  .filter(position => Math.abs(Number(position.amount)) > 0 && instrumentFromName(position.instrument_name))
-  .map(position => position.instrument_name))
-  .map(instrument => {
-    const ticker = snapshot.tickerMap[instrument];
-    return {
-      instrument,
-      present: Boolean(ticker && typeof ticker === 'object' && !Array.isArray(ticker)),
-      ask: usablePrice(ticker?.a),
-      bid: usablePrice(ticker?.b),
-      mark: usablePrice(ticker?.M),
-      // Zero is valid for Greeks. Their availability, rather than ordinary
-      // numerical movement during deliberation, determines whether to rereview.
-      greeks: Object.fromEntries(['d', 'g', 't', 'v', 'r'].map(key => [key, usableNumber(ticker?.option_pricing?.[key])])),
-      implied_vol: usablePrice(ticker?.option_pricing?.i),
-    };
-  });
-
+// ponytail: only side-level quote status and held positions trigger a rerun.
+// Per-instrument identity sets and held-option bid/ask/Greek presence flicker
+// on every multi-minute deliberation and were doubling model spend for nothing.
 function compareAdvisorySnapshots(inputSnapshot, checkedSnapshot) {
   validateSnapshot(inputSnapshot);
   validateSnapshot(checkedSnapshot);
   const changes = [];
   for (const side of ['put', 'call']) {
-    const before = inputSnapshot.quoteAvailability[side];
-    const after = checkedSnapshot.quoteAvailability[side];
-    for (const field of ['status', 'coverage_status']) {
-      if (before[field] !== after[field]) changes.push(`${side} ${field}: ${before[field]} -> ${after[field]}`);
-    }
-    for (const field of identityFields) {
-      if (JSON.stringify(normalizedIds(before[field])) !== JSON.stringify(normalizedIds(after[field]))) {
-        changes.push(`${side} ${field} changed`);
-      }
-    }
+    const before = inputSnapshot.quoteAvailability[side].status;
+    const after = checkedSnapshot.quoteAvailability[side].status;
+    if (before !== after) changes.push(`${side} status: ${before} -> ${after}`);
   }
   if (JSON.stringify(positionIdentity(inputSnapshot.positions)) !== JSON.stringify(positionIdentity(checkedSnapshot.positions))) {
     changes.push('held positions changed');
-  }
-  if (JSON.stringify(heldOptionQuoteAvailability(inputSnapshot)) !== JSON.stringify(heldOptionQuoteAvailability(checkedSnapshot))) {
-    changes.push('held option quote availability changed');
   }
   return { fresh: changes.length === 0, changes, reason: changes.join('; ') || 'Quote availability and held positions remain consistent' };
 }
