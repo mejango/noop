@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mandate.json",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "const": "noop.strategy/v1"
+    },
+    "mandate_id": {
+      "$ref": "common.json#/$defs/id"
+    },
+    "mandate_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "strategy_release_id": {
+      "$ref": "common.json#/$defs/id"
+    },
+    "release_digest": {
+      "$ref": "common.json#/$defs/digest"
+    },
+    "account": {
+      "$ref": "common.json#/$defs/account"
+    },
+    "protected_eth": {
+      "$ref": "common.json#/$defs/decimal"
+    },
+    "parameters": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^(?!(?:constructor|prototype|__proto__)$)[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$"
+      },
+      "maxProperties": 128,
+      "additionalProperties": {
+        "$ref": "common.json#/$defs/decimal"
+      }
+    },
+    "authority": {
+      "type": "object",
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/action"
+          },
+          "maxItems": 6,
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "instrument_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/id"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "spot_routes": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/id"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "budget_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/id"
+          },
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "inventory_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/id"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "liability_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/id"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "actions",
+        "instrument_refs",
+        "spot_routes",
+        "budget_refs",
+        "inventory_refs",
+        "liability_refs"
+      ],
+      "additionalProperties": false
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "funding_pending",
+        "activation_ready",
+        "active",
+        "entry_paused",
+        "exit_requested",
+        "unwinding",
+        "withdrawal_ready",
+        "withdrawal_pending",
+        "closed",
+        "recovery_required",
+        "resolution_required"
+      ]
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 32,
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "contract_version",
+    "mandate_id",
+    "mandate_revision",
+    "strategy_release_id",
+    "release_digest",
+    "account",
+    "protected_eth",
+    "parameters",
+    "authority",
+    "status",
+    "extensions"
+  ],
+  "additionalProperties": false
+}

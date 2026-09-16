@@ -1,0 +1,22 @@
+{
+  "files": {
+    "config.js": "sha256:e4989163cf3fb86f7165bb142932e22aab102ee79541c15115751d9738cdd2ee",
+    "fields.js": "sha256:e20cd5e8b0032b74ef3849dc75967075b49b67988c609c0c1d33435ce9fd5476",
+    "fixtures.js": "sha256:62b511647f31b3802739eb97a8c07c98d1fdd8ac22438bf85fb2128318569420",
+    "index.js": "sha256:8bf3f14db335de67ebd6179001fb8804dbd62a22fc34fe3b973ab1f4a26921e8",
+    "legacy.js": "sha256:ef9e9b6fa2605d799b57422e0188b617131b2ee99196a68b925a9eeb1850ef23",
+    "provenance.json": "sha256:9bcd2422ad82ec2e3693dfb9c8ea702ba6bc2de14989005823a0362c68b2cbc5"
+  },
+  "dependencies": {
+    "strategy/canonical.js": "sha256:563dcd006fd39e0506cdb77108cfd596ab7eec39b00eccce926954f888b76fbd",
+    "strategy/conditions.js": "sha256:3a5e399a7ac69f465293fdc07858eaa6fd83554f024a9e004778641577718e75",
+    "strategy/contract.js": "sha256:2c8462ed199b6db8b79da9dd3cdb77437a64b7d27c64ff851a2d632e47e7b10d",
+    "strategy/decimal.js": "sha256:06b1063ae10daff6e329ee2df9a60a7bc6a6ee011d2c55017730842b4c9f4ce0",
+    "strategy/fields.js": "sha256:d2f37c6cb02ce8db512fc57796631b9e1ff6ef8ecf35e39179c5df8ab85fb62d",
+    "strategy/schemas/common.json": "sha256:f9b47c9b5b4dc4c2b8a38e70b3bd9783d40cf7ba8cbf6fb3faca4db1b01f26eb",
+    "strategy/schemas/decision.json": "sha256:b83dc50cf83d1f90e844451bb1c916b88616ab2609b92a192e3a50c79043214b",
+    "strategy/schemas/input-bundle.json": "sha256:a3db84ae70a444111d7254a143f4395a245e02d4e1fbdaaff944b60eea27079e",
+    "strategy/schemas/mandate.json": "sha256:4f7b7d44df8546ae33ee050862f22ee19daec039897d417b4ef1b6f1beef369f",
+    "strategy/schemas/release.json": "sha256:72886eaf8f8cce8e0979f2ba19281128271b28bc4cbb0c943262a87bfdad3e17"
+  }
+}

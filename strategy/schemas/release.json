@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "release.json",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "const": "noop.strategy/v1"
+    },
+    "strategy_id": {
+      "$ref": "common.json#/$defs/id"
+    },
+    "strategy_release_id": {
+      "$ref": "common.json#/$defs/id"
+    },
+    "release_digest": {
+      "$ref": "common.json#/$defs/digest"
+    },
+    "artifact": {
+      "type": "object",
+      "properties": {
+        "digest": {
+          "$ref": "common.json#/$defs/digest"
+        },
+        "entrypoint": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "dependency_lock_digest": {
+          "$ref": "common.json#/$defs/digest"
+        }
+      },
+      "required": [
+        "digest",
+        "entrypoint",
+        "dependency_lock_digest"
+      ],
+      "additionalProperties": false
+    },
+    "parameters": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^(?!(?:constructor|prototype|__proto__)$)[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$"
+      },
+      "minProperties": 1,
+      "maxProperties": 128,
+      "additionalProperties": {
+        "$ref": "common.json#/$defs/parameter"
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/action"
+          },
+          "maxItems": 6,
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "instrument_kinds": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "put",
+              "call"
+            ]
+          },
+          "maxItems": 2,
+          "uniqueItems": true
+        },
+        "venues": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/id"
+          },
+          "maxItems": 16,
+          "uniqueItems": true,
+          "minItems": 1
+        },
+        "spot_routes": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/id"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "actions",
+        "instrument_kinds",
+        "venues",
+        "spot_routes"
+      ],
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "max_duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "max_memory_mb": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8192
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4194304
+        }
+      },
+      "required": [
+        "max_duration_ms",
+        "max_memory_mb",
+        "max_output_bytes"
+      ],
+      "additionalProperties": false
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 32,
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "contract_version",
+    "strategy_id",
+    "strategy_release_id",
+    "release_digest",
+    "artifact",
+    "parameters",
+    "capabilities",
+    "runtime",
+    "extensions"
+  ],
+  "additionalProperties": false
+}

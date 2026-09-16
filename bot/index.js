@@ -2,9 +2,15 @@
  * Bot Entry Point
  * Initializes the database and starts the trading bot.
  */
-const db = require('./db');
 const fs = require('fs');
 const path = require('path');
+const venue = require('../integrations/derive-v3/profile').readProfile();
+if (venue.version === 3) {
+  if (process.env.NOOP_V3_ISOLATED_RUNNER !== '1') throw new Error('Start V3 through its dedicated isolated runner');
+  require('../integrations/derive-v3/isolation').assertIsolatedDataPaths(venue, process.env, path.resolve(__dirname, '..'));
+}
+// Validate V3 state isolation before db.js can open or migrate any database.
+const db = require('./db');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');

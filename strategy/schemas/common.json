@@ -1,0 +1,635 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "common.json",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^(?!(?:constructor|prototype|__proto__)$)[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^-?(?:0|[1-9][0-9]{0,59})(?:\\.[0-9]{1,30})?$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "utc-milliseconds"
+    },
+    "unit": {
+      "enum": [
+        "boolean",
+        "ratio",
+        "percent",
+        "day",
+        "ms",
+        "count",
+        "contract",
+        "ETH",
+        "USDC",
+        "USDC/contract",
+        "USDC/ETH"
+      ]
+    },
+    "action": {
+      "enum": [
+        "buy_put",
+        "sell_put",
+        "sell_call",
+        "buyback_call",
+        "buy_spot_eth",
+        "sell_spot_eth"
+      ]
+    },
+    "account": {
+      "type": "object",
+      "properties": {
+        "network": {
+          "enum": [
+            "testnet",
+            "mainnet"
+          ]
+        },
+        "chain_id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "venue": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "deployment": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "owner": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]{40}$"
+        },
+        "subaccount_id": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,29})$"
+        },
+        "manager_id": {
+          "type": "string",
+          "pattern": "^(?:0|[1-9][0-9]{0,29})$"
+        },
+        "risk_universe": {
+          "$ref": "common.json#/$defs/id"
+        }
+      },
+      "required": [
+        "network",
+        "chain_id",
+        "venue",
+        "deployment",
+        "owner",
+        "subaccount_id",
+        "manager_id",
+        "risk_universe"
+      ],
+      "additionalProperties": false
+    },
+    "amount": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "$ref": "common.json#/$defs/decimal"
+        },
+        "unit": {
+          "$ref": "common.json#/$defs/unit"
+        }
+      },
+      "required": [
+        "value",
+        "unit"
+      ],
+      "additionalProperties": false
+    },
+    "parameter": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "decimal"
+        },
+        "unit": {
+          "enum": [
+            "ratio",
+            "percent",
+            "day",
+            "ms",
+            "count",
+            "contract",
+            "ETH",
+            "USDC",
+            "USDC/contract",
+            "USDC/ETH"
+          ]
+        },
+        "minimum": {
+          "$ref": "common.json#/$defs/decimal"
+        },
+        "maximum": {
+          "$ref": "common.json#/$defs/decimal"
+        },
+        "default": {
+          "$ref": "common.json#/$defs/decimal"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "type",
+        "unit",
+        "minimum",
+        "maximum",
+        "default",
+        "description"
+      ],
+      "additionalProperties": false
+    },
+    "field": {
+      "type": "object",
+      "properties": {
+        "value": {
+          "anyOf": [
+            {
+              "$ref": "common.json#/$defs/decimal"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit": {
+          "$ref": "common.json#/$defs/unit"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "available_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "quality": {
+          "enum": [
+            "valid",
+            "missing",
+            "invalid"
+          ]
+        }
+      },
+      "required": [
+        "value",
+        "unit",
+        "observed_at",
+        "available_at",
+        "quality"
+      ],
+      "additionalProperties": false
+    },
+    "instrument": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "put",
+            "call"
+          ]
+        },
+        "base_asset": {
+          "const": "ETH"
+        },
+        "quote_asset": {
+          "const": "USDC"
+        },
+        "expiry": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "contract_size": {
+          "$ref": "common.json#/$defs/decimal"
+        }
+      },
+      "required": [
+        "kind",
+        "base_asset",
+        "quote_asset",
+        "expiry",
+        "contract_size"
+      ],
+      "additionalProperties": false
+    },
+    "dependency": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "intent_id": {
+              "$ref": "common.json#/$defs/id"
+            },
+            "intent_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "condition": {
+              "const": "filled_and_accounted"
+            },
+            "minimum_quantity": {
+              "$ref": "common.json#/$defs/amount"
+            }
+          },
+          "required": [
+            "intent_id",
+            "intent_revision",
+            "condition",
+            "minimum_quantity"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "intent_id": {
+              "$ref": "common.json#/$defs/id"
+            },
+            "intent_revision": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "condition": {
+              "const": "cancelled_and_reconciled"
+            }
+          },
+          "required": [
+            "intent_id",
+            "intent_revision",
+            "condition"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "condition": {
+              "const": "ledger_event"
+            },
+            "event_ref": {
+              "$ref": "common.json#/$defs/id"
+            }
+          },
+          "required": [
+            "condition",
+            "event_ref"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "operand": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "ref": {
+              "$ref": "common.json#/$defs/id"
+            }
+          },
+          "required": [
+            "ref"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "literal": {
+              "anyOf": [
+                {
+                  "$ref": "common.json#/$defs/decimal"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "unit": {
+              "$ref": "common.json#/$defs/unit"
+            }
+          },
+          "required": [
+            "literal",
+            "unit"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "condition": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "enum": [
+                "all",
+                "any"
+              ]
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "$ref": "common.json#/$defs/condition"
+              },
+              "maxItems": 32,
+              "minItems": 1
+            }
+          },
+          "required": [
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "not"
+            },
+            "arg": {
+              "$ref": "common.json#/$defs/condition"
+            }
+          },
+          "required": [
+            "op",
+            "arg"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "enum": [
+                "lt",
+                "lte",
+                "eq",
+                "gte",
+                "gt"
+              ]
+            },
+            "left": {
+              "$ref": "common.json#/$defs/operand"
+            },
+            "right": {
+              "$ref": "common.json#/$defs/operand"
+            }
+          },
+          "required": [
+            "op",
+            "left",
+            "right"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "order": {
+      "type": "object",
+      "properties": {
+        "side": {
+          "enum": [
+            "buy",
+            "sell"
+          ]
+        },
+        "time_in_force": {
+          "enum": [
+            "ioc",
+            "gtc"
+          ]
+        },
+        "reduce_only": {
+          "type": "boolean"
+        },
+        "limit_price": {
+          "$ref": "common.json#/$defs/amount"
+        },
+        "max_total_outlay": {
+          "$ref": "common.json#/$defs/amount"
+        },
+        "max_total_liability": {
+          "$ref": "common.json#/$defs/amount"
+        },
+        "max_total_fees": {
+          "$ref": "common.json#/$defs/amount"
+        }
+      },
+      "required": [
+        "side",
+        "time_in_force",
+        "reduce_only",
+        "limit_price",
+        "max_total_fees"
+      ],
+      "additionalProperties": false
+    },
+    "private_state": {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "content_ref": {
+          "$ref": "common.json#/$defs/id"
+        }
+      },
+      "required": [
+        "version",
+        "content_ref"
+      ],
+      "additionalProperties": false
+    },
+    "intent": {
+      "type": "object",
+      "properties": {
+        "intent_id": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "action": {
+          "$ref": "common.json#/$defs/action"
+        },
+        "purpose": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "authority_ref": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "instrument_ref": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "route_ref": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "active_from": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "expires_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "evaluation_interval_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "max_quote_age_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "conflict_group": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "budget_ref": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "inventory_ref": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "liability_ref": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "reservation_policy": {
+          "enum": [
+            "reserve_on_activation",
+            "reserve_on_trigger"
+          ]
+        },
+        "quantity": {
+          "type": "object",
+          "properties": {
+            "max_total": {
+              "$ref": "common.json#/$defs/decimal"
+            },
+            "unit": {
+              "enum": [
+                "contract",
+                "ETH"
+              ]
+            }
+          },
+          "required": [
+            "max_total",
+            "unit"
+          ],
+          "additionalProperties": false
+        },
+        "order": {
+          "$ref": "common.json#/$defs/order"
+        },
+        "requires_reconciled_account": {
+          "const": true
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/dependency"
+          },
+          "maxItems": 32
+        },
+        "when": {
+          "$ref": "common.json#/$defs/condition"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "evidence": {
+          "type": "object",
+          "maxProperties": 32,
+          "additionalProperties": true
+        },
+        "extensions": {
+          "type": "object",
+          "maxProperties": 32,
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "intent_id",
+        "intent_revision",
+        "action",
+        "purpose",
+        "authority_ref",
+        "active_from",
+        "expires_at",
+        "evaluation_interval_ms",
+        "max_quote_age_ms",
+        "max_attempts",
+        "priority",
+        "reservation_policy",
+        "quantity",
+        "order",
+        "requires_reconciled_account",
+        "dependencies",
+        "when",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "active_intent": {
+      "type": "object",
+      "properties": {
+        "intent_id": {
+          "$ref": "common.json#/$defs/id"
+        },
+        "intent_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "status": {
+          "enum": [
+            "active",
+            "cancel_requested",
+            "replacement_pending_reconciliation",
+            "expired",
+            "completed"
+          ]
+        }
+      },
+      "required": [
+        "intent_id",
+        "intent_revision",
+        "status"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

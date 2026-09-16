@@ -1,6 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
+  // Concurrent V3 testnet development must not overwrite the V2 build cache.
+  distDir: process.env.NOOP_VENUE === 'v3-testnet' ? '.next-v3-testnet' : '.next',
   compress: true,
   async headers() {
     return [

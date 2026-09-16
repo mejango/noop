@@ -1,0 +1,399 @@
+{
+  "source_version": "workspace script.js as read 2026-09-11",
+  "source_sha256": "cac50e2ee926bc841b280fddc9940b70e0d78750b4cae8b88ac3fdd9c44a35a3",
+  "snippets": [
+    {
+      "name": "floorOptionPriceCents",
+      "source": "script.js",
+      "source_sha256": "e15b8815ba29ba2ef426adbe522c6bb5080fe435d4f4e0e360b29418c75cd46d",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getBuyPutEntryPricing",
+      "source": "script.js",
+      "source_sha256": "4ade63b759b1f67c71d8cb5ba6748a188b7f9cf0546474407a14e9d2c9756c97",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "parseAdvisoryOptionInstrument",
+      "source": "script.js",
+      "source_sha256": "7a6018a74a164480a2cbf1f970993537be640bd1f7cdc992daba0a87b63acb77",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "BUY_PUT_VALUE_SIGNALS",
+      "source": "script.js",
+      "source_sha256": "9f172c7e2cf2afb0a972a1d5336a98c80d91943bca5597cac563b6f0607d4093",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "normalizeBuyPutValueSignal",
+      "source": "script.js",
+      "source_sha256": "cc4a9f7f7aae8f7ba0552d6324daf1113f89a4acc0491a41f7c08d112141a1bf",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "hasExplicitBuyPutValueSignal",
+      "source": "script.js",
+      "source_sha256": "4bdc3349ec259a3206e98e98f235b058c4e75c443158c21f12fe96d7ff11c0fc",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "isKnownBuyPutValueSignal",
+      "source": "script.js",
+      "source_sha256": "7160403665c1c792f68811f4242a6a02b03d06e70576494c75512f79655ad3b2",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "buildRulebookRequirements",
+      "source": "script.js",
+      "source_sha256": "1d9d918b78ed08e3e76a6aa739dd45908347d5f7a194e6b5df5d194e2b8e5fc9",
+      "adaptation": "interpolate CALL_BUYBACK_PROFIT_THRESHOLD in original 80% prose literal"
+    },
+    {
+      "name": "formatRulebookRequirements",
+      "source": "script.js",
+      "source_sha256": "55a8a5471b14ad80714e6179418820cc519d5ed52370cd500348a028febd9bf5",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "findMissingRulebookRequirements",
+      "source": "script.js",
+      "source_sha256": "6b6d76604a4ecf1e25aadcf9ba2b6b38c564edd98347027c4bdf9122c25291ad",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "buildAgendaFromValidatedRules",
+      "source": "script.js",
+      "source_sha256": "1b9ed4b72b9544a13a7a8f135c154073901072b43b0b71364800d8c06ad1c9f9",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "buildCanonicalRequiredWatcherRule",
+      "source": "script.js",
+      "source_sha256": "2bc9bd4501a5b5e601106f9836ff98a303050d0167a80d5006489444d5562365",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "isSellCallCandidateInStrategyRange",
+      "source": "script.js",
+      "source_sha256": "592b86ff1b9c087167aefe83c04619da7ded2c39618b2523c46198cf00544c4e",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "parseMaybeJsonObject",
+      "source": "script.js",
+      "source_sha256": "588fcc5e7cc794e18e32977e9d5ee880805851b408d4583bc1b75cc83ae7305d",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "isBuybackProfitCaptureCondition",
+      "source": "script.js",
+      "source_sha256": "1ad3fe9e56aa12db4327051bab8fc1ff8f53fce5e78f71355639f0a746bb238f",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "REDUNDANT_BUYBACK_CAPTURE_FIELDS",
+      "source": "script.js",
+      "source_sha256": "3d65cc9bb7fcabb09e56b6ed35ce7548184c435590f7eb7997e99757dbc2c759",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "isThreatManagementBuybackCriteria",
+      "source": "script.js",
+      "source_sha256": "14ebdf8dbfa962705fb317917564c138a192ac5dff306efe2de1a3c25469ac7c",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getBuybackProfitCaptureCondition",
+      "source": "script.js",
+      "source_sha256": "c79728f40553fb4a185e7e53e63a46b0ea70cea6644342bba59f717c27fbc6ab",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "conditionPasses",
+      "source": "script.js",
+      "source_sha256": "4d9f0859f321cfec6aad9e4442f179d2ec9197385517b2971972a23ee9d56056",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getRuleIntent",
+      "source": "script.js",
+      "source_sha256": "3ff960ba25a180c3b65aa4b1625abb1f32ad1f8d8ca897133df2fdc6dfae9c91",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getPutExitIntent",
+      "source": "script.js",
+      "source_sha256": "77a6344dc9abce98824022333cd9375b20ab72e51a43dd50552e7a37e3629230",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getBuybackIntent",
+      "source": "script.js",
+      "source_sha256": "161a3f44d43f36fc7251bff99ce85633f57f7bd65f608b60ca49331d0bedd4bf",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "isFiniteNumber",
+      "source": "script.js",
+      "source_sha256": "e2ae81c60de295ff86e0c3a30ce5903a869fc17e7cc6c6a1d4f35d47d7fd7813",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "isRangeWithin",
+      "source": "script.js",
+      "source_sha256": "55cbe79e744543ae165d5d2fd435f352faecaab909815a273722a898a610c4bf",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getConditions",
+      "source": "script.js",
+      "source_sha256": "5950bc0bc9ec4561265af5c07a3b419d1526309587cf0ceca9f21f0f98919122",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "hasCondition",
+      "source": "script.js",
+      "source_sha256": "29f843093c10fb7250dd52b5d68f4b65b31720668d826a4f62297d76ec803dc0",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "hasThresholdCondition",
+      "source": "script.js",
+      "source_sha256": "f9eaa7d0c412f1eb9eab23abab935ad77ae83e9975751539121c27f58e764757",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "hasLongerDatedPutProtectionSnapshot",
+      "source": "script.js",
+      "source_sha256": "459cabef8d0352ffe4121985ac8e0038cffc5b1158d10cc5958b1d9dec18da42",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getTotalLongPutAmount",
+      "source": "script.js",
+      "source_sha256": "a14484db123b9242d39e71ae0ef2037de4ab4ff10d6b19103476b17aa8937caf",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "leavesDownsideProtectionAfterSale",
+      "source": "script.js",
+      "source_sha256": "8d91b23664c7c2d44d9697f504b18b05362baac5de3aef8ce4a6ee6d5cba5fdd",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getSellPutExitAmount",
+      "source": "script.js",
+      "source_sha256": "509f4af300925d00df081b3c7a7d56a85f2295b4f79956da04ee540addbec95b",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getAdvisorSellPutLimitPrice",
+      "source": "script.js",
+      "source_sha256": "e2ce7b3449b3e8ed06bcedc13d02515ed6751d39f53f8ceb6de4e4340fbc492d",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getLongPutFairValueProof",
+      "source": "script.js",
+      "source_sha256": "7c012fdb8b7333a74b967f7cd550532d7c5e825edeaa505027f9d9aa28c96ab1",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getPatientSellPutPlan",
+      "source": "script.js",
+      "source_sha256": "8ff13be3e61aacef94f01ebb2786bd1118c6bbc03d3f8616e0c1724d15796af9",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getBuybackTargetCapturePct",
+      "source": "script.js",
+      "source_sha256": "a2c4259835f989ecfa7945bf60971072e06efae31a1a81492c0cea6e91165ee5",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getPatientBuybackPlan",
+      "source": "script.js",
+      "source_sha256": "46854ef71aac5bd56c65129442d0af72160764a6c89c313ce3155773fc55dd50",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getBuybackCapturePctAtPrice",
+      "source": "script.js",
+      "source_sha256": "bca782d9021c52f42933d2dee0e1bb831de9b90065cdc0f56388c6990a933ed1",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "validateAdvisorRuleContract",
+      "source": "script.js",
+      "source_sha256": "c1a714f06c61aece4c313034ed1d776cdd299631f951ab67b96669253b3a0ccc",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "normalizeBuybackCaptureFloor",
+      "source": "script.js",
+      "source_sha256": "4a261e8c0eeb66ffee42de031b8c499459944b183f3452550fc753f18ce24f68",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getBuybackCaptureGate",
+      "source": "script.js",
+      "source_sha256": "cc50bb161dbd4845b0a873e8fda06816f4ddcf697a0128f6657944bff757b7f3",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "buildBuybackConfirmationContext",
+      "source": "script.js",
+      "source_sha256": "5eaacdf912b9178a71c0b4041fa7a55893652000770f91518e442341bf4a655b",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "formatBuybackConfirmationContext",
+      "source": "script.js",
+      "source_sha256": "f20f4a0923f0d6abf08e048231375ab5cc99afe64d8087ecd78ececd5671d1b4",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "buildBuyPutPatientMakerContext",
+      "source": "script.js",
+      "source_sha256": "caa420b1e23ce1028b5c021ff280f841da968a92a5bb9edb61d6e624a7739daa",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getMarginCapacityBase",
+      "source": "script.js",
+      "source_sha256": "9400f7dd374f986a5bd1242bcc02e4cfeb69568fa32c1995eb9a4bfb74848631",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getMarginUtilizationBase",
+      "source": "script.js",
+      "source_sha256": "8a989cdd78eff825ee9c8636979e5db2348ebc520a0df969a1637be6ecde69cc",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "normalizeMarginUtilizationValue",
+      "source": "script.js",
+      "source_sha256": "8079419b2274b40ab50fab9c37cf607995eecbd6448f90ac8e9d8e7c8d6107b5",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "estimateMarginUtilizationFromComponents",
+      "source": "script.js",
+      "source_sha256": "e177008cd6ef906f2be6aa9116f49da52861b29e036075eb696a629efcbe04f6",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "estimateMarginUtilization",
+      "source": "script.js",
+      "source_sha256": "396291f76b2d67797b83b3d54522871e310ef3239702bebf0d27175c836a992e",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "estimateDisplayedMarginUtilization",
+      "source": "script.js",
+      "source_sha256": "82d4c5e5ea8e2d984471bf50c9b92f28dc52d59e9a87121803df28e548e3035f",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "estimateProjectedDisplayedMarginUtilization",
+      "source": "script.js",
+      "source_sha256": "7e8513c17e0d1a98e3b84f39824b4bb8806dbe7412b77d07e731b7a399c2695f",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getShortCallExposure",
+      "source": "script.js",
+      "source_sha256": "74c2564b3b103da0dec2e848276fbe5bfd22134cb520eeb18e775fe3ffaf572e",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "isCallBreakoutAddWindow",
+      "source": "script.js",
+      "source_sha256": "ab227832eeafd861f2adeb7db4adb89b02b342d7332af148eaf4fc24f4e47365",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getEffectiveCallExposureCapPct",
+      "source": "script.js",
+      "source_sha256": "aa9535a526915a11c03238df9e62b4f14f5a1f4a74dc2a8d46ced88cc6d2efec",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getEffectiveCallExposureLimitPct",
+      "source": "script.js",
+      "source_sha256": "6dec2c082ee42337266ea31b3dc665d691302b788873f9414f01f09683843f8e",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getDisplayedMarginHeadroomAtCap",
+      "source": "script.js",
+      "source_sha256": "ea76aa09eed1d57a758cd2c1dba2cfb59c258dbc1c338cb7e14c3178c0566a01",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "ACTION_POLICY",
+      "source": "script.js",
+      "source_sha256": "df79486ac81f82e41a5ca066c2588bbca66432fb15a0de01229bae24cb1ed10e",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getActionPolicy",
+      "source": "script.js",
+      "source_sha256": "3bfbe373e27711fbcf0914e76727496019bcb76dc5b978b18459a59e3ef650c3",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getAllowedOrderTypesForAction",
+      "source": "script.js",
+      "source_sha256": "f4351cab940c7c2444857226e3bb56b86ce2f54c5cfb19ebc8fe656ef7e6c2b8",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getStandingRulebookDisciplinePrompt",
+      "source": "script.js",
+      "source_sha256": "23d6925f4a60c0109e3819bb5445be45f324150c637c57f2e4643496bd29015b",
+      "adaptation": "interpolate CALL_BUYBACK_PROFIT_THRESHOLD in original 80% prose literal"
+    },
+    {
+      "name": "getCallMarginDisciplinePrompt",
+      "source": "script.js",
+      "source_sha256": "e2f92c5b75495ba7599ae7c2e96c8b32b7fa46595bbd052fcb7766c03c59b640",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getCallBuybackDisciplinePrompt",
+      "source": "script.js",
+      "source_sha256": "224476e8023a074d9d29264b4b55991c718aefe8101fede85ff41790c8cfd487",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getPutExitDisciplinePrompt",
+      "source": "script.js",
+      "source_sha256": "582e3412ea3c58277cec4af0a9bcbec877efe3ce2a8feef4e095f994927d39e7",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "getConfirmationScopePrompt",
+      "source": "script.js",
+      "source_sha256": "4cc2bc790c7943e3133816b866b1da16a5b7f944d613dc622b2f259beee72e85",
+      "adaptation": "verbatim function/constant declaration"
+    },
+    {
+      "name": "normalizePreferredOrderType",
+      "source": "script.js",
+      "source_sha256": "2f06a0981404ffc9a5e8009dcf227c0d75e60ea40d6dec3e7f9d4d9e085a9ced",
+      "adaptation": "verbatim function/constant declaration"
+    }
+  ],
+  "score_sources": [
+    "bot/put-score.js",
+    "bot/call-score.js"
+  ],
+  "notes": [
+    "Function declarations are copied at implementation time; runtime never reads production source.",
+    "Source-based tests evaluate only allowlisted snippets, never full script.js.",
+    "Legacy Number arithmetic is compatibility research output, not exact authorization."
+  ]
+}

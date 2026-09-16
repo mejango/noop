@@ -1092,8 +1092,8 @@ const getInstrumentPriceStep = (instrument, fallbackPrice = 0) => {
 const roundToStep = (value, step, mode = 'nearest') => {
   if (!(step > 0)) return value;
   const scaled = value / step;
-  if (mode === 'up') return Math.ceil(scaled) * step;
-  if (mode === 'down') return Math.floor(scaled) * step;
+  if (mode === 'up') return Math.ceil(scaled - 1e-9) * step;
+  if (mode === 'down') return Math.floor(scaled + 1e-9) * step;
   return Math.round(scaled) * step;
 };
 
@@ -1149,18 +1149,24 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
   const step = getInstrumentPriceStep(instrument, attemptedPrice);
 
   if (direction === 'sell') {
-    const retryBase = bidPrice > 0 ? bidPrice + step : attemptedPrice + step;
+    if (!(Number(attemptedPrice) > 0)) return null;
+    // Anchor to whichever is higher so a retry always moves off a price the venue just rejected.
+    const retryBase = Math.max(bidPrice, Number(attemptedPrice)) + step;
     const retryPrice = avoidRoundNumberRestingPrice(direction, normalizePriceToStep(retryBase, step, 'up'), step);
     return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
   }
 
-  if (askPrice <= 0) return null;
-  const belowAsk = askPrice - step;
+  if (askPrice <= 0 || !(Number(attemptedPrice) > 0)) return null;
+  const belowAsk = Math.min(askPrice, Number(attemptedPrice)) - step;
   const candidate = belowAsk > 0
     ? normalizePriceToStep(belowAsk, step, 'down')
     : normalizePriceToStep(askPrice * 0.99, step, 'down');
-  const retryPrice = avoidRoundNumberRestingPrice(direction, candidate, step);
-  return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
+  // A refreshed ask must never make a buy retry exceed the approved bid.
+  const cappedCandidate = normalizePriceToStep(Math.min(candidate, Number(attemptedPrice)), step, 'down');
+  const retryPrice = avoidRoundNumberRestingPrice(direction, cappedCandidate, step);
+  return retryPrice > 0 && retryPrice < askPrice && retryPrice <= Number(attemptedPrice)
+    ? { retryPrice, bidPrice, askPrice, step }
+    : null;
 };
 
 
@@ -6257,11 +6263,10 @@ describe('Buy-put patient maker confirmation override', () => {
 // ============================================================================
 
 describe('Entry cooldown logic', () => {
-  const isIocZeroFillFailure = (failure) => (
-    String(failure?.reason || failure?.execution_result || '')
-      .toLowerCase()
-      .includes('zero fill (ioc)')
-  );
+  const isIocZeroFillFailure = (failure) => {
+    const reason = String(failure?.reason || failure?.execution_result || '').toLowerCase();
+    return reason.includes('zero fill (ioc)') || reason.includes('post_only rejected');
+  };
   const shouldSkipForFailedEntryCooldown = (action, failure) => {
     if (!failure) return false;
     return !isIocZeroFillFailure(failure);
@@ -6304,6 +6309,11 @@ describe('Entry cooldown logic', () => {
     assert.strictEqual(shouldSkipForFailedEntryCooldown('sell_call', failure), false);
   });
 
+  test('post_only race rejection does not block next opportunity', () => {
+    const failure = { execution_result: 'post_only rejected without retry: attempted=$10.4000, bid=$10.3000, ask=$11.8000' };
+    assert.strictEqual(shouldSkipForFailedEntryCooldown('sell_call', failure), false);
+  });
+
   test('non-zero-fill buy_put failure still blocks during cooldown', () => {
     const failure = { reason: 'Order error: venue unavailable' };
     assert.strictEqual(shouldSkipForFailedEntryCooldown('buy_put', failure), true);
@@ -6311,11 +6321,10 @@ describe('Entry cooldown logic', () => {
 });
 
 describe('Recent execution friction confirmation context', () => {
-  const isIocZeroFillFailure = (failure) => (
-    String(failure?.reason || failure?.execution_result || '')
-      .toLowerCase()
-      .includes('zero fill (ioc)')
-  );
+  const isIocZeroFillFailure = (failure) => {
+    const reason = String(failure?.reason || failure?.execution_result || '').toLowerCase();
+    return reason.includes('zero fill (ioc)') || reason.includes('post_only rejected');
+  };
   const formatRecentExecutionFrictionContext = (action, failure) => {
     const reason = failure?.reason || failure?.execution_result;
     if (!reason) return '';
@@ -7540,6 +7549,31 @@ describe('post_only retry price discipline', () => {
     assert.ok(retry);
     assert.ok(Math.abs(retry.retryPrice - 6.1) < 0.0000001, `Expected ~6.1, got ${retry.retryPrice}`);
     assert.strictEqual(retry.step, 0.1);
+  });
+
+  test('sell retry steps off a rejected price even when the ticker bid is stale', () => {
+    // Ticker still says bid 10.3, but 10.4 was just rejected as crossing: retry must not be 10.4 again.
+    const retry = computePostOnlyRetryPrice('sell', { b: 10.3, a: 11.8 }, { option_details: {} }, 10.4);
+    assert.ok(retry);
+    assert.ok(Math.abs(retry.retryPrice - 10.5) < 0.0000001, `Expected ~10.5, got ${retry.retryPrice}`);
+  });
+
+  test('buy retry steps off a rejected price even when the ticker ask is stale', () => {
+    const retry = computePostOnlyRetryPrice('buy', { b: 13.5, a: 13.8 }, { option_details: {} }, 13.7);
+    assert.ok(retry);
+    assert.ok(Math.abs(retry.retryPrice - 13.6) < 0.0000001, `Expected ~13.6, got ${retry.retryPrice}`);
+  });
+
+  test('float noise does not make a retry jump two ticks', () => {
+    const sell = computePostOnlyRetryPrice('sell', { b: 16.1, a: 18 }, { option_details: {} }, 16.1);
+    assert.ok(Math.abs(sell.retryPrice - 16.2) < 0.0000001, `Expected ~16.2, got ${sell.retryPrice}`);
+    const buy = computePostOnlyRetryPrice('buy', { b: 1, a: 1.4 }, { option_details: {} }, 1.3);
+    assert.ok(Math.abs(buy.retryPrice - 1.2) < 0.0000001, `Expected ~1.2, got ${buy.retryPrice}`);
+  });
+
+  test('margin-guard block is not exempt from cooldown', () => {
+    const reason = 'post_only retry blocked by margin guard: attempted=$10.4000, margin_guard=projected 45.2% > cap';
+    assert.strictEqual(reason.toLowerCase().includes('post_only rejected'), false);
   });
 
   test('buy retry skips exact round numbers by one tick lower', () => {

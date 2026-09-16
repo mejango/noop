@@ -1,0 +1,9 @@
+{
+  "name": "noop-derive-v3",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated Derive V3 migration dependencies",
+  "dependencies": {
+    "@derivexyz/derive-ts": "3.0.13"
+  }
+}

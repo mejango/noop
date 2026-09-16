@@ -5,6 +5,7 @@ import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import { Readable } from 'stream';
+import '@/lib/venue';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';

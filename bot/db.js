@@ -183,6 +183,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_resting_orders_status ON resting_orders(status);
 `);
 try { db.exec('ALTER TABLE resting_orders ADD COLUMN pending_action_id INTEGER REFERENCES pending_actions(id)'); } catch {}
+// Cumulative notional already accounted for, so V3 partial fills can be booked once.
+// NULL preserves uncertainty for older rows that predate cost tracking.
+try { db.exec('ALTER TABLE resting_orders ADD COLUMN filled_value REAL'); } catch {}
 try {
   const restingActions = db.prepare(`
     SELECT id, execution_result
@@ -1547,8 +1550,8 @@ const stmts = {
 
   // Resting order tracking
   insertRestingOrder: db.prepare(`
-    INSERT OR IGNORE INTO resting_orders (order_id, pending_action_id, instrument_name, action, direction, amount, limit_price)
-    VALUES (@order_id, @pending_action_id, @instrument_name, @action, @direction, @amount, @limit_price)
+    INSERT OR IGNORE INTO resting_orders (order_id, pending_action_id, instrument_name, action, direction, amount, limit_price, filled_amount, filled_value)
+    VALUES (@order_id, @pending_action_id, @instrument_name, @action, @direction, @amount, @limit_price, @filled_amount, @filled_value)
   `),
   getOpenRestingOrders: db.prepare(`
     SELECT ro.*, pa.rule_id AS rule_id
@@ -1557,7 +1560,8 @@ const stmts = {
     WHERE ro.status = 'open'
   `),
   updateRestingOrder: db.prepare(`
-    UPDATE resting_orders SET status = @status, filled_amount = @filled_amount WHERE order_id = @order_id
+    UPDATE resting_orders SET status = @status, filled_amount = @filled_amount,
+      filled_value = COALESCE(@filled_value, filled_value) WHERE order_id = @order_id
   `),
   updateRestingOrderId: db.prepare(`
     UPDATE resting_orders
@@ -2748,13 +2752,15 @@ const insertRestingOrder = (order) => {
     direction: order.direction,
     amount: order.amount,
     limit_price: order.limit_price,
+    filled_amount: order.filled_amount ?? 0,
+    filled_value: order.filled_value ?? (Number(order.filled_amount || 0) === 0 ? 0 : null),
   });
 };
 
 const getOpenRestingOrders = () => stmts.getOpenRestingOrders.all();
 
-const updateRestingOrder = (orderId, status, filledAmount) => {
-  stmts.updateRestingOrder.run({ order_id: orderId, status, filled_amount: filledAmount ?? 0 });
+const updateRestingOrder = (orderId, status, filledAmount, filledValue = null) => {
+  stmts.updateRestingOrder.run({ order_id: orderId, status, filled_amount: filledAmount ?? 0, filled_value: filledValue });
 };
 
 const updateRestingOrderId = (oldOrderId, newOrderId) => {

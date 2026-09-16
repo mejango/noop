@@ -12,6 +12,8 @@ RUN npm ci --production
 # Copy bot and script files
 COPY bot/ ./bot/
 COPY script.js ./
+COPY integrations/derive-v3/*.js integrations/derive-v3/package*.json ./integrations/derive-v3/
+RUN npm ci --prefix integrations/derive-v3 --omit=dev --ignore-scripts --no-audit --no-fund
 
 # Data directory (Railway volume mount point)
 ENV DATA_DIR=/data

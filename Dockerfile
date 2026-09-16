@@ -7,6 +7,7 @@ COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci
 COPY dashboard/ ./
 COPY bot/config.json /bot/config.json
+COPY integrations/derive-v3/profile.js integrations/derive-v3/isolation.js /integrations/derive-v3/
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV BOT_CONFIG_PATH=/bot/config.json
 RUN npm run build
@@ -25,6 +26,8 @@ RUN npm ci --omit=dev
 # Copy bot
 COPY bot/ ./bot/
 COPY script.js ./
+COPY integrations/derive-v3/*.js integrations/derive-v3/package*.json ./integrations/derive-v3/
+RUN npm ci --prefix integrations/derive-v3 --omit=dev --ignore-scripts --no-audit --no-fund
 
 # Copy knowledge wiki templates (used to seed empty volumes on first deploy)
 COPY knowledge/ ./knowledge-templates/

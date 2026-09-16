@@ -1,0 +1,11 @@
+{
+  "name": "@oof/product-foundation",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OOF multi-strategy platform: durable mandates, accounting, and operation recovery",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "demo": "node demo.js"
+  }
+}

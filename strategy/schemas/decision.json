@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "decision.json",
+  "type": "object",
+  "properties": {
+    "contract_version": {
+      "const": "noop.strategy/v1"
+    },
+    "strategy_release_id": {
+      "$ref": "common.json#/$defs/id"
+    },
+    "release_digest": {
+      "$ref": "common.json#/$defs/digest"
+    },
+    "mandate_id": {
+      "$ref": "common.json#/$defs/id"
+    },
+    "mandate_revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "input_bundle_id": {
+      "$ref": "common.json#/$defs/digest"
+    },
+    "decision_id": {
+      "$ref": "common.json#/$defs/id"
+    },
+    "expected_control_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "private_state": {
+      "type": "object",
+      "properties": {
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "proposed_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "content_ref": {
+          "$ref": "common.json#/$defs/id"
+        }
+      },
+      "required": [
+        "expected_version",
+        "proposed_version",
+        "content_ref"
+      ],
+      "additionalProperties": false
+    },
+    "operations": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "upsert_intent"
+              },
+              "expected_intent_revision": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  }
+                ]
+              },
+              "intent": {
+                "$ref": "common.json#/$defs/intent"
+              }
+            },
+            "required": [
+              "op",
+              "expected_intent_revision",
+              "intent"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "cancel_intent"
+              },
+              "intent_id": {
+                "$ref": "common.json#/$defs/id"
+              },
+              "expected_intent_revision": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            },
+            "required": [
+              "op",
+              "intent_id",
+              "expected_intent_revision",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "op": {
+                "const": "no_action"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              }
+            },
+            "required": [
+              "op",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "maxItems": 128,
+      "minItems": 1
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 32,
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "contract_version",
+    "strategy_release_id",
+    "release_digest",
+    "mandate_id",
+    "mandate_revision",
+    "input_bundle_id",
+    "decision_id",
+    "expected_control_revision",
+    "operations"
+  ],
+  "additionalProperties": false
+}

@@ -18,6 +18,7 @@ import {
 } from './db';
 import { buildCorrelationAnalysis } from './correlation';
 import { getPositions, getCollaterals } from './lyra';
+import { IS_V3 } from './venue';
 import fs from 'fs';
 import path from 'path';
 import { resolveWikiDir } from './wiki';
@@ -80,7 +81,10 @@ async function _buildUncached() {
   let collaterals: any[] = [];
   try {
     [positions, collaterals] = await Promise.all([getPositions(), getCollaterals()]);
-  } catch { /* Lyra API unavailable — continue without account data */ }
+  } catch (error) {
+    if (IS_V3) throw error;
+    // V2 retains its existing research-only fallback.
+  }
 
   return {
     _meta: {
