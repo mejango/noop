@@ -76,13 +76,14 @@ const computePostOnlyRetryPrice = (direction, ticker, instrument, attemptedPrice
 
   if (direction === 'sell') {
     if (!(Number(attemptedPrice) > 0)) return null;
-    const retryBase = Math.max(Number(attemptedPrice), bidPrice > 0 ? bidPrice + step : Number(attemptedPrice) + step);
+    // Anchor to whichever is higher so a retry always moves off a price the venue just rejected.
+    const retryBase = Math.max(bidPrice, Number(attemptedPrice)) + step;
     const retryPrice = avoidRoundNumberRestingPrice(direction, normalizePriceToStep(retryBase, step, 'up'), step);
     return retryPrice > 0 ? { retryPrice, bidPrice, askPrice, step } : null;
   }
 
   if (askPrice <= 0 || !(Number(attemptedPrice) > 0)) return null;
-  const belowAsk = askPrice - step;
+  const belowAsk = Math.min(askPrice, Number(attemptedPrice)) - step;
   const candidate = belowAsk > 0
     ? normalizePriceToStep(belowAsk, step, 'down')
     : normalizePriceToStep(askPrice * 0.99, step, 'down');

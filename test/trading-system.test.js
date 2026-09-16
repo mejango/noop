@@ -5184,6 +5184,16 @@ describe('Entry cooldown logic', () => {
     assert.strictEqual(shouldSkipForFailedEntryCooldown('sell_call', failure), false);
   });
 
+  test('post_only race rejection does not block next opportunity', () => {
+    const failure = { execution_result: 'post_only rejected: attempted=$10.4000, bid=$10.3000, ask=$11.8000. Price may have moved — will re-evaluate next tick.' };
+    assert.strictEqual(shouldSkipForFailedEntryCooldown('sell_call', failure), false);
+  });
+
+  test('margin-guard block still cools down', () => {
+    const failure = { execution_result: 'post_only retry blocked by margin guard: attempted=$10.4000, margin_guard=projected 45.2% > cap' };
+    assert.strictEqual(shouldSkipForFailedEntryCooldown('sell_call', failure), true);
+  });
+
   test('non-zero-fill buy_put failure still blocks during cooldown', () => {
     const failure = { reason: 'Order error: venue unavailable' };
     assert.strictEqual(shouldSkipForFailedEntryCooldown('buy_put', failure), true);
@@ -6264,6 +6274,19 @@ describe('confirmation prompt margin context', () => {
 });
 
 describe('post_only retry price discipline', () => {
+  test('sell retry steps off a rejected price even when the ticker bid is stale', () => {
+    // Ticker still says bid 10.3, but 10.4 was just rejected as crossing: retry must not be 10.4 again.
+    const retry = computePostOnlyRetryPrice('sell', { b: 10.3, a: 11.8 }, { option_details: {} }, 10.4);
+    assert.ok(retry);
+    assert.ok(Math.abs(retry.retryPrice - 10.5) < 0.0000001, `Expected ~10.5, got ${retry.retryPrice}`);
+  });
+
+  test('buy retry steps off a rejected price even when the ticker ask is stale', () => {
+    const retry = computePostOnlyRetryPrice('buy', { b: 13.5, a: 13.8 }, { option_details: {} }, 13.7);
+    assert.ok(retry);
+    assert.ok(Math.abs(retry.retryPrice - 13.6) < 0.0000001, `Expected ~13.6, got ${retry.retryPrice}`);
+  });
+
   test('sell retry moves one tick above bid, not to the ask', () => {
     const retry = computePostOnlyRetryPrice(
       'sell',

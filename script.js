@@ -7731,7 +7731,8 @@ const formatBuyPutConfirmationContext = ({ action, triggerData, ticker, currentP
     : Number(advisorLimitPrice) > 0
       ? Number(advisorLimitPrice)
       : bestAsk;
-  const makerPlan = instrument && Number(ticker?.a) > 0 && limitPrice > 0
+  // Only re-plan when the limit would cross; a limit already inside the spread is the planned price.
+  const makerPlan = instrument && Number(ticker?.a) > 0 && limitPrice >= Number(ticker.a)
     ? computePostOnlyRetryPrice('buy', ticker, instrument, limitPrice)
     : null;
   const plannedPrice = makerPlan?.retryPrice ?? limitPrice;
@@ -10147,11 +10148,11 @@ const getRecentFailedEntry = (action, instrumentName, cooldownMs = FAILED_ENTRY_
   };
 };
 
-const isIocZeroFillFailure = (failure) => (
-  String(failure?.reason || failure?.execution_result || '')
-    .toLowerCase()
-    .includes('zero fill (ioc)')
-);
+// Nothing filled and nothing lost in either case — the book just moved. Not a cooldown blocker.
+const isIocZeroFillFailure = (failure) => {
+  const reason = String(failure?.reason || failure?.execution_result || '').toLowerCase();
+  return reason.includes('zero fill (ioc)') || reason.includes('post_only rejected');
+};
 
 const formatRecentExecutionFrictionContext = (action, failure) => {
   const reason = failure?.reason || failure?.execution_result;
@@ -10168,7 +10169,9 @@ const formatRecentExecutionFrictionContext = (action, failure) => {
 
   return [
     `Recent execution routing note for this exact instrument/action: ${reason}`,
-    '- Prior IOC zero fill means no visible/matching liquidity accepted the limit at that instant. It is not a reviewer rejection, not a cooldown blocker, and not evidence that the active rule trigger is invalid.',
+    String(reason).toLowerCase().includes('post_only rejected')
+      ? '- Prior post_only rejection means the book moved through the maker price between quote and submit. It is not a reviewer rejection, not a cooldown blocker, and not evidence that the active rule trigger is invalid.'
+      : '- Prior IOC zero fill means no visible/matching liquidity accepted the limit at that instant. It is not a reviewer rejection, not a cooldown blocker, and not evidence that the active rule trigger is invalid.',
     `- ${routingGuidance}`,
   ].join('\n');
 };
@@ -10180,13 +10183,6 @@ const adaptOrderTypeFromFailureHistory = (action, instrumentName, proposedOrderT
   if (!recentFailed?.reason) return { orderType: normalized, note: null };
 
   const reason = String(recentFailed.reason || '').toLowerCase();
-  if (normalized === 'post_only' && reason.includes('post_only rejected') && validOrderTypes.includes('gtc')) {
-    return {
-      orderType: 'gtc',
-      note: 'recent post_only rejection on this instrument; using gtc instead of post_only',
-    };
-  }
-
   if (normalized === 'ioc' && reason.includes('zero fill') && validOrderTypes.includes('gtc')) {
     return {
       orderType: 'gtc',
@@ -10715,6 +10711,10 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       if (retryOrder && !retryOrder.rejected_post_only && !retryOrder.placement_error && !retryOrder.zero_fill_rejected) {
         order = retryOrder;
         price = retryPlan.retryPrice;
+      } else if (retryOrder?.placement_error) {
+        const reason = `Venue rejected maker retry: ${retryOrder.placement_error}`;
+        insertExecutionOrder({ action, success: false, reason, instrument_name: instrumentName, spot_price: spotPrice, price: retryPlan.retryPrice, intended_amount: amount });
+        return { failed: true, reason };
       } else {
         const finalContext = formatPostOnlyContext({
           attemptedPrice: price,
@@ -11869,7 +11869,9 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
           // post_only failed even after one maker retry — mark failed, don't retry again this tick
           db.updatePendingAction(action.id, {
             status: 'failed',
-            execution_result: `post_only rejected: ${result.context || `would cross book at $${executionPrice}`}. Price may have moved — will re-evaluate next tick.`,
+            execution_result: result.postOnlyBlocked
+              ? `post_only retry blocked by margin guard: ${result.context}`
+              : `post_only rejected: ${result.context || `would cross book at $${executionPrice}`}. Price may have moved — will re-evaluate next tick.`,
           });
           if (result.postOnlyBlocked) {
             console.log(`📋 maker entry skipped: ${action.action} ${action.instrument_name} — ${result.context || 'retry blocked by guard'}`);
