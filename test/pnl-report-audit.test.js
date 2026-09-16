@@ -500,3 +500,32 @@ test('expiry at a window boundary appears once, either in current estimates or t
     });
   }
 });
+
+test('covered-call summary pairs call cashflow with the move on one backing ETH per contract', async () => {
+  // Sold 1 call at spot 2000 for $100; settled at spot 2500 for -$500. The ETH behind it gained $500.
+  const settled = await routeFixture({ orders: [order()], spots: [quote(-60_000)] }).report();
+  assert.equal(settled.summary.coveredCall.callPnl, -400);
+  assert.equal(settled.summary.coveredCall.ethMove, 500);
+  assert.equal(settled.summary.coveredCall.net, 100);
+  assert.equal(settled.summary.coveredCall.openContracts, 0);
+  assert.equal(settled.summary.coveredCall.unpricedLegs, 0);
+
+  // Still open at the window close: the backing ETH is marked at the closing snapshot spot.
+  const open = await routeFixture({
+    orders: [order({ instrument_name: 'ETH-20260320-2000-C', expiry: Math.floor(Date.parse('2026-03-20T08:00:00.000Z') / 1000) })],
+    snapshots: [snapshot('2026-03-07T12:00:00.000Z', 10_000, 2200)],
+  }).report();
+  assert.equal(open.summary.coveredCall.callPnl, 100);
+  assert.equal(open.summary.coveredCall.ethMove, 200);
+  assert.equal(open.summary.coveredCall.openContracts, 1);
+});
+
+test('DRY RUN simulated fills are excluded from every cashflow total', async () => {
+  const report = await routeFixture({
+    orders: [order(), order({ id: 2, reason: 'DRY RUN: simulated sell_call (post_only)', total_value: 9_999 })],
+    spots: [quote(-60_000)],
+  }).report();
+  assert.equal(report.meta.orderCount, 1);
+  assert.equal(report.summary.callNetCashflow, 100);
+  assert.equal(report.summary.coveredCall.callPnl, -400);
+});

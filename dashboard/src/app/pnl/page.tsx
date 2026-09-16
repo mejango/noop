@@ -51,6 +51,7 @@ type Report = {
     estimatedSettlementCashflow: number;
     putNetCashflow: number;
     callNetCashflow: number;
+    coveredCall?: { callPnl: number; ethMove: number; net: number; openContracts: number; unpricedLegs: number; basis: string };
     openingSpot: number;
     closingSpot: number;
     spotChangePct: number;
@@ -391,6 +392,15 @@ export default function PnlReportPage() {
               <div className="space-y-1">
                 <div className="flex justify-between"><span>Puts</span><span className={report.summary.putNetCashflow >= 0 ? 'text-emerald-600' : 'text-red-600'}>{fmtSignedUsd(report.summary.putNetCashflow)}</span></div>
                 <div className="flex justify-between"><span>Calls</span><span className={report.summary.callNetCashflow >= 0 ? 'text-emerald-600' : 'text-red-600'}>{fmtSignedUsd(report.summary.callNetCashflow)}</span></div>
+                {report.summary.coveredCall && (
+                  <div className="flex justify-between" title={report.summary.coveredCall.basis}>
+                    <span className="text-zinc-500">Calls incl. backing ETH</span>
+                    <span className={report.summary.coveredCall.net >= 0 ? 'text-emerald-600' : 'text-red-600'}>
+                      {fmtSignedUsd(report.summary.coveredCall.net)}
+                      <span className="text-zinc-400"> ({fmtSignedUsd(report.summary.coveredCall.callPnl)} calls {fmtSignedUsd(report.summary.coveredCall.ethMove)} ETH)</span>
+                    </span>
+                  </div>
+                )}
                 <div className="flex justify-between"><span>Opening Unrealized</span><span>{formatUSD(report.summary.openingUnrealized)}</span></div>
                 <div className="flex justify-between"><span>Closing Unrealized</span><span>{formatUSD(report.summary.closingUnrealized)}</span></div>
               </div>

@@ -386,6 +386,13 @@ const BUY_PUT_EDGE_SHOCKS = [0.30, 0.40, 0.50];
 const PUT_ROLL_DTE_THRESHOLD = STRATEGY_FACTS.put_roll_dte_threshold;
 const PUT_MONETIZATION_PROFIT_THRESHOLD = STRATEGY_FACTS.put_monetization_profit_threshold_pct;
 const PUT_MONETIZATION_MAX_TRANCHE_FRACTION = STRATEGY_FACTS.put_monetization_max_tranche_fraction;
+// Rolling a put that only recovers pennies sells a crash ticket for nothing; require real recovery.
+const PUT_ROLL_MIN_RECOVERY_PCT = Number(STRATEGY_FACTS.put_roll_min_recovery_pct) || 0;
+// Monetization ladder: each successive tranche needs a bigger multiple; once exhausted, hold the rest.
+const PUT_MONETIZATION_LADDER_PCT = Array.isArray(STRATEGY_FACTS.put_monetization_ladder_pct) && STRATEGY_FACTS.put_monetization_ladder_pct.length
+  ? STRATEGY_FACTS.put_monetization_ladder_pct.map(Number)
+  : [PUT_MONETIZATION_PROFIT_THRESHOLD];
+const PUT_MONETIZATION_MIN_INTRINSIC_FRACTION = Number(STRATEGY_FACTS.put_monetization_min_intrinsic_fraction) || 0;
 const REJECTED_ACTION_BACKOFF_MS = 60 * 60 * 1000;
 const MANDELBROT_SPOT_PATH_LOOKBACK_DAYS = 30;
 const MANDELBROT_SPOT_PATH_INTERVAL_HOURS = 1;
@@ -7286,6 +7293,19 @@ const getSellPutExitAmount = (rule, criteria, position, values) => {
   return Math.max(0, Math.min(fullAmount * fraction, fullAmount - 1e-9));
 };
 
+// null once every ladder rung has been sold: the remainder is held to settlement.
+// ponytail: counts distinct sell_put fill orders, so a repriced partial tranche can count twice — that only makes us hold more.
+const getPutMonetizationThresholdPct = (instrumentName) => {
+  const sold = db && typeof db.countSellPutTranches === 'function' && instrumentName ? db.countSellPutTranches(instrumentName) : 0;
+  return sold < PUT_MONETIZATION_LADDER_PCT.length ? PUT_MONETIZATION_LADDER_PCT[sold] : null;
+};
+
+const getLongPutIntrinsicValue = (position, spotPrice) => {
+  const parsed = parseAdvisoryOptionInstrument(position?.instrument_name);
+  return parsed?.optionType === 'P' && Number.isFinite(parsed.strike) && Number(spotPrice) > 0
+    ? Math.max(0, parsed.strike - Number(spotPrice)) : 0;
+};
+
 const getAdvisorSellPutLimitPrice = (criteria) => {
   const explicit = Number(criteria?.min_exit_price ?? criteria?.limit_price ?? criteria?.target_exit_price);
   return Number.isFinite(explicit) && explicit > 0 ? explicit : null;
@@ -7319,15 +7339,19 @@ const getPatientSellPutPlan = (rule, criteria, position, values = {}) => {
   if (!rule || rule.action !== 'sell_put') return null;
   if (getPutExitIntent(criteria) !== 'monetize_tail_win') return null;
 
-  const limitPrice = getAdvisorSellPutLimitPrice(criteria);
+  const advisorLimit = getAdvisorSellPutLimitPrice(criteria);
   const entryPrice = Number(position?.avg_entry_price);
-  if (!(limitPrice > 0) || !(entryPrice > 0)) return null;
+  if (!(advisorLimit > 0) || !(entryPrice > 0)) return null;
+  const thresholdPct = getPutMonetizationThresholdPct(position?.instrument_name);
+  if (thresholdPct == null) return null;
 
+  // Settlement pays intrinsic for free, so our resting offer never goes below (most of) it.
+  const limitPrice = Math.max(advisorLimit, PUT_MONETIZATION_MIN_INTRINSIC_FRACTION * getLongPutIntrinsicValue(position, values?.spot_price));
   const pnlPct = ((limitPrice - entryPrice) / entryPrice) * 100;
-  if (!(pnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
+  if (!(pnlPct > thresholdPct)) return null;
 
   const fairValueProof = getLongPutFairValueProof(position, values);
-  if (!(Number(fairValueProof?.pnlPct) > PUT_MONETIZATION_PROFIT_THRESHOLD)) return null;
+  if (!(Number(fairValueProof?.pnlPct) > thresholdPct)) return null;
 
   return {
     limitPrice,
@@ -7620,7 +7644,20 @@ const getSellPutProtectionGate = (rule, values, context = {}) => {
         reason: 'roll_protection requires enough later-expiry long puts at the same or higher strike to replace the quantity sold',
       };
     }
+    const rollEntry = Number(context.position?.avg_entry_price);
+    const rollBid = Number(values?.execution_price) || Number(values?.mark_price);
+    if (rollEntry > 0 && !(rollBid >= rollEntry * PUT_ROLL_MIN_RECOVERY_PCT / 100)) {
+      return {
+        allowed: false,
+        reason: `roll_protection bid $${Number.isFinite(rollBid) ? rollBid.toFixed(2) : 'n/a'} recovers less than ${PUT_ROLL_MIN_RECOVERY_PCT}% of cost $${rollEntry.toFixed(2)}; hold the ticket`,
+      };
+    }
     return { allowed: true };
+  }
+
+  const monetizationThresholdPct = getPutMonetizationThresholdPct(context.position?.instrument_name);
+  if (monetizationThresholdPct == null) {
+    return { allowed: false, reason: `monetization ladder complete (${PUT_MONETIZATION_LADDER_PCT.join('/')}%); remaining protection is held to settlement` };
   }
 
   const livePnlPct = Number(values?.unrealized_pnl_pct);
@@ -7629,7 +7666,7 @@ const getSellPutProtectionGate = (rule, values, context = {}) => {
     Number.isFinite(livePnlPct) ? livePnlPct : -Infinity,
     Number.isFinite(fairValuePnlPct) ? fairValuePnlPct : -Infinity
   );
-  if (Number.isFinite(proofPnlPct) && proofPnlPct > PUT_MONETIZATION_PROFIT_THRESHOLD) {
+  if (Number.isFinite(proofPnlPct) && proofPnlPct > monetizationThresholdPct) {
     const plannedSellAmount = Number(context.plannedSellAmount ?? context.position?.amount ?? 0);
     if (!leavesDownsideProtectionAfterSale(context.position, context.positions || [], plannedSellAmount)) {
       return {
@@ -7645,7 +7682,7 @@ const getSellPutProtectionGate = (rule, values, context = {}) => {
   const fairPnlText = Number.isFinite(fairValuePnlPct) ? `${fairValuePnlPct.toFixed(2)}%` : 'n/a';
   return {
     allowed: false,
-    reason: `protective long put exit requires dte <= ${PUT_ROLL_DTE_THRESHOLD} for rolling or extreme current pnl proof > ${PUT_MONETIZATION_PROFIT_THRESHOLD}% for monetization; actual dte=${dteText}, executable_pnl=${livePnlText}, fair_value_pnl=${fairPnlText}`,
+    reason: `protective long put exit requires dte <= ${PUT_ROLL_DTE_THRESHOLD} for rolling or extreme current pnl proof > ${monetizationThresholdPct}% for this monetization tranche; actual dte=${dteText}, executable_pnl=${livePnlText}, fair_value_pnl=${fairPnlText}`,
   };
 };
 
@@ -8850,6 +8887,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           instrumentName: rule.instrument_name, amount: desiredAmount, price: plannedPrice,
           orderType: desiredOrderType, intent, instrument, ticker, existingOrder: existingRestingExit,
           priceReason: patientBuybackPlan?.priceReason, ceilingPrice: patientBuybackPlan?.ceilingPrice });
+        // A resting monetization offer is our price into a panic: it may be raised, never chased down.
+        if (existingRestingExit?.exit_intent === 'monetize_tail_win' && intent === 'monetize_tail_win'
+          && Number(existingRestingExit.limit_price) > desiredExitOrder.limit_price) {
+          desiredExitOrder.limit_price = Number(existingRestingExit.limit_price);
+        }
         const existingComparison = existingRestingExit
           ? compareRestingExitOrder(existingRestingExit, desiredExitOrder) : null;
         if (existingComparison && existingComparison.decision !== 'replace') {
@@ -9948,7 +9990,7 @@ const getRestingExitInvalidReason = ({ order, tracked, activeRules = [], positio
         orderType: tracked?.order_type || 'gtc', criteria, ticker,
         instrument: instruments.find(instrument => instrument.instrument_name === order.instrument_name),
         positions, spotPrice: Number(ticker.I) > 0 ? Number(ticker.I) : spotPrice,
-        policy: getFinalOrderPolicy(), now: Date.now(),
+        policy: getFinalOrderPolicy(order.instrument_name), now: Date.now(),
       });
       if (!validation.allowed) continue;
     }
@@ -10317,7 +10359,7 @@ const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normal
 
 const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, keep two intents separate. Intent 1 is profit/capacity reset while the short call is winning: use buyback_intent="profit_capture" and executable unrealized_pnl_pct >= ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic trigger, or set a patient max_buyback_price/target_capture_pct where the bid would capture at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% if filled. Do not add DTE or mark_price blockers for this intent; executable capture already uses the live buyback ask. Intent 2 is threat management when the short call is genuinely dangerous and time/range for recovery is running out: use buyback_intent="threat_management" with allow_below_profit_floor=true, and conditions on real threat facts such as delta, spot vs strike, and remaining DTE. Do not prematurely buy back just because price is rising; spot can come back down, and buying back fear premium can make us the sucker of the trade. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks only when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
 
-const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put returns cash and reduces the hedge position, but removing hedge offsets may worsen portfolio margin; assess the remaining portfolio. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds enough later-expiry long puts at the same or higher strike to replace the quantity sold. For roll_protection, a full close of the aging instrument is allowed, negative PnL is not a rejection reason, and monetize_tail_win tranche/profit thresholds do not apply because replacement protection is already in the book. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. For monetization, never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Even when the monetization hard trigger is satisfied, confirm only if the full market context says selling a tranche is wise rather than prematurely cutting convexity. If you reject a sell_put, do it because the typed intent's requirements fail or removing protection is strategically unwise, and include any loss of portfolio hedge offsets in that assessment.`;
+const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put returns cash and reduces the hedge position, but removing hedge offsets may worsen portfolio margin; assess the remaining portfolio. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds enough later-expiry long puts at the same or higher strike to replace the quantity sold. For roll_protection, a full close of the aging instrument is allowed, negative PnL is not a rejection reason, and monetize_tail_win tranche/profit thresholds do not apply because replacement protection is already in the book. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. For monetization, never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Monetization is a ladder (${PUT_MONETIZATION_LADDER_PCT.join('% / ')}%): each tranche requires a larger multiple and the final remainder is held to settlement, so a tranche that meets its rung is the plan working, not premature. Your discretion is the offer price: read the book, mark, intrinsic and IV, and name the price we are willing to sell this tranche at — we make the market, we do not hit thin bids — never below ${(PUT_MONETIZATION_MIN_INTRINSIC_FRACTION * 100).toFixed(0)}% of intrinsic. If you reject a sell_put, do it because the typed intent's requirements fail, never because the market might go further.`;
 
 const normalizeLearningText = (value) => String(value || '').toLowerCase();
 
@@ -10791,7 +10833,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   return result;
 };
 
-const getFinalOrderPolicy = () => ({
+const getFinalOrderPolicy = (instrumentName = null) => ({
   putDeltaRange: PUT_DELTA_RANGE,
   putDteRange: PUT_EXPIRATION_RANGE,
   callDeltaRange: CALL_DELTA_RANGE,
@@ -10800,7 +10842,9 @@ const getFinalOrderPolicy = () => ({
   sellCallMinBid: SELL_CALL_FALLBACK_MIN_BID,
   callCapturePct: CALL_BUYBACK_PROFIT_THRESHOLD,
   putRollDte: PUT_ROLL_DTE_THRESHOLD,
-  putMonetizationPct: PUT_MONETIZATION_PROFIT_THRESHOLD,
+  putRollMinRecoveryPct: PUT_ROLL_MIN_RECOVERY_PCT,
+  putMonetizationPct: instrumentName ? getPutMonetizationThresholdPct(instrumentName) : PUT_MONETIZATION_PROFIT_THRESHOLD,
+  putMinIntrinsicFraction: PUT_MONETIZATION_MIN_INTRINSIC_FRACTION,
   putMaxTrancheFraction: PUT_MONETIZATION_MAX_TRANCHE_FRACTION,
 });
 
@@ -10831,7 +10875,7 @@ const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData
       criteria: ruleCriteria, triggerData, ticker,
       instrument: instruments.find(instrument => instrument.instrument_name === action.instrument_name),
       positions, spotPrice: currentSpot, marginState, callMarginDecision, putBudgetRemaining,
-      ruleBudgetLimit: activeRule.budget_limit, policy: getFinalOrderPolicy(), now: Date.now(),
+      ruleBudgetLimit: activeRule.budget_limit, policy: getFinalOrderPolicy(action.instrument_name), now: Date.now(),
     });
     if (validation.allowed && isEntryAction(action.action)) {
       // This callback runs immediately before every submission and maker retry.
@@ -11518,7 +11562,14 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
       // Vote 1: Claude Sonnet (Spitznagel temperament)
       let anthropicVote = null;
       let anthropicFailure = null;
-      try {
+      // ponytail: deterministic preflight already enforces every rule the voters are told to defer to.
+      // Skipping them takes 20-50s of quote staleness out of every entry/reprice. Monetization keeps
+      // its vote because that is where a model prices our offer into a panic.
+      const skipLlmVotes = process.env.SKIP_LLM_CONFIRMATION === '1'
+        && !(action.action === 'sell_put' && getPutExitIntent(ruleCriteria) === 'monetize_tail_win');
+      if (skipLlmVotes) {
+        anthropicVote = { confirm: true, order_type: advisoryOrderPref || (isEntryAction(action.action) ? 'post_only' : null), limit_price: null, reasoning: 'preflight passed; LLM confirmation disabled' };
+      } else try {
         const anthropicResp = await axios.post('https://api.anthropic.com/v1/messages', {
           model: ANTHROPIC_SONNET_MODEL,
           thinking: { type: 'disabled' },
@@ -11567,7 +11618,9 @@ ${getConfirmationJsonOnlyPrompt()}`,
       // Vote 2: OpenAI GPT (Taleb temperament)
       let codexVote = null;
       let codexFailure = null;
-      try {
+      if (skipLlmVotes) {
+        codexVote = anthropicVote;
+      } else try {
         const codexText = await callOpenAI(
           `You are a Taleb-style risk advisor. Your philosophy has TWO sides:
 1. BUY CONVEXITY CHEAP: Long puts have limited premium loss and provide nonlinear downside protection. Their intrinsic payoff is bounded by the strike when the underlying reaches zero. For buy_put, judge premium through the approved min_score/target_score at the proposed bid using fresh delta and DTE.

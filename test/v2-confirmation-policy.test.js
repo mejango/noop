@@ -30,11 +30,13 @@ async function confirm(overrides = {}) {
   const vote = { confirm: true, order_type: 'gtc', limit_price: overrides.price ?? 8, reasoning: 'Approved concrete order' };
   const ctx = {
     ...tradePolicy, ...pricing, inferActionFromOpenOrder, Date: Clock, Math, Number, JSON,
-    console: { log() {}, error() {} }, process: { env: {} },
+    console: { log() {}, error() {} }, process: { env: overrides.env || {} },
     ANTHROPIC_SONNET_MODEL: 'mock', OPENAI_CONFIRMATION_MODEL: 'mock',
     PUT_DELTA_RANGE: [-0.12, -0.02], PUT_EXPIRATION_RANGE: [45, 78], CALL_DELTA_RANGE: [0.04, 0.12], CALL_EXPIRATION_RANGE: [5, 12],
     SELL_CALL_FALLBACK_MIN_SCORE: 65, SELL_CALL_FALLBACK_MIN_BID: 4, CALL_BUYBACK_PROFIT_THRESHOLD: 80,
     PUT_ROLL_DTE_THRESHOLD: 25, PUT_MONETIZATION_PROFIT_THRESHOLD: 1000, PUT_MONETIZATION_MAX_TRANCHE_FRACTION: 0.25,
+    PUT_ROLL_MIN_RECOVERY_PCT: 40, PUT_MONETIZATION_MIN_INTRINSIC_FRACTION: 0.95,
+    getPutMonetizationThresholdPct: () => 1000, getPutExitIntent: criteria => criteria?.put_exit_intent || null,
     botData: { mediumTermMomentum: {}, putBudgetForCycle: 100, putUnspentBuyLimit: 0, putNetBought: 0 },
     db: {
       getPendingActions: () => [action], getOpenRestingOrders: () => overrides.trackedOrders || [], getActiveTradeLessons: () => [], getRecentTradeReviews: () => [],
@@ -195,4 +197,13 @@ test('sub-tick buy cap has no valid normalized price', () => {
 test('maker retries never worsen either direction of the approved price', () => {
   assert.ok(pricing.computePostOnlyRetryPrice('sell', { b: 5, a: 6 }, instrument, 10).retryPrice >= 10);
   assert.ok(pricing.computePostOnlyRetryPrice('buy', { b: 20, a: 21 }, instrument, 10).retryPrice <= 10);
+});
+
+test('SKIP_LLM_CONFIRMATION submits a preflight-valid entry without spending reviewer calls', async () => {
+  const result = await confirm({ env: { SKIP_LLM_CONFIRMATION: '1' } });
+  assert.equal(result.reviewerCalls, 0);
+  assert.equal(result.submitted.length, 1);
+  // no reviewer price: the action's own approved price is submitted, still through revalidation
+  assert.equal(result.submitted[0].price, 10);
+  assert.ok(result.validationResults.every(check => check.allowed));
 });

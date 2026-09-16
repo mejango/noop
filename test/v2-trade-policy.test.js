@@ -310,3 +310,20 @@ test('exits cannot exceed the live position quantity', () => {
   rejectCode(buybackOrder({ amount: 4 }), 'close_quantity_failed');
   rejectCode(monetizeOrder({ amount: 101 }), 'close_quantity_failed');
 });
+
+test('final roll must recover the configured fraction of cost', () => {
+  const recovering = { ...policy, putRollMinRecoveryPct: 40 };
+  assert.equal(validateFinalOrderPolicy(rollOrder({ policy: recovering })).allowed, true);
+  // longPut cost basis in this fixture is 10; a $3 roll recovers 30% and must hold the ticket
+  rejectCode(rollOrder({ policy: recovering, price: 3, ticker: { b: 3, a: 4, M: 3.5, option_pricing: { d: -0.1 } } }), 'roll_recovery_failed');
+});
+
+test('final monetization floors the offer at a fraction of intrinsic and stops once the ladder is complete', () => {
+  // strike 2000, spot 1700 -> intrinsic 300; 95% floor = 285 beats the $120 advisor floor
+  const floored = { ...policy, putMinIntrinsicFraction: 0.95 };
+  rejectCode(monetizeOrder({ policy: floored }), 'put_exit_price_failed');
+  const accepted = validateFinalOrderPolicy(monetizeOrder({ policy: floored, price: 290 }));
+  assert.equal(accepted.allowed, true);
+  assert.ok(Math.abs(accepted.approvedBounds.sellFloor - 285) < 1e-9);
+  rejectCode(monetizeOrder({ policy: { ...policy, putMonetizationPct: null } }), 'ladder_complete');
+});

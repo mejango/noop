@@ -208,10 +208,12 @@ function validateFinalOrderPolicy({ action, instrumentName, price, amount, order
       const intent = criteria.put_exit_intent || criteria.exit_intent;
       if (intent === 'roll_protection') {
         if (identity.dte > policy.putRollDte || orderType !== 'ioc') return reject('roll_failed', 'Roll is outside its DTE window or is not IOC');
+        if (Number(price) + EPSILON < entryPrice * (Number(policy.putRollMinRecoveryPct) || 0) / 100) return reject('roll_recovery_failed', 'Roll price recovers too little of cost; hold the ticket');
         const coverage = getPutReplacementCoverage(position, positions, amount, now);
         if (!coverage.allowed) return reject('replacement_failed', coverage.reason);
         if (!bid || !evaluateConditions(criteria.conditions, criteria.condition_logic, values)) return reject('exit_conditions_failed', 'Fresh roll conditions or executable bid are unavailable');
       } else if (intent === 'monetize_tail_win') {
+        if (!finite(policy.putMonetizationPct)) return reject('ladder_complete', 'Monetization ladder is complete; remaining protection is held');
         const fairPrice = Math.max(values.mark_price || 0, identity.strike - Number(spotPrice));
         const currentProofPnl = Math.max(Number(values.unrealized_pnl_pct) || -Infinity, (fairPrice - entryPrice) / entryPrice * 100);
         if (!(currentProofPnl > policy.putMonetizationPct) || !(finalPnl > policy.putMonetizationPct)) return reject('monetization_failed', 'Fresh fair/executable value and final limit must satisfy the tail-win floor');
@@ -219,7 +221,9 @@ function validateFinalOrderPolicy({ action, instrumentName, price, amount, order
         if (!(requestedFraction > 0) || Number(amount) > Number(position.amount) * Math.min(requestedFraction, policy.putMaxTrancheFraction) + EPSILON
           || Number(amount) >= Number(position.amount)) return reject('tranche_failed', 'Final put sale exceeds its retained-protection tranche');
         sellFloor = Number(triggerData.advisor_limit_price ?? criteria.min_exit_price ?? criteria.limit_price ?? criteria.target_exit_price);
-        if (!(sellFloor > 0) || Number(price) + EPSILON < sellFloor) return reject('put_exit_price_failed', 'Final put sale violates the approved exit floor');
+        if (!(sellFloor > 0)) return reject('put_exit_price_failed', 'Final put sale violates the approved exit floor');
+        sellFloor = Math.max(sellFloor, (Number(policy.putMinIntrinsicFraction) || 0) * Math.max(0, identity.strike - Number(spotPrice)));
+        if (Number(price) + EPSILON < sellFloor) return reject('put_exit_price_failed', 'Final put sale violates the approved exit floor');
         if (!evaluateConditions(criteria.conditions, criteria.condition_logic, { ...values, unrealized_pnl_pct: finalPnl })) return reject('exit_conditions_failed', 'Fresh put facts do not satisfy every approved exit condition');
       } else return reject('unknown_exit_intent', 'Missing typed put exit intent');
     }

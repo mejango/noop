@@ -67,6 +67,8 @@ async function confirmEntry(overrides = {}) {
     PUT_DELTA_RANGE: [-0.12, -0.02], PUT_EXPIRATION_RANGE: [45, 78], CALL_DELTA_RANGE: [0.04, 0.12], CALL_EXPIRATION_RANGE: [5, 12],
     SELL_CALL_FALLBACK_MIN_SCORE: 65, SELL_CALL_FALLBACK_MIN_BID: 4, CALL_BUYBACK_PROFIT_THRESHOLD: 80,
     PUT_ROLL_DTE_THRESHOLD: 25, PUT_MONETIZATION_PROFIT_THRESHOLD: 1000, PUT_MONETIZATION_MAX_TRANCHE_FRACTION: 0.25,
+    PUT_ROLL_MIN_RECOVERY_PCT: 40, PUT_MONETIZATION_MIN_INTRINSIC_FRACTION: 0.95,
+    getPutMonetizationThresholdPct: () => 1000, getPutExitIntent: criteria => criteria?.put_exit_intent || null,
     botData: { mediumTermMomentum: {}, putBudgetForCycle: 100, putUnspentBuyLimit: 0, putNetBought: 0 },
     db: {
       getPendingActions: () => [action], getOpenRestingOrders: currentOrders,

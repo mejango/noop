@@ -1032,6 +1032,12 @@ const stmts = {
       AND timestamp > @since
   `),
 
+  countSellPutTranches: db.prepare(`
+    SELECT COUNT(DISTINCT COALESCE(pending_action_id, id)) AS tranches
+    FROM orders
+    WHERE action = 'sell_put' AND success = 1 AND filled_amount > 0 AND instrument_name = ?
+  `),
+
   getOrdersInWindow: db.prepare(`
     SELECT id, timestamp, action, instrument_name, filled_amount, fill_price,
       total_value, spot_price, success
@@ -2984,6 +2990,7 @@ module.exports = {
   getReviewedHypothesesSinceId,
   getHypothesisStats,
   getOrdersInWindow,
+  countSellPutTranches: (instrumentName) => Number(stmts.countSellPutTranches.get(instrumentName)?.tranches || 0),
   insertLesson,
   getActiveLessons,
   archiveLesson,

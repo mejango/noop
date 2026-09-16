@@ -4876,7 +4876,7 @@ describe('Fixture scenario: exit monitoring for put rolling', () => {
     const position = { instrument_name: 'ETH-20991226-1000-P', amount: 10.0, direction: 'long', avg_entry_price: 10.00 };
     const longerPut = { instrument_name: 'ETH-20991231-1500-P', amount: 7.1, direction: 'long', avg_entry_price: 26.81 };
     const criteria = { put_exit_intent: 'roll_protection' };
-    const values = { dte: 19.22, unrealized_pnl_pct: -84.16, execution_price: 2.10 };
+    const values = { dte: 19.22, unrealized_pnl_pct: -40, execution_price: 6.00 };
     const amount = getSellPutExitAmount({ action: 'sell_put' }, criteria, position, values);
     const gate = getSellPutProtectionGate(
       { action: 'sell_put' },
@@ -4891,6 +4891,44 @@ describe('Fixture scenario: exit monitoring for put rolling', () => {
       { criteria, position, positions: [position, { ...longerPut, amount: 10 }], plannedSellAmount: amount }
     );
     assert.strictEqual(covered.allowed, true);
+  });
+
+  test('roll_protection holds the ticket when the bid recovers less than 40% of cost', () => {
+    const position = { instrument_name: 'ETH-20991226-1300-P', amount: 2.72, direction: 'long', avg_entry_price: 20.20 };
+    const longerPut = { instrument_name: 'ETH-20991231-1500-P', amount: 10, direction: 'long', avg_entry_price: 26.81 };
+    const criteria = { put_exit_intent: 'roll_protection' };
+    const pennies = getSellPutProtectionGate({ action: 'sell_put' },
+      { dte: 19, unrealized_pnl_pct: -89.6, execution_price: 2.10 },
+      { criteria, position, positions: [position, longerPut], plannedSellAmount: 2.72 });
+    assert.strictEqual(pennies.allowed, false);
+    assert.match(pennies.reason, /recovers less than 40%/);
+    const recovering = getSellPutProtectionGate({ action: 'sell_put' },
+      { dte: 19, unrealized_pnl_pct: -25, execution_price: 15.15 },
+      { criteria, position, positions: [position, longerPut], plannedSellAmount: 2.72 });
+    assert.strictEqual(recovering.allowed, true);
+  });
+
+  test('monetization ladder raises the bar per tranche and holds the remainder', () => {
+    let sold = 0;
+    const { getSellPutProtectionGate: ladderGate, getPutMonetizationThresholdPct } = loadProduction(
+      ['getSellPutProtectionGate', 'getPutMonetizationThresholdPct'],
+      { bindings: { db: { countSellPutTranches: () => sold } } }
+    );
+    const position = { instrument_name: 'ETH-20991226-1500-P', amount: 4.0, direction: 'long', avg_entry_price: 5.00 };
+    const criteria = { put_exit_intent: 'monetize_tail_win', tranche_fraction: 0.25 };
+    const gate = (pnl) => ladderGate({ action: 'sell_put' }, { dte: 60, unrealized_pnl_pct: pnl, execution_price: 5 * (1 + pnl / 100) },
+      { criteria, position, positions: [position], plannedSellAmount: 1 });
+    assert.strictEqual(getPutMonetizationThresholdPct(position.instrument_name), 1000);
+    assert.strictEqual(gate(1200).allowed, true);
+    sold = 1;
+    assert.strictEqual(getPutMonetizationThresholdPct(position.instrument_name), 1500);
+    assert.strictEqual(gate(1200).allowed, false);
+    assert.strictEqual(gate(1600).allowed, true);
+    sold = 3;
+    assert.strictEqual(getPutMonetizationThresholdPct(position.instrument_name), null);
+    const held = gate(5000);
+    assert.strictEqual(held.allowed, false);
+    assert.match(held.reason, /ladder complete/);
   });
 
   test('long-dated put can be considered after extreme asymmetric upside', () => {

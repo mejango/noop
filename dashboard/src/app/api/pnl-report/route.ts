@@ -78,6 +78,36 @@ function signedCashflow(action: string, totalValue: number | null | undefined, a
 const portfolioValue = (row: { portfolio_value_usd?: number } | null | undefined) =>
   Number(row?.portfolio_value_usd ?? 0);
 
+// Covered-call view. Every short call is backed by one ETH the owner holds, so the leg's honest
+// result is its cashflow plus the move on that ETH while the call was open. Contracts still open
+// at the window edges are marked at the window's opening/closing spot.
+type CoveredCallLeg = { timestamp: string; action: string; instrument_name: string | null; filled_amount: number | null;
+  spot_price: number | null; cashflow: number };
+function coveredCallSummary(legs: CoveredCallLeg[], fromIso: string, openingSpot: number, closingSpot: number,
+  spotAt: (timestamp: string) => number | null) {
+  const open = new Map<string, number>();
+  const totalOpen = () => Array.from(open.values()).reduce((sum, value) => sum + value, 0);
+  let callPnl = 0, ethMove = 0, unpriced = 0, openAtStart: number | null = null;
+  for (const leg of legs) {
+    const inWindow = leg.timestamp >= fromIso;
+    if (inWindow && openAtStart == null) openAtStart = totalOpen();
+    const key = leg.instrument_name ?? '';
+    const opened = leg.action === 'sell_call';
+    // A recorded settlement may not know its quantity: it closes whatever is still open.
+    const quantity = Number(leg.filled_amount) > 0 ? Number(leg.filled_amount) : (opened ? 0 : open.get(key) ?? 0);
+    if (inWindow) {
+      const spot = leg.spot_price && leg.spot_price > 0 ? leg.spot_price : spotAt(leg.timestamp);
+      callPnl += leg.cashflow;
+      if (spot && spot > 0) ethMove += opened ? -quantity * spot : quantity * spot; else unpriced += 1;
+    }
+    open.set(key, Math.max(0, (open.get(key) ?? 0) + (opened ? quantity : -quantity)));
+  }
+  const openAtEnd = totalOpen();
+  ethMove += -(openAtStart ?? openAtEnd) * openingSpot + openAtEnd * closingSpot;
+  return { callPnl, ethMove, net: callPnl + ethMove, openContracts: openAtEnd, unpricedLegs: unpriced,
+    basis: 'Call cashflow (fills, buybacks, valued settlements) plus the spot move on one backing ETH per open contract; contracts open at the window edges are marked at opening/closing spot.' };
+}
+
 const PERFORMANCE_UNAVAILABLE_REASON = 'Return and drawdown require reconciled deposits and withdrawals with portfolio valuations around those flows. Portfolio change is the raw account balance change.';
 
 const isCallAction = (a: string) => a === 'sell_call' || a === 'buyback_call' || a === 'settle_call';
@@ -156,7 +186,9 @@ function getPnlResponse(req: NextRequest) {
     const rawSnapshots = getPortfolioSnapshotsInRange(fromIso, toIso) as SnapshotRow[];
     const baseline = getPortfolioSnapshotBefore(fromIso) as SnapshotRow | undefined;
     // Resolve each expiry directly; a moving latest-N spot window makes old reports unstable.
-    const allOrders = getOrdersInRange('1970-01-01T00:00:00.000Z', toIso) as OrderRow[];
+    // DRY_RUN=1 records simulated fills with success=1; they are not cashflow.
+    const allOrders = (getOrdersInRange('1970-01-01T00:00:00.000Z', toIso) as OrderRow[])
+      .filter(o => !String(o.reason ?? '').startsWith('DRY RUN'));
     const economicHistory = getEconomicHistory('1970-01-01T00:00:00.000Z', toIso);
     const recordedSettlements = economicHistory.events.filter(event => event.event_type === 'settlement');
     const settledInstruments = new Set(recordedSettlements.flatMap(event => event.instrument_name ? [event.instrument_name] : []));
@@ -247,6 +279,14 @@ function getPnlResponse(req: NextRequest) {
       sum + (isPutAction(order.action) ? signedCashflow(order.action, order.total_value, order.actual_cashflow_usd) : 0), 0);
     const callNetCashflow = orders.reduce((sum, order) =>
       sum + (isCallAction(order.action) ? signedCashflow(order.action, order.total_value, order.actual_cashflow_usd) : 0), 0);
+    const coveredCallLegs: CoveredCallLeg[] = [
+      ...allOrders.filter(o => o.success === 1 && Number(o.filled_amount ?? 0) > 0 && isCallAction(o.action)),
+      ...settlementRows.filter(o => o.action === 'settle_call'),
+      ...estimatedSettlements.estimates.filter(o => o.action === 'settle_call'),
+    ].map(o => ({ timestamp: o.timestamp, action: o.action, instrument_name: o.instrument_name, filled_amount: o.filled_amount,
+      spot_price: o.spot_price, cashflow: signedCashflow(o.action, o.total_value, (o as OrderRow).actual_cashflow_usd) }))
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const spotAt = (timestamp: string) => getSpotPricesAtOrBefore([timestamp], SETTLEMENT_SPOT_MAX_AGE_MS)[0]?.price ?? null;
 
     const actionMap = new Map<string, { action: string; count: number; grossValue: number; cashflow: number; filledAmount: number | null }>();
     for (const order of orders) {
@@ -355,6 +395,7 @@ function getPnlResponse(req: NextRequest) {
     const closingUnrealized = Number(closing?.total_unrealized_pnl ?? openingUnrealized);
     const openingSpot = Number(opening?.spot_price ?? 0);
     const closingSpot = Number(closing?.spot_price ?? openingSpot);
+    const coveredCall = coveredCallSummary(coveredCallLegs, fromIso, openingSpot, closingSpot, spotAt);
     const portfolioChange = closingValue - openingValue;
     const unrealizedChange = closingUnrealized - openingUnrealized;
     const spotChangePct = openingSpot > 0 ? ((closingSpot - openingSpot) / openingSpot) * 100 : 0;
@@ -401,6 +442,7 @@ function getPnlResponse(req: NextRequest) {
         estimatedSettlementCashflow: settlementEstimates.reduce((sum, row) => sum + signedCashflow(row.action, row.total_value), 0),
         putNetCashflow,
         callNetCashflow,
+        coveredCall,
         openingSpot,
         closingSpot,
         spotChangePct,

@@ -612,7 +612,7 @@ function prepareAll(d: Database.Database) {
           as gross_cashflow,
         COUNT(CASE WHEN success = 1 AND COALESCE(filled_amount, 0) > 0 AND action IN ('sell_call', 'buyback_call', 'buy_put', 'sell_put') THEN 1 END) as order_count
       FROM orders
-      WHERE timestamp < ?
+      WHERE timestamp < ? AND COALESCE(reason, '') NOT LIKE 'DRY RUN%'
     `),
     getOptionsCashflow: d.prepare(`
       SELECT
