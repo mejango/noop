@@ -2932,7 +2932,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         return { rejected_post_only: true, error: errMsg };
       }
       console.error(`Error placing limit order for ${name}:`, errMsg);
-      return { placement_error: errMsg, definitive_rejection: [-32600, -32602].includes(Number(response.data.error?.code)) };
+      return { placement_error: errMsg, definitive_rejection: isDefinitiveVenueRejection(response.data.error) };
     }
     // Check for cancelled IOC (cancel_reason in response indicates immediate cancel)
     const orderResult = extractOrderRecord(response.data?.result || response.data) || response.data?.result || response.data;
@@ -2959,11 +2959,41 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     }
     const bodyStr = errBody ? stringifyApiError(errBody).slice(0, 300) : 'no body';
     console.error(`Error placing limit order for ${name}: ${error.message} | status: ${status || 'N/A'} | body: ${bodyStr}`);
-    return { placement_error: `status=${status || 'N/A'} ${error.message} | body: ${bodyStr}` };
+    return { placement_error: `status=${status || 'N/A'} ${error.message} | body: ${bodyStr}`,
+      definitive_rejection: isDefinitiveVenueRejection(errBody?.error) };
   }
 };
 
 // Fetch all open (resting) orders from Derive
+// Malformed-request codes and Derive's rate limiter (HTTP 500, -32000
+// "Rate limit exceeded ... Retry after N ms") both mean the order was never accepted.
+const isDefinitiveVenueRejection = (apiError) => (
+  [-32600, -32602].includes(Number(apiError?.code)) || /rate limit exceeded/i.test(String(apiError?.message || ''))
+);
+
+const venueHasNonce = async (nonce, sinceMs) => {
+  const wanted = String(nonce);
+  const open = await fetchOpenOrders({ throwOnError: true });
+  if (open.some(order => String(order.nonce) === wanted)) return true;
+  const wallet = createWallet();
+  const timestamp = Date.now();
+  const signature = await signMessage(wallet, timestamp);
+  for (let page = 1; page <= 20; page++) {
+    const response = await axios.post(API_URL.GET_ORDER_HISTORY, {
+      subaccount_id: SUBACCOUNT_ID, from_timestamp: Math.max(0, sinceMs - 10 * 60 * 1000), page, page_size: 100,
+    }, {
+      headers: { 'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
+        'X-LyraTimestamp': timestamp.toString(), 'X-LyraSignature': signature },
+      timeout: 10000,
+    });
+    if (response.data?.error) throw new Error(`Order history unavailable: ${stringifyApiError(response.data.error)}`);
+    const records = extractOrderRecords(response.data?.result);
+    if (records.some(order => String(order.nonce) === wanted)) return true;
+    if (records.length < 100) return false;
+  }
+  throw new Error('Order history scan incomplete; reconciliation required');
+};
+
 const fetchOpenOrders = async (options = {}) => {
   const throwOnError = Boolean(options.throwOnError);
   try {
@@ -2993,6 +3023,7 @@ const fetchOpenOrders = async (options = {}) => {
       limit_price: o.limit_price,
       average_price: o.average_price,
       order_status: o.order_status,
+      nonce: o.nonce,
       time_in_force: o.time_in_force,
       creation_timestamp: o.creation_timestamp,
       last_update_timestamp: o.last_update_timestamp,
@@ -10003,7 +10034,13 @@ const getRestingExitInvalidReason = ({ order, tracked, activeRules = [], positio
 const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spotPrice = 0) => {
   if (process.env.DRY_RUN === '1') return; // No real orders in dry run
   if (!db) return;
-  require('./bot/order-accounting').assertNoUnresolvedSubmission(db);
+  const accounting = require('./bot/order-accounting');
+  const resolved = await accounting.resolveAbandonedSubmission(db, { venueHasNonce });
+  if (resolved) {
+    console.log(`📋 Execution ${resolved.id} (nonce ${resolved.nonce}) never reached the venue — marked rejected`);
+    sendTelegram(`♻️ *Execution ${resolved.id} reconciled*: venue has no order for nonce ${resolved.nonce}; trading resumes`);
+  }
+  accounting.assertNoUnresolvedSubmission(db);
 
   let openOrders;
   try {

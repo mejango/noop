@@ -59,6 +59,19 @@ function assertNoUnresolvedSubmission(db) {
   if (row) throw new Error(`Execution ${row.id} (${row.instrument_name}, nonce ${row.nonce}) requires accounting recovery before trading`);
 }
 
+// A submission left 'unknown' by a placement error self-heals once the venue
+// provably never accepted it. A nonce the venue does know still needs manual
+// fill accounting, so that case keeps throwing above.
+async function resolveAbandonedSubmission(db, { venueHasNonce, minAgeMs = 2 * 60 * 1000, now = Date.now() } = {}) {
+  const row = executionStore(db).prepare("SELECT id,nonce,created_at,status FROM execution_submissions WHERE status='unknown' ORDER BY id LIMIT 1").get();
+  if (!row || now - Date.parse(row.created_at) < minAgeMs) return null;
+  if (await venueHasNonce(row.nonce, Date.parse(row.created_at))) return null;
+  const changed = executionStore(db).prepare(`UPDATE execution_submissions SET status='rejected',
+    response_json=json_set(coalesce(response_json,'{}'),'$.auto_reconciliation','venue reports no order for this nonce') WHERE id=? AND status='unknown'`)
+    .run(row.id).changes;
+  return changed === 1 ? row : null;
+}
+
 function beginSubmission(db, pendingActionId, request) {
   assertNoUnresolvedSubmission(db);
   return Number(executionStore(db).prepare(`INSERT INTO execution_submissions
@@ -212,4 +225,4 @@ function accountRestingObservation({ db, botData, tracked, live }) {
   return result;
 }
 
-module.exports = { accountInitialReceipt, accountRestingObservation, assertNoUnresolvedSubmission, beginSubmission, noteSubmission };
+module.exports = { accountInitialReceipt, accountRestingObservation, assertNoUnresolvedSubmission, beginSubmission, noteSubmission, resolveAbandonedSubmission };

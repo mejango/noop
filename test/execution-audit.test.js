@@ -130,6 +130,7 @@ function runtime(t, overrides = {}) {
     fetchFreshTickerForInstrument: async () => null,
     fetchPositions: async () => [],
     fetchOpenOrders: async () => [],
+    venueHasNonce: async () => { throw new Error('fixture venue lookup not configured'); },
     fetchOrderStatus: async () => null,
     cancelOrder: async () => null,
     fetchSubaccount: async () => ({}),
@@ -590,7 +591,7 @@ test('venue placement journals before sending, blocks persistence failures and c
   const events = [];
   const state = production([
     ...pricing, 'floorOrderAmountToVenuePrecision', 'formatVenueOrderAmount',
-    'stringifyApiError', 'isIocNoLiquidityError', 'extractOrderRecord', 'placeOrder',
+    'stringifyApiError', 'isIocNoLiquidityError', 'isDefinitiveVenueRejection', 'extractOrderRecord', 'placeOrder',
   ], {
     Buffer,
     VENUE_AMOUNT_DECIMALS: 2,
@@ -628,6 +629,19 @@ test('venue placement journals before sending, blocks persistence failures and c
   const noLiquidity = await state.placeOrder(putName, 5, 'buy', 10, 'fixture-asset', 'fixture-sub-id', false, 'ioc', instrument(), () => {});
   assert.equal(noLiquidity.zero_fill_rejected, true);
   assert.equal(noLiquidity.placement_error, undefined);
+  state.axios.post = async () => {
+    throw Object.assign(new Error('Request failed with status code 500'), {
+      response: { status: 500, data: { error: { code: -32000, message: 'Rate limit exceeded: 0xabc-nonMatching', data: 'Retry after 230 ms' } } },
+    });
+  };
+  const rateLimited = await state.placeOrder(putName, 5, 'buy', 10, 'fixture-asset', 'fixture-sub-id', false, 'gtc', instrument(), () => {});
+  assert.match(rateLimited.placement_error, /Rate limit exceeded/);
+  assert.equal(rateLimited.definitive_rejection, true, 'a rate-limited request was never accepted');
+  state.axios.post = async () => {
+    throw Object.assign(new Error('socket hang up'), { response: undefined });
+  };
+  const unknown = await state.placeOrder(putName, 5, 'buy', 10, 'fixture-asset', 'fixture-sub-id', false, 'gtc', instrument(), () => {});
+  assert.equal(unknown.definitive_rejection, false, 'a transport failure leaves the outcome unknown');
 });
 
 for (const orderStatus of ['open', 'cancelled']) {
@@ -903,3 +917,25 @@ for (const [name, alter] of [
     assert.throws(() => accounting.assertNoUnresolvedSubmission(state.db), /accounting recovery/);
   });
 }
+
+test('an unknown submission the venue never accepted self-heals; a known nonce or a young row stays latched', async () => {
+  const accounting = require('../bot/order-accounting');
+  const db = { db: new Database(':memory:') };
+  const request = { instrument_name: putName, nonce: '178961091804923', subaccount_id: 25923 };
+  const id = accounting.beginSubmission(db, null, request);
+  accounting.noteSubmission(db, id, { placement_error: 'status=500 Rate limit exceeded' });
+  assert.throws(() => accounting.assertNoUnresolvedSubmission(db), /requires accounting recovery/);
+  const created = Date.parse(db.db.prepare('SELECT created_at FROM execution_submissions WHERE id=?').get(id).created_at);
+  const seen = [];
+  const venueHasNonce = async (nonce, since) => { seen.push([nonce, since]); return false; };
+  assert.equal(await accounting.resolveAbandonedSubmission(db, { venueHasNonce, now: created + 1000 }), null, 'young rows wait');
+  assert.deepEqual(seen, []);
+  assert.equal(await accounting.resolveAbandonedSubmission(db, { venueHasNonce: async () => true, now: created + 600000 }), null);
+  assert.throws(() => accounting.assertNoUnresolvedSubmission(db), /requires accounting recovery/, 'known nonce stays latched');
+  const resolved = await accounting.resolveAbandonedSubmission(db, { venueHasNonce, now: created + 600000 });
+  assert.equal(resolved.id, id);
+  assert.deepEqual(seen, [['178961091804923', created]]);
+  assert.doesNotThrow(() => accounting.assertNoUnresolvedSubmission(db));
+  assert.equal(db.db.prepare('SELECT status FROM execution_submissions WHERE id=?').get(id).status, 'rejected');
+  assert.equal(await accounting.resolveAbandonedSubmission(db, { venueHasNonce, now: created + 600000 }), null);
+});
