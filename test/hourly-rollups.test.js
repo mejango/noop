@@ -35,7 +35,9 @@ function spot(price, timestamp, momentum = {}) {
   return production.insertSpotPrice(price, momentum, {}, timestamp);
 }
 function option(name, details = {}, optionDetails = {}) {
-  return { instrument_name: name, option_details: { option_type: name.endsWith('-P') ? 'P' : 'C', ...optionDetails }, details };
+  // Every fixture observes on 2026-09-11; land puts and calls inside their entry DTE windows.
+  const expiry = Date.parse('2026-09-11T00:00:00.000Z') / 1000 + (name.endsWith('-P') ? 60 : 8) * 86400;
+  return { instrument_name: name, option_details: { option_type: name.endsWith('-P') ? 'P' : 'C', expiry, ...optionDetails }, details };
 }
 function onchain(timestamp, magnitude, dex, direction = 'inflow') {
   production.insertOnchainData({ timestamp, dexLiquidity: { flowAnalysis: { magnitude, direction }, dexes: dex } });
@@ -254,4 +256,20 @@ test('repair CLI defaults to brief lock waits and validates explicit timeout bou
   assert.equal(parseArguments(['--db', '/tmp/example.db', '--busy-timeout-ms=250'])['busy-timeout-ms'], 250);
   assert.throws(() => parseArguments(['--db', '/tmp/example.db', '--busy-timeout-ms', '5001']), /between 0 and 5000/);
   assert.throws(() => parseArguments(['--db', '/tmp/example.db', '--busy-timeout-ms', 'NaN']), /between 0 and 5000/);
+});
+
+test('hourly option winners ignore contracts outside the entry DTE window and rebuild once per algorithm version', () => {
+  const at = '2026-09-11T10:05:00.000Z';
+  const day = 86400, base = Date.parse('2026-09-11T00:00:00.000Z') / 1000;
+  production.insertOptionsSnapshotBatch([
+    option('NEAR-P', { delta: -0.05, askDeltaValue: 99 }, { expiry: base + 20 * day }),
+    option('OK-P', { delta: -0.05, askDeltaValue: 3 }, { expiry: base + 60 * day }),
+    option('FAR-C', { delta: 0.08, bidDeltaValue: 999 }, { expiry: base + 30 * day }),
+    option('OK-C', { delta: 0.08, bidDeltaValue: 4 }, { expiry: base + 8 * day }),
+  ], at);
+  const row = db.prepare('SELECT best_put_dv, best_call_dv FROM options_hourly').get();
+  assert.deepEqual(row, { best_put_dv: 3, best_call_dv: 4 });
+  db.prepare("DELETE FROM hourly_rollup_metadata WHERE key = 'last_full_rebuild'").run();
+  assert.equal(rollups.rebuildIfOutdated().algorithmVersion, 2);
+  assert.equal(rollups.rebuildIfOutdated(), null, 'a current full rebuild is not repeated');
 });

@@ -1226,14 +1226,12 @@ export function getSpotPricesHourly_rollup(since: string) {
 }
 
 export function getBestOptionsHourly_rollup(since: string) {
-  // Existing rollups omit expiry and cannot establish entry eligibility. Read
-  // retained quotes instead; leave both the observations and rollups untouched.
-  const rows = getBestOptionsBucketed(since, 60 * 60 * 1000) as {
-    timestamp: string; best_put_value: number | null; best_call_value: number | null;
-  }[];
-  return rows.map(({ timestamp, best_put_value, best_call_value }) => ({
-    timestamp, best_put_value, best_call_value,
-  }));
+  // The bot's hourly rollup (algorithm v2) already restricts winners to the
+  // entry DTE windows. Scanning raw quotes here took minutes on a cold volume.
+  return getDb().prepare(`
+    SELECT hour AS timestamp, best_put_dv AS best_put_value, best_call_dv AS best_call_value
+    FROM options_hourly WHERE hour > ? ORDER BY hour ASC
+  `).all(since) as { timestamp: string; best_put_value: number | null; best_call_value: number | null }[];
 }
 
 export function getLiquidityHourly_rollup(since: string) {

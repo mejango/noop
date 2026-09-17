@@ -9,7 +9,9 @@
  * Onchain TVL, cumulative volume and transaction counts are latest stock values;
  * flow magnitude is the arithmetic mean of available observations for that DEX.
  */
-const ALGORITHM_VERSION = 1;
+// 2: best_put_dv / best_call_dv restricted to the entry DTE windows, so the
+// dashboard can read this table for long ranges instead of scanning raw quotes.
+const ALGORITHM_VERSION = 2;
 const HOUR_MS = 60 * 60 * 1000;
 const RAW_TABLES = {
   spot_prices_hourly: 'spot_prices',
@@ -66,9 +68,11 @@ function createHourlyRollups(db) {
     )
     SELECT
       MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
-        AND delta BETWEEN -0.12 AND -0.02 THEN ask_delta_value END) AS best_put_dv,
+        AND delta BETWEEN -0.12 AND -0.02
+        AND (expiry - unixepoch(timestamp, 'subsec')) / 86400.0 BETWEEN 45 AND 78 THEN ask_delta_value END) AS best_put_dv,
       MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
-        AND delta BETWEEN 0.04 AND 0.12 THEN bid_delta_value END) AS best_call_dv,
+        AND delta BETWEEN 0.04 AND 0.12
+        AND (expiry - unixepoch(timestamp, 'subsec')) / 86400.0 BETWEEN 5 AND 12 THEN bid_delta_value END) AS best_call_dv,
       AVG(CASE WHEN (delta BETWEEN -0.12 AND -0.02 OR delta BETWEEN 0.04 AND 0.12)
         AND ask_price > 0 AND bid_price > 0 AND mark_price > 0
         THEN (ask_price - bid_price) / mark_price END) AS avg_spread,
@@ -219,7 +223,17 @@ function createHourlyRollups(db) {
     return result;
   });
 
+  const lastFullRebuild = () => {
+    const row = db.prepare("SELECT value FROM hourly_rollup_metadata WHERE key = 'last_full_rebuild'").get();
+    try { return row ? JSON.parse(row.value) : null; } catch { return null; }
+  };
+
   return {
+    // Stored aggregates computed by an older algorithm are recomputed once.
+    rebuildIfOutdated() {
+      if (lastFullRebuild()?.algorithmVersion === ALGORITHM_VERSION) return null;
+      return rebuildTransaction.immediate({ from: null, to: null });
+    },
     refreshSpotHour: db.transaction(refreshSpotHour),
     refreshOptionsHour: db.transaction(refreshOptionsHour),
     refreshOnchainHour: db.transaction(refreshOnchainHour),

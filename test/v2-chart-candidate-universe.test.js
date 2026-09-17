@@ -181,28 +181,23 @@ test('RAW and EDGE independently choose their maxima from the same eligible PUT 
   assert.equal(f.api.getOptionsHeatmap(SINCE).length, 4);
 });
 
-test('historical hourly RAW ignores legacy rollup maxima that cannot be filtered to eligible candidates', t => {
+test('historical hourly RAW reads the stored rollup, which the bot filters at write time', t => {
   const f = fixture(t);
-  f.option('P', { ask_delta_value: 0.004 });
-  f.option('C', { bid_delta_value: 90 });
   f.option('P', { dte: 25, ask_delta_value: 99 });
-  f.option('C', { dte: 30, bid_delta_value: 99999 });
   f.db.prepare('INSERT INTO options_hourly (hour,best_put_dv,best_call_dv) VALUES (?,?,?)')
-    .run(iso(), 99, 99999);
-  const before = f.db.prepare('SELECT total_changes() AS n').get().n;
+    .run(iso(), 0.004, 90);
   const rows = f.api.getBestOptionsHourly_rollup(SINCE);
   assert.equal(rows.length, 1);
   assert.deepEqual(values(rows[0]), [0.004, 90]);
-  assert.equal(f.db.prepare('SELECT total_changes() AS n').get().n, before, 'Read-time filtering does not repair or rewrite stored history');
 });
 
-test('90d, 365d and all chart responses cannot reintroduce ineligible legacy hourly values', async t => {
+test('90d, 365d and all chart responses use the hourly rollup and filter only the raw tail', async t => {
   const f = fixture(t);
-  f.option('P', { ask_delta_value: 0.004 });
-  f.option('C', { bid_delta_value: 90 });
-  f.option('P', { dte: 25, ask_delta_value: 99 });
-  f.option('C', { dte: 30, bid_delta_value: 99999 });
-  f.db.prepare('INSERT INTO options_hourly (hour,best_put_dv,best_call_dv) VALUES (?,?,?)').run(iso(), 99, 99999);
+  f.db.prepare('INSERT INTO options_hourly (hour,best_put_dv,best_call_dv) VALUES (?,?,?)').run(iso(-2 * DAY), 0.004, 90);
+  // Raw tail (last hour) still applies the entry window to retained quotes.
+  f.option('P', { timestamp: iso(2 * DAY - HOUR / 2), ask_delta_value: 0.002 });
+  f.option('P', { timestamp: iso(2 * DAY - HOUR / 2), dte: 25, ask_delta_value: 99 });
+  f.option('C', { timestamp: iso(2 * DAY - HOUR / 2), dte: 30, bid_delta_value: 99999 });
   const empty = () => [];
   const route = loadTs('dashboard/src/app/api/chart/route.ts', {
     'next/server': { NextResponse: { json: (body, options) => ({ status: options?.status ?? 200, body }) } },
@@ -220,7 +215,8 @@ test('90d, 365d and all chart responses cannot reintroduce ineligible legacy hou
   for (const range of ['90d', '365d', 'all']) {
     const response = await route.GET({ nextUrl: new URL(`http://fixture/api/chart?range=${range}`) });
     assert.equal(response.status, 200, JSON.stringify(response.body));
-    assert.equal(response.body.options.length, 1);
+    assert.equal(response.body.options.length, 2, range);
     assert.deepEqual(values(response.body.options[0]), [0.004, 90], range);
+    assert.deepEqual(values(response.body.options[1]), [0.002, null], `${range} raw tail`);
   }
 });

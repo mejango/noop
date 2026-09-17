@@ -690,6 +690,9 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument_receipt
 // New snapshots use the truthful field; historical legacy values are not copied.
 addColumnIfMissing('portfolio_snapshots', 'gross_options_cashflow', 'REAL');
 const hourlyRollups = createHourlyRollups(db);
+// Outcome is recorded in hourly_rollup_metadata (last_full_rebuild); boot stdout stays machine-readable.
+try { hourlyRollups.rebuildIfOutdated(); }
+catch (e) { console.error('📊 Hourly rollup rebuild failed:', e.message); }
 
 // ─── Prepared Statements ──────────────────────────────────────────────────────
 
