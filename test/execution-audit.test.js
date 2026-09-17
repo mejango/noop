@@ -920,9 +920,10 @@ for (const [name, alter] of [
 
 test('an unknown submission the venue never accepted self-heals; a known nonce or a young row stays latched', async () => {
   const accounting = require('../bot/order-accounting');
-  const db = { db: new Database(':memory:') };
+  const updates = [];
+  const db = { db: new Database(':memory:'), updatePendingAction: (...args) => updates.push(args) };
   const request = { instrument_name: putName, nonce: '178961091804923', subaccount_id: 25923 };
-  const id = accounting.beginSubmission(db, null, request);
+  const id = accounting.beginSubmission(db, 11388, request);
   accounting.noteSubmission(db, id, { placement_error: 'status=500 Rate limit exceeded' });
   assert.throws(() => accounting.assertNoUnresolvedSubmission(db), /requires accounting recovery/);
   const created = Date.parse(db.db.prepare('SELECT created_at FROM execution_submissions WHERE id=?').get(id).created_at);
@@ -937,5 +938,8 @@ test('an unknown submission the venue never accepted self-heals; a known nonce o
   assert.deepEqual(seen, [['178961091804923', created]]);
   assert.doesNotThrow(() => accounting.assertNoUnresolvedSubmission(db));
   assert.equal(db.db.prepare('SELECT status FROM execution_submissions WHERE id=?').get(id).status, 'rejected');
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0][0], 11388);
+  assert.equal(updates[0][1].status, 'failed', 'the orphaned confirmed action is released');
   assert.equal(await accounting.resolveAbandonedSubmission(db, { venueHasNonce, now: created + 600000 }), null);
 });
