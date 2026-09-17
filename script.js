@@ -5068,7 +5068,8 @@ If no pages need updating, output: <no_updates/>`;
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
       thinking: { type: 'disabled' },
-      max_tokens: 4096,
+      // Up to 11 full pages come back; 4096 truncated every run and silently applied nothing.
+      max_tokens: 16384,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -5076,10 +5077,13 @@ If no pages need updating, output: <no_updates/>`;
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 180000,
+      timeout: 600000,
     });
 
-    const text = getAnthropicResponseText(response.data);
+    // Each complete <wiki_update> block is validated on its own below, so a
+    // truncated response still applies the pages that finished. Log the cut.
+    const text = (response.data?.content || []).filter(block => block.type === 'text').map(block => block.text).join('');
+    if (response.data?.stop_reason !== 'end_turn') console.log(`📚 Wiki ingest: ${getAnthropicResponseFailure(response.data)}; applying complete page blocks only`);
 
     if (text.includes('<no_updates/>')) {
       const meta = readWikiMeta();
@@ -5222,6 +5226,9 @@ If no pages need updating, output: <no_updates/>`;
       `pages updated: ${updateCount}`,
     ]);
 
+    if (updateCount === 0) {
+      console.log(`📚 Wiki ingest: no page applied — ${/<wiki_update/.test(text) ? 'every block was rejected or incomplete' : 'response had neither <no_updates/> nor a <wiki_update> block'} (${text.length} chars)`);
+    }
     console.log(`📚 Wiki ingest: ${updateCount} page(s) updated`);
   } catch (e) {
     console.log('📚 Wiki ingest failed:', e.message);
