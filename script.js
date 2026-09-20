@@ -12614,7 +12614,9 @@ Produce your trading agenda JSON now.`;
       thinking: { type: 'adaptive' },
       system: primarySystemPrompt,
       messages: [{ role: 'user', content: primaryUserPrompt }],
-      timeout: 120000,
+      // Fable 5.1 thinks before a 16k-token agenda; both the run and its scheduled retry
+      // hit exactly 120s. 10 min matches the SDK default. Drop to effort:'medium' if too slow.
+      timeout: 600000,
     });
 
     const primaryText = getAnthropicResponseText(primaryResponse.data);
