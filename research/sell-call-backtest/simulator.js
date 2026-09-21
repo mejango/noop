@@ -1,12 +1,21 @@
 'use strict';
 
-const { HOUR_MS, clamp, finite, maxDrawdown, mean, round } = require('./utils');
+const { HOUR_MS, DAY_MS, clamp, finite, maxDrawdown, mean, round } = require('./utils');
+const { normalizeSellCallScore } = require('../../bot/call-score');
 
 function normalizeConfig(config = {}) {
   return {
     startingEth: Math.max(0, Number(config.startingEth ?? 5)),
     startingCash: Number(config.startingCash ?? 0),
     callExposureCap: clamp(Number(config.callExposureCap ?? 0.45), 0, 1),
+    // Greed window: when the best candidate edge is at least greedEdge and short calls are on,
+    // widen the exposure cap to greedExposureCap (mirrors the live breakout override).
+    greedEdge: Number(config.greedEdge) > 0 ? Number(config.greedEdge) : null,
+    // Spot breakout window: spot >= (1 + breakoutPct) x max spot over the prior lookback (excluding the last breakoutExcludeHours).
+    breakoutPct: Number(config.breakoutPct) > 0 ? Number(config.breakoutPct) : null,
+    breakoutLookbackDays: Math.max(1, Number(config.breakoutLookbackDays ?? 7)),
+    breakoutExcludeHours: Math.max(0, Number(config.breakoutExcludeHours ?? 24)),
+    greedExposureCap: clamp(Number(config.greedExposureCap ?? 0.65), 0, 1),
     maxOpenPositions: Math.max(1, Math.floor(Number(config.maxOpenPositions || 1))),
     maxContracts: Number(config.maxContracts) > 0 ? Number(config.maxContracts) : Infinity,
     amountStep: Math.max(0.0001, Number(config.amountStep || 0.01)),
@@ -17,6 +26,12 @@ function normalizeConfig(config = {}) {
     marginRate: Math.max(0, Number(config.marginRate ?? 0.15)),
     marginBudgetPct: clamp(Number(config.marginBudgetPct ?? 0.45), 0, 1),
     profitCapturePct: clamp(Number(config.profitCapturePct ?? 0.80), 0, 1),
+    // Edge-based buyback: close when the held call's ask-side edge score drops to this level,
+    // provided capture is at least buybackMinCapturePct and the ask is above dust.
+    buybackMaxEdge: Number(config.buybackMaxEdge) > 0 ? Number(config.buybackMaxEdge) : null,
+    buybackMinCapturePct: clamp(Number(config.buybackMinCapturePct ?? 0.40), 0, 1),
+    buybackMinAsk: Math.max(0, Number(config.buybackMinAsk ?? 1.5)),
+    takerFeePerContract: Math.max(0, Number(config.takerFeePerContract || 0)),
     stopLossMultiple: Number(config.stopLossMultiple) > 1 ? Number(config.stopLossMultiple) : null,
     maxHoldHours: Number(config.maxHoldHours) > 0 ? Number(config.maxHoldHours) : null,
     entryCooldownHours: Math.max(0, Number(config.entryCooldownHours || 0)),
@@ -53,6 +68,14 @@ function optionLiability(position, frame, execution) {
   return position.entry_price * position.quantity;
 }
 
+// Score the held call the way candidates are scored, but on the buyback (ask) side.
+function heldEdge(quote, askPrice, frame, position) {
+  const absDelta = Math.abs(Number(quote?.delta));
+  if (!(absDelta > 0)) return Infinity;
+  const dte = (position.expiry_ms - frame.timestamp_ms) / DAY_MS;
+  return normalizeSellCallScore(askPrice / absDelta, dte);
+}
+
 function portfolioNav(account, positions, frame, execution) {
   const ethValue = account.eth * Number(frame.spot_price || 0);
   const liabilities = positions.reduce((sum, position) => sum + optionLiability(position, frame, execution), 0);
@@ -78,7 +101,8 @@ function closePosition({ account, position, frame, config, reason, forcedPrice =
     approximate = true;
   }
   const closeGross = closePrice * quantity;
-  const closeFee = feeFor(closeGross, settlement ? config.settlementFeeBps : config.feeBps);
+  const closeFee = feeFor(closeGross, settlement ? config.settlementFeeBps : config.feeBps)
+    + (settlement ? 0 : config.takerFeePerContract * quantity);
   account.cash -= closeGross + closeFee;
   const pnl = entryGross - closeGross - entryFee - closeFee;
   return {
@@ -102,6 +126,7 @@ function closePosition({ account, position, frame, config, reason, forcedPrice =
     holding_hours: (frame.timestamp_ms - position.opened_at_ms) / HOUR_MS,
     reason,
     tail_loss: closePrice > position.entry_price * 2,
+    held_edge_at_exit: settlement ? null : heldEdge(quote, closePrice, frame, position),
     approximate_exit: approximate,
     model_version: position.model_version,
     entry_score: position.entry_score,
@@ -150,6 +175,7 @@ function runBacktest(frames = [], policy, rawConfig = {}) {
   let totalFees = 0;
   let maxMarginUsed = 0;
   let lastEntryAtMs = -Infinity;
+  let greedFrames = 0;
   const firstSpot = Number(frames[0].spot_price || 0);
   if (!(firstSpot > 0)) throw new Error('first historical frame has no valid spot price');
   const startingNav = account.cash + account.eth * firstSpot;
@@ -173,6 +199,10 @@ function runBacktest(frames = [], policy, rawConfig = {}) {
         settlement = true;
       } else if (closePrice != null && closePrice <= position.entry_price * (1 - config.profitCapturePct)) {
         reason = 'profit_capture';
+      } else if (config.buybackMaxEdge && closePrice != null && heldEdge(quote, closePrice, frame, position) <= config.buybackMaxEdge
+        && closePrice >= config.buybackMinAsk
+        && closePrice <= position.entry_price * (1 - config.buybackMinCapturePct)) {
+        reason = 'edge_buyback';
       } else if (closePrice != null && config.stopLossMultiple && closePrice >= position.entry_price * config.stopLossMultiple) {
         reason = 'stop_loss';
       } else if (config.maxHoldHours && frame.timestamp_ms - position.opened_at_ms >= config.maxHoldHours * HOUR_MS) {
@@ -201,7 +231,22 @@ function runBacktest(frames = [], policy, rawConfig = {}) {
     }
 
     const openExposure = positions.reduce((sum, position) => sum + position.quantity, 0);
-    const exposureAvailable = Math.max(0, account.eth * config.callExposureCap - openExposure);
+    const bestEdge = config.greedEdge
+      ? Math.max(0, ...frame.candidates.filter((c) => c.bid_price >= 4).map((c) => normalizeSellCallScore(c.raw_score, c.dte)))
+      : 0;
+    let priorHigh = 0;
+    if (config.breakoutPct) {
+      const fromMs = frame.timestamp_ms - config.breakoutLookbackDays * 24 * HOUR_MS;
+      const toMs = frame.timestamp_ms - config.breakoutExcludeHours * HOUR_MS;
+      for (let k = frameIndex - 1; k >= 0 && frames[k].timestamp_ms >= fromMs; k--) {
+        if (frames[k].timestamp_ms <= toMs) priorHigh = Math.max(priorHigh, Number(frames[k].spot_price || 0));
+      }
+    }
+    const spotBreakout = Boolean(config.breakoutPct) && priorHigh > 0 && frame.spot_price >= priorHigh * (1 + config.breakoutPct);
+    const greedWindow = openExposure > 0 && ((Boolean(config.greedEdge) && bestEdge >= config.greedEdge) || spotBreakout);
+    const exposureCap = greedWindow ? config.greedExposureCap : config.callExposureCap;
+    const exposureAvailable = Math.max(0, account.eth * exposureCap - openExposure);
+    if (greedWindow) greedFrames++;
     const currentMargin = positions.reduce((sum, position) => sum + position.margin_reserved, 0);
     const navBeforeEntry = portfolioNav(account, positions, frame, config.execution);
     const marginAvailable = Math.max(0, navBeforeEntry * config.marginBudgetPct - currentMargin);
@@ -311,6 +356,8 @@ function runBacktest(frames = [], policy, rawConfig = {}) {
     wins,
     win_rate: closedTrades.length > 0 ? round(wins / closedTrades.length, 8) : null,
     tail_losses: trades.filter((trade) => trade.tail_loss).length,
+    greed_frames: greedFrames,
+    exits_by_reason: exitFills.reduce((acc, fill) => ({ ...acc, [fill.reason]: (acc[fill.reason] || 0) + 1 }), {}),
     approximate_exits: trades.filter((trade) => trade.approximate_exit).length,
     average_holding_hours: round(mean(closedTrades.map((trade) => trade.holding_hours)), 4),
     trade_log: trades,

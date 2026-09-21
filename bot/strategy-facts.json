@@ -19,7 +19,7 @@
   "sell_call_fallback_min_bid": 4,
   "sell_call_fallback_min_score": 65,
   "put_roll_dte_threshold": 25,
-  "call_buyback_profit_threshold_pct": 80,
+  "call_buyback_profit_threshold_pct": 60,
   "put_monetization_profit_threshold_pct": 1000,
   "put_monetization_max_tranche_fraction": 0.25,
   "put_roll_min_recovery_pct": 40,
@@ -28,5 +28,6 @@
     1500,
     2000
   ],
-  "put_monetization_min_intrinsic_fraction": 0.95
+  "put_monetization_min_intrinsic_fraction": 0.95,
+  "sell_call_max_tranche_fraction": 0.34
 }

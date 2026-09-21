@@ -45,6 +45,7 @@ const describe = (name, fn) => {
 const SCRIPT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'script.js'), 'utf8');
 
 const { loadProduction } = require('./helpers/load-production');
+const CALL_CAPTURE = require('../bot/strategy-facts.json').call_buyback_profit_threshold_pct;
 const {
   CALL_EXPIRATION_RANGE,
   CALL_DELTA_RANGE,
@@ -872,9 +873,9 @@ describe('Standing rulebook coverage requirements', () => {
     assert.strictEqual(fallback.instrument_name, 'ETH-20260626-2400-C');
     assert.strictEqual(fallback.criteria.buyback_intent, 'profit_capture');
     assert.deepStrictEqual(fallback.criteria.conditions, [
-      { field: 'unrealized_pnl_pct', op: 'gte', value: 80 },
+      { field: 'unrealized_pnl_pct', op: 'gte', value: CALL_CAPTURE },
     ]);
-    assert.strictEqual(fallback.criteria.max_buyback_price, 3.82);
+    assert.strictEqual(fallback.criteria.max_buyback_price, Math.floor(19.10 * (1 - CALL_CAPTURE / 100) * 100) / 100);
     assert.strictEqual(fallback.preferred_order_type, 'post_only');
   });
 
@@ -5744,7 +5745,7 @@ describe('advisor-led buyback confirmation discipline', () => {
       action: 'buyback_call',
       criteria: {
         conditions: [
-          { field: 'unrealized_pnl_pct', op: 'gte', value: 70 },
+          { field: 'unrealized_pnl_pct', op: 'gte', value: CALL_CAPTURE - 10 },
           { field: 'dte', op: 'lte', value: 7 },
         ],
         condition_logic: 'all',
@@ -5752,7 +5753,7 @@ describe('advisor-led buyback confirmation discipline', () => {
     });
 
     assert.strictEqual(normalized.changed, true);
-    assert.strictEqual(normalized.rule.criteria.conditions[0].value, 80);
+    assert.strictEqual(normalized.rule.criteria.conditions[0].value, CALL_CAPTURE);
     assert.strictEqual(normalized.rule.criteria.conditions.some((condition) => condition.field === 'dte'), false);
   });
 
@@ -5788,10 +5789,10 @@ describe('advisor-led buyback confirmation discipline', () => {
     const captureCondition = normalized.rule.criteria.conditions.find(isProfitCaptureCondition);
     assert.strictEqual(normalized.changed, true);
     assert.ok(captureCondition);
-    assert.strictEqual(captureCondition.value, 80);
+    assert.strictEqual(captureCondition.value, CALL_CAPTURE);
     assert.strictEqual(normalized.rule.criteria.conditions.some((condition) => condition.field === 'dte'), false);
-    assert.strictEqual(captureGateAllows({ rule: normalized.rule, values: { dte: 30, unrealized_pnl_pct: 65 } }), false);
-    assert.strictEqual(captureGateAllows({ rule: normalized.rule, values: { dte: 30, unrealized_pnl_pct: 82 } }), true);
+    assert.strictEqual(captureGateAllows({ rule: normalized.rule, values: { dte: 30, unrealized_pnl_pct: CALL_CAPTURE - 15 } }), false);
+    assert.strictEqual(captureGateAllows({ rule: normalized.rule, values: { dte: 30, unrealized_pnl_pct: CALL_CAPTURE + 2 } }), true);
   });
 
   test('removes mark_price from normalized buyback capture rules', () => {
@@ -5863,8 +5864,8 @@ describe('advisor-led buyback confirmation discipline', () => {
 
   test('patient buyback bid can satisfy profit-capture rule before live ask does', () => {
     const context = buildBuybackContext({
-      actual: 77.49,
-      patientCapturePct: 80,
+      actual: CALL_CAPTURE - 2.51,
+      patientCapturePct: CALL_CAPTURE,
     });
 
     assert.strictEqual(context.actualSatisfied, false);
@@ -7054,6 +7055,45 @@ describe('Buy-put DTE-normalized edge chart', () => {
     assert.ok(edgeFunction.includes('MAX(edge_score) AS edge_score'));
     assert.ok(!edgeFunction.includes('FROM options_snapshots'));
     assert.ok(!edgeFunction.includes('last_value'));
+  });
+});
+
+describe('sell_call entry laddering', () => {
+  const { getSellCallTrancheQty, SELL_CALL_MAX_TRANCHE_FRACTION } = loadProduction(['getSellCallTrancheQty', 'SELL_CALL_MAX_TRANCHE_FRACTION']);
+  // 45% cap on a $10,000 base = $4,500 total call capacity; $300 margin per contract = 15 contracts.
+  const marginState = { aggregated_collaterals_maintenance_margin: 10000 };
+
+  test('one entry takes at most one tranche of total capacity even with full headroom', () => {
+    const qty = getSellCallTrancheQty(marginState, 0.45, 4500, 300);
+    assert.ok(Math.abs(qty - 15 * SELL_CALL_MAX_TRANCHE_FRACTION) < 1e-9, `expected ${15 * SELL_CALL_MAX_TRANCHE_FRACTION}, got ${qty}`);
+    assert.ok(qty < 15);
+  });
+
+  test('remaining headroom still binds when it is smaller than a tranche', () => {
+    assert.strictEqual(getSellCallTrancheQty(marginState, 0.45, 600, 300), 2);
+    assert.strictEqual(getSellCallTrancheQty(marginState, 0.45, 0, 300), 0);
+  });
+});
+
+describe('momentum labels never gate decisions', () => {
+  const { classifySpotPriceAction } = loadProduction(['classifySpotPriceAction']);
+  const { isCallBreakoutAddWindow } = loadProduction(['isCallBreakoutAddWindow'], {
+    bindings: { botData: { shortTermMomentum: { main: 'neutral', derivative: 'flat_with_spikes(1h_down)', sevenDayHigh: 2741, priorSevenDayHigh: 2600 } } },
+  });
+  const rows = (a, b) => [{ price: a, timestamp: '2026-09-21T00:00:00Z' }, { price: b, timestamp: '2026-09-21T06:00:00Z' }];
+
+  test('spot price action comes from the measured slope only', () => {
+    assert.strictEqual(classifySpotPriceAction(rows(2500, 2450)).state, 'downward');
+    assert.strictEqual(classifySpotPriceAction(rows(2500, 2550)).state, 'upward');
+    assert.strictEqual(classifySpotPriceAction(rows(2500, 2502)).state, 'stable');
+    assert.strictEqual(classifySpotPriceAction([]).state, 'unknown');
+  });
+
+  test('breakout add window needs spot well above the prior 7d range, regardless of the momentum label', () => {
+    const shortCall = [{ instrument_name: 'ETH-20260925-2700-C', direction: 'short', amount: 8.1 }];
+    assert.strictEqual(isCallBreakoutAddWindow(shortCall, 2731), true);   // 5% over 2600
+    assert.strictEqual(isCallBreakoutAddWindow(shortCall, 2700), false);  // above the 7d high but < 5% over the prior range
+    assert.strictEqual(isCallBreakoutAddWindow([], 2735), false);
   });
 });
 

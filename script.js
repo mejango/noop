@@ -35,7 +35,8 @@
  *     – Standard Exit: buy back when medium-term momentum flips to upward (≤7 days to expiry)
  *     – Confident Uptrend: buy back immediately when medium-term uptrend + short-term uptrend + 3-day upward spike (no expiry restrictions)
  *
- * Enhanced Momentum Detection:
+ * Enhanced Momentum Detection (labels drive display and poll cadence only; no trade
+ * decision or prompt reads them — decisions use measured spot slope and prior 7d high):
  * ----------------------------
  *   • Medium-term: ADX(21) + MACD(12,26,13) computed on 5-minute OHLC candles
  *     – ADX >= 25 required to confirm trend strength
@@ -218,7 +219,6 @@ const CALL_EXPOSURE_LIMIT_PCT = getCallExposureLimitPct(CALL_EXPOSURE_CAP_PCT);
 const CALL_BREAKOUT_OVERRIDE_LIMIT_PCT = getCallExposureLimitPct(CALL_BREAKOUT_OVERRIDE_CAP_PCT);
 const CALL_ENTRY_BUFFER_PCT = BOT_CONFIG.CALL_ENTRY_BUFFER_PCT || 0.05;
 const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
-const CALL_BREAKOUT_DERIVATIVES = new Set(['moving', 'slanted', 'steep']);
 const SUBACCOUNT_ID = 25923;
 // The automatic ledger starts before this process can trade and resumes from the
 // same durable boundary after restarts. Older history is an explicit import.
@@ -403,6 +403,11 @@ const CALL_EXPIRATION_RANGE = STRATEGY_FACTS.call_dte_range;
 const CALL_DELTA_RANGE = STRATEGY_FACTS.call_delta_range; // Positive delta for calls
 const SELL_CALL_FALLBACK_MIN_BID = STRATEGY_FACTS.sell_call_fallback_min_bid;
 const SELL_CALL_FALLBACK_MIN_SCORE = STRATEGY_FACTS.sell_call_fallback_min_score;
+// Ladder short-call entries: one sell takes at most this fraction of total call capacity at the
+// active cap, and never adds to a strike already held. Backtest (Feb-Sep 2026): 3 tranches on
+// distinct strikes beat all-in by ~60% overlay P&L and cut the worst trade from -214 to -71,
+// because capacity is left to sell richer strikes as a spike develops.
+const SELL_CALL_MAX_TRANCHE_FRACTION = Math.min(1, Math.max(0.05, Number(STRATEGY_FACTS.sell_call_max_tranche_fraction) || 1));
 const CANDIDATE_OBSERVATION_TOP_N = 8;
 
 // Call buyback thresholds
@@ -882,13 +887,6 @@ const getTrueTimeBasedMomentum = (
 };
 
 // Helper function to check for spikes in the new format
-const hasSpike = (derivative, spikeType) => {
-  if (!derivative || !derivative.includes('_with_spikes(')) return false;
-  const spikeMatch = derivative.match(/_with_spikes\(([^)]+)\)/);
-  if (!spikeMatch) return false;
-  const spikes = spikeMatch[1].split(',');
-  return spikes.includes(spikeType);
-};
 
 // Helper function to filter valid options by delta range
 const filterValidOptions = (options, minDelta, maxDelta) => {
@@ -910,20 +908,6 @@ const logEntryDecision = (type, count, reason) => {
 };
 
 // Helper function to check for steep momentum with downward spike (for entry conditions)
-const hasSteepWithDownwardSpike = (derivative) => {
-  if (!derivative || !derivative.startsWith('steep')) return false;
-  return hasSpike(derivative, '1h_down') || hasSpike(derivative, '1d_down') || hasSpike(derivative, '3d_down');
-};
-
-// Utility function to extract momentum values consistently
-const extractMomentumValues = (mediumTermMomentum, shortTermMomentum) => {
-  const mainMomentum = typeof mediumTermMomentum === 'object' ? mediumTermMomentum.main : mediumTermMomentum;
-  const shortMainMomentum = typeof shortTermMomentum === 'object' ? shortTermMomentum.main : shortTermMomentum;
-  const shortDerivative = typeof shortTermMomentum === 'object' ? shortTermMomentum.derivative : null;
-  
-  return { mainMomentum, shortMainMomentum, shortDerivative };
-};
-
 // shouldEnterStandard — removed (replaced by LLM-driven advisory)
 
 // ===== ONCHAIN ANALYSIS FUNCTIONS =====
@@ -1347,6 +1331,7 @@ const getShortTermMomentum = (priceHistory) => {
   let threeDayHigh = 0;
   let threeDayLow = Infinity;
   let sevenDayHigh = 0;
+  let priorSevenDayHigh = 0; // 7d high excluding the last 24h: the range a breakout must clear
   let sevenDayLow = Infinity;
 
   if (last15MinPrices.length > 0 && prev15MinPrices.length > 0) {
@@ -1473,6 +1458,8 @@ const getShortTermMomentum = (priceHistory) => {
       
       if (sevenDaysExcludingLast30Min.length > 0) {
         sevenDayHigh = Math.max(...sevenDaysExcludingLast30Min.map(p => p.price));
+        const priorSevenDayPrices = sevenDaysExcludingLast30Min.filter(p => p.timestamp < oneDayAgo);
+        priorSevenDayHigh = priorSevenDayPrices.length > 0 ? Math.max(...priorSevenDayPrices.map(p => p.price)) : 0;
         sevenDayLow = Math.min(...sevenDaysExcludingLast30Min.map(p => p.price));
         const thirtyMinHigh = Math.max(...last30MinPrices.map(p => p.price));
         const thirtyMinLow = Math.min(...last30MinPrices.map(p => p.price));
@@ -1512,7 +1499,8 @@ const getShortTermMomentum = (priceHistory) => {
     threeDayHigh, 
     threeDayLow,
     sevenDayHigh, 
-    sevenDayLow 
+    sevenDayLow,
+    priorSevenDayHigh,
   };
 };
 
@@ -1540,17 +1528,12 @@ const analyzeMomentum = (priceHistory) => {
   };
 };
 
-const determineCheckInterval = (mediumTermMomentum, shortTermMomentum) => {
-  // Extract main momentum from the new format
-  const mainMomentum = typeof mediumTermMomentum === 'object' ? mediumTermMomentum.main : mediumTermMomentum;
-  const shortMainMomentum = typeof shortTermMomentum === 'object' ? shortTermMomentum.main : shortTermMomentum;
-  
-  // Maximum urgency during downturns (1 minute)
-  if (mainMomentum === 'downward' || shortMainMomentum === 'downward') {
-    return DYNAMIC_INTERVALS.urgent;
-  }
 
-  // Normal interval for other conditions
+// Cadence only: poll faster when the momentum labels read downward. Labels never gate trades.
+const determineCheckInterval = (mediumTermMomentum, shortTermMomentum) => {
+  const mainMomentum = typeof mediumTermMomentum === 'object' ? mediumTermMomentum?.main : mediumTermMomentum;
+  const shortMainMomentum = typeof shortTermMomentum === 'object' ? shortTermMomentum?.main : shortTermMomentum;
+  if (mainMomentum === 'downward' || shortMainMomentum === 'downward') return DYNAMIC_INTERVALS.urgent;
   return DYNAMIC_INTERVALS.normal;
 };
 
@@ -2156,16 +2139,8 @@ const getBestCurrentSellCallCandidate = (
   return best;
 };
 
-const classifySpotPriceAction = (momentum = {}, recentSpotPrices = []) => {
-  const mainText = (value) => {
-    if (!value) return '';
-    if (typeof value === 'string') return value.toLowerCase();
-    return `${value.main || ''} ${value.derivative || ''}`.toLowerCase();
-  };
-  const mediumText = mainText(momentum.mediumTerm);
-  const shortText = mainText(momentum.shortTerm);
-  const combined = `${mediumText} ${shortText}`;
-
+// Spot state from the measured recent slope only; momentum labels never gate decisions.
+const classifySpotPriceAction = (recentSpotPrices = []) => {
   let slopePct = null;
   const rows = Array.isArray(recentSpotPrices)
     ? recentSpotPrices
@@ -2177,20 +2152,12 @@ const classifySpotPriceAction = (momentum = {}, recentSpotPrices = []) => {
     slopePct = ((rows[rows.length - 1].price - rows[0].price) / rows[0].price) * 100;
   }
 
-  if (/\bdownward\b|_down\b|down\b/.test(shortText) || /\bdownward\b/.test(mediumText)) {
-    return { state: 'downward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'momentum labels point downward' };
+  if (!Number.isFinite(slopePct)) {
+    return { state: 'unknown', slope_pct_6h: null, reason: 'not enough recent spot samples' };
   }
-  if (/\bupward\b|_up\b|up\b/.test(shortText) || /\bupward\b/.test(mediumText)) {
-    return { state: 'upward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'momentum labels point upward' };
-  }
-  if (Number.isFinite(slopePct)) {
-    if (slopePct <= -0.25) return { state: 'downward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'recent spot slope is negative' };
-    if (slopePct >= 0.25) return { state: 'upward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'recent spot slope is positive' };
-  }
-  if (combined.includes('neutral') || combined.includes('flat')) {
-    return { state: 'stable', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'momentum labels are neutral or flat' };
-  }
-  return { state: 'unknown', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'spot trend is not classifiable' };
+  if (slopePct <= -0.25) return { state: 'downward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'recent spot slope is negative' };
+  if (slopePct >= 0.25) return { state: 'upward', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'recent spot slope is positive' };
+  return { state: 'stable', slope_pct_6h: roundForAdvisory(slopePct, 2), reason: 'recent spot slope is flat' };
 };
 
 const computeScoreTrendPct = (samples, currentScore, hours) => {
@@ -2373,7 +2340,6 @@ const buyPutValueSignalMatches = (requiredSignal, currentSignal) => {
 
 const buildRollingOptionValueContext = ({
   tickerMap,
-  momentum,
   putBudgetRemaining,
   activeRules = [],
   recentPendingActions = [],
@@ -2501,7 +2467,7 @@ const buildRollingOptionValueContext = ({
     order?.action === 'buy_put' && (!order?.status || order.status === 'open')
   ).length;
   const hasWorkingBuyPut = (workingBuyPutActions + restingBuyPutOrders) > 0;
-  const spotAction = classifySpotPriceAction(momentum, recentSpotPrices);
+  const spotAction = classifySpotPriceAction(recentSpotPrices);
   const budgetAvailable = Number(putBudgetRemaining) > 1;
   const scoreTrend1hPct = computeScoreTrendPct(priorSamples, currentScore, BUY_PUT_REPRICING_LAG_SCORE_LOOKBACK_HOURS);
   const spotMove20mPct = computeSpotMovePct(recentSpotPrices, BUY_PUT_REPRICING_LAG_LOOKBACK_MINUTES);
@@ -8455,21 +8421,15 @@ const getShortCallExposure = (positions = []) => positions
   .filter((p) => p.instrument_name?.endsWith('-C') && p.direction === 'short')
   .reduce((sum, p) => sum + Math.abs(Number(p.amount) || 0), 0);
 
+// Breakout = spot well above everything seen lately (>= CALL_BREAKOUT_MIN_PCT over the 7d high
+// excluding the last 24h) with short calls already on. Momentum labels never gate this.
+// Backtest (Feb-Sep 2026): P&L is flat from 4% to 15%; the threshold sets how rare the window is, not returns.
+const CALL_BREAKOUT_MIN_PCT = 0.05;
 const isCallBreakoutAddWindow = (positions = [], spotPrice = 0) => {
   const currentShortExposure = getShortCallExposure(positions);
   if (!(currentShortExposure > 0) || !(spotPrice > 0)) return false;
-
-  const short = botData.shortTermMomentum || {};
-  const medium = botData.mediumTermMomentum || {};
-  const threeDayHigh = Number(short.threeDayHigh || 0);
-  const sevenDayHigh = Number(short.sevenDayHigh || 0);
-  const nearRecentHigh = (threeDayHigh > 0 && spotPrice >= threeDayHigh * 0.997)
-    || (sevenDayHigh > 0 && spotPrice >= sevenDayHigh * 0.995);
-
-  return short.main === 'upward'
-    && CALL_BREAKOUT_DERIVATIVES.has(short.derivative)
-    && medium.main !== 'downward'
-    && nearRecentHigh;
+  const priorHigh = Number(botData.shortTermMomentum?.priorSevenDayHigh || 0);
+  return priorHigh > 0 && spotPrice >= priorHigh * (1 + CALL_BREAKOUT_MIN_PCT);
 };
 
 const getEffectiveCallExposureCapPct = (positions = [], spotPrice = 0) => (
@@ -8481,6 +8441,13 @@ const getEffectiveCallExposureCapPct = (positions = [], spotPrice = 0) => (
 const getEffectiveCallExposureLimitPct = (positions = [], spotPrice = 0) => (
   getCallExposureLimitPct(getEffectiveCallExposureCapPct(positions, spotPrice))
 );
+
+// One sell_call entry may use the remaining headroom or one tranche of total capacity, whichever is smaller.
+const getSellCallTrancheQty = (marginState, capPct, marginHeadroom, marginPerUnit) => {
+  if (!(marginPerUnit > 0) || !(marginHeadroom >= 0)) return 0;
+  const trancheHeadroom = capPct * getMarginUtilizationBase(marginState) * SELL_CALL_MAX_TRANCHE_FRACTION;
+  return Math.min(marginHeadroom, trancheHeadroom > 0 ? trancheHeadroom : marginHeadroom) / marginPerUnit;
+};
 
 const getDisplayedMarginHeadroomAtCap = (marginState, capPct = CALL_EXPOSURE_CAP_PCT) => {
   if (!marginState) return null;
@@ -9072,10 +9039,6 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
       const putBudgetRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
       buyPutOpportunityContext = buildRollingOptionValueContext({
         tickerMap,
-        momentum: {
-          mediumTerm: botData.mediumTermMomentum,
-          shortTerm: botData.shortTermMomentum,
-        },
         putBudgetRemaining,
         activeRules: entryRules,
         recentPendingActions: workingEntryActions,
@@ -9485,7 +9448,15 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             || a.name.localeCompare(b.name);
         });
         let blockedByRestingOrder = 0;
+        const heldShortCalls = rule.action === 'sell_call'
+          ? new Set(positions.filter((p) => p.direction === 'short' && p.instrument_name?.endsWith('-C')).map((p) => p.instrument_name))
+          : new Set();
+        let blockedByHeldStrike = 0;
         const best = candidates.find((candidate) => {
+          if (heldShortCalls.has(candidate.name)) {
+            blockedByHeldStrike++;
+            return false;
+          }
           const sameActionEntryResting = openRestingEntryOrders.some(order =>
             order.instrument_name === candidate.name && order.action === rule.action
           );
@@ -9495,11 +9466,12 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           return false;
         });
         if (!best) {
-          console.log(`📋 Rule ${rule.id} (${rule.action}): ${candidates.length} candidate(s) blocked by same-instrument resting orders`);
+          const blockedReason = `${blockedByRestingOrder} candidate(s) blocked by same-instrument resting orders, ${blockedByHeldStrike} by already-held strikes`;
+          console.log(`📋 Rule ${rule.id} (${rule.action}): ${blockedReason}`);
           logDecision(rule, {
             decision_status: 'skipped',
-            reason_code: 'all_candidates_blocked_by_resting',
-            reason: `${candidates.length} candidate(s) blocked by same-instrument resting orders`,
+            reason_code: blockedByHeldStrike > 0 && blockedByRestingOrder === 0 ? 'all_candidates_held' : 'all_candidates_blocked_by_resting',
+            reason: blockedReason,
             candidates_evaluated: candidates.length,
             criteria_json: criteria,
             context_json: { filter_stats: filterStats },
@@ -9510,15 +9482,15 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             criteria,
             selectedName: null,
             decisionStatus: 'skipped',
-            selectionReason: 'all candidates blocked by same-instrument resting orders',
+            selectionReason: blockedReason,
             spotPrice,
             tickTimestamp: evaluationTimestamp,
             context: { filter_stats: filterStats, blocked_by_resting_order: candidates.length },
           }));
           continue;
         }
-        if (blockedByRestingOrder > 0) {
-          console.log(`📋 Rule ${rule.id} (${rule.action}): skipped ${blockedByRestingOrder} candidate(s) with same-instrument resting orders; selected ${best.name}`);
+        if (blockedByRestingOrder > 0 || blockedByHeldStrike > 0) {
+          console.log(`📋 Rule ${rule.id} (${rule.action}): skipped ${blockedByRestingOrder} candidate(s) with same-instrument resting orders and ${blockedByHeldStrike} already-held strike(s); selected ${best.name}`);
         }
         const candidateTelemetryContext = {
           filter_stats: filterStats,
@@ -9589,8 +9561,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             best.bidPrice
           );
           if (marginPerUnit > 0 && marginHeadroom != null) {
-            const maxQtyAtCap = marginHeadroom / marginPerUnit;
+            const maxQtyAtCap = getSellCallTrancheQty(liveMarginState, targetCapPct, marginHeadroom, marginPerUnit);
             sellCallMarginDebug = {
+              trancheFraction: SELL_CALL_MAX_TRANCHE_FRACTION,
               currentUtilization: estimateDisplayedMarginUtilization(liveMarginState),
               marginHeadroom,
               marginPerUnit,
@@ -10108,10 +10081,6 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
     try { recentPendingActions = db.getRecentPendingActions(50); } catch { /* ok */ }
     openOrderBuyPutContext = buildRollingOptionValueContext({
       tickerMap,
-      momentum: {
-        mediumTerm: botData.mediumTermMomentum,
-        shortTerm: botData.shortTermMomentum,
-      },
       putBudgetRemaining: Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought),
       activeRules,
       recentPendingActions,
@@ -10352,9 +10321,7 @@ const getSharedActionPolicyPrompt = () => [
 const getMomentumEvidenceDisciplinePrompt = () => [
   'EVIDENCE PRIORITY: This is an options bang-for-buck strategy, not a price-direction strategy.',
   '- Primary evidence: executable bid/ask, spread/depth, IV/skew, DTE, delta, moneyness, OI, funding, candidate score, position PnL, hedge role, and account margin impact.',
-  '- Secondary evidence: short-term and medium-term momentum. Use momentum as timing and path-risk context only after option economics justify attention.',
-  '- Do not create, preserve, or justify a rule mainly because momentum is upward or downward. Momentum must be confirmed by option pricing, liquidity, skew, OI, funding, or position-specific risk.',
-  '- If momentum conflicts with option-market structure, trust executable option economics first and state the mismatch plainly.',
+  '- Path context comes from the raw 30-day hourly spot path, not from momentum labels. Do not create, preserve, or justify a rule mainly because spot has been rising or falling; direction must be confirmed by option pricing, liquidity, skew, OI, funding, or position-specific risk.',
 ].join('\n');
 
 const getBuyPutEntryPriceDisciplinePrompt = () => [
@@ -11231,7 +11198,6 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       }
       const liveMarketPrice = ticker ? (action.action.includes('buy') ? Number(ticker.a) : Number(ticker.b)) : null;
       const currentPrice = liveMarketPrice;
-      const momentum = botData.mediumTermMomentum;
 
       // Parse trigger details for advisory's preferred order type and value context.
       let triggerData = {};
@@ -11578,7 +11544,7 @@ Best available price: $${currentPrice || action.price || 'N/A'}
 	${advisorSellPutLimitPrice ? `Advisor sell-put minimum exit price: $${advisorSellPutLimitPrice} (tail-win monetization floor; do not sell below this limit merely because the visible bid is sparse).` : ''}
 	${detailsStr}
 Action semantics: ${describeActionSemantics(action.action)}
-Market: spot=$${spotPrice}, momentum=${JSON.stringify(momentum)}
+Market: spot=$${spotPrice}
 ${marginStr}
 ${callMarginContext}
 ${buybackConfirmationPrompt}
@@ -12167,7 +12133,7 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
       currentShortExposure: +totalCallExposure.toFixed(2),
       utilizationPct: marginState ? +(100 * (estimateDisplayedMarginUtilization(marginState) || 0)).toFixed(1) : null,
       marginBase: marginState ? +getMarginCapacityBase(marginState).toFixed(2) : null,
-      note: `Base target cap: keep Derive-displayed margin utilization near ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}%; the ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% is last-mile execution safety, not planned sell-call capacity. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold for new short-call entries. When breakoutAddWindow=true because spot is breaking upward with existing short calls already on, the bot may add into richer upside premium up to a ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% target / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit instead of reflexively buying back into emotional bullish pricing. utilizationPct mirrors the Derive display metric; projected trade sizing still uses the internal margin estimate.`,
+      note: `Base target cap: keep Derive-displayed margin utilization near ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}%; the ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% is last-mile execution safety, not planned sell-call capacity. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold for new short-call entries. When breakoutAddWindow=true because spot is at least ${(CALL_BREAKOUT_MIN_PCT * 100).toFixed(0)}% above the prior 7-day high (excluding the last 24h) with existing short calls already on, the bot may add into richer upside premium up to a ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% target / ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% buffered limit instead of reflexively buying back into emotional bullish pricing. utilizationPct mirrors the Derive display metric; projected trade sizing still uses the internal margin estimate.`,
     },
     margin: marginState ? {
       buying_power: +marginState.initial_margin.toFixed(2),              // available margin for new trades
@@ -12225,7 +12191,6 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
 
   const rollingOptionValueContext = buildRollingOptionValueContext({
     tickerMap,
-    momentum,
     putBudgetRemaining,
     activeRules,
     recentPendingActions,
@@ -12539,9 +12504,6 @@ ${summarizeSentimentForAdvisor(sentiment?.windows || {}, sentiment?.latest?.mark
 
 === ROLLING OPTION VALUE CONTEXT (PRIMARY ENTRY VALUE EVIDENCE) ===
 ${formatRollingOptionValueContext(rollingOptionValueContext)}
-
-=== MOMENTUM (SECONDARY PATH CONTEXT; NOT A STANDALONE TRADE SIGNAL) ===
-Medium-term ${momentum.mediumTerm.main} (${momentum.mediumTerm.derivative || 'n/a'}), Short-term ${momentum.shortTerm.main} (${momentum.shortTerm.derivative || 'n/a'})
 
 === PORTFOLIO ===
 Positions: ${JSON.stringify(positions.map(p => ({
@@ -13665,7 +13627,7 @@ const runBot = async () => {
     console.log(' ');
 
     // Determine next check interval
-    const checkInterval = determineCheckInterval(botData.mediumTermMomentum, botData.shortTermMomentum, botData);
+    const checkInterval = determineCheckInterval(botData.mediumTermMomentum, botData.shortTermMomentum);
 
     console.log(`⏰ Next bot check in ${checkInterval / (1000 * 60)} minutes`);
 
