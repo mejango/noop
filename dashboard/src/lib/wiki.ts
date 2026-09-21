@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { noul, TypeSafeClient } from '@typesafe-ai/sdk';
 
 import { countWikiEvidenceReferences, extractWikiTldr, WIKI_PAGES } from '@/lib/wikiCatalog';
 
@@ -113,15 +114,6 @@ function latestTickId(content: string): number | null {
   return tickIds.length > 0 ? Math.max(...tickIds) : null;
 }
 
-function getConsecutiveTickRequirements(content: string): Set<number> {
-  return new Set(
-    Array.from(
-      content.matchAll(/(?:≥|>=|at\s+least)?\s*`?(\d+)`?\s+consecutive\s+ticks/gi),
-      (match) => Number(match[1]),
-    ).filter(Number.isFinite),
-  );
-}
-
 const REFERENCE_ONLY_SECTIONS: Record<string, Record<string, string>> = {
   'revenue/pricing.md': {
     'Skew & IV Context': 'Current skew and IV readings are perishable. Consult protection/pricing.md and regimes/current.md for current values.',
@@ -131,26 +123,6 @@ const REFERENCE_ONLY_SECTIONS: Record<string, Record<string, string>> = {
     'Buyback Patterns': 'When spot is ≥10% below strike with DTE collapsing, buying back converts near-certain theta income into a certain realized loss. Assess strike distance, DTE, and momentum before any buyback; a buyback below strike requires a credible breakout thesis. See [lesson:short_call.exit_insurance] and [lesson:process.decision_quality].',
   },
 };
-
-function getEscalationTopics(content: string): Set<string> {
-  return new Set(content.match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g) || []);
-}
-
-function hasResolvedEscalationForTopic(content: string, topic: string): boolean {
-  return content.split(/\n\s*\n/).some((paragraph) => (
-    paragraph.includes(topic)
-    && /(?:ESCALATION\s*(?:—|-)\s*RESOLVED|resolution confirmed)/i.test(paragraph)
-  ));
-}
-
-export function isObsoleteUnresolvedEscalationIssue(
-  issue: string,
-  referencedContent: string,
-): boolean {
-  if (!/(?:open\s+unresolved|unresolved\s+(?:cross-page\s+)?escalation|still\s+open)/i.test(issue)) return false;
-  const topics = getEscalationTopics(issue);
-  return Array.from(topics).some((topic) => hasResolvedEscalationForTopic(referencedContent, topic));
-}
 
 const SUPPORTED_NUMERIC_MARKER_TYPES = new Set(['tick', 'order', 'review']);
 
@@ -191,67 +163,6 @@ function normalizeProse(content: string): string {
   return content.replace(/\s+/g, ' ').trim();
 }
 
-function getTradingRuleNumericTokens(content: string): Map<string, string> {
-  const tokens = new Map<string, string>();
-  const matches = content.match(/~?\$[\d,]+(?:\.\d+)?|~?\d+(?:\.\d+)?%|(?:≥|≤|>=|<=|>|<)\s*\d+(?:\.\d+)?/g) || [];
-  matches.forEach((value) => {
-    const normalized = value.replace(/[~,\s]/g, '').replace('>=', '≥').replace('<=', '≤');
-    tokens.set(normalized, value);
-  });
-  return tokens;
-}
-
-function getUnsupportedNumericTradingRules(
-  previousContent: string,
-  replacementContent: string,
-  canonicalLessonContent: string,
-  validationIssues: string[],
-): Set<string> {
-  const previousLines = new Set(previousContent.split('\n').map(normalizeProse).filter(Boolean));
-  const supportedTokens = getTradingRuleNumericTokens(
-    `${previousContent}\n${canonicalLessonContent}\n${validationIssues.join('\n')}`,
-  );
-  const unsupported = new Set<string>();
-  replacementContent.split('\n').forEach((line) => {
-    const normalizedLine = normalizeProse(line);
-    if (!normalizedLine || previousLines.has(normalizedLine)) return;
-    if (!/\b(?:buyback|buy\s+back|buy_put|sell_call|sell_put|accumulat(?:e|ion)|harvest|enter|entry|exit|close)\b/i.test(line)) return;
-    if (!/\b(?:obligation|mandatory|required|must|shall|automatic(?:ally)?|triggers?|only\s+(?:if|when)|do\s+not|never|preferred\s+path)\b/i.test(line)) return;
-    getTradingRuleNumericTokens(line).forEach((displayValue, token) => {
-      if (!supportedTokens.has(token)) unsupported.add(displayValue);
-    });
-  });
-  return unsupported;
-}
-
-function getUncertainArtifactAnchors(issues: string[]): Set<string> {
-  const anchors = new Set<string>();
-  issues.forEach((issue) => {
-    if (!/artifact/i.test(issue)) return;
-    if (!/(?:likely|possibly|potentially|may|might|could|unverified|unconfirmed|needs?\s+(?:caveat|reconciliation))/i.test(issue)) return;
-    (issue.match(/\b\d+\.\d{3,}\b/g) || []).forEach((value) => anchors.add(value));
-  });
-  return anchors;
-}
-
-function getUnresolvedOutcomeAnchors(issues: string[]): Set<string> {
-  const anchors = new Set<string>();
-  issues.forEach((issue) => {
-    if (!/(?:never\s+recorded|not\s+recorded|unrecorded|resolution\s+(?:unknown|missing)|outcome\s+(?:unknown|missing))/i.test(issue)) return;
-    (issue.match(/[+-]?\d+(?:\.\d+)?%/g) || []).forEach((value) => anchors.add(value));
-  });
-  return anchors;
-}
-
-function getExpiredTickIds(issues: string[]): Set<number> {
-  const tickIds = new Set<number>();
-  issues.forEach((issue) => {
-    if (!/(?:stale|expired|superseded)/i.test(issue)) return;
-    getTickIds(issue).forEach((tickId) => tickIds.add(tickId));
-  });
-  return tickIds;
-}
-
 function getDuplicateMatches(content: string, pattern: RegExp): string[] {
   const counts = new Map<string, number>();
   Array.from(content.matchAll(pattern), (match) => match[1].toUpperCase()).forEach((value) => {
@@ -284,29 +195,14 @@ function findNumberedMetadataTask(content: string, taskNumber: number): string {
   ))?.[1] || '';
 }
 
-function getAddedPerishableStrategyClaims(
-  previousContent: string,
-  replacementContent: string,
-): string[] {
-  const previousLines = new Set(
-    previousContent.split('\n').map(normalizeProse).filter(Boolean),
-  );
-  return replacementContent.split('\n').filter((line) => {
-    const normalized = normalizeProse(line);
-    if (!normalized || previousLines.has(normalized)) return false;
-    if (!/\b(?:spot|call[_ ]score|put[_ ]score|harvest\s+gate|accumulation\s+gate|momentum)\b/i.test(line)) return false;
-    if (!/\b(?:current(?:ly)?|latest|live[- ]state|status\s+as\s+of|as\s+of\s+\d{4}-\d{2}-\d{2})\b/i.test(line)) return false;
-    return /\$\s*[\d,]+|\b\d+(?:\.\d+)?%|\b(?:open|closed|marginal|neutral|upward|downward|accelerating|decelerating)\b/i.test(line);
-  }).map((line) => normalizeProse(line).slice(0, 180));
-}
-
 export function validateWikiReplacement(args: {
   pagePath: string;
   previousContent: string;
   replacementContent: string;
   allowedMarkerContent: string;
   canonicalLessonContent: string;
-  validationIssues: string[];
+  // Tick markers the semantic judgments identified as expired live state (see judgeWikiReplacement).
+  expiredTickIds?: Set<number>;
 }): string[] {
   const {
     pagePath,
@@ -314,7 +210,7 @@ export function validateWikiReplacement(args: {
     replacementContent,
     allowedMarkerContent,
     canonicalLessonContent,
-    validationIssues,
+    expiredTickIds = new Set<number>(),
   } = args;
   const errors: string[] = [];
   const replacement = replacementContent.trim();
@@ -393,22 +289,6 @@ export function validateWikiReplacement(args: {
     });
   }
 
-  const previousParagraphs = new Set(
-    previousContent.split(/\n\s*\n/).map(normalizeProse).filter(Boolean),
-  );
-  const revivedResolvedTopics = new Set<string>();
-  replacement.split(/\n\s*\n/).forEach((paragraph) => {
-    const normalized = normalizeProse(paragraph);
-    if (previousParagraphs.has(normalized)) return;
-    if (!/(?:open\s+unresolved|unresolved\s+(?:cross-page\s+)?escalation|still\s+open)/i.test(paragraph)) return;
-    getEscalationTopics(paragraph).forEach((topic) => {
-      if (hasResolvedEscalationForTopic(allowedMarkerContent, topic)) revivedResolvedTopics.add(topic);
-    });
-  });
-  if (revivedResolvedTopics.size > 0) {
-    errors.push(`Replacement revives resolved escalations: ${Array.from(revivedResolvedTopics).join(', ')}`);
-  }
-
   const unsupportedMarkerTypes = Array.from(getUnsupportedNumericMarkerTypes(replacement));
   if (unsupportedMarkerTypes.length > 0) {
     errors.push(`Replacement retains unsupported marker types: ${unsupportedMarkerTypes.join(', ')}`);
@@ -425,55 +305,6 @@ export function validateWikiReplacement(args: {
     );
   }
 
-  const uncertainArtifactAnchors = getUncertainArtifactAnchors(validationIssues);
-  uncertainArtifactAnchors.forEach((anchor) => {
-    const overconfidentParagraph = replacement.split(/\n\s*\n/).find((paragraph) => (
-      paragraph.includes(anchor)
-      && /artifact/i.test(paragraph)
-      && !/(?:likely|possibly|potentially|may|might|could|appears?|unverified|unconfirmed|not\s+confirmed|treat\s+as)/i.test(paragraph)
-    ));
-    if (overconfidentParagraph) {
-      errors.push(`Replacement turns an uncertain artifact interpretation into fact: ${anchor}`);
-    }
-  });
-
-  const unsupportedNumericTradingRules = getUnsupportedNumericTradingRules(
-    previousContent,
-    replacement,
-    canonicalLessonContent,
-    validationIssues,
-  );
-  if (unsupportedNumericTradingRules.size > 0) {
-    errors.push(
-      `Replacement invents unsupported numeric trading triggers: ${Array.from(unsupportedNumericTradingRules).join(', ')}`,
-    );
-  }
-
-  const failedIndicators = getH2Body(replacement, 'Failed Indicators') || '';
-  const unresolvedOutcomeAnchors = Array.from(getUnresolvedOutcomeAnchors(validationIssues));
-  const misclassifiedUnresolvedOutcomes = unresolvedOutcomeAnchors
-    .filter((anchor) => failedIndicators.includes(anchor));
-  if (misclassifiedUnresolvedOutcomes.length > 0) {
-    errors.push(
-      `Replacement classifies outcomes without recorded resolution as failed: ${misclassifiedUnresolvedOutcomes.join(', ')}`,
-    );
-  }
-  if (pagePath === 'indicators/leading.md' && unresolvedOutcomeAnchors.length > 0) {
-    const confirmedIndicators = getH2Body(replacement, 'Confirmed Leading Indicators') || '';
-    const experimentalIndicators = getH2Body(replacement, 'Experimental Indicators') || '';
-    const unresolvedConfirmedRows = unresolvedOutcomeAnchors.filter((anchor) => (
-      confirmedIndicators.split('\n').some((line) => line.trim().startsWith('|') && line.includes(anchor))
-    ));
-    if (unresolvedConfirmedRows.length > 0) {
-      errors.push(`Unresolved episodes remain as rows in Confirmed Leading Indicators: ${unresolvedConfirmedRows.join(', ')}`);
-    }
-    const missingExperimentalClassifications = unresolvedOutcomeAnchors
-      .filter((anchor) => !experimentalIndicators.includes(anchor));
-    if (missingExperimentalClassifications.length > 0) {
-      errors.push(`Unresolved episodes must be classified under Experimental Indicators: ${missingExperimentalClassifications.join(', ')}`);
-    }
-  }
-
   if (pagePath.startsWith('strategy/')) {
     const previousTickIds = new Set(getTickIds(previousContent));
     const addedTickIds = getTickIds(replacement).filter((tickId) => !previousTickIds.has(tickId));
@@ -482,17 +313,11 @@ export function validateWikiReplacement(args: {
         `Learning-owned strategy page adds perishable tick evidence: ${Array.from(new Set(addedTickIds)).map((tickId) => `[tick:#${tickId}]`).join(', ')}`,
       );
     }
-    const retainedExpiredTickIds = Array.from(getExpiredTickIds(validationIssues))
+    const retainedExpiredTickIds = Array.from(expiredTickIds)
       .filter((tickId) => getTickIds(replacement).includes(tickId));
     if (retainedExpiredTickIds.length > 0) {
       errors.push(
         `Learning-owned strategy page retains expired live tick evidence: ${retainedExpiredTickIds.map((tickId) => `[tick:#${tickId}]`).join(', ')}`,
-      );
-    }
-    const addedPerishableClaims = getAddedPerishableStrategyClaims(previousContent, replacement);
-    if (addedPerishableClaims.length > 0) {
-      errors.push(
-        `Learning-owned strategy page adds perishable live-state claims: ${addedPerishableClaims.slice(0, 2).join(' | ')}`,
       );
     }
   }
@@ -510,22 +335,13 @@ export function validateWikiReplacement(args: {
     errors.push(`Replacement uses non-canonical lesson markers: ${unsupportedLessonMarkers.slice(0, 5).join(', ')}`);
   }
 
-  const allowedTickRequirements = getConsecutiveTickRequirements(
-    `${previousContent}\n${allowedMarkerContent}\n${canonicalLessonContent}`,
-  );
-  const inventedTickRequirements = Array.from(getConsecutiveTickRequirements(replacement))
-    .filter((count) => !allowedTickRequirements.has(count));
-  if (inventedTickRequirements.length > 0) {
-    errors.push(`Replacement invents a consecutive-tick gate rule: ${inventedTickRequirements.join(', ')} ticks`);
-  }
-
   // A targeted repair may replace stale evidence, but it must not silently make
   // the page less current by dropping the newest tick cited anywhere on it.
   const previousLatestTick = latestTickId(previousContent);
   const replacementLatestTick = latestTickId(replacement);
   const removesExpiredStrategyTick = pagePath.startsWith('strategy/')
     && previousLatestTick != null
-    && getExpiredTickIds(validationIssues).has(previousLatestTick);
+    && expiredTickIds.has(previousLatestTick);
   if (
     previousLatestTick != null
     && !removesExpiredStrategyTick
@@ -534,4 +350,139 @@ export function validateWikiReplacement(args: {
     errors.push(`Replacement drops newest tick evidence [tick:#${previousLatestTick}]`);
   }
   return errors;
+}
+
+// ── Semantic judgments ────────────────────────────────────────────────────────
+// The checks above are structural (headers, marker vocabulary, exact canonical
+// sections, tick-id monotonicity). The ones below are about what the prose
+// means, which regexes over model-written English guessed badly. They run as
+// System One questions over the paired page state; without TYPESAFE_API_KEY
+// they are skipped and the Sonnet approval gate remains the semantic check.
+const JUDGMENT_THRESHOLD = 0.6; // ponytail: untuned; raise if repairs get rejected on clean proposals
+
+let typesafe: TypeSafeClient | null = null;
+let loggedMode = false;
+function getTypeSafe(): TypeSafeClient | null {
+  if (!loggedMode) {
+    loggedMode = true;
+    console.log(`[wiki] semantic repair safeguards: ${process.env.TYPESAFE_API_KEY ? 'TypeSafe judgments' : 'OFF (no TYPESAFE_API_KEY); structural checks + reviewer only'}`);
+  }
+  if (!process.env.TYPESAFE_API_KEY) return null;
+  typesafe ??= new TypeSafeClient();
+  return typesafe;
+}
+
+// A judgment outage degrades to the no-key path instead of failing the repair
+// (and discarding the proposal the caller already paid for).
+async function judged<T>(label: string, run: () => Promise<T>): Promise<T | null> {
+  try {
+    return await run();
+  } catch (error) {
+    console.log(`[wiki] ${label} judgment failed; continuing without it: ${(error as Error).message}`);
+    return null;
+  }
+}
+
+export async function judgeWikiReplacement(args: {
+  pagePath: string;
+  previousContent: string;
+  replacementContent: string;
+  relatedContext: string;
+  validationIssues: string[];
+}): Promise<{ errors: string[]; expiredTickIds: Set<number> }> {
+  const client = getTypeSafe();
+  const expiredTickIds = new Set<number>();
+  if (!client) return { errors: [], expiredTickIds };
+  const { pagePath, previousContent, replacementContent, relatedContext, validationIssues } = args;
+  const isStrategy = pagePath.startsWith('strategy/');
+  const isLeading = pagePath === 'indicators/leading.md';
+  const previousTickIds = isStrategy ? Array.from(new Set(getTickIds(previousContent))) : [];
+
+  const checks: Record<string, [string, ReturnType<typeof noul>]> = {
+    revives_resolved: ['Replacement revives resolved escalations', noul(
+      'Does `replacement_page` describe as open, unresolved, or still pending an escalation or topic that `previous_page`, `related_pages`, or `findings` mark as resolved?',
+    )],
+    upgrades_uncertainty: ['Replacement turns an uncertain artifact interpretation into fact', noul(
+      'Does `replacement_page` state as established fact or confirmed causal mechanism something that `previous_page` or `findings` describe only as likely, possible, potential, unverified, unconfirmed, or needing reconciliation?',
+    )],
+    invents_trigger: ['Replacement invents unsupported numeric trading triggers', noul(
+      'Does `replacement_page` add a numeric trading trigger (a price, percentage, dollar amount, or count tied to entering, exiting, buying back, or accumulating) that appears nowhere in `previous_page`, `related_pages`, or `findings`?',
+      {
+        true: 'A new number is attached to obligation language such as must, never, only when, automatically, or triggers',
+        false: 'Every number in obligation language already appeared in the supplied context, or the new language is advisory (assess, consider, prefer)',
+      },
+    )],
+    invents_tick_gate: ['Replacement invents a consecutive-tick gate rule', noul(
+      'Does `replacement_page` introduce a requirement for a specific number of consecutive ticks that does not appear in `previous_page`, `related_pages`, or `findings`?',
+    )],
+    misclassifies_unresolved: ['Replacement classifies outcomes without recorded resolution as failed', noul(
+      'Do `findings` describe an episode whose outcome or resolution was never recorded, and does `replacement_page` classify that episode as failed or confirmed?',
+      { false: 'No finding describes an unrecorded outcome, or the replacement keeps the episode unresolved or experimental' },
+    )],
+  };
+  if (isLeading) {
+    checks.unresolved_in_confirmed = ['Unresolved episodes remain as rows in Confirmed Leading Indicators', noul(
+      'Do `findings` describe an episode with no recorded outcome that still appears as a row in the "Confirmed Leading Indicators" section of `replacement_page`?',
+    )];
+    checks.unresolved_missing_experimental = ['Unresolved episodes must be classified under Experimental Indicators', noul(
+      'Do `findings` describe an episode with no recorded outcome that is absent from the "Experimental Indicators" section of `replacement_page`?',
+    )];
+  }
+  if (isStrategy) {
+    checks.adds_live_state = ['Learning-owned strategy page adds perishable live-state claims', noul(
+      'Does `replacement_page` add a claim about the current spot price, current call or put score, current gate status, or current momentum that was not already in `previous_page`?',
+      { false: 'Only durable rules remain, or live values are replaced by references to regimes/current.md or protection/revenue pages' },
+    )];
+    previousTickIds.forEach((tickId) => {
+      checks[`expired_tick_${tickId}`] = ['', noul(
+        `Do \`findings\` identify the tick marker [tick:#${tickId}] as stale, expired, or superseded live evidence?`,
+      )];
+    });
+  }
+
+  const result = await judged('replacement', () => client.systemOne({
+    state: {
+      page_path: pagePath,
+      previous_page: previousContent,
+      replacement_page: replacementContent,
+      related_pages: relatedContext,
+      findings: validationIssues,
+    },
+    questions: Object.fromEntries(Object.entries(checks).map(([key, [, question]]) => [key, question])),
+  }));
+  if (!result) return { errors: [], expiredTickIds };
+  const { answers } = result;
+
+  const errors: string[] = [];
+  for (const [key, [message]] of Object.entries(checks)) {
+    const answer = answers[key];
+    if (!answer || answer.noul < JUDGMENT_THRESHOLD) continue;
+    if (key.startsWith('expired_tick_')) expiredTickIds.add(Number(key.slice('expired_tick_'.length)));
+    else errors.push(message);
+  }
+  return { errors, expiredTickIds };
+}
+
+// Stored lint findings can lag a related page repaired later: drop the ones the
+// current wiki already resolves.
+export async function findObsoleteUnresolvedEscalationIssues(
+  issues: string[],
+  wikiContext: string,
+): Promise<Set<string>> {
+  const client = getTypeSafe();
+  const obsolete = new Set<string>();
+  if (!client || issues.length === 0) return obsolete;
+  const result = await judged('obsolete-findings', () => client.systemOne({
+    state: { wiki: wikiContext, findings: issues },
+    questions: Object.fromEntries(issues.map((_issue, index) => [`issue_${index}`, noul(
+      `Does \`findings[${index}]\` report an open or unresolved escalation that \`wiki\` now explicitly marks as resolved?`,
+      { false: 'The finding is not about an escalation, or the wiki does not confirm a resolution for it' },
+    )])),
+  }));
+  if (!result) return obsolete;
+  const { answers } = result;
+  issues.forEach((issue, index) => {
+    if ((answers[`issue_${index}`]?.noul ?? 0) >= JUDGMENT_THRESHOLD) obsolete.add(issue);
+  });
+  return obsolete;
 }

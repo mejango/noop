@@ -6835,14 +6835,14 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('Unresolved episodes must be classified under Experimental Indicators'));
     assert.ok(wikiLibSource.includes('Learning-owned strategy page adds perishable tick evidence'));
     assert.ok(wikiLibSource.includes('Learning-owned strategy page retains expired live tick evidence'));
-    assert.ok(wikiLibSource.includes('getAddedPerishableStrategyClaims'));
+    assert.ok(wikiLibSource.includes('judgeWikiReplacement'));
     assert.ok(wikiLibSource.includes('Learning-owned strategy page adds perishable live-state claims'));
     assert.ok(wikiRepairRouteSource.includes('isUnsupportedStructuredMarkerIssue'));
     assert.ok(wikiRepairRouteSource.includes('no page content changes required'));
     assert.ok(wikiRepairRouteSource.includes('Deterministic cleanup; no content changes required'));
     assert.ok(wikiRepairRouteSource.includes("appendWikiLog('manual-cleanup'"));
     assert.ok(wikiLibSource.includes('validationIssues: string[]'));
-    assert.ok(wikiRepairRouteSource.includes('isObsoleteUnresolvedEscalationIssue'));
+    assert.ok(wikiRepairRouteSource.includes('findObsoleteUnresolvedEscalationIssues'));
     assert.ok(wikiRepairRouteSource.includes('current supplied page content outranks finding text'));
     assert.ok(wikiRepairRouteSource.includes('Preserve epistemic qualifiers exactly'));
     assert.ok(wikiRepairRouteSource.includes('never classify it as confirmed or failed'));
@@ -7094,6 +7094,29 @@ describe('momentum labels never gate decisions', () => {
     assert.strictEqual(isCallBreakoutAddWindow(shortCall, 2731), true);   // 5% over 2600
     assert.strictEqual(isCallBreakoutAddWindow(shortCall, 2700), false);  // above the 7d high but < 5% over the prior range
     assert.strictEqual(isCallBreakoutAddWindow([], 2735), false);
+  });
+});
+
+describe('wiki ingest page context', () => {
+  const { buildWikiIngestPagesContext, orderWikiPagesByStaleness } = loadProduction(['buildWikiIngestPagesContext', 'orderWikiPagesByStaleness']);
+
+  test('ingest sees whole pages, not a 1200-char excerpt', () => {
+    const big = 'x'.repeat(12000);
+    const context = buildWikiIngestPagesContext({ 'protection/pricing.md': big }, ['protection/pricing.md']);
+    assert.ok(context.includes(big));
+    assert.ok(!context.includes('[truncated]'));
+  });
+
+  test('stalest pages come first so truncation drops the freshest', () => {
+    const meta = {
+      'regimes/current.md': { last_changed_at: '2026-09-21T00:00:00Z' },
+      'protection/pricing.md': { last_changed_at: '2026-08-12T00:00:00Z' },
+      'revenue/pricing.md': { last_changed_at: '2026-08-13T00:00:00Z' },
+    };
+    assert.deepStrictEqual(
+      orderWikiPagesByStaleness(['regimes/current.md', 'revenue/pricing.md', 'protection/pricing.md', 'never/changed.md'], meta),
+      ['never/changed.md', 'protection/pricing.md', 'revenue/pricing.md', 'regimes/current.md'],
+    );
   });
 });
 

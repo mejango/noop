@@ -7,9 +7,10 @@ import { getCanonicalTradeLessons } from '@/lib/db';
 import { validateWriteAccess } from '@/lib/write-access';
 import {
   appendWikiLog,
+  findObsoleteUnresolvedEscalationIssues,
   hashWikiContent,
-  isObsoleteUnresolvedEscalationIssue,
   isUnsupportedStructuredMarkerIssue,
+  judgeWikiReplacement,
   readWikiMeta,
   refreshWikiIndex,
   resolveWikiDir,
@@ -31,6 +32,7 @@ type WikiPageState = {
   content: string;
   issues: string[];
   storedIssueCount: number;
+  obsoleteIssues: Set<string>;
   baseHash: string;
   contextHash: string;
   schema: string;
@@ -78,7 +80,9 @@ function excerpt(content: string, maxChars: number): string {
   return `${content.slice(0, half)}\n\n[...middle omitted...]\n\n${content.slice(-half)}`;
 }
 
-function readWikiPageState(pagePath: string): WikiPageState {
+// The obsolete-findings judgment reads the whole wiki; run it once per request
+// and reuse it for the post-validation re-read.
+async function readWikiPageState(pagePath: string, knownObsoleteIssues?: Set<string>): Promise<WikiPageState> {
   if (!WIKI_PAGE_PATHS.includes(pagePath)) throw new Error('Unknown Wiki page');
   const pages = Object.fromEntries(WIKI_PAGE_PATHS.map((candidate) => [
     candidate,
@@ -92,17 +96,19 @@ function readWikiPageState(pagePath: string): WikiPageState {
   const storedIssues = Array.isArray(storedPages[pagePath]?.issues)
     ? (storedPages[pagePath].issues as unknown[]).filter((issue): issue is string => typeof issue === 'string' && issue.trim().length > 0)
     : [];
-  const issues = storedIssues.filter((issue) => (
-    !isObsoleteUnresolvedEscalationIssue(issue, Object.values(pages).join('\n\n'))
-    && !isUnsupportedStructuredMarkerIssue(issue)
-  ));
+  const candidateIssues = storedIssues.filter((issue) => !isUnsupportedStructuredMarkerIssue(issue));
   const referencedPages = new Set(
-    issues.flatMap((issue) => issue.match(/(?:regimes|protection|revenue|indicators|strategy)\/[a-z-]+\.md/g) || []),
+    candidateIssues.flatMap((issue) => issue.match(/(?:regimes|protection|revenue|indicators|strategy)\/[a-z-]+\.md/g) || []),
   );
   const relatedContext = WIKI_PAGE_PATHS
     .filter((candidate) => candidate !== pagePath)
     .map((candidate) => `--- ${candidate} ---\n${excerpt(pages[candidate], referencedPages.has(candidate) ? 5_000 : 1_000)}`)
     .join('\n\n');
+  const obsoleteIssues = knownObsoleteIssues ?? await findObsoleteUnresolvedEscalationIssues(
+    candidateIssues,
+    `--- ${pagePath} ---\n${pages[pagePath]}\n\n${relatedContext}`,
+  );
+  const issues = candidateIssues.filter((issue) => !obsoleteIssues.has(issue));
   const learningContext = getCanonicalTradeLessons()
     .map((lesson) => `[lesson:${lesson.lesson_key}] (${lesson.status}) ${lesson.title}: ${lesson.lesson}`)
     .join('\n');
@@ -124,6 +130,7 @@ function readWikiPageState(pagePath: string): WikiPageState {
     content,
     issues,
     storedIssueCount: storedIssues.length,
+    obsoleteIssues,
     baseHash: hashWikiContent(content),
     contextHash,
     schema,
@@ -140,15 +147,25 @@ function getToolInput<T>(response: Anthropic.Message, toolName: string): T {
   return block.input as T;
 }
 
-function validateProposal(state: WikiPageState, proposal: RepairProposal): string[] {
-  return validateWikiReplacement({
+async function validateProposal(state: WikiPageState, replacementContent: string): Promise<string[]> {
+  const judged = await judgeWikiReplacement({
     pagePath: state.pagePath,
     previousContent: state.content,
-    replacementContent: proposal.content,
-    allowedMarkerContent: state.allowedMarkerContent,
-    canonicalLessonContent: state.learningContext,
+    replacementContent,
+    relatedContext: state.relatedContext,
     validationIssues: state.issues,
   });
+  return [
+    ...validateWikiReplacement({
+      pagePath: state.pagePath,
+      previousContent: state.content,
+      replacementContent,
+      allowedMarkerContent: state.allowedMarkerContent,
+      canonicalLessonContent: state.learningContext,
+      expiredTickIds: judged.expiredTickIds,
+    }),
+    ...judged.errors,
+  ];
 }
 
 async function proposeRepair(state: WikiPageState, correction?: RepairCorrection): Promise<RepairProposal> {
@@ -270,7 +287,7 @@ export async function POST(request: Request) {
     const body = await request.json() as Record<string, unknown>;
     const action = body.action;
     const pagePath = typeof body.pagePath === 'string' ? body.pagePath : '';
-    const state = readWikiPageState(pagePath);
+    const state = await readWikiPageState(pagePath);
 
     if (action === 'preview') {
       if (state.issues.length === 0 && state.storedIssueCount > 0) {
@@ -283,13 +300,13 @@ export async function POST(request: Request) {
         });
       }
       let proposal = normalizeSupportedPlaceholderMarkers(await proposeRepair(state));
-      let errors = validateProposal(state, proposal);
+      let errors = await validateProposal(state, proposal.content);
       if (errors.length > 0) {
         const rejectedProposal = proposal;
         proposal = normalizeSupportedPlaceholderMarkers(
           await proposeRepair(state, { rejectedProposal, errors }),
         );
-        errors = validateProposal(state, proposal);
+        errors = await validateProposal(state, proposal.content);
       }
       if (errors.length > 0) {
         return NextResponse.json({ error: 'AI proposal failed deterministic safeguards', validationErrors: errors }, { status: 422 });
@@ -314,21 +331,14 @@ export async function POST(request: Request) {
       if (state.baseHash !== baseHash || state.contextHash !== contextHash) {
         return NextResponse.json({ error: 'Wiki context changed after this diff was generated. Generate a fresh diff.' }, { status: 409 });
       }
-      const errors = validateWikiReplacement({
-        pagePath,
-        previousContent: state.content,
-        replacementContent: proposedContent,
-        allowedMarkerContent: state.allowedMarkerContent,
-        canonicalLessonContent: state.learningContext,
-        validationIssues: state.issues,
-      });
+      const errors = await validateProposal(state, proposedContent);
       if (errors.length > 0) return NextResponse.json({ error: errors.join(' | ') }, { status: 422 });
 
       const obsoleteFindingsOnly = state.issues.length === 0
         && state.storedIssueCount > 0
         && proposedContent === state.content.trim();
       if (obsoleteFindingsOnly) {
-        const finalState = readWikiPageState(pagePath);
+        const finalState = await readWikiPageState(pagePath, state.obsoleteIssues);
         if (finalState.baseHash !== baseHash || finalState.contextHash !== contextHash) {
           return NextResponse.json({ error: 'Wiki context changed during cleanup. Generate a fresh diff.' }, { status: 409 });
         }
@@ -375,7 +385,7 @@ export async function POST(request: Request) {
         }, { status: 422 });
       }
 
-      const finalState = readWikiPageState(pagePath);
+      const finalState = await readWikiPageState(pagePath, state.obsoleteIssues);
       if (finalState.baseHash !== baseHash || finalState.contextHash !== contextHash) {
         return NextResponse.json({ error: 'Wiki context changed during validation. Generate a fresh diff.' }, { status: 409 });
       }

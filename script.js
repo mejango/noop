@@ -145,6 +145,7 @@ const db = global.__noopDb || null;
 const { createEconomicStore, syncV2TradesProgressively } = require('./bot/economic-events');
 const { observationUniverse, missingExpiryDates } = require('./bot/observations');
 const { buildPortfolioObservation } = require('./bot/portfolio-observation');
+const typesafe = require('@typesafe-ai/sdk');
 const economicStore = db?.db ? createEconomicStore(db.db) : null;
 if (db) {
   console.log('SQLite database connected');
@@ -4332,6 +4333,16 @@ const WIKI_INDEX_PATH = path.join(WIKI_DIR, WIKI_INDEX_PAGE);
 const WIKI_LOG_PATH = path.join(WIKI_DIR, WIKI_LOG_PAGE);
 const WIKI_RAW_EVIDENCE_DIR = path.join(WIKI_DIR, 'raw', 'evidence');
 
+// System One judgments (TypeSafe) replace keyword heuristics over wiki prose.
+// Without TYPESAFE_API_KEY each caller falls back to its deterministic path.
+let _typesafeClient = null;
+console.log(`📚 Wiki judgments: ${process.env.TYPESAFE_API_KEY ? 'TypeSafe' : 'OFF (no TYPESAFE_API_KEY); keyword fallbacks'}`);
+const getTypeSafe = () => {
+  if (!process.env.TYPESAFE_API_KEY) return null;
+  _typesafeClient ??= new typesafe.TypeSafeClient();
+  return _typesafeClient;
+};
+
 // Ensure all wiki subdirectories exist
 for (const sub of ['regimes', 'protection', 'revenue', 'indicators', 'strategy', 'raw', 'raw/evidence']) {
   fs.mkdirSync(path.join(WIKI_DIR, sub), { recursive: true });
@@ -4738,54 +4749,55 @@ const getWikiPagesNeedingSeed = () => {
   return WIKI_ALL_PAGES.filter((page) => isPlaceholderWikiPage(readWikiPage(page)));
 };
 
-const inferWikiPagesForJournalEntries = (journalEntries = []) => {
+// Live research pages are always reconciled together; the durable research
+// pages join the ingest only when the entries carry evidence for them.
+const WIKI_OPTIONAL_INGEST_PAGES = {
+  'regimes/history.md': 'a regime transition, or a recurring pattern across past regimes',
+  'revenue/efficiency.md': 'premium captured per unit of risk on short calls, strike-selection outcomes, or buyback decisions',
+  'indicators/correlations.md': 'a strong, weakening, or new correlation between market series',
+  'indicators/divergences.md': 'an active or historical divergence between an indicator and price',
+};
+
+const inferWikiPagesForJournalEntries = async (journalEntries = []) => {
   const selected = new Set(WIKI_LIVE_RESEARCH_PAGES);
-
-  for (const entry of journalEntries) {
-    const type = entry?.type || entry?.entry_type || '';
-    const content = String(entry?.content || '').toLowerCase();
-
-    if (type === 'regime_note') {
-      selected.add('regimes/current.md');
-      selected.add('regimes/history.md');
-      selected.add('protection/pricing.md');
-      selected.add('revenue/pricing.md');
-    }
-
-    if (type === 'hypothesis') {
-      selected.add('protection/windows.md');
-      selected.add('revenue/windows.md');
-      selected.add('indicators/leading.md');
-      selected.add('indicators/divergences.md');
-    }
-
-    if (type === 'observation') {
-      selected.add('indicators/correlations.md');
-      selected.add('indicators/divergences.md');
-    }
-
-    if (content.includes('convex') || content.includes('skew') || content.includes('tail')) {
-      selected.add('protection/convexity.md');
-    }
-    if (content.includes('premium') || content.includes('call')) {
-      selected.add('revenue/efficiency.md');
-    }
-    if (content.includes('mistake') || content.includes('discipline') || content.includes('rule')) {
-      selected.add('strategy/mistakes.md');
-      selected.add('strategy/playbook.md');
-    }
+  const entries = journalEntries.map((entry) => ({
+    type: entry?.type || entry?.entry_type || '',
+    content: String(entry?.content || ''),
+  })).filter((entry) => entry.content);
+  const client = getTypeSafe();
+  if (entries.length === 0) return Array.from(selected);
+  if (!client) {
+    Object.keys(WIKI_OPTIONAL_INGEST_PAGES).forEach((page) => selected.add(page)); // ponytail: no judge, ingest everything
+    return Array.from(selected);
   }
-
-  return Array.from(selected).filter((page) => WIKI_ALL_PAGES.includes(page)).slice(0, 10);
+  try {
+    const { answers } = await client.systemOne({
+      state: { journal_entries: entries },
+      questions: Object.fromEntries(Object.entries(WIKI_OPTIONAL_INGEST_PAGES).map(([page, topic]) => [
+        page,
+        typesafe.noul(`Does any entry in \`journal_entries\` contain evidence about ${topic}?`),
+      ])),
+    });
+    Object.keys(WIKI_OPTIONAL_INGEST_PAGES).forEach((page) => {
+      if ((answers[page]?.noul ?? 0) >= 0.5) selected.add(page);
+    });
+  } catch (e) {
+    console.log('📚 Wiki ingest: page routing judgment failed, ingesting all research pages:', e.message);
+    Object.keys(WIKI_OPTIONAL_INGEST_PAGES).forEach((page) => selected.add(page));
+  }
+  return Array.from(selected).filter((page) => WIKI_ALL_PAGES.includes(page));
 };
 
-const buildWikiIngestPagesContext = (pages, selectedPages) => {
-  return selectedPages.map((page) => {
-    const content = pages[page] || '';
-    const truncated = content.length > 1200 ? `${content.slice(0, 1200)}\n...[truncated]` : content;
-    return `--- ${page} ---\n${truncated}`;
-  }).join('\n\n');
-};
+// Full pages: the model must return whole rewrites, and a 1200-char excerpt left
+// every 11-14KB research page untouched for weeks while lint kept flagging it.
+const buildWikiIngestPagesContext = (pages, selectedPages) => selectedPages
+  .map((page) => `--- ${page} ---\n${pages[page] || ''}`)
+  .join('\n\n');
+
+// Stalest first, so a truncated response still applies the pages that need it most.
+const orderWikiPagesByStaleness = (pagePaths, pageMeta = {}) => [...pagePaths].sort((a, b) => (
+  Date.parse(pageMeta[a]?.last_changed_at || 0) - Date.parse(pageMeta[b]?.last_changed_at || 0)
+));
 
 const seedWikiFromHistory = async (incomingEntries = []) => {
   if (!process.env.ANTHROPIC_API_KEY || !db) return 0;
@@ -4956,17 +4968,20 @@ const ingestToWiki = async (journalEntries) => {
 
   console.log('📚 Wiki ingest: processing', journalEntries.length, 'journal entries...');
 
-  // Read schema + targeted page subset to keep prompt compact.
+  // Read schema + selected pages in full.
   const schema = readWikiPage('schema.md');
   const pages = {};
   for (const page of WIKI_ALL_PAGES) {
     pages[page] = readWikiPage(page);
   }
-  const selectedPages = inferWikiPagesForJournalEntries(journalEntries);
+  const selectedPages = await inferWikiPagesForJournalEntries(journalEntries);
   const recentTradeReviews = db.getRecentTradeReviews(30) || [];
   const recentTradeCampaigns = groupTradeReviewsForWiki(recentTradeReviews, 10);
   const activeTradeLessons = db.getActiveTradeLessons() || [];
-  const researchPages = selectedPages.filter((pagePath) => !WIKI_STRATEGY_PAGES.has(pagePath)).slice(0, 8);
+  const researchPages = orderWikiPagesByStaleness(
+    selectedPages.filter((pagePath) => !WIKI_STRATEGY_PAGES.has(pagePath)),
+    getWikiPageMetaMap(readWikiMeta())
+  );
   selectedPages.splice(0, selectedPages.length, ...researchPages);
   if (activeTradeLessons.some((lesson) => lesson.lesson_key)) {
     for (const pagePath of WIKI_STRATEGY_PAGES) {
@@ -4993,7 +5008,7 @@ ${schema}
 ## Allowed Wiki Pages
 ${selectedPages.join('\n')}
 
-## Current Wiki Pages (targeted excerpts)
+## Current Wiki Pages (full content)
 ${pagesContext}
 
 ## Raw Evidence Packet${rawEvidencePacket?.relativePath ? ` (${rawEvidencePacket.relativePath})` : ''}
@@ -5208,13 +5223,42 @@ const getWikiSectionText = (content, heading) => {
   return match ? match[1].trim() : '';
 };
 
-const getWikiAssessmentValue = (content, heading, allowed) => {
-  const section = getWikiSectionText(content, heading).replace(/[*_`#:\-]/g, ' ');
+// Keyword fallback when no TypeSafe key is configured: first allowed word wins.
+const getWikiAssessmentValue = (sectionText, allowed) => {
+  const section = sectionText.replace(/[*_`#:\-]/g, ' ');
   const match = section.match(new RegExp(`\\b(${allowed.join('|')})\\b`, 'i'));
   return match ? match[1].toLowerCase() : null;
 };
 
-const getWikiSignalContext = () => {
+// Each assessment is a Choice over the section's prose. "not cheap, drifting
+// expensive" must read as expensive, which first-keyword matching got wrong.
+const judgeWikiAssessments = async (sections) => {
+  const client = getTypeSafe();
+  const fallback = Object.fromEntries(Object.entries(sections).map(([key, { text, allowed }]) => (
+    [key, text ? getWikiAssessmentValue(text, allowed) : null]
+  )));
+  if (!client || !Object.values(sections).some(({ text }) => text)) return fallback;
+  try {
+    const { answers } = await client.systemOne({
+      state: Object.fromEntries(Object.entries(sections).map(([key, { text }]) => [key, text || ''])),
+      questions: Object.fromEntries(Object.entries(sections).filter(([, { text }]) => text).map(([key, { question, allowed }]) => [
+        key,
+        typesafe.choice(question, Object.fromEntries([...allowed.map((value) => [value, null]), ['unclear', 'The section asserts no single current value']])),
+      ])),
+    });
+    return Object.fromEntries(Object.entries(sections).map(([key]) => {
+      const answer = answers[key];
+      // ponytail: 0.5 confidence floor untuned; an ambiguous section reads as unknown rather than a guess
+      const value = answer && answer.choice !== 'unclear' && answer.confidence >= 0.5 ? answer.choice : null;
+      return [key, value];
+    }));
+  } catch (e) {
+    console.log('📚 Wiki signals: assessment judgment failed, using keyword fallback:', e.message);
+    return fallback;
+  }
+};
+
+const getWikiSignalContext = async () => {
   try {
     const regimePage = readWikiPage('regimes/current.md');
     const playbookPage = readWikiPage('strategy/playbook.md');
@@ -5223,20 +5267,32 @@ const getWikiSignalContext = () => {
       return null;
     }
 
-    const regime = getWikiAssessmentValue(regimePage, 'Classification', ['complacency', 'fear', 'transition', 'recovery']);
-    const regimeConfidence = getWikiAssessmentValue(regimePage, 'Confidence', ['high', 'medium', 'low']);
-
-    // Parse protection cost assessment from pricing page
     const pricingPage = readWikiPage('protection/pricing.md');
-    const protectionAssessment = pricingPage
-      ? getWikiAssessmentValue(pricingPage, 'Cost Assessment', ['cheap', 'fair', 'expensive'])
-      : null;
-
-    // Parse revenue/call premium assessment
     const revenuePage = readWikiPage('revenue/pricing.md');
-    const revenueAssessment = revenuePage && !revenuePage.includes('Awaiting initial assessment')
-      ? getWikiAssessmentValue(revenuePage, 'Premium Assessment', ['cheap', 'fair', 'rich'])
-      : null;
+    const {
+      regime, regimeConfidence, protectionAssessment, revenueAssessment,
+    } = await judgeWikiAssessments({
+      regime: {
+        text: getWikiSectionText(regimePage, 'Classification'),
+        question: 'Which market regime does `regime` currently assert?',
+        allowed: ['complacency', 'fear', 'transition', 'recovery'],
+      },
+      regimeConfidence: {
+        text: getWikiSectionText(regimePage, 'Confidence'),
+        question: 'What confidence level does `regimeConfidence` assign to the current regime classification?',
+        allowed: ['high', 'medium', 'low'],
+      },
+      protectionAssessment: {
+        text: pricingPage ? getWikiSectionText(pricingPage, 'Cost Assessment') : '',
+        question: 'How does `protectionAssessment` assess the current cost of put protection?',
+        allowed: ['cheap', 'fair', 'expensive'],
+      },
+      revenueAssessment: {
+        text: revenuePage && !revenuePage.includes('Awaiting initial assessment') ? getWikiSectionText(revenuePage, 'Premium Assessment') : '',
+        question: 'How does `revenueAssessment` assess the current call premium available to sell?',
+        allowed: ['cheap', 'fair', 'rich'],
+      },
+    });
 
     // Parse playbook rules (first 5 bullet points from Core Rules)
     const playbookRules = [];
