@@ -12018,15 +12018,9 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
     console.log('📋 Advisory: failed to fetch collaterals:', e.message);
   }
 
-  // Momentum
-  const momentum = {
-    mediumTerm: botData.mediumTermMomentum,
-    shortTerm: botData.shortTermMomentum,
-  };
-
   // Wiki knowledge
   const wikiContext = queryWikiContext();
-  const wikiSignals = getWikiSignalContext();
+  const wikiSignals = await getWikiSignalContext();
 
   // Market sentiment
   const nowMs = Date.parse(currentTickTimestamp);
@@ -12400,7 +12394,7 @@ Things to consider in your assessment:
 - In recovery, IV can remain elevated even as price stabilizes. Treat that as descriptive context; judge a new put entry by its approved PUT EDGE price contract.
 - The full cycle: cash → cheap puts → crash → puts print → sell at the right time → buy cheap ETH → sell calls → premium → repeat.
 
-Use your judgment. Look at the actual Greeks, DTE, IV/skew, spread/depth, OI, executable bid/ask, position characteristics, and only then momentum as secondary path context. There are no absolute directional rules; hard execution, sizing, DTE, and risk constraints still apply.
+Use your judgment. Look at the actual Greeks, DTE, IV/skew, spread/depth, OI, executable bid/ask, position characteristics, and the raw spot path. There are no absolute directional rules; hard execution, sizing, DTE, and risk constraints still apply.
 
 ## Assessment Writing Constraints
 - Every assessment must do two jobs: state the clearest current market observation or thesis from the supplied data, and state the operational stance it implies for the bot.
