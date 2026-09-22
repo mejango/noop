@@ -1029,8 +1029,6 @@ export function getLiquidityOverTime(since: string) {
     return name === 'uniswap_v4' && Number.isFinite(poolCount) && poolCount > 1;
   };
 
-  let lastTrackedV4: Record<string, number> | null = null;
-
   return rows.map(row => {
     const entry: Record<string, number | string> = { timestamp: row.timestamp };
     try {
@@ -1040,6 +1038,10 @@ export function getLiquidityOverTime(since: string) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         for (const [name, dex] of Object.entries(dexes) as [string, any][]) {
           if (isTemporaryV4AggregateSample(name, dex)) continue;
+          // A stale sample is the previous value replayed. Emitting it draws a flat
+          // line through an outage and dumps the whole gap's volume into one bar when
+          // the feed returns; leaving a hole makes the gap visible instead.
+          if (dex.stale) continue;
           if (!dex.error && dex.totalLiquidity && !isNaN(dex.totalLiquidity)) {
             entry[name] = dex.totalLiquidity;
           }
@@ -1057,17 +1059,6 @@ export function getLiquidityOverTime(since: string) {
             if (activeSum > 0) entry[`${name}_active`] = activeSum;
             const firstPool = dex.poolDetails[0];
             if (firstPool?.feeTier) entry[`${name}_fee`] = firstPool.feeTier;
-          }
-        }
-        if (typeof entry.uniswap_v4 === 'number') {
-          lastTrackedV4 = {};
-          for (const suffix of ['', '_vol', '_txCount', '_active', '_fee']) {
-            const key = `uniswap_v4${suffix}`;
-            if (typeof entry[key] === 'number') lastTrackedV4[key] = entry[key];
-          }
-        } else if (lastTrackedV4) {
-          for (const [key, value] of Object.entries(lastTrackedV4)) {
-            entry[key] = value;
           }
         }
       }

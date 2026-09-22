@@ -937,6 +937,26 @@ const isTemporaryV4AggregateSample = (dexName, dex) => {
   return dexName === 'uniswap_v4' && Number.isFinite(poolCount) && poolCount > 1;
 };
 
+// A fallback that never complains hid a 157h Uniswap V4 outage (2026-09-15..21).
+const DEX_STALE_WARN_AFTER = 12; // ~20 minutes of consecutive fallbacks at normal tick cadence
+const dexStaleStreaks = new Map();
+
+const noteDexSampleOutcome = (dexName, isStale) => {
+  if (!isStale) {
+    if (dexStaleStreaks.get(dexName) >= DEX_STALE_WARN_AFTER) {
+      console.log(`✅ ${dexName} subgraph recovered after ${dexStaleStreaks.get(dexName)} stale sample(s)`);
+    }
+    dexStaleStreaks.set(dexName, 0);
+    return 0;
+  }
+  const streak = (dexStaleStreaks.get(dexName) || 0) + 1;
+  dexStaleStreaks.set(dexName, streak);
+  if (streak === DEX_STALE_WARN_AFTER || streak % 500 === 0) {
+    console.log(`⚠️ ${dexName} has served ${streak} consecutive stale samples; liquidity flow now excludes it`);
+  }
+  return streak;
+};
+
 const findLastValidDexSample = (historicalData, dexName) => {
   for (const entry of historicalData || []) {
     const dex = entry?.dexes?.[dexName];
@@ -970,16 +990,22 @@ const calculateLiquidityFlow = (currentData, historicalData) => {
   
   const isComparableDex = (dexName, dex) => {
     if (isTemporaryV4AggregateSample(dexName, dex)) return false;
-    if (dex?.error) return false;
+    // A replayed sample is last week's number wearing today's timestamp; it is not evidence of flow.
+    if (dex?.error || dex?.stale) return false;
     const totalLiquidity = Number(dex?.totalLiquidity);
     return Number.isFinite(totalLiquidity) && totalLiquidity > 0;
   };
 
+  const currentDexEntries = Object.entries(currentData.dexes || {});
   const currentDexNames = new Set(
-    Object.entries(currentData.dexes || {})
+    currentDexEntries
       .filter(([dexName, dex]) => isComparableDex(dexName, dex))
       .map(([dexName]) => dexName)
   );
+  // A tracked venue dropped for being errored or stale means partial coverage, so say so.
+  const excludedDexNames = currentDexEntries
+    .filter(([dexName, dex]) => !currentDexNames.has(dexName) && !isTemporaryV4AggregateSample(dexName, dex))
+    .map(([dexName]) => dexName);
 
   // Calculate total liquidity for each time period using the current valid DEX set.
   const calculateTotalLiquidity = (data) => {
@@ -990,8 +1016,8 @@ const calculateLiquidityFlow = (currentData, historicalData) => {
       Object.entries(data.dexes).forEach(([dexName, dex]) => {
         if (!currentDexNames.has(dexName)) return;
         if (isTemporaryV4AggregateSample(dexName, dex)) return;
-        // Skip DEXes that failed to load (have error property)
-        if (dex.error) {
+        // Skip DEXes that failed to load or are replaying a stale sample
+        if (dex.error || dex.stale) {
           hasFailedDexes = true;
           return;
         }
@@ -1022,7 +1048,7 @@ const calculateLiquidityFlow = (currentData, historicalData) => {
   }
   
   const currentTotal = currentTotalResult.total;
-  const hasFailedDexes = currentTotalResult.hasFailedDexes;
+  const hasFailedDexes = currentTotalResult.hasFailedDexes || excludedDexNames.length > 0;
   
   // Get data from different timeframes
   const oneHourAgo = Date.now() - (60 * 60 * 1000);
@@ -1087,6 +1113,7 @@ const calculateLiquidityFlow = (currentData, historicalData) => {
     confidence,
     weightedChange,
     currentTotal,
+    excludedDexes: excludedDexNames,
     dataReliability: hasFailedDexes ? 'unreliable' : 'reliable',
     timeframes: {
       hourly: { 
@@ -1249,6 +1276,7 @@ const analyzeDEXLiquidity = async (spotPrice) => {
           return isNaN(t) ? sum : sum + t;
         }, 0);
 
+        noteDexSampleOutcome('uniswap_v4', false);
         liquidityData.dexes.uniswap_v4 = {
           pools: response.data.data.pools.length,
           totalLiquidity: totalTVLUSD, // TVL in USD terms (consistent with V3)
@@ -1276,7 +1304,7 @@ const analyzeDEXLiquidity = async (spotPrice) => {
     } catch (error) {
       const fallback = findLastValidDexSample(historicalData, 'uniswap_v4');
       if (fallback) {
-        console.log('⚠️ Uniswap V4 subgraph unavailable; using last valid tracked-pool sample');
+        noteDexSampleOutcome('uniswap_v4', true);
         liquidityData.dexes.uniswap_v4 = fallback;
       } else {
         console.log('⚠️ Uniswap V4 liquidity analysis failed:', error.message);

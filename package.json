@@ -5,7 +5,7 @@
   "main": "dashboard_server.js",
   "scripts": {
     "start": "node dashboard_server.js",
-    "test": "node test/trading-system.test.js && node --test test/model-api.test.js test/v2-*.test.js test/db-data-integrity.test.js test/hourly-rollups.test.js test/execution-audit.test.js test/profit-correlation-engine.test.js test/dashboard-v2-audit.test.js test/pnl-report-audit.test.js && node test/sell-call-backtest.test.js && node dashboard/scripts/wiki-judgments.test.js",
+    "test": "node test/trading-system.test.js && node --test test/model-api.test.js test/v2-*.test.js test/db-data-integrity.test.js test/hourly-rollups.test.js test/execution-audit.test.js test/profit-correlation-engine.test.js test/dashboard-v2-audit.test.js test/pnl-report-audit.test.js && node test/sell-call-backtest.test.js && node dashboard/scripts/wiki-judgments.test.js && node dashboard/scripts/liquidity-staleness.test.js",
     "test:mutation": "node test/helpers/production-mutation-probe.js",
     "bot": "node bot/index.js",
     "bot:standalone": "node script.js",

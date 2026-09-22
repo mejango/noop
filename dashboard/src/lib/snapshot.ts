@@ -174,6 +174,7 @@ async function _buildUncached() {
             const topPool = pools[0] ?? null;
             return {
               dex: name,
+              stale: dex.stale === true ? { replayed_sample: true, reason: dex.staleReason ?? null } : null,
               total_liquidity: dex.totalLiquidity ?? null,
               total_volume_usd: dex.totalVolume ?? null,
               total_tx_count: dex.totalTxCount ?? null,

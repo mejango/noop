@@ -7120,6 +7120,46 @@ describe('wiki ingest page context', () => {
   });
 });
 
+describe('stale DEX liquidity samples', () => {
+  const { calculateLiquidityFlow, noteDexSampleOutcome, DEX_STALE_WARN_AFTER } = loadProduction(
+    ['calculateLiquidityFlow', 'noteDexSampleOutcome', 'DEX_STALE_WARN_AFTER'],
+    { bindings: { isTemporaryV4AggregateSample: () => false } },
+  );
+  const at = (hoursAgo, v3, v4) => ({
+    timestamp: new Date(Date.now() - hoursAgo * 3600000).toISOString(),
+    dexes: { uniswap_v3: { pools: 2, totalLiquidity: v3 }, uniswap_v4: { pools: 1, totalLiquidity: v4 } },
+  });
+
+  test('a replayed V4 sample is excluded from the flow total', () => {
+    // The real Sep 15-21 shape: V3 moving, V4 frozen at one replayed value.
+    const history = [at(168, 700e6, 20e6), at(24, 720e6, 20e6), at(1, 740e6, 20e6)];
+    const live = {
+      dexes: {
+        uniswap_v3: { pools: 2, totalLiquidity: 750e6 },
+        uniswap_v4: { pools: 1, totalLiquidity: 13.45e6, stale: true, staleReason: 'subgraph_unavailable' },
+      },
+    };
+    const flow = calculateLiquidityFlow(live, history);
+    assert.strictEqual(flow.currentTotal, 750e6, 'stale V4 must not be added to the live total');
+    assert.strictEqual(flow.dataReliability, 'unreliable');
+  });
+
+  test('a live V4 sample still counts', () => {
+    const history = [at(168, 700e6, 20e6), at(24, 720e6, 20e6), at(1, 740e6, 20e6)];
+    const live = { dexes: { uniswap_v3: { pools: 2, totalLiquidity: 750e6 }, uniswap_v4: { pools: 1, totalLiquidity: 12.4e6 } } };
+    const flow = calculateLiquidityFlow(live, history);
+    assert.strictEqual(flow.currentTotal, 762.4e6);
+    assert.strictEqual(flow.dataReliability, 'reliable');
+  });
+
+  test('consecutive fallbacks are counted so an outage cannot stay silent', () => {
+    let streak = 0;
+    for (let i = 0; i < DEX_STALE_WARN_AFTER; i++) streak = noteDexSampleOutcome('test_dex', true);
+    assert.strictEqual(streak, DEX_STALE_WARN_AFTER);
+    assert.strictEqual(noteDexSampleOutcome('test_dex', false), 0);
+  });
+});
+
 // ============================================================================
 // Summary
 // ============================================================================
