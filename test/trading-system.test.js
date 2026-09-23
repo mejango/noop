@@ -7167,7 +7167,7 @@ describe('wiki findings feed back into ingest', () => {
     const pageMeta = {
       'revenue/pricing.md': { issues: ['[stale] TLDR references ETH-20260821-2150-C as active legs'] },
       'strategy/playbook.md': { issues: [{ description: "[quality] Core Rule 3 says five closed wins; six are recorded" }] },
-      'regimes/current.md': { issues: [] },
+      'regimes/current.md': { issues: [], last_changed_at: new Date().toISOString() },
       'indicators/leading.md': { issues: ['[redundant] duplicates strategy/lessons.md'] },
     };
     const lines = buildWikiIngestFindingsContext(
@@ -7180,8 +7180,24 @@ describe('wiki findings feed back into ingest', () => {
     assert.ok(!lines.join('\n').includes('indicators/leading.md'), 'unselected pages are not included');
   });
 
+  test('flagged and stale pages join the ingest even when no journal entry mentions them', () => {
+    const { getWikiPagesNeedingIngest } = loadProduction(['getWikiPagesNeedingIngest']);
+    const now = Date.parse('2026-09-23T22:00:00Z');
+    const pageMeta = {
+      'strategy/playbook.md': { last_changed_at: '2026-09-20T00:00:00Z', issues: ['[quality] six wins, not five'] },
+      'indicators/divergences.md': { last_changed_at: '2026-08-12T04:56:56Z', issues: [] },
+      'regimes/history.md': { last_changed_at: '2026-08-13T22:13:46Z', issues: [] },
+    };
+    const pages = getWikiPagesNeedingIngest(pageMeta, now);
+    assert.ok(pages.includes('strategy/playbook.md'), 'ATTENTION page');
+    assert.ok(pages.includes('indicators/divergences.md'), 'STALE page past its 14d window');
+    assert.ok(!pages.includes('regimes/history.md'), 'still inside its 90d window');
+    const lines = buildWikiIngestFindingsContext(['indicators/divergences.md'], pageMeta, now);
+    assert.ok(lines[0].startsWith('- indicators/divergences.md: [stale]'), 'stale pages get an explicit finding to act on');
+  });
+
   test('no findings yields an empty list rather than a fabricated section', () => {
-    assert.deepStrictEqual(buildWikiIngestFindingsContext(['regimes/current.md'], {}), []);
+    assert.deepStrictEqual(buildWikiIngestFindingsContext(['regimes/current.md'], { 'regimes/current.md': { last_changed_at: new Date().toISOString() } }), []);
   });
 
   test('ingest prompt asks for the findings to be fixed first', () => {

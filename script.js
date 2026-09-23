@@ -4824,17 +4824,45 @@ const inferWikiPagesForJournalEntries = async (journalEntries = []) => {
 // Lint writes precise findings into .meta.json, but nothing automated ever read them:
 // ingest compiled new evidence while flagged pages kept their stale claims for weeks.
 // Handing the findings to the ingest closes that loop.
-const buildWikiIngestFindingsContext = (selectedPages, pageMeta = {}) => {
+const buildWikiIngestFindingsContext = (selectedPages, pageMeta = {}, nowMs = Date.now()) => {
   const lines = [];
   for (const pagePath of selectedPages) {
-    const issues = Array.isArray(pageMeta[pagePath]?.issues) ? pageMeta[pagePath].issues : [];
-    for (const issue of issues) {
-      const text = typeof issue === 'string' ? issue : issue?.description;
-      if (typeof text === 'string' && text.trim()) lines.push(`- ${pagePath}: ${text.trim()}`);
+    const issues = getWikiPageIssueTexts(pageMeta[pagePath]);
+    for (const text of issues) lines.push(`- ${pagePath}: ${text}`);
+    if (issues.length === 0 && isWikiPagePastFreshness(pagePath, pageMeta[pagePath], nowMs)) {
+      lines.push(`- ${pagePath}: [stale] no new evidence since ${pageMeta[pagePath]?.last_evidence_at || pageMeta[pagePath]?.last_changed_at || 'unknown'}, past its ${WIKI_FRESHNESS_DAYS[pagePath]}d window; re-verify every claim against the evidence packet and rewrite, marking unconfirmed claims historical`);
     }
   }
   return lines;
 };
+
+// ponytail: mirrors freshnessDays in dashboard/src/lib/wikiCatalog.ts; keep them in sync.
+const WIKI_FRESHNESS_DAYS = {
+  'regimes/current.md': 3, 'regimes/history.md': 90,
+  'protection/pricing.md': 3, 'protection/windows.md': 14, 'protection/convexity.md': 30,
+  'revenue/pricing.md': 3, 'revenue/windows.md': 14, 'revenue/efficiency.md': 45,
+  'indicators/leading.md': 30, 'indicators/correlations.md': 45, 'indicators/divergences.md': 14,
+  'strategy/lessons.md': 90, 'strategy/mistakes.md': 90, 'strategy/playbook.md': 90,
+};
+
+const getWikiPageIssueTexts = (stored) => (Array.isArray(stored?.issues) ? stored.issues : [])
+  .map((issue) => (typeof issue === 'string' ? issue : issue?.description))
+  .filter((text) => typeof text === 'string' && text.trim())
+  .map((text) => text.trim());
+
+// Same clock the dashboard uses for STALE: last evidence, else last change.
+const isWikiPagePastFreshness = (pagePath, stored, nowMs = Date.now()) => {
+  const days = WIKI_FRESHNESS_DAYS[pagePath];
+  if (!days) return false;
+  const changedMs = Date.parse(stored?.last_evidence_at || stored?.last_changed_at || '');
+  return !Number.isFinite(changedMs) || nowMs - changedMs > days * 86400000;
+};
+
+// Pages the dashboard shows as ATTENTION or STALE. Routing by journal content
+// alone never selected them, so their findings sat unread for weeks.
+const getWikiPagesNeedingIngest = (pageMeta = {}, nowMs = Date.now()) => WIKI_ALL_PAGES.filter((pagePath) => (
+  getWikiPageIssueTexts(pageMeta[pagePath]).length > 0 || isWikiPagePastFreshness(pagePath, pageMeta[pagePath], nowMs)
+));
 
 const buildWikiIngestPagesContext = (pages, selectedPages) => selectedPages
   .map((page) => `--- ${page} ---\n${pages[page] || ''}`)
@@ -5020,22 +5048,23 @@ const ingestToWiki = async (journalEntries) => {
   for (const page of WIKI_ALL_PAGES) {
     pages[page] = readWikiPage(page);
   }
-  const selectedPages = await inferWikiPagesForJournalEntries(journalEntries);
+  const pageMeta = getWikiPageMetaMap(readWikiMeta());
+  const pagesNeedingIngest = getWikiPagesNeedingIngest(pageMeta);
+  const selectedPages = Array.from(new Set([...await inferWikiPagesForJournalEntries(journalEntries), ...pagesNeedingIngest]));
   const recentTradeReviews = db.getRecentTradeReviews(30) || [];
   const recentTradeCampaigns = groupTradeReviewsForWiki(recentTradeReviews, 10);
   const activeTradeLessons = db.getActiveTradeLessons() || [];
   const researchPages = orderWikiPagesByStaleness(
     selectedPages.filter((pagePath) => !WIKI_STRATEGY_PAGES.has(pagePath)),
-    getWikiPageMetaMap(readWikiMeta())
+    pageMeta
   );
   selectedPages.splice(0, selectedPages.length, ...researchPages);
-  if (activeTradeLessons.some((lesson) => lesson.lesson_key)) {
-    for (const pagePath of WIKI_STRATEGY_PAGES) {
-      if (!selectedPages.includes(pagePath)) selectedPages.push(pagePath);
-    }
+  const hasLessons = activeTradeLessons.some((lesson) => lesson.lesson_key);
+  for (const pagePath of WIKI_STRATEGY_PAGES) {
+    if ((hasLessons || pagesNeedingIngest.includes(pagePath)) && !selectedPages.includes(pagePath)) selectedPages.push(pagePath);
   }
   const pagesContext = buildWikiIngestPagesContext(pages, selectedPages);
-  const ingestFindings = buildWikiIngestFindingsContext(selectedPages, getWikiPageMetaMap(readWikiMeta()));
+  const ingestFindings = buildWikiIngestFindingsContext(selectedPages, pageMeta);
   const rawEvidencePacket = writeRawEvidencePacket(journalEntries);
 
   const entriesText = journalEntries
@@ -13820,7 +13849,13 @@ const runBot = async () => {
         && !_wikiIngestInFlight
       ) {
         _advisoryCatchupChecked = true;
-        if (botData.lastJournalGeneration > botData.lastAdvisoryRun) {
+        // Ingest stamps last_ingest on completion; a journal newer than that means
+        // the chain died mid-ingest. Rerun the whole chain (it ends in the advisory).
+        const lastIngestMs = Date.parse(readWikiMeta().last_ingest || '') || 0;
+        if (botData.lastJournalGeneration > lastIngestMs) {
+          console.log('📓 Last journal never finished its wiki ingest (restart mid-chain?) — rerunning journal chain');
+          botData.lastJournalGeneration = 0;
+        } else if (botData.lastJournalGeneration > botData.lastAdvisoryRun) {
           console.log('📋 Advisory missed after last journal (restart mid-chain?) — running now');
           generateTradingAdvisory({ trigger: 'catchup' }).catch(e => {
             console.log(`📋 Catch-up advisory failed (non-fatal): ${e.message}`);
