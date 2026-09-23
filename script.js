@@ -257,6 +257,8 @@ const formatAdvisoryRunNotification = ({ advisoryId, trigger, attempt, retryCoun
     ? 'Additional review: market data or positions changed during deliberation.'
     : trigger === 'retry'
     ? `Retry after failed or deferred advisory (${retryCount} prior failure${retryCount === 1 ? '' : 's'}).`
+    : trigger === 'catchup'
+    ? 'Catch-up: the scheduled advisory was lost to a restart.'
     : 'Normal schedule.';
   return [
     extraReview ? '📋 *ADVISORY EXTRA REVIEW*' : '📋 *ADVISORY STARTED*',
@@ -478,6 +480,7 @@ let botData = createBotData();
 let _advisoryInFlight = false;
 let _wikiIngestInFlight = false;
 let _wikiLintInFlight = false;
+let _advisoryCatchupChecked = false; // once per process: catch up an advisory lost to a restart
 
 const ADVISORY_RETRY_BACKOFF_MS = [
   5 * 60 * 1000,
@@ -13806,6 +13809,23 @@ const runBot = async () => {
         generateTradingAdvisory({ trigger: 'retry' }).catch(e => {
           console.log(`📋 Scheduled advisory retry failed (non-fatal): ${e.message}`);
         });
+      }
+
+      // The advisory runs at the tail of the journal chain; a restart mid-chain
+      // persists the journal timestamp but drops the advisory for a full 8h.
+      if (
+        !_advisoryCatchupChecked
+        && process.env.ANTHROPIC_API_KEY
+        && spotPrice
+        && !_wikiIngestInFlight
+      ) {
+        _advisoryCatchupChecked = true;
+        if (botData.lastJournalGeneration > botData.lastAdvisoryRun) {
+          console.log('📋 Advisory missed after last journal (restart mid-chain?) — running now');
+          generateTradingAdvisory({ trigger: 'catchup' }).catch(e => {
+            console.log(`📋 Catch-up advisory failed (non-fatal): ${e.message}`);
+          });
+        }
       }
 
       // Auto-generate journal entries every 8 hours
