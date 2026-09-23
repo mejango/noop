@@ -25,5 +25,7 @@ export const chartTooltip = {
     borderRadius: 8,
     fontSize: 12,
   },
+  // Legends render later in the DOM; keep the tooltip above them.
+  wrapperStyle: { zIndex: 20 },
   isAnimationActive: false,
 } as const;
