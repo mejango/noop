@@ -248,10 +248,26 @@ function getPnlResponse(req: NextRequest) {
     const opening = baseline ?? rawSnapshots[0] ?? null;
     const closing = rawSnapshots[rawSnapshots.length - 1] ?? opening;
 
+    // Off-exchange ETH as the bot recorded it over time. Points before the first record reuse the
+    // earliest recorded amount (flagged in meta) so the full-portfolio line spans the whole window.
+    const exposure = (economicHistory.exposureHistory ?? [])
+      .map((r) => ({ ts: Date.parse(r.effective_at), eth: Number(r.external_eth) }))
+      .filter((r) => Number.isFinite(r.ts) && Number.isFinite(r.eth));
+    const externalEthAt = (ts: number) => {
+      let eth = exposure[0]?.eth ?? 0;
+      for (const r of exposure) if (r.ts <= ts) eth = r.eth; else break;
+      return eth;
+    };
+    const fullPortfolioValue = (row: SnapshotRow, ts: number) => {
+      const spot = Number(row.spot_price ?? 0);
+      return spot > 0 ? portfolioValue(row) + externalEthAt(ts) * spot : null;
+    };
+
     const portfolioSeries = rawSnapshots.map((row) => ({
       timestamp: row.timestamp,
       ts: new Date(row.timestamp).getTime(),
       portfolioValue: portfolioValue(row),
+      fullPortfolioValue: fullPortfolioValue(row, new Date(row.timestamp).getTime()),
       unrealizedPnl: Number(row.total_unrealized_pnl ?? 0),
       spotPrice: Number(row.spot_price ?? 0),
       usdcBalance: Number(row.usdc_balance ?? 0),
@@ -263,6 +279,7 @@ function getPnlResponse(req: NextRequest) {
           timestamp: fromIso,
           ts: from.getTime(),
           portfolioValue: portfolioValue(opening),
+          fullPortfolioValue: fullPortfolioValue(opening, from.getTime()),
           unrealizedPnl: Number(opening.total_unrealized_pnl ?? 0),
           spotPrice: Number(opening.spot_price ?? 0),
           usdcBalance: Number(opening.usdc_balance ?? 0),
@@ -413,9 +430,11 @@ function getPnlResponse(req: NextRequest) {
         orderCount: orders.length,
         hasBaseline: Boolean(opening),
         bucketMs,
-        insuredExternalEth: 0,
+        insuredExternalEth: exposure.length ? exposure[exposure.length - 1].eth : 0,
+        // portfolio[].portfolioValue is the Derive subaccount; fullPortfolioValue adds off-exchange ETH at spot.
         valuationScope: 'derive_subaccount',
-        externalHoldingsUnavailableReason: 'External insured holdings are excluded from this account report; the current insurance setting is not applied to historical balances.',
+        externalHoldingsUnavailableReason: 'Off-exchange ETH is excluded from this account report\'s balances, and the current insurance setting is not applied to historical balances. The full-portfolio series adds it from the recorded exposure history.',
+        externalEthRecordedFrom: exposure.length ? new Date(exposure[0].ts).toISOString() : null,
         performanceAvailable: false,
         performanceUnavailableReason: PERFORMANCE_UNAVAILABLE_REASON,
         settlementEstimateCount: settlementEstimates.length,

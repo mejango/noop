@@ -342,6 +342,7 @@ interface PnlReportData {
     hasBaseline: boolean;
     bucketMs: number;
     insuredExternalEth?: number;
+    externalEthRecordedFrom?: string | null;
     missingSettlementEstimateCount?: number;
     unvaluedRecordedSettlementCount?: number;
     openingMissingSettlementEstimateCount?: number;
@@ -376,6 +377,7 @@ interface PnlReportData {
       timestamp: string;
       ts: number;
       portfolioValue: number;
+      fullPortfolioValue?: number | null;
       unrealizedPnl: number;
       spotPrice: number;
       usdcBalance: number;
@@ -919,8 +921,16 @@ export default function OverviewPage() {
 
   // Plot account value from the raw snapshot series, not the daily buckets, so it keeps intraday detail.
   const pnlPortfolioSeries = useMemo(() => pnlReport.series.portfolio
-    .map((row) => ({ ts: row.ts, portfolioValueUsd: row.portfolioValue }))
+    .map((row) => ({ ts: row.ts, portfolioValueUsd: row.portfolioValue, fullPortfolioValueUsd: row.fullPortfolioValue ?? null }))
     .filter((row) => Number.isFinite(row.ts) && Number.isFinite(row.portfolioValueUsd)), [pnlReport]);
+  const pnlShowFullPortfolio = Number(pnlReport.meta.insuredExternalEth ?? 0) > 0;
+  // Tooltip rows are daily/weekly buckets; give each the account values at the bucket's end.
+  const pnlTooltipData = useMemo(() => pnlChartData.map((row) => {
+    const end = row.ts + pnlReport.meta.bucketMs;
+    let last: (typeof pnlPortfolioSeries)[number] | undefined;
+    for (const point of pnlPortfolioSeries) if (point.ts < end) last = point; else break;
+    return { ...row, portfolioValueUsd: last?.portfolioValueUsd ?? row.portfolioValueUsd, fullPortfolioValueUsd: last?.fullPortfolioValueUsd ?? null };
+  }), [pnlChartData, pnlPortfolioSeries, pnlReport.meta.bucketMs]);
 
   const pnlPortfolioDomain = useMemo<[number, number]>(() => {
     const values = pnlPortfolioSeries
@@ -932,6 +942,22 @@ export default function OverviewPage() {
     const pad = Math.max(25, (max - min) * 0.08);
     return [min - pad, max + pad];
   }, [pnlPortfolioSeries, pnlXDomain]);
+
+  // Off-exchange ETH dwarfs the Derive account, so the full portfolio gets its own (hidden) scale.
+  const pnlFullPortfolioDomain = useMemo<[number, number]>(() => {
+    const values = pnlPortfolioSeries
+      .filter((row) => row.ts >= pnlXDomain[0] && row.ts <= pnlXDomain[1])
+      .flatMap((row) => row.fullPortfolioValueUsd != null ? [row.fullPortfolioValueUsd] : []);
+    if (values.length === 0) return [0, 1];
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const pad = Math.max(25, (max - min) * 0.08);
+    return [min - pad, max + pad];
+  }, [pnlPortfolioSeries, pnlXDomain]);
+  const pnlDeriveShare = useMemo(() => {
+    const last = [...pnlPortfolioSeries].reverse().find((row) => row.fullPortfolioValueUsd);
+    return last?.fullPortfolioValueUsd ? last.portfolioValueUsd / last.fullPortfolioValueUsd : null;
+  }, [pnlPortfolioSeries]);
 
   const pnlCoverageLabel = useMemo(() => {
     if (!pnlReport.meta.from || !pnlReport.meta.to) return null;
@@ -1861,10 +1887,10 @@ export default function OverviewPage() {
       {/* P&L */}
       {pnlChartData.length > 0 && (
         <Card title="Options Result, Cashflow & Account Value" subtitle={pnlCoverageLabel ?? `${pnlRange} options activity`}>
-          <p className="text-xs text-gray-500 mb-3">The result includes call expiry costs and put expiry proceeds, using estimates when exchange records are unavailable. Fees and open-position P&amp;L are excluded. Account value includes deposits and withdrawals.</p>
+          <p className="text-xs text-gray-500 mb-3">The result includes call expiry costs and put expiry proceeds, using estimates when exchange records are unavailable. Fees and open-position P&amp;L are excluded. Account value includes deposits and withdrawals.{pnlShowFullPortfolio && <> Full portfolio adds off-exchange ETH at spot{pnlReport.meta.externalEthRecordedFrom ? `, using the earliest recorded amount before ${new Date(pnlReport.meta.externalEthRecordedFrom).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : ''}.</>}</p>
           {pnlMissingSettlements > 0 && <p className="text-xs text-amber-400 mb-3">Partial estimate: {pnlMissingSettlements} expired positions or recorded settlements lack a valuation and are omitted. This is not complete P&amp;L.</p>}
           <ResponsiveContainer width="100%" height={mobile ? 390 : 350}>
-            <ComposedChart data={pnlChartData} margin={baseMargins} stackOffset="sign" barGap={0} barCategoryGap="25%">
+            <ComposedChart data={pnlTooltipData} margin={baseMargins} stackOffset="sign" barGap={0} barCategoryGap="25%">
               <XAxis {...timeAxis}
                 domain={pnlXDomain}
                 ticks={Array.from({ length: mobile ? 3 : 5 }, (_, i) => pnlXDomain[0] + (pnlXDomain[1] - pnlXDomain[0]) * i / (mobile ? 2 : 4))}
@@ -1902,6 +1928,7 @@ export default function OverviewPage() {
                 allowDataOverflow
                 tickFormatter={(v) => `$${Math.round(v)}`}
               />
+              <YAxis yAxisId="fullPortfolio" hide width={0} domain={pnlFullPortfolioDomain} allowDataOverflow />
               <Tooltip
                 {...chartTooltip}
                 formatter={(value: number | string | undefined, name: string | undefined) => {
@@ -1918,9 +1945,8 @@ export default function OverviewPage() {
                     periodCallExpenses: 'Recorded Call Costs',
                     periodCallSettlements: 'Call Expiry Costs (est.)',
                     periodPutSettlements: 'Put Expiry Proceeds (est.)',
-                    portfolioValueUsd: Number(pnlReport.meta.insuredExternalEth ?? 0) > 0
-                      ? `Portfolio USD (incl. ${Number(pnlReport.meta.insuredExternalEth).toFixed(4)} off-platform ETH)`
-                      : 'Portfolio USD',
+                    portfolioValueUsd: 'Derive account USD (period end)',
+                    fullPortfolioValueUsd: `Full portfolio USD, period end (incl. ${Number(pnlReport.meta.insuredExternalEth ?? 0).toFixed(4)} off-exchange ETH)`,
                   };
                   const numericValue = typeof value === 'number' ? value : Number(value ?? 0);
                   const key = name ?? '';
@@ -1948,7 +1974,8 @@ export default function OverviewPage() {
                      value === 'periodCallExpenses' ? 'call costs' :
                      value === 'periodCallSettlements' ? 'call expiry (est.)' :
                      value === 'periodPutSettlements' ? 'put expiry (est.)' :
-                     value === 'portfolioValueUsd' ? 'portfolio usd' : value}
+                     value === 'portfolioValueUsd' ? 'derive account usd' :
+                     value === 'fullPortfolioValueUsd' ? `full portfolio usd (own scale${pnlDeriveShare != null ? `, derive ${(pnlDeriveShare * 100).toFixed(1)}%` : ''})` : value}
                   </span>
                 )}
               />
@@ -1964,7 +1991,11 @@ export default function OverviewPage() {
               <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeCashflow" name="cumulativeCashflow" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeSettlementAdjustedCashflow" name="cumulativeSettlementAdjustedCashflow" stroke="#c4b5fd" strokeWidth={2.5} strokeDasharray="6 3" dot={false} isAnimationActive={false} />
+              {/* Invisible bucket-end copies so the tooltip lists account values. */}
+              <Line yAxisId="portfolio" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />
+              {pnlShowFullPortfolio && <Line yAxisId="fullPortfolio" dataKey="fullPortfolioValueUsd" name="fullPortfolioValueUsd" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />}
               <Line yAxisId="portfolio" xAxisId="portfolio" data={pnlPortfolioSeries} type="linear" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={2} dot={false} strokeDasharray="5 4" isAnimationActive={false} />
+              {pnlShowFullPortfolio && <Line yAxisId="fullPortfolio" xAxisId="portfolio" data={pnlPortfolioSeries} type="linear" dataKey="fullPortfolioValueUsd" name="fullPortfolioValueUsd" stroke="#e0f2fe" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />}
             </ComposedChart>
           </ResponsiveContainer>
         </Card>

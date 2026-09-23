@@ -80,6 +80,7 @@ function routeFixture({
   orders = [],
   spots = [],
   events = [],
+  exposureHistory,
   snapshots = [],
   baseline,
   from = FROM,
@@ -97,6 +98,7 @@ function routeFixture({
       events: events.filter(row => row.timestamp >= start && row.timestamp <= end),
       coverage: { trades: false, settlements: false, transfers: false },
       available: true,
+      exposureHistory,
     }),
     getSpotPricesAtOrBefore: (timestamps, maxAgeMs) => {
       spotQueries.push({ timestamps, maxAgeMs });
@@ -245,6 +247,22 @@ test('current external ETH insurance settings cannot rewrite historical persiste
   assert.equal(report.meta.valuationScope, 'derive_subaccount');
   assert.equal(report.meta.insuredExternalEth, 0);
   assert.match(report.meta.externalHoldingsUnavailableReason, /current insurance setting is not applied to historical balances/i);
+});
+
+test('full portfolio adds recorded off-exchange ETH at each snapshot spot, backfilling before the first record', async () => {
+  const report = await routeFixture({
+    baseline: snapshot('2026-02-28T23:59:00.000Z', 10_000, 2000),
+    snapshots: [snapshot('2026-03-02T12:00:00.000Z', 10_000, 2000), snapshot('2026-03-07T12:00:00.000Z', 10_000, 2500)],
+    exposureHistory: [
+      { effective_at: '2026-03-05T00:00:00.000Z', external_eth: '4', source: 'runtime-config' },
+      { effective_at: '2026-03-06T00:00:00.000Z', external_eth: '5', source: 'runtime-config' },
+    ],
+    env: { PUT_INSURED_EXTERNAL_ETH: '100' },
+  }).report();
+  assert.deepEqual(report.series.portfolio.map(row => row.portfolioValue), [10_000, 10_000, 10_000]);
+  assert.deepEqual(report.series.portfolio.map(row => row.fullPortfolioValue), [18_000, 18_000, 22_500]);
+  assert.equal(report.meta.insuredExternalEth, 5);
+  assert.equal(report.meta.externalEthRecordedFrom, '2026-03-05T00:00:00.000Z');
 });
 
 test('recorded settlement cashflow replaces estimates even with unknown filled amount', async (t) => {
