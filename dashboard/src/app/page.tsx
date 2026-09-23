@@ -917,17 +917,21 @@ export default function OverviewPage() {
     return [-(absMax + pad), absMax + pad];
   }, [pnlChartData]);
 
+  // Plot account value from the raw snapshot series, not the daily buckets, so it keeps intraday detail.
+  const pnlPortfolioSeries = useMemo(() => pnlReport.series.portfolio
+    .map((row) => ({ ts: row.ts, portfolioValueUsd: row.portfolioValue }))
+    .filter((row) => Number.isFinite(row.ts) && Number.isFinite(row.portfolioValueUsd)), [pnlReport]);
+
   const pnlPortfolioDomain = useMemo<[number, number]>(() => {
-    const values = pnlChartData
+    const values = pnlPortfolioSeries
       .filter((row) => row.ts >= pnlXDomain[0] && row.ts <= pnlXDomain[1])
-      .map((row) => row.portfolioValueUsd)
-      .filter((value) => Number.isFinite(value));
+      .map((row) => row.portfolioValueUsd);
     if (values.length === 0) return [0, 1];
     const min = Math.min(...values);
     const max = Math.max(...values);
     const pad = Math.max(25, (max - min) * 0.08);
     return [min - pad, max + pad];
-  }, [pnlChartData, pnlXDomain]);
+  }, [pnlPortfolioSeries, pnlXDomain]);
 
   const pnlCoverageLabel = useMemo(() => {
     if (!pnlReport.meta.from || !pnlReport.meta.to) return null;
@@ -1870,6 +1874,8 @@ export default function OverviewPage() {
                 stroke={chartAxis.stroke}
                 tick={chartAxis.tick}
               />
+              {/* Own hidden axis so the dense account-value points don't shrink the daily bars. */}
+              <XAxis {...timeAxis} xAxisId="portfolio" domain={pnlXDomain} hide />
               <YAxis
                 yAxisId="lines"
                 orientation="left"
@@ -1958,7 +1964,7 @@ export default function OverviewPage() {
               <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeExpenses" name="cumulativeExpenses" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeCashflow" name="cumulativeCashflow" stroke="#fbbf24" strokeWidth={2.5} dot={false} isAnimationActive={false} />
               <Line yAxisId="lines" type="stepAfter" dataKey="cumulativeSettlementAdjustedCashflow" name="cumulativeSettlementAdjustedCashflow" stroke="#c4b5fd" strokeWidth={2.5} strokeDasharray="6 3" dot={false} isAnimationActive={false} />
-              <Line yAxisId="portfolio" type="monotone" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={2} dot={false} strokeDasharray="5 4" isAnimationActive={false} />
+              <Line yAxisId="portfolio" xAxisId="portfolio" data={pnlPortfolioSeries} type="linear" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={2} dot={false} strokeDasharray="5 4" isAnimationActive={false} />
             </ComposedChart>
           </ResponsiveContainer>
         </Card>
