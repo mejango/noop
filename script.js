@@ -4818,6 +4818,21 @@ const inferWikiPagesForJournalEntries = async (journalEntries = []) => {
 
 // Full pages: the model must return whole rewrites, and a 1200-char excerpt left
 // every 11-14KB research page untouched for weeks while lint kept flagging it.
+// Lint writes precise findings into .meta.json, but nothing automated ever read them:
+// ingest compiled new evidence while flagged pages kept their stale claims for weeks.
+// Handing the findings to the ingest closes that loop.
+const buildWikiIngestFindingsContext = (selectedPages, pageMeta = {}) => {
+  const lines = [];
+  for (const pagePath of selectedPages) {
+    const issues = Array.isArray(pageMeta[pagePath]?.issues) ? pageMeta[pagePath].issues : [];
+    for (const issue of issues) {
+      const text = typeof issue === 'string' ? issue : issue?.description;
+      if (typeof text === 'string' && text.trim()) lines.push(`- ${pagePath}: ${text.trim()}`);
+    }
+  }
+  return lines;
+};
+
 const buildWikiIngestPagesContext = (pages, selectedPages) => selectedPages
   .map((page) => `--- ${page} ---\n${pages[page] || ''}`)
   .join('\n\n');
@@ -5017,6 +5032,7 @@ const ingestToWiki = async (journalEntries) => {
     }
   }
   const pagesContext = buildWikiIngestPagesContext(pages, selectedPages);
+  const ingestFindings = buildWikiIngestFindingsContext(selectedPages, getWikiPageMetaMap(readWikiMeta()));
   const rawEvidencePacket = writeRawEvidencePacket(journalEntries);
 
   const entriesText = journalEntries
@@ -5039,6 +5055,9 @@ ${selectedPages.join('\n')}
 ## Current Wiki Pages (full content)
 ${pagesContext}
 
+## Outstanding Validation Findings
+${ingestFindings.length > 0 ? ingestFindings.join('\n') : 'None recorded.'}
+
 ## Raw Evidence Packet${rawEvidencePacket?.relativePath ? ` (${rawEvidencePacket.relativePath})` : ''}
 ${rawEvidencePacket?.content || 'No raw evidence packet available'}
 
@@ -5052,18 +5071,19 @@ ${recentTradeCampaigns.length > 0 ? recentTradeCampaigns.slice(0, 6).map(formatT
 ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPrompt).join('\n') : 'None'}
 
 ## Instructions
-1. Reconcile every allowed live-state research page against the same raw evidence packet. Return an update for each page whose TLDR, Current, or Active section disagrees with newer evidence; do not omit a stale dependent page merely to minimize the update set
-2. Preserve accurate durable and historical content. In TLDR, Current, and Active sections, replace superseded state instead of appending it; move useful prior observations into the matching Historical section
-3. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
-4. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" only in historical context—never leave the obsolete value in the current TLDR or Active section
-5. Keep each page under 2000 words — consolidate older entries if approaching limit
-6. Each page may start with one H1 title; place a bold TLDR line reflecting current state immediately after that optional title
-7. Prefer a compact update set only after every live-state page has been checked for cross-page consistency
-8. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
-9. If evidence is thin or mixed, say so explicitly instead of over-asserting
-10. Every materially new factual claim must cite an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker; never invent a source marker
-11. Strategy pages are Learning-owned views. They may summarize canonical [lesson:key] records, including status and contradictions, but must not invent independent execution rules or present disputed lessons as settled
-12. Strategy pages contain durable conditional rules, not the current spot, skew, score, budget, gate state, or other live snapshot values. Live market state belongs in research pages and the trading advisory
+1. Fix the Outstanding Validation Findings above first. Each one names a page and a concrete defect a prior audit confirmed; return an updated page that resolves it, correcting or relocating the offending claim rather than restating it. A finding that the supplied evidence genuinely cannot resolve may be left, but prefer fixing it
+2. Reconcile every allowed live-state research page against the same raw evidence packet. Return an update for each page whose TLDR, Current, or Active section disagrees with newer evidence; do not omit a stale dependent page merely to minimize the update set
+3. Preserve accurate durable and historical content. In TLDR, Current, and Active sections, replace superseded state instead of appending it; move useful prior observations into the matching Historical section
+4. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
+5. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" only in historical context—never leave the obsolete value in the current TLDR or Active section
+6. Keep each page under 2000 words — consolidate older entries if approaching limit
+7. Each page may start with one H1 title; place a bold TLDR line reflecting current state immediately after that optional title
+8. Prefer a compact update set only after every live-state page has been checked for cross-page consistency
+9. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
+10. If evidence is thin or mixed, say so explicitly instead of over-asserting
+11. Every materially new factual claim must cite an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker; never invent a source marker
+12. Strategy pages are Learning-owned views. They may summarize canonical [lesson:key] records, including status and contradictions, but must not invent independent execution rules or present disputed lessons as settled
+13. Strategy pages contain durable conditional rules, not the current spot, skew, score, budget, gate state, or other live snapshot values. Live market state belongs in research pages and the trading advisory
 
 Output your updates as XML blocks. Only include pages that need changes:
 
@@ -5077,8 +5097,9 @@ If no pages need updating, output: <no_updates/>`;
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
       thinking: { type: 'disabled' },
-      // Up to 11 full pages come back; 4096 truncated every run and silently applied nothing.
-      max_tokens: 16384,
+      // Up to 14 full pages come back. 4096 truncated every run and silently applied
+      // nothing; 16384 fit only ~5 rewrites, so flagged pages kept rolling to the next run.
+      max_tokens: 32000,
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -5239,6 +5260,7 @@ If no pages need updating, output: <no_updates/>`;
       console.log(`📚 Wiki ingest: no page applied — ${/<wiki_update/.test(text) ? 'every block was rejected or incomplete' : 'response had neither <no_updates/> nor a <wiki_update> block'} (${text.length} chars)`);
     }
     console.log(`📚 Wiki ingest: ${updateCount} page(s) updated`);
+    return { updateCount, updatedPages: updatedPages.map((update) => update.pagePath) };
   } catch (e) {
     console.log('📚 Wiki ingest failed:', e.message);
     throw e;
@@ -5401,6 +5423,7 @@ const lintWiki = async ({ forcePageReview = false } = {}) => {
     return recordWikiLintFailure(meta, 'wiki not yet seeded', 'wiki lint waiting for seed');
   }
 
+  const priorLintAttempt = typeof meta.last_lint_attempt === 'string' ? meta.last_lint_attempt : null;
   meta.last_lint_attempt = new Date().toISOString();
   meta.last_lint_error = null;
   writeWikiMeta(meta);
@@ -5547,7 +5570,11 @@ Assign page_to_fix to the page whose content should change. For a cross-page con
       reviewedPageCount++;
     }
     if (isFullReview) completionMeta.last_lint = reviewedAt;
-    completionMeta.last_lint_attempt = reviewedAt;
+    // The daily cadence keys off last_lint_attempt, so a forced post-ingest pass must
+    // leave it alone or the full audit would be pushed back on every ingest and never run.
+    completionMeta.last_lint_attempt = forcePageReview && !isFullReview
+      ? (priorLintAttempt || reviewedAt)
+      : reviewedAt;
     completionMeta.last_lint_error = null;
     const completedPageMeta = getWikiPageMetaMap(completionMeta);
     const outstandingIssueCount = WIKI_ALL_PAGES.reduce((total, pagePath) => (
@@ -13791,12 +13818,29 @@ const runBot = async () => {
         generateJournalEntries(tickSummary, botData).then(async (entries) => {
           console.log('📓 Journal generation succeeded, next in 8h');
           // Ingest journal entries into wiki (non-fatal)
+          let ingestResult = null;
           try {
-            await ingestToWiki(entries);
+            ingestResult = await ingestToWiki(entries);
           } catch (e) {
             console.log('📚 Wiki ingest failed (non-fatal):', e.message);
           } finally {
             _wikiIngestInFlight = false;
+          }
+          // Ingest clears last_reviewed_at on every page it rewrites, and the daily audit
+          // runs 8h/24h behind it, so touched pages sat unreviewed most of the time.
+          // Revalidate just what changed instead of waiting for the next daily pass.
+          if (ingestResult?.updateCount > 0 && !_wikiLintInFlight) {
+            _wikiLintInFlight = true;
+            try {
+              const revalidation = await lintWiki({ forcePageReview: true });
+              console.log(revalidation?.success
+                ? `📚 Post-ingest revalidation: reviewed=${revalidation.reviewedPageCount || 0} outstanding=${revalidation.outstandingIssues || 0}`
+                : `📚 Post-ingest revalidation skipped: ${revalidation?.error || 'not due'}`);
+            } catch (e) {
+              console.log('📚 Post-ingest revalidation failed (non-fatal):', e.message);
+            } finally {
+              _wikiLintInFlight = false;
+            }
           }
           // Generate trading advisory alongside journal
           try { await generateTradingAdvisory({ trigger: 'scheduled' }); }

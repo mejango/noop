@@ -7160,6 +7160,43 @@ describe('stale DEX liquidity samples', () => {
   });
 });
 
+describe('wiki findings feed back into ingest', () => {
+  const { buildWikiIngestFindingsContext } = loadProduction(['buildWikiIngestFindingsContext']);
+
+  test('stored lint findings for selected pages reach the ingest prompt', () => {
+    const pageMeta = {
+      'revenue/pricing.md': { issues: ['[stale] TLDR references ETH-20260821-2150-C as active legs'] },
+      'strategy/playbook.md': { issues: [{ description: "[quality] Core Rule 3 says five closed wins; six are recorded" }] },
+      'regimes/current.md': { issues: [] },
+      'indicators/leading.md': { issues: ['[redundant] duplicates strategy/lessons.md'] },
+    };
+    const lines = buildWikiIngestFindingsContext(
+      ['revenue/pricing.md', 'strategy/playbook.md', 'regimes/current.md'],
+      pageMeta,
+    );
+    assert.strictEqual(lines.length, 2, 'only findings for selected pages, and only non-empty ones');
+    assert.ok(lines[0].startsWith('- revenue/pricing.md: [stale]'));
+    assert.ok(lines[1].includes('Core Rule 3'), 'object-shaped findings expose their description');
+    assert.ok(!lines.join('\n').includes('indicators/leading.md'), 'unselected pages are not included');
+  });
+
+  test('no findings yields an empty list rather than a fabricated section', () => {
+    assert.deepStrictEqual(buildWikiIngestFindingsContext(['regimes/current.md'], {}), []);
+  });
+
+  test('ingest prompt asks for the findings to be fixed first', () => {
+    assert.ok(SCRIPT_SOURCE.includes('## Outstanding Validation Findings'));
+    assert.ok(SCRIPT_SOURCE.includes('1. Fix the Outstanding Validation Findings above first.'));
+  });
+
+  test('a forced post-ingest revalidation does not push back the daily full audit', () => {
+    // last_lint_attempt drives the 24h cadence; bumping it every 8h would starve the audit.
+    assert.ok(SCRIPT_SOURCE.includes('completionMeta.last_lint_attempt = forcePageReview && !isFullReview'));
+    assert.ok(SCRIPT_SOURCE.includes('? (priorLintAttempt || reviewedAt)'));
+    assert.ok(SCRIPT_SOURCE.includes("await lintWiki({ forcePageReview: true })"));
+  });
+});
+
 // ============================================================================
 // Summary
 // ============================================================================
