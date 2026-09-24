@@ -4839,6 +4839,7 @@ const buildWikiIngestFindingsContext = (selectedPages, pageMeta = {}, nowMs = Da
 };
 
 const WIKI_INGEST_MAX_EXTRA_PAGES = 3;
+const WIKI_INGEST_PAGES_PER_CALL = 5;
 
 // ponytail: mirrors freshnessDays in dashboard/src/lib/wikiCatalog.ts; keep them in sync.
 const WIKI_FRESHNESS_DAYS = {
@@ -5075,13 +5076,13 @@ const ingestToWiki = async (journalEntries) => {
   for (const pagePath of WIKI_STRATEGY_PAGES) {
     if ((hasLessons || pagesNeedingIngest.includes(pagePath)) && !selectedPages.includes(pagePath)) selectedPages.push(pagePath);
   }
-  // One call's 32k output fit ~10 full rewrites, so the pages listed last (Learning-owned)
-  // were truncated every run. Routed research pages and the rotated extras + strategy
-  // pages each get their own call, in parallel so the chain takes no longer.
-  const batches = [
-    selectedPages.filter((pagePath) => routedPages.includes(pagePath) && !WIKI_STRATEGY_PAGES.has(pagePath)),
-    selectedPages.filter((pagePath) => !routedPages.includes(pagePath) || WIKI_STRATEGY_PAGES.has(pagePath)),
-  ].filter((batch) => batch.length > 0);
+  // One call's 32k output fits ~10 full rewrites (~3.5k tokens each), and the page cut off
+  // last never applied: strategy pages, then revenue/pricing, for weeks. Parallel calls of
+  // at most 5 writable pages; each still reads every selected page to keep them consistent.
+  const batches = [];
+  for (let i = 0; i < selectedPages.length; i += WIKI_INGEST_PAGES_PER_CALL) {
+    batches.push(selectedPages.slice(i, i + WIKI_INGEST_PAGES_PER_CALL));
+  }
   const rawEvidencePacket = writeRawEvidencePacket(journalEntries);
 
   const entriesText = journalEntries
@@ -5098,11 +5099,11 @@ ${schema}
 2. Reviewed trade campaigns and active trade lessons are evaluated second-order evidence.
 3. Journal entries are analyst notes; use them to guide emphasis, but do not copy speculative language as fact without corroboration.
 
-## Allowed Wiki Pages
+## Allowed Wiki Pages (the only pages you may update in this response)
 ${batchPages.join('\n')}
 
-## Current Wiki Pages (full content)
-${buildWikiIngestPagesContext(pages, batchPages)}
+## Current Wiki Pages (full content; pages not listed above are read-only context for cross-page consistency)
+${buildWikiIngestPagesContext(pages, selectedPages)}
 
 ## Outstanding Validation Findings
 ${buildWikiIngestFindingsContext(batchPages, pageMeta).join('\n') || 'None recorded.'}
