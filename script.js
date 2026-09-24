@@ -4836,6 +4836,8 @@ const buildWikiIngestFindingsContext = (selectedPages, pageMeta = {}, nowMs = Da
   return lines;
 };
 
+const WIKI_INGEST_MAX_EXTRA_PAGES = 3;
+
 // ponytail: mirrors freshnessDays in dashboard/src/lib/wikiCatalog.ts; keep them in sync.
 const WIKI_FRESHNESS_DAYS = {
   'regimes/current.md': 3, 'regimes/history.md': 90,
@@ -5049,8 +5051,14 @@ const ingestToWiki = async (journalEntries) => {
     pages[page] = readWikiPage(page);
   }
   const pageMeta = getWikiPageMetaMap(readWikiMeta());
-  const pagesNeedingIngest = getWikiPagesNeedingIngest(pageMeta);
-  const selectedPages = Array.from(new Set([...await inferWikiPagesForJournalEntries(journalEntries), ...pagesNeedingIngest]));
+  const routedPages = await inferWikiPagesForJournalEntries(journalEntries);
+  // ponytail: all 14 pages (~155KB) in one non-streamed call overran the 10min timeout and
+  // 32k output. Rotate at most 3 extra flagged/stale pages per ingest, stalest first.
+  const pagesNeedingIngest = orderWikiPagesByStaleness(
+    getWikiPagesNeedingIngest(pageMeta).filter((pagePath) => !routedPages.includes(pagePath)),
+    pageMeta
+  ).slice(0, WIKI_INGEST_MAX_EXTRA_PAGES);
+  const selectedPages = Array.from(new Set([...routedPages, ...pagesNeedingIngest]));
   const recentTradeReviews = db.getRecentTradeReviews(30) || [];
   const recentTradeCampaigns = groupTradeReviewsForWiki(recentTradeReviews, 10);
   const activeTradeLessons = db.getActiveTradeLessons() || [];
@@ -5139,7 +5147,7 @@ If no pages need updating, output: <no_updates/>`;
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 600000,
+      timeout: 900000, // 7 live + 3 rotated full-page rewrites run ~10min unstreamed
     });
 
     // Each complete <wiki_update> block is validated on its own below, so a
