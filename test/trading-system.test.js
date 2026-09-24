@@ -7196,6 +7196,22 @@ describe('wiki findings feed back into ingest', () => {
     assert.ok(lines[0].startsWith('- indicators/divergences.md: [stale]'), 'stale pages get an explicit finding to act on');
   });
 
+  test('a rejected rewrite comes back to the next ingest with its reason', () => {
+    const { getWikiPagesNeedingIngest } = loadProduction(['getWikiPagesNeedingIngest']);
+    const now = Date.parse('2026-09-24T02:00:00Z');
+    const pageMeta = {
+      'revenue/pricing.md': {
+        last_changed_at: '2026-09-24T01:00:00Z',
+        issues: [],
+        last_ingest_rejection: '2026-09-24: invented source marker(s): [tick:#170047]',
+      },
+    };
+    assert.ok(getWikiPagesNeedingIngest(pageMeta, now).includes('revenue/pricing.md'));
+    const lines = buildWikiIngestFindingsContext(['revenue/pricing.md'], pageMeta, now);
+    assert.strictEqual(lines.length, 1);
+    assert.ok(lines[0].includes('[ingest-rejected]') && lines[0].includes('[tick:#170047]'));
+  });
+
   test('no findings yields an empty list rather than a fabricated section', () => {
     assert.deepStrictEqual(buildWikiIngestFindingsContext(['regimes/current.md'], { 'regimes/current.md': { last_changed_at: new Date().toISOString() } }), []);
   });

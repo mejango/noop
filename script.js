@@ -4829,6 +4829,8 @@ const buildWikiIngestFindingsContext = (selectedPages, pageMeta = {}, nowMs = Da
   for (const pagePath of selectedPages) {
     const issues = getWikiPageIssueTexts(pageMeta[pagePath]);
     for (const text of issues) lines.push(`- ${pagePath}: ${text}`);
+    const rejection = pageMeta[pagePath]?.last_ingest_rejection;
+    if (rejection) lines.push(`- ${pagePath}: [ingest-rejected] your last rewrite of this page was discarded (${rejection}); fix that cause or the page stays stale`);
     if (issues.length === 0 && isWikiPagePastFreshness(pagePath, pageMeta[pagePath], nowMs)) {
       lines.push(`- ${pagePath}: [stale] no new evidence since ${pageMeta[pagePath]?.last_evidence_at || pageMeta[pagePath]?.last_changed_at || 'unknown'}, past its ${WIKI_FRESHNESS_DAYS[pagePath]}d window; re-verify every claim against the evidence packet and rewrite, marking unconfirmed claims historical`);
     }
@@ -4863,7 +4865,9 @@ const isWikiPagePastFreshness = (pagePath, stored, nowMs = Date.now()) => {
 // Pages the dashboard shows as ATTENTION or STALE. Routing by journal content
 // alone never selected them, so their findings sat unread for weeks.
 const getWikiPagesNeedingIngest = (pageMeta = {}, nowMs = Date.now()) => WIKI_ALL_PAGES.filter((pagePath) => (
-  getWikiPageIssueTexts(pageMeta[pagePath]).length > 0 || isWikiPagePastFreshness(pagePath, pageMeta[pagePath], nowMs)
+  getWikiPageIssueTexts(pageMeta[pagePath]).length > 0
+  || Boolean(pageMeta[pagePath]?.last_ingest_rejection)
+  || isWikiPagePastFreshness(pagePath, pageMeta[pagePath], nowMs)
 ));
 
 const buildWikiIngestPagesContext = (pages, selectedPages) => selectedPages
@@ -5071,15 +5075,20 @@ const ingestToWiki = async (journalEntries) => {
   for (const pagePath of WIKI_STRATEGY_PAGES) {
     if ((hasLessons || pagesNeedingIngest.includes(pagePath)) && !selectedPages.includes(pagePath)) selectedPages.push(pagePath);
   }
-  const pagesContext = buildWikiIngestPagesContext(pages, selectedPages);
-  const ingestFindings = buildWikiIngestFindingsContext(selectedPages, pageMeta);
+  // One call's 32k output fit ~10 full rewrites, so the pages listed last (Learning-owned)
+  // were truncated every run. Routed research pages and the rotated extras + strategy
+  // pages each get their own call, in parallel so the chain takes no longer.
+  const batches = [
+    selectedPages.filter((pagePath) => routedPages.includes(pagePath) && !WIKI_STRATEGY_PAGES.has(pagePath)),
+    selectedPages.filter((pagePath) => !routedPages.includes(pagePath) || WIKI_STRATEGY_PAGES.has(pagePath)),
+  ].filter((batch) => batch.length > 0);
   const rawEvidencePacket = writeRawEvidencePacket(journalEntries);
 
   const entriesText = journalEntries
     .map(e => `[${e.type || e.entry_type || 'unknown'}] ${e.content}`)
     .join('\n\n---\n\n');
 
-  const prompt = `You are maintaining a knowledge wiki for a Spitznagel-style tail-risk hedging bot. Your job is to compile wiki updates from evidence, not to restate speculative notes.
+  const buildIngestPrompt = (batchPages) => `You are maintaining a knowledge wiki for a Spitznagel-style tail-risk hedging bot. Your job is to compile wiki updates from evidence, not to restate speculative notes.
 
 ## Wiki Schema
 ${schema}
@@ -5090,13 +5099,13 @@ ${schema}
 3. Journal entries are analyst notes; use them to guide emphasis, but do not copy speculative language as fact without corroboration.
 
 ## Allowed Wiki Pages
-${selectedPages.join('\n')}
+${batchPages.join('\n')}
 
 ## Current Wiki Pages (full content)
-${pagesContext}
+${buildWikiIngestPagesContext(pages, batchPages)}
 
 ## Outstanding Validation Findings
-${ingestFindings.length > 0 ? ingestFindings.join('\n') : 'None recorded.'}
+${buildWikiIngestFindingsContext(batchPages, pageMeta).join('\n') || 'None recorded.'}
 
 ## Raw Evidence Packet${rawEvidencePacket?.relativePath ? ` (${rawEvidencePacket.relativePath})` : ''}
 ${rawEvidencePacket?.content || 'No raw evidence packet available'}
@@ -5121,7 +5130,7 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 8. Prefer a compact update set only after every live-state page has been checked for cross-page consistency
 9. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
 10. If evidence is thin or mixed, say so explicitly instead of over-asserting
-11. Every materially new factual claim must cite an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker; never invent a source marker
+11. Every materially new factual claim must cite an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker; never invent a source marker. A marker is valid only if it appears verbatim above (evidence packet, current pages, campaigns, lessons). Never extrapolate a tick ID: for a multi-day range, cite markers already on the page or state the range without a marker. Any unknown marker rejects the whole page
 12. Strategy pages are Learning-owned views. They may summarize canonical [lesson:key] records, including status and contradictions, but must not invent independent execution rules or present disputed lessons as settled
 13. Strategy pages contain durable conditional rules, not the current spot, skew, score, budget, gate state, or other live snapshot values. Live market state belongs in research pages and the trading advisory
 
@@ -5133,49 +5142,35 @@ Output your updates as XML blocks. Only include pages that need changes:
 
 If no pages need updating, output: <no_updates/>`;
 
-  try {
+  const requestIngestBatch = async (batchPages) => {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
       thinking: { type: 'disabled' },
-      // Up to 14 full pages come back. 4096 truncated every run and silently applied
-      // nothing; 16384 fit only ~5 rewrites, so flagged pages kept rolling to the next run.
+      // 4096 truncated every run and silently applied nothing; 16384 fit only ~5 rewrites.
       max_tokens: 32000,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: 'user', content: buildIngestPrompt(batchPages) }],
     }, {
       headers: {
         'x-api-key': process.env.ANTHROPIC_API_KEY,
         'anthropic-version': '2023-06-01',
         'content-type': 'application/json',
       },
-      timeout: 900000, // 7 live + 3 rotated full-page rewrites run ~10min unstreamed
+      timeout: 900000, // ~10 full-page rewrites run ~10min unstreamed
     });
-
     // Each complete <wiki_update> block is validated on its own below, so a
     // truncated response still applies the pages that finished. Log the cut.
-    const text = (response.data?.content || []).filter(block => block.type === 'text').map(block => block.text).join('');
-    if (response.data?.stop_reason !== 'end_turn') console.log(`📚 Wiki ingest: ${getAnthropicResponseFailure(response.data)}; applying complete page blocks only`);
+    if (response.data?.stop_reason !== 'end_turn') console.log(`📚 Wiki ingest [${batchPages[0]}…]: ${getAnthropicResponseFailure(response.data)}; applying complete page blocks only`);
+    return (response.data?.content || []).filter(block => block.type === 'text').map(block => block.text).join('');
+  };
 
-    if (text.includes('<no_updates/>')) {
-      const meta = readWikiMeta();
-      const checkedAt = new Date().toISOString();
-      meta.last_ingest = checkedAt;
-      meta.last_ingest_updates = 0;
-      meta.last_evidence_packet = rawEvidencePacket?.relativePath || meta.last_evidence_packet || null;
-      for (const pagePath of selectedPages) {
-        updateWikiPageMeta(meta, pagePath, {
-          last_checked_at: checkedAt,
-          evidence_packet: rawEvidencePacket?.relativePath || null,
-        });
-      }
-      writeWikiMeta(meta);
-      refreshWikiIndex();
-      appendWikiLog('ingest', 'no wiki updates needed', [
-        rawEvidencePacket?.relativePath ? `evidence packet: ${rawEvidencePacket.relativePath}` : 'evidence packet: none',
-        `selected pages: ${selectedPages.join(', ')}`,
-      ]);
-      console.log('📚 Wiki ingest: no updates needed');
-      return;
-    }
+  try {
+    const settled = await Promise.allSettled(batches.map(requestIngestBatch));
+    if (!settled.some((result) => result.status === 'fulfilled')) throw settled[0].reason;
+    settled.forEach((result, i) => {
+      if (result.status === 'rejected') console.log(`📚 Wiki ingest batch [${batches[i].join(', ')}] failed: ${result.reason?.message}`);
+    });
+    const batchTexts = settled.map((result, i) => ({ text: result.status === 'fulfilled' ? result.value : '', batchPages: batches[i] }));
+    const text = batchTexts.map((batch) => batch.text).join('\n');
 
     // Parse wiki_update blocks
     const updateRegex = /<wiki_update\s+path="([^"]+)">([\s\S]*?)<\/wiki_update>/g;
@@ -5196,71 +5191,81 @@ If no pages need updating, output: <no_updates/>`;
         .filter((marker) => marker.startsWith('[lesson:')),
     );
 
-    while ((match = updateRegex.exec(text)) !== null) {
-      const pagePath = match[1];
-      const newContent = match[2].trim();
+    // Rejections used to be logged and forgotten, so a page rejected every run (revenue/pricing,
+    // unchanged Aug 13 → Sep 24) never learned why. The next ingest gets the reason as a finding.
+    const rejections = {};
+    const reject = (pagePath, reason) => {
+      rejections[pagePath] = reason;
+      console.log(`📚 Wiki ingest: rejected update for ${pagePath} — ${reason}`);
+    };
+    for (const { text: batchText, batchPages } of batchTexts) {
+      updateRegex.lastIndex = 0;
+      while ((match = updateRegex.exec(batchText)) !== null) {
+        const pagePath = match[1];
+        const newContent = match[2].trim();
 
-      // Validate page path
-      if (!selectedPages.includes(pagePath)) {
-        console.log(`📚 Wiki ingest: rejected unknown page "${pagePath}"`);
-        continue;
-      }
+        // Validate page path
+        if (!batchPages.includes(pagePath)) {
+          console.log(`📚 Wiki ingest: rejected unknown page "${pagePath}"`);
+          continue;
+        }
 
-      // Safety: reject updates < 50 chars
-      if (newContent.length < 50) {
-        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — too short (${newContent.length} chars)`);
-        continue;
-      }
+        // Safety: reject updates < 50 chars
+        if (newContent.length < 50) {
+          reject(pagePath, `too short (${newContent.length} chars)`);
+          continue;
+        }
 
-      // Safety: reject updates that shrink page by > 50%
-      const existingContent = pages[pagePath] || '';
-      if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) {
-        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — shrinks by >50% (${existingContent.length} -> ${newContent.length})`);
-        continue;
-      }
+        // Safety: reject updates that shrink page by > 50%
+        const existingContent = pages[pagePath] || '';
+        if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) {
+          reject(pagePath, `shrinks by >50% (${existingContent.length} -> ${newContent.length})`);
+          continue;
+        }
 
-      // Safety: check expected section headers from schema
-      const required = WIKI_EXPECTED_HEADERS[pagePath] || [];
-      const missingHeaders = required.filter(h => !newContent.includes(h));
-      if (missingHeaders.length > 0) {
-        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — missing sections: ${missingHeaders.join(', ')}`);
-        continue;
-      }
+        // Safety: check expected section headers from schema
+        const required = WIKI_EXPECTED_HEADERS[pagePath] || [];
+        const missingHeaders = required.filter(h => !newContent.includes(h));
+        if (missingHeaders.length > 0) {
+          reject(pagePath, `missing sections: ${missingHeaders.join(', ')}`);
+          continue;
+        }
 
-      const outputMarkers = getStructuredWikiMarkers(newContent);
-      const unknownMarkers = Array.from(outputMarkers).filter((marker) => !allowedMarkers.has(marker));
-      if (unknownMarkers.length > 0) {
-        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — invented source marker(s): ${unknownMarkers.slice(0, 5).join(', ')}`);
-        continue;
-      }
-      if (
-        WIKI_LIVE_RESEARCH_PAGES.includes(pagePath)
-        && latestTickMarkers.size > 0
-        && !Array.from(outputMarkers).some((marker) => latestTickMarkers.has(marker))
-      ) {
-        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — live state lacks an exact marker from the latest tick packet`);
-        continue;
-      }
-      if (
-        WIKI_STRATEGY_PAGES.has(pagePath)
-        && availableLessonMarkers.size > 0
-        && !Array.from(outputMarkers).some((marker) => availableLessonMarkers.has(marker))
-      ) {
-        console.log(`📚 Wiki ingest: rejected update for ${pagePath} — Learning-owned page lacks a canonical lesson marker`);
-        continue;
-      }
+        const outputMarkers = getStructuredWikiMarkers(newContent);
+        const unknownMarkers = Array.from(outputMarkers).filter((marker) => !allowedMarkers.has(marker));
+        if (unknownMarkers.length > 0) {
+          reject(pagePath, `invented source marker(s): ${unknownMarkers.slice(0, 5).join(', ')}`);
+          continue;
+        }
+        if (
+          WIKI_LIVE_RESEARCH_PAGES.includes(pagePath)
+          && latestTickMarkers.size > 0
+          && !Array.from(outputMarkers).some((marker) => latestTickMarkers.has(marker))
+        ) {
+          reject(pagePath, `live state lacks an exact marker from the latest tick packet`);
+          continue;
+        }
+        if (
+          WIKI_STRATEGY_PAGES.has(pagePath)
+          && availableLessonMarkers.size > 0
+          && !Array.from(outputMarkers).some((marker) => availableLessonMarkers.has(marker))
+        ) {
+          reject(pagePath, `Learning-owned page lacks a canonical lesson marker`);
+          continue;
+        }
 
-      // Save history before overwriting
-      if (existingContent && !existingContent.includes('Awaiting initial assessment')) {
-        saveWikiHistory(pagePath, existingContent);
-      }
+        // Save history before overwriting
+        if (existingContent && !existingContent.includes('Awaiting initial assessment')) {
+          saveWikiHistory(pagePath, existingContent);
+        }
 
-      // Write updated page
-      const fullPath = path.join(WIKI_DIR, pagePath);
-      fs.writeFileSync(fullPath, newContent);
-      updateCount++;
-      updatedPages.push({ pagePath, existingContent, newContent });
-      console.log(`📚 Wiki ingest: updated ${pagePath}`);
+        // Write updated page
+        const fullPath = path.join(WIKI_DIR, pagePath);
+        fs.writeFileSync(fullPath, newContent);
+        updateCount++;
+        updatedPages.push({ pagePath, existingContent, newContent });
+        console.log(`📚 Wiki ingest: updated ${pagePath}`);
+      }
     }
 
     // Update meta
@@ -5281,6 +5286,7 @@ If no pages need updating, output: <no_updates/>`;
         last_changed_at: ingestedAt,
         last_reviewed_at: null,
         issues: [],
+        last_ingest_rejection: null,
         change_summary: summarizeWikiPageChange(
           update.existingContent,
           update.newContent,
@@ -5288,15 +5294,21 @@ If no pages need updating, output: <no_updates/>`;
         ),
       });
     }
+    for (const [pagePath, reason] of Object.entries(rejections)) {
+      if (!updatedPages.some((update) => update.pagePath === pagePath)) {
+        updateWikiPageMeta(meta, pagePath, { last_ingest_rejection: `${ingestedAt.slice(0, 10)}: ${reason}` });
+      }
+    }
     writeWikiMeta(meta);
     refreshWikiIndex();
-    appendWikiLog('ingest', 'wiki ingest applied', [
+    appendWikiLog('ingest', updateCount > 0 ? 'wiki ingest applied' : 'no wiki updates applied', [
       rawEvidencePacket?.relativePath ? `evidence packet: ${rawEvidencePacket.relativePath}` : 'evidence packet: none',
       `selected pages: ${selectedPages.join(', ')}`,
       `pages updated: ${updateCount}`,
+      ...Object.entries(rejections).map(([pagePath, reason]) => `rejected ${pagePath}: ${reason}`),
     ]);
 
-    if (updateCount === 0) {
+    if (updateCount === 0 && !text.includes('<no_updates/>')) {
       console.log(`📚 Wiki ingest: no page applied — ${/<wiki_update/.test(text) ? 'every block was rejected or incomplete' : 'response had neither <no_updates/> nor a <wiki_update> block'} (${text.length} chars)`);
     }
     console.log(`📚 Wiki ingest: ${updateCount} page(s) updated`);
