@@ -5134,6 +5134,7 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 11. Every materially new factual claim must cite an exact supplied [tick:#ID], [order:#ID], [review:#ID], or [lesson:key] marker; never invent a source marker. A marker is valid only if it appears verbatim above (evidence packet, current pages, campaigns, lessons). Never extrapolate a tick ID: for a multi-day range, cite markers already on the page or state the range without a marker. Any unknown marker rejects the whole page
 12. Strategy pages are Learning-owned views. They may summarize canonical [lesson:key] records, including status and contradictions, but must not invent independent execution rules or present disputed lessons as settled
 13. Strategy pages contain durable conditional rules, not the current spot, skew, score, budget, gate state, or other live snapshot values. Live market state belongs in research pages and the trading advisory
+14. The Outstanding Validation Findings are instructions to you, not page content. Never write a findings, validation, audit, or resolved-issues section into a page; remove any such section a page already has
 
 Output your updates as XML blocks. Only include pages that need changes:
 
@@ -5229,6 +5230,11 @@ If no pages need updating, output: <no_updates/>`;
         const missingHeaders = required.filter(h => !newContent.includes(h));
         if (missingHeaders.length > 0) {
           reject(pagePath, `missing sections: ${missingHeaders.join(', ')}`);
+          continue;
+        }
+
+        if (/^#+\s*(outstanding\s+)?validation findings/im.test(newContent)) {
+          reject(pagePath, 'page contains a Validation Findings section; findings are instructions, never page content');
           continue;
         }
 
@@ -5511,12 +5517,15 @@ ${pagesToReview.map((pagePath) => `- ${pagePath}`).join('\n')}
 ## Audit Checklist
 1. **Contradictions**: Do any pages contradict each other?
 2. **Staleness**: Are time-sensitive current-state claims old enough to mislead? Do not call stable historical or structural knowledge stale merely because it is old.
-3. **Redundancy**: Is the same information repeated across pages?
-4. **Missing links**: Do pages reference concepts that should be in another page but aren't?
-5. **Quality**: Are TLDRs accurate? Are evidence values specific?
+3. **Redundancy**: Only when repeated copies now disagree (report it as a contradiction) or the repetition pushes a page past its word limit. Duplication alone is not an issue.
+4. **Missing links**: Does a page rely on a concept or claim that no page supplies?
+5. **Quality**: Is a TLDR, number, or unit wrong or misleading?
 6. **Provenance**: Are material claims linked to supplied source, review, or canonical lesson markers where available?
 7. **Ownership**: Do strategy pages faithfully summarize canonical [lesson:key] records without inventing a competing playbook?
 8. **Live-state boundaries**: Do strategy pages avoid embedding current spot, skew, score, budget, or gate values that belong in research/advisory state?
+
+## Materiality Bar
+Report only issues that would mislead a trading decision or misstate current or historical fact: contradictions, wrong numbers or units, stale live state, unsupported material claims, or strategy pages inventing rules. Do not report formatting, column consistency, wording, epistemic tone, caveat placement, sub-1% rounding, or cross-reference tidiness. Every rewrite is re-audited, so nitpicks keep sound pages flagged forever. A sound page returns no issues; do not search for something to report.
 
 ## Instructions
 Return one compact audit object and do not rewrite page content during validation:

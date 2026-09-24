@@ -7216,6 +7216,11 @@ describe('wiki findings feed back into ingest', () => {
     assert.deepStrictEqual(buildWikiIngestFindingsContext(['regimes/current.md'], { 'regimes/current.md': { last_changed_at: new Date().toISOString() } }), []);
   });
 
+  test('findings never become page content, and lint holds a materiality bar', () => {
+    assert.ok(SCRIPT_SOURCE.includes('/^#+\\s*(outstanding\\s+)?validation findings/im'), 'ingest rejects a leaked findings section');
+    assert.ok(SCRIPT_SOURCE.includes('## Materiality Bar'), 'every rewrite is re-audited; nitpicks would keep sound pages flagged');
+  });
+
   test('ingest prompt asks for the findings to be fixed first', () => {
     assert.ok(SCRIPT_SOURCE.includes('## Outstanding Validation Findings'));
     assert.ok(SCRIPT_SOURCE.includes('1. Fix the Outstanding Validation Findings above first.'));
