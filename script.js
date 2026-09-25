@@ -12988,10 +12988,12 @@ Synthesize the final agenda now.`;
     const synthesisResponse = await callAnthropicWithMinuteBoundaryRetry({
       label: 'Advisory Step 3',
       model: synthesisAnthropicModel,
-      maxTokens: 3072,
+      // It rewrites the full agenda Step 1 produced with 16384; 3072 truncated it into
+      // "no JSON" and silently published the unsynthesized primary agenda (2 of 3 runs, Sep 25).
+      maxTokens: 16384,
       system: synthesisSystemPrompt,
       messages: [{ role: 'user', content: synthesisUserPrompt }],
-      timeout: 120000, // Step 3 writes a full 3072-token agenda; 60s was timing out every run
+      timeout: 600000,
       spreadAfterBoundary: true,
     });
 
@@ -13008,7 +13010,7 @@ Synthesize the final agenda now.`;
         }
         console.log(`📋 Advisory Step 3: synthesized ${finalAgenda.entry_rules?.length || 0} entry rules, ${finalAgenda.exit_rules?.length || 0} exit rules`);
       } else {
-        console.log('📋 Advisory Step 3: no JSON in synthesis response, using primary agenda');
+        console.log(`📋 Advisory Step 3: no JSON in synthesis response (stop_reason=${synthesisResponse.data?.stop_reason}, output_tokens=${synthesisResponse.data?.usage?.output_tokens}), using primary agenda`);
       }
     } catch (parseErr) {
       console.log('📋 Advisory Step 3: JSON parse failed, using primary agenda:', parseErr.message);
@@ -13030,7 +13032,7 @@ Synthesize the final agenda now.`;
       const repairResponse = await callAnthropicWithMinuteBoundaryRetry({
         label: 'Advisory Step 3b',
         model: synthesisAnthropicModel,
-        maxTokens: 3072,
+        maxTokens: 16384, // returns the full repaired agenda, same size as Step 1's
         system: `You repair an options bot standing rulebook. Add or amend only the missing watcher rules needed to satisfy REQUIRED STANDING RULEBOOK COVERAGE. The favorable conditions must come from the supplied market, account, and position facts. Preserve valid existing rules unless they contradict risk discipline.
 ${getAdvisoryDataQualityPrompt()}
 ${getMomentumEvidenceDisciplinePrompt()}
@@ -13065,7 +13067,7 @@ ${top5Calls.length > 0 ? top5Calls.map((c, i) => `${i + 1}. ${c.name} | delta=${
 
 Return the full repaired agenda JSON.`,
         }],
-        timeout: 120000,
+        timeout: 600000,
       });
       const repairedText = getAnthropicResponseText(repairResponse.data);
       const repairedAgenda = extractJSON(repairedText);
@@ -13094,7 +13096,7 @@ Return the full repaired agenda JSON.`,
         missingRulebookCoverage = findMissingRulebookRequirements(finalAgenda, rulebookRequirements);
         console.log(`📋 Advisory Step 3b: repaired agenda, missing watchers remaining=${missingRulebookCoverage.length}`);
       } else {
-        console.log('📋 Advisory Step 3b: no JSON in repair response');
+        console.log(`📋 Advisory Step 3b: no JSON in repair response (stop_reason=${repairResponse.data?.stop_reason}, output_tokens=${repairResponse.data?.usage?.output_tokens})`);
       }
     } catch (e) {
       console.log('📋 Advisory Step 3b FAILED:', getAnthropicErrorMessage(e));
