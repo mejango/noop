@@ -5525,7 +5525,7 @@ ${pagesToReview.map((pagePath) => `- ${pagePath}`).join('\n')}
 8. **Live-state boundaries**: Do strategy pages avoid embedding current spot, skew, score, budget, or gate values that belong in research/advisory state?
 
 ## Materiality Bar
-Report only issues that would mislead a trading decision or misstate current or historical fact: contradictions, wrong numbers or units, stale live state, unsupported material claims, or strategy pages inventing rules. Do not report formatting, column consistency, wording, epistemic tone, caveat placement, sub-1% rounding, or cross-reference tidiness. Every rewrite is re-audited, so nitpicks keep sound pages flagged forever. A sound page returns no issues; do not search for something to report.
+Report only issues that would mislead a trading decision or misstate current or historical fact: contradictions, wrong numbers or units, stale live state, unsupported material claims, or strategy pages inventing rules. Do not report formatting, column consistency, wording, epistemic tone, caveat placement, sub-1% rounding, or cross-reference tidiness. Values that agree at their stated precision are consistent: timestamps within 5 minutes (01:31 and 01:32 both describe 01:31:58), approximate '~' figures such as DTE on rows hours apart, and rounded totals. Flag them only when they differ beyond that precision. Every rewrite is re-audited, so nitpicks keep sound pages flagged forever. A sound page returns no issues; do not search for something to report.
 
 ## Instructions
 Return one compact audit object and do not rewrite page content during validation:
