@@ -4635,8 +4635,14 @@ const formatTickEvidenceLine = (row) => {
   const medium = parsed.medium_momentum?.main || parsed.medium_momentum || 'unknown';
   const short = parsed.short_momentum?.main || parsed.short_momentum || 'unknown';
   const source = row.id != null ? `tick:#${row.id}` : `tick:${row.timestamp}`;
-  return `[${source}] ${row.timestamp} | spot=${formatWikiNumber(parsed.price, 2, '$')} | medium=${medium} | short=${short} | put_score=${formatWikiNumber(parsed.current_best_put, 4)} | call_score=${formatWikiNumber(parsed.current_best_call, 4)}`;
+  return `[${source}] ${row.timestamp} | spot=${formatWikiNumber(parsed.price, 2, '$')} | medium=${medium} | short=${short} | put_score=${formatWikiNumber(parsed.current_best_put, 4)} | call_score=${formatWikiNumber(parsed.current_best_call, 4)}${formatTickBestLeg('best_put', parsed.best_put_detail)}${formatTickBestLeg('best_call', parsed.best_call_detail)}`;
 };
+
+// Without the instrument and DTE here, each parallel ingest call derived DTE on its own
+// and pages disagreed for the same tick (5.1 / 5.9 / 6.1 on Sep 26).
+const formatTickBestLeg = (label, detail) => (detail?.instrument
+  ? ` | ${label}=${detail.instrument} dte=${formatWikiNumber(detail.dte, 1)}`
+  : '');
 
 const formatOrderEvidenceLine = (order) => {
   const side = order.success ? 'OK' : 'FAIL';

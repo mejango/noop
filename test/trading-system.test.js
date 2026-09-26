@@ -7216,6 +7216,18 @@ describe('wiki findings feed back into ingest', () => {
     assert.deepStrictEqual(buildWikiIngestFindingsContext(['regimes/current.md'], { 'regimes/current.md': { last_changed_at: new Date().toISOString() } }), []);
   });
 
+  test('tick evidence names the best legs and their DTE so parallel ingest calls agree', () => {
+    const { formatTickEvidenceLine } = loadProduction(['formatTickEvidenceLine']);
+    const line = formatTickEvidenceLine({ id: 173153, timestamp: '2026-09-26T05:53:59Z', summary: JSON.stringify({
+      price: 2685.4, current_best_put: 0.0031, current_best_call: 46.6,
+      best_put_detail: { instrument: 'ETH-20261127-1800-P', dte: 62.08 },
+      best_call_detail: { instrument: 'ETH-20261002-2900-C', dte: 6.08 },
+    }) });
+    assert.ok(line.includes('best_put=ETH-20261127-1800-P dte=62.1'));
+    assert.ok(line.includes('best_call=ETH-20261002-2900-C dte=6.1'));
+    assert.ok(!formatTickEvidenceLine({ id: 1, timestamp: 't', summary: '{}' }).includes('best_'), 'older ticks without detail stay unchanged');
+  });
+
   test('findings never become page content, and lint holds a materiality bar', () => {
     assert.ok(SCRIPT_SOURCE.includes('/^#+\\s*(outstanding\\s+)?validation findings/im'), 'ingest rejects a leaked findings section');
     assert.ok(SCRIPT_SOURCE.includes('## Materiality Bar'), 'every rewrite is re-audited; nitpicks would keep sound pages flagged');
