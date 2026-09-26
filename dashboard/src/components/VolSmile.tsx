@@ -17,6 +17,27 @@ const DELTA_TICKS = [-0.4, -0.25, 0, 0.25, 0.4];
 const DELTA_TICK_LABEL: Record<string, string> = { '-0.4': '10Δ P', '-0.25': '25Δ P', '0': 'ATM', '0.25': '25Δ C', '0.4': '10Δ C' };
 
 type Zone = { delta: [number, number]; dte: [number, number] };
+
+// Skew measures for the per-expiry bar panel. All in vol points (IV differences).
+const diff = (a: number | null, b: number | null) => (a != null && b != null ? a - b : null);
+const SKEW_METRICS = [
+  { key: 'rr25', label: '25Δ risk reversal', short: 'RR25', color: null,
+    hint: '25Δ call IV − 25Δ put IV. Above 0: calls cost more than matching puts.',
+    value: (s: SmileStats) => s.rr25 },
+  { key: 'rr10', label: '10Δ risk reversal', short: 'RR10', color: null,
+    hint: '10Δ call IV − 10Δ put IV. The same comparison out in the tails.',
+    value: (s: SmileStats) => s.rr10 },
+  { key: 'callWing', label: 'Call wing premium', short: 'call wing', color: '#10b981',
+    hint: '10Δ call IV − ATM IV. Extra paid for the far calls you sell.',
+    value: (s: SmileStats) => diff(s.call10, s.atm) },
+  { key: 'putWing', label: 'Put wing premium', short: 'put wing', color: '#f87171',
+    hint: '10Δ put IV − ATM IV. Extra cost of far puts (your protection).',
+    value: (s: SmileStats) => diff(s.put10, s.atm) },
+  { key: 'fly25', label: '25Δ butterfly', short: 'fly25', color: '#c084fc',
+    hint: 'Mean 25Δ call/put IV − ATM IV. Higher = both wings pricier.',
+    value: (s: SmileStats) => (s.call25 != null && s.put25 != null && s.atm != null ? (s.call25 + s.put25) / 2 - s.atm : null) },
+] as const;
+type SkewKey = (typeof SKEW_METRICS)[number]['key'];
 type HistoryRow = { name: string; expiry: number; strike: number; type: 'P' | 'C'; delta: number; iv: number; timestamp: string };
 type SmileResponse = {
   asOf?: string; expiries: SmileExpiry[]; history: HistoryRow[]; historyScope?: 'full' | 'zones';
@@ -57,6 +78,8 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
   const [axis, setAxis] = useState<Axis>('delta');
   const [view, setView] = useState<'chart' | 'table'>('chart');
   const [showHistory, setShowHistory] = useState(true);
+  const [skewKey, setSkewKey] = useState<SkewKey>('rr25');
+  const skewMetric = SKEW_METRICS.find(m => m.key === skewKey) ?? SKEW_METRICS[0];
 
   // ── Playback: frames from iv_smile_snapshots, decoded client-side ──
   const [replay, setReplay] = useState(false);
@@ -190,7 +213,10 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
   const heldPts = series.flatMap(s => s.pts.filter(p => p.held != null)).sort((a, b) => a.x - b.x).map((p, i) => ({ ...p, below: i % 2 === 1 }));
 
   // Term-structure panel data, one row per expiry.
-  const term = rows.map(r => ({ label: `${Math.round(r.dte)}d`, expiry: r.expiry, atm: r.stats.atm, rr25: r.stats.rr25, inCall: r.inCall, inPut: r.inPut }));
+  const term = rows.map(r => ({ label: `${Math.round(r.dte)}d`, expiry: r.expiry, atm: r.stats.atm, skew: skewMetric.value(r.stats), inCall: r.inCall, inPut: r.inPut }));
+  // Bars start at zero: the domain always spans 0.
+  const skewValues = term.map(t => t.skew).filter((v): v is number => v != null && Number.isFinite(v));
+  const skewDomain: [number, number] = [Math.min(0, ...skewValues), Math.max(0, ...skewValues)];
   const zoneBand = (key: 'inCall' | 'inPut') => {
     const inZone = term.filter(t => t[key]);
     return inZone.length ? [inZone[0].label, inZone[inZone.length - 1].label] as const : null;
@@ -417,17 +443,35 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
           {/* Term structure + skew by expiry: two measures, two charts, shared x */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
             {([
-              { key: 'atm', title: 'ATM IV term structure', hint: 'upward = later expiries pricier' },
-              { key: 'rr25', title: '25Δ risk reversal by expiry', hint: 'call IV − put IV · green = calls rich' },
+              { key: 'atm', title: 'ATM IV term structure', hint: 'At-the-money IV per expiry. Rising = normal; near expiries above far ones = stress.' },
+              { key: 'skew', title: '', hint: '' },
             ] as const).map(panel => (
               <div key={panel.key}>
-                <div className="text-[10px] text-gray-500 mb-0.5 flex">
-                  {panel.title}<span className="text-gray-600 ml-auto">{panel.hint}</span>
-                </div>
+                {panel.key === 'skew' ? (
+                  <div className="text-[10px] text-gray-500 mb-0.5">
+                    <label className="flex items-center gap-1">
+                      <select
+                        value={skewKey}
+                        onChange={e => setSkewKey(e.target.value as SkewKey)}
+                        className="bg-gray-800 border border-white/10 rounded px-1 py-0.5 text-[10px] text-gray-300 cursor-pointer"
+                      >
+                        {SKEW_METRICS.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+                      </select>
+                      by expiry
+                    </label>
+                    <div className="text-gray-600 mt-0.5">{skewMetric.hint}</div>
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-gray-500 mb-0.5">
+                    {panel.title}
+                    <div className="text-gray-600 mt-0.5">{panel.hint}</div>
+                  </div>
+                )}
                 <ResponsiveContainer width="100%" height={110}>
                   <ComposedChart data={term} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                     <XAxis {...chartAxis} dataKey="label" interval="preserveStartEnd" tick={{ ...chartAxis.tick, fontSize: 9 }} />
-                    <YAxis {...chartAxis} width={40} domain={['auto', 'auto']} tickFormatter={(v: number) => (panel.key === 'atm' ? `${v.toFixed(0)}%` : fmtSigned(v, 0))} />
+                    <YAxis {...chartAxis} width={40} tickFormatter={(v: number) => (panel.key === 'atm' ? `${v.toFixed(0)}%` : fmtSigned(v, 0))}
+                      domain={panel.key === 'atm' ? ['auto', 'auto'] : skewDomain} />
                     {callBand && <ReferenceArea x1={callBand[0]} x2={callBand[1]} fill={CALL_ZONE} fillOpacity={0.07} />}
                     {putBand && <ReferenceArea x1={putBand[0]} x2={putBand[1]} fill={PUT_ZONE} fillOpacity={0.07} />}
                     {panel.key === 'atm' ? (
@@ -441,9 +485,12 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
                     ) : (
                       <>
                         <ReferenceLine y={0} stroke="#555" />
-                        <Bar dataKey="rr25" isAnimationActive={false} radius={[2, 2, 0, 0]}
+                        <Bar dataKey="skew" isAnimationActive={false} radius={[2, 2, 0, 0]}
                           onClick={(d: { payload?: { expiry: number } }) => d.payload && toggle(d.payload.expiry)} style={{ cursor: 'pointer' }}>
-                          {term.map(t => <Cell key={t.expiry} fill={(t.rr25 ?? 0) >= 0 ? CALL_ZONE : PUT_ZONE} fillOpacity={colorOf(t.expiry) ? 0.9 : 0.45} />)}
+                          {/* Risk reversals colour by sign (calls vs puts richer); the one-sided measures keep one colour. */}
+                          {term.map(t => <Cell key={t.expiry}
+                            fill={skewMetric.color ?? ((t.skew ?? 0) >= 0 ? CALL_ZONE : PUT_ZONE)}
+                            fillOpacity={colorOf(t.expiry) ? 0.9 : 0.45} />)}
                         </Bar>
                       </>
                     )}
@@ -455,7 +502,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
                         return (
                           <div style={{ ...chartTooltip.contentStyle, padding: '6px 10px' }} className="text-xs tabular-nums">
                             <div className="text-gray-300">{rows.find(r => r.expiry === t.expiry)?.label}</div>
-                            <div className="text-gray-400">ATM {fmtPct(t.atm)} · RR25 {fmtSigned(t.rr25)}</div>
+                            <div className="text-gray-400">ATM {fmtPct(t.atm)} · {skewMetric.short} {fmtSigned(t.skew)}</div>
                             <div className="text-gray-600">click to {colorOf(t.expiry) ? 'hide' : 'show'} on smile</div>
                           </div>
                         );
