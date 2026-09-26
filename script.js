@@ -6867,9 +6867,33 @@ const selectAssessmentText = (...candidates) => {
   return 'No assessment produced';
 };
 
+// Advisors get the regime call and what would falsify it. The full narrative stays in the
+// mandelbrot_archive journal (dashboard drawer) so one model's prose doesn't steer the next.
 const buildMandelbrotContextBlock = (mandelbrotContext) => {
   if (!mandelbrotContext) return 'No Mandelbrot regime context available.';
-  return JSON.stringify(mandelbrotContext, null, 2);
+  const confidence = Number(mandelbrotContext.confidence);
+  const invalidations = Array.isArray(mandelbrotContext.invalidations) ? mandelbrotContext.invalidations.slice(0, 4) : [];
+  return [
+    `Regime: ${mandelbrotContext.regime}${Number.isFinite(confidence) ? ` (confidence ${confidence.toFixed(2)})` : ''}.`,
+    invalidations.length ? `Invalidated if: ${invalidations.map(v => String(v).trim()).join(' | ')}` : 'No invalidations recorded.',
+  ].join('\n');
+};
+
+// The computed 30d hourly path statistics, without the raw sample series.
+const formatSpotPathStructureForAdvisor = (ctx) => {
+  if (!ctx || !ctx.point_count) return 'Spot path statistics unavailable.';
+  const r = ctx.returns_pct || {}, m = ctx.hourly_move_stats_pct || {}, t = ctx.tail_and_scaling || {};
+  const j = ctx.jump_counts || {}, c = ctx.concentration_pct || {}, v = ctx.vol_clustering_proxy || {};
+  const moves = (list = []) => list.slice(0, 3).map(([hour, pct]) => `${pct}% @${hour}`).join(', ') || 'n/a';
+  return [
+    `Source ${ctx.source}, ${ctx.point_count} hourly points (${ctx.first_sample_hour} → ${ctx.last_sample_hour}).`,
+    `Returns %: 1h ${r['1h'] ?? 'n/a'} | 6h ${r['6h'] ?? 'n/a'} | 24h ${r['24h'] ?? 'n/a'} | 7d ${r['7d'] ?? 'n/a'} | 30d ${r['30d'] ?? 'n/a'}.`,
+    `Hourly |move| %: mean ${m.average_abs ?? 'n/a'}, median ${m.median_abs ?? 'n/a'}, p90 ${m.p90_abs ?? 'n/a'}; max up ${m.max_up ?? 'n/a'}, max down ${m.max_down ?? 'n/a'}.`,
+    `Fat tails: excess kurtosis ${t.excess_kurtosis_hourly ?? 'n/a'} (Gaussian = 0). Time scaling: 24h variance ratio ${t.variance_ratio_24h ?? 'n/a'} over ${t.variance_ratio_days ?? 0} days (1 = square-root-of-time; >1 persistent, <1 mean-reverting).`,
+    `Jumps (hours): >0.5% ${j.abs_gt_0_5pct ?? 'n/a'}, >1% ${j.abs_gt_1pct ?? 'n/a'}, >2% ${j.abs_gt_2pct ?? 'n/a'}, >3% ${j.abs_gt_3pct ?? 'n/a'}. Concentration: top 5 hours = ${c.top_5_hourly_abs_moves_share ?? 'n/a'}% of all |movement|, top 10 = ${c.top_10_hourly_abs_moves_share ?? 'n/a'}%.`,
+    `Clustering: ${v.adjacent_large_move_pairs ?? 'n/a'} back-to-back pairs of top-quartile moves (threshold ${v.large_move_threshold_p75_abs_pct ?? 'n/a'}%).`,
+    `Largest hours — up: ${moves(ctx.largest_hourly_moves?.up)}; down: ${moves(ctx.largest_hourly_moves?.down)}.`,
+  ].join('\n');
 };
 
 const normalizeTalebSecondOpinion = (payload) => {
@@ -7030,6 +7054,22 @@ const buildMandelbrotSpotPathContext = ({
     ? roundForAdvisory((sortedAbsMoves.slice(0, count).reduce((sum, value) => sum + value, 0) / totalAbsMove) * 100, 2)
     : null;
   const largeMoveThreshold = quantile(absMoves, 0.75);
+  // Fat tails: excess kurtosis of hourly returns (0 for a Gaussian).
+  const meanMove = average(hourlyMoves.map((move) => move.pct));
+  const m2 = average(hourlyMoves.map((move) => (move.pct - meanMove) ** 2));
+  const m4 = average(hourlyMoves.map((move) => (move.pct - meanMove) ** 4));
+  const excessKurtosis = hourlyMoves.length >= 48 && m2 > 0 ? m4 / (m2 ** 2) - 3 : null;
+  // Time scaling: variance of non-overlapping 24h returns over 24× hourly variance.
+  // 1 = square-root-of-time holds; >1 trending/persistent; <1 mean-reverting within the day.
+  const dailyMoves = [];
+  for (let i = hourlyMoves.length % 24; i + 24 <= hourlyMoves.length; i += 24) {
+    dailyMoves.push(hourlyMoves.slice(i, i + 24).reduce((sum, move) => sum + move.pct, 0));
+  }
+  const dailyMean = average(dailyMoves);
+  const dailyVariance = dailyMoves.length >= 10
+    ? dailyMoves.reduce((sum, v) => sum + (v - dailyMean) ** 2, 0) / (dailyMoves.length - 1)
+    : null;
+  const varianceRatio24h = dailyVariance != null && m2 > 0 ? dailyVariance / (24 * m2) : null;
   let adjacentLargeMoveCount = 0;
   if (Number.isFinite(largeMoveThreshold)) {
     for (let i = 1; i < absMoves.length; i++) {
@@ -7055,6 +7095,11 @@ const buildMandelbrotSpotPathContext = ({
       p90_abs: roundForAdvisory(quantile(absMoves, 0.9), 3),
       max_up: roundForAdvisory(Math.max(0, ...hourlyMoves.map((move) => move.pct)), 3),
       max_down: roundForAdvisory(Math.min(0, ...hourlyMoves.map((move) => move.pct)), 3),
+    },
+    tail_and_scaling: {
+      excess_kurtosis_hourly: roundForAdvisory(excessKurtosis, 2),
+      variance_ratio_24h: roundForAdvisory(varianceRatio24h, 2),
+      variance_ratio_days: dailyMoves.length,
     },
     jump_counts: {
       abs_gt_0_5pct: absMoves.filter((value) => value > 0.5).length,
@@ -7094,6 +7139,7 @@ const generateMandelbrotRegimeContext = async ({
   spotPathContext,
   sentiment,
   wikiSignals,
+  volSurface = null,
 }) => {
   if (!process.env.OPENAI_API_KEY) return null;
 
@@ -7105,7 +7151,7 @@ You are writing for a downstream Spitznagel-style strategist who will make the a
 Use Mandelbrot's finance framing from *The (Mis)Behavior of Markets* and *Fractals and Scaling in Finance*: markets are often discontinuous, concentrated, fat-tailed, and governed by scaling relationships that make Gaussian intuitions unreliable.
 
 Focus on:
-- whether skew, funding, open interest, spread/depth, and option pricing suggest unstable distribution geometry
+- whether the volatility surface (IV level vs realized, wing premiums, risk reversals, term slope), funding, open interest, spread/depth, and option pricing suggest unstable distribution geometry
 - whether volatility and option-market participation are clustering across the supplied windows
 - roughness versus smoothness of the supplied 30-day hourly spot path
 - whether movement is concentrated into bursts rather than dispersed smoothly
@@ -7145,8 +7191,12 @@ Return JSON only:
 
   const userPrompt = `Assess the market structure from a Mandelbrot lens.
 
-=== SENTIMENT / DISTRIBUTION BY WINDOW ===
-${JSON.stringify(summarizeSentimentWindowsForLLM(sentiment?.windows || {}), null, 2)}
+=== FUNDING AND OPEN INTEREST BY WINDOW ===
+${JSON.stringify(Object.fromEntries(Object.entries(summarizeSentimentWindowsForLLM(sentiment?.windows || {}))
+    .map(([label, row]) => [label, { funding_rate: row.funding_rate, aggregate_oi: row.aggregate_oi }])), null, 2)}
+
+=== VOLATILITY SURFACE (bot's call and put expiries; percentiles vs 30d) ===
+${formatVolSurfaceForAdvisor(volSurface)}
 
 === BROAD QUOTE SNAPSHOT (all recorded tenors, not the entry candidate pool) ===
 ${JSON.stringify(summarizeMarketQualitySnapshotForLLM(sentiment?.latest?.marketQuality || []), null, 2)}
@@ -12333,9 +12383,14 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
   if (db) {
     try {
       let spotPathRows = [];
-      let source = 'spot_prices_hourly';
-      if (typeof db.getSpotPricesHourly === 'function') {
+      let source = 'spot_prices_hourly_close';
+      // Closes, not hourly averages: averaging smooths away the jumps these statistics measure.
+      if (typeof db.getSpotHourlyCloses === 'function') {
+        spotPathRows = db.getSpotHourlyCloses(since30dSentiment) || [];
+      }
+      if (spotPathRows.length === 0 && typeof db.getSpotPricesHourly === 'function') {
         spotPathRows = db.getSpotPricesHourly(since30dSentiment) || [];
+        source = 'spot_prices_hourly_avg';
       }
       if (spotPathRows.length === 0 && typeof db.getRecentSpotPrices === 'function') {
         spotPathRows = db.getRecentSpotPrices(since30dSentiment) || [];
@@ -12582,6 +12637,7 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
       spotPathContext: mandelbrotSpotPathContext,
       sentiment,
       wikiSignals,
+      volSurface,
     });
     if (mandelbrotContext) {
       console.log(`📋 Mandelbrot regime: ${mandelbrotContext.regime} @ ${(Number(mandelbrotContext.confidence || 0) * 100).toFixed(0)}% confidence`);
@@ -12811,11 +12867,14 @@ Protection cost: ${wikiSignals.protectionAssessment || 'unknown'}
 Call premium: ${wikiSignals.revenueAssessment || 'unknown'}
 Knowledge warnings: ${wikiSignals.warnings?.length ? wikiSignals.warnings.join('; ') : 'none'}
 ${wikiSignals.playbookRules.length > 0 ? `Playbook rules:\n${wikiSignals.playbookRules.map(r => `- ${r}`).join('\n')}` : ''}` : ''}
-=== MANDELBROT MARKET STRUCTURE ARCHIVE ===
+=== SPOT PATH STRUCTURE (30d hourly closes, computed) ===
+${formatSpotPathStructureForAdvisor(mandelbrotSpotPathContext)}
+
+=== MANDELBROT REGIME (label and invalidations; full narrative archived) ===
 ${buildMandelbrotContextBlock(mandelbrotContext)}
 ${wikiContext ? `\n=== KNOWLEDGE WIKI (cumulative bot knowledge) ===\n${wikiContext}` : ''}
 
-Use the Mandelbrot archive as descriptive market-structure context. It highlights what should matter intellectually, but it does not prescribe trade actions.`;
+Use the spot path structure and Mandelbrot regime as descriptive market-structure context. They highlight what should matter intellectually, but they do not prescribe trade actions.`;
 
   const primaryUserPrompt = `${sharedAdvisoryInputBlock}
 
