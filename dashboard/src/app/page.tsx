@@ -8,6 +8,7 @@ import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import { DASHBOARD_RANGES } from '@/lib/dashboard-ranges';
 import { buildOptionsCashflowChart, cashflowDisplayDomain, type CashflowBucket } from '@/lib/options-cashflow-chart';
 import Card from '@/components/Card';
+import VolSmile from '@/components/VolSmile';
 import { Bot, User } from 'lucide-react';
 import {
   ComposedChart, Line, Bar, Scatter, XAxis, YAxis, Tooltip,
@@ -2552,6 +2553,7 @@ export default function OverviewPage() {
             )}
 
             </div>
+            <VolSmile positions={account.positions} />
           </Card>
         );
       })()}

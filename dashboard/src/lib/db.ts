@@ -408,6 +408,13 @@ function prepareAll(d: Database.Database) {
       WHERE symbol = ? AND exchange = '${FUNDING_EXCHANGE}' AND timestamp > ?
     `),
 
+    getSmileSnapshotAt: d.prepare(`
+      SELECT timestamp, instrument_name, strike, expiry, option_type, delta, implied_vol
+      FROM options_snapshots
+      WHERE timestamp = (SELECT MAX(timestamp) FROM options_snapshots WHERE timestamp <= ? AND timestamp > ?)
+        AND implied_vol > 0 AND delta IS NOT NULL
+    `),
+
     getOptionsSkew: d.prepare(`
       SELECT timestamp, avg_put_iv, avg_call_iv
       FROM oi_snapshots
@@ -1274,6 +1281,16 @@ export function getFundingRateAvg24h(symbol = FUNDING_SYMBOL) {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
     return (getStmts().getFundingRateAvg24h.get(symbol, since) as { avg_rate: number | null })?.avg_rate ?? null;
   } catch { return null; }
+}
+
+// Bot-candidate options (its trade zones only) from the snapshot nearest `at`, within 2h before it.
+export function getSmileSnapshotAt(at: Date) {
+  try {
+    return getStmts().getSmileSnapshotAt.all(at.toISOString(), new Date(at.getTime() - 2 * 3_600_000).toISOString()) as {
+      timestamp: string; instrument_name: string; strike: number; expiry: number;
+      option_type: string; delta: number; implied_vol: number;
+    }[];
+  } catch { return []; }
 }
 
 export function getOptionsSkew(since: string) {
