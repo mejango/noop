@@ -80,3 +80,12 @@ test('bot snapshot rows decode to exactly the live chain points', () => {
   assert.deepEqual(decoded.points.map(p => [p.name, p.type, p.delta, +p.iv.toFixed(2), +p.bidIv.toFixed(2), p.oi]),
     live.points.map(p => [p.name, p.type, p.delta, +p.iv.toFixed(2), +p.bidIv.toFixed(2), p.oi]));
 });
+
+test('advisor risk reversal matches the dashboard chart', () => {
+  const { riskReversal25 } = require('../bot/vol-surface');
+  const pts = [
+    { type: 'P', delta: -0.05, iv: 80 }, { type: 'P', delta: -0.30, iv: 60 },
+    { type: 'C', delta: 0.30, iv: 55 }, { type: 'C', delta: 0.05, iv: 65 },
+  ];
+  assert.equal(riskReversal25(pts), expiryStats(pts).rr25);
+});

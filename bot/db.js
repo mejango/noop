@@ -1482,6 +1482,23 @@ const stmts = {
     ORDER BY side
   `),
 
+  // Bot-candidate IVs sampled at the first snapshot of each hour (volatility-surface percentiles).
+  getVolSurfaceHistoryRows: db.prepare(`
+    WITH picks AS (
+      SELECT MIN(timestamp) AS ts FROM options_snapshots
+      WHERE timestamp > @since AND implied_vol > 0
+      GROUP BY substr(timestamp, 1, 13)
+    )
+    SELECT o.timestamp, o.expiry, o.option_type, o.delta, o.implied_vol
+    FROM options_snapshots o JOIN picks p ON o.timestamp = p.ts
+    WHERE o.implied_vol > 0 AND o.delta IS NOT NULL
+  `),
+
+  getSpotHourlyCloses: db.prepare(`
+    SELECT hour, close FROM spot_prices_hourly
+    WHERE hour > @since AND close > 0 ORDER BY hour ASC
+  `),
+
   insertSmileSnapshot: db.prepare(`
     INSERT INTO iv_smile_snapshots (timestamp, expiry, forward, spot, points)
     VALUES (@timestamp, @expiry, @forward, @spot, @points)
@@ -2456,6 +2473,9 @@ const getAvgCallPremium7d = () => {
   return stmts.getAvgCallPremium7d.get({ since });
 };
 
+const getVolSurfaceHistoryRows = (since) => stmts.getVolSurfaceHistoryRows.all({ since });
+const getSpotHourlyCloses = (since) => stmts.getSpotHourlyCloses.all({ since });
+
 const insertSmileSnapshotBatch = (rows, timestamp) => {
   db.transaction(() => {
     for (const row of rows) stmts.insertSmileSnapshot.run({ ...row, timestamp });
@@ -3042,6 +3062,8 @@ module.exports = {
   migrateFromJson,
   insertOISnapshot,
   insertSmileSnapshotBatch,
+  getVolSurfaceHistoryRows,
+  getSpotHourlyCloses,
   insertFundingRates,
   getFundingRates,
   getFundingRatesHourly,

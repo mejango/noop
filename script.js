@@ -134,6 +134,7 @@ const {
 } = require('./bot/put-score');
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
 const { buildSmileRows, SMILE_SNAPSHOT_INTERVAL_MS } = require('./bot/iv-smile');
+const { buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor } = require('./bot/vol-surface');
 let lastSmileSnapshotAt = 0;
 const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
 const { summarizeAdvisoryQuotes, candidateSpreadPct } = require('./bot/advisory-quotes');
@@ -6415,6 +6416,26 @@ const formatSignedPct = (value, digits = 1) => {
   return `${value > 0 ? '+' : ''}${Number(value).toFixed(digits)}%`;
 };
 
+// 30d percentile history is ~720 hourly samples; rebuilding it once an hour is plenty.
+let volSurfaceHistoryCache = null;
+const buildAdvisoryVolSurface = ({ tickerMap, instruments, nowMs }) => {
+  if (!db?.getVolSurfaceHistoryRows) return null;
+  const DAY = 86_400_000;
+  const zones = { call_dte_range: CALL_EXPIRATION_RANGE, put_dte_range: PUT_EXPIRATION_RANGE };
+  const spotRows = db.getSpotHourlyCloses(new Date(nowMs - 38 * DAY).toISOString());
+  if (!volSurfaceHistoryCache || nowMs - volSurfaceHistoryCache.at > 60 * 60 * 1000) {
+    const rows = db.getVolSurfaceHistoryRows(new Date(nowMs - 30 * DAY).toISOString());
+    volSurfaceHistoryCache = { at: nowMs, history: buildSurfaceHistory(rows, spotRows, zones) };
+  }
+  const expiryByDate = {};
+  for (const i of instruments || []) expiryByDate[i.instrument_name.split('-')[1]] = i.option_details?.expiry;
+  const expiries = buildSmileRows(tickerMap, expiryByDate).map(r => ({
+    expiry: r.expiry,
+    points: JSON.parse(r.points).map(([, isCall, delta, iv]) => ({ type: isCall ? 'C' : 'P', delta, iv: iv * 100 })),
+  }));
+  return buildVolSurface({ current: { atMs: nowMs, expiries }, spotRows, history: volSurfaceHistoryCache.history, zones });
+};
+
 const summarizeSentimentForAdvisor = (sentimentWindows, marketQualityRows = []) => {
   const summary = summarizeSentimentWindowsForLLM(sentimentWindows);
   const windowOrder = ['6h', '24h', '7d', '30d'];
@@ -6425,7 +6446,6 @@ const summarizeSentimentForAdvisor = (sentimentWindows, marketQualityRows = []) 
     if (!row) continue;
     lines.push(
       `${label}: funding ${row.funding_rate.current != null ? row.funding_rate.current : 'n/a'} vs avg ${row.funding_rate.avg != null ? row.funding_rate.avg : 'n/a'} (${row.funding_rate.trend}; Derive ETH-PERP hourly rate), ` +
-      `skew ${row.options_skew.current_pct != null ? `${formatSignedPct(row.options_skew.current_pct, 2)} current` : 'n/a'} vs ${row.options_skew.avg_pct != null ? `${formatSignedPct(row.options_skew.avg_pct, 2)} avg` : 'n/a'} (${row.options_skew.direction}), ` +
       `OI ${row.aggregate_oi.current != null ? row.aggregate_oi.current : 'n/a'} (${row.aggregate_oi.change_pct != null ? formatSignedPct(row.aggregate_oi.change_pct, 1) : 'n/a'})`
     );
   }
@@ -12297,6 +12317,13 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
     }
   }
 
+  let volSurface = null;
+  try {
+    volSurface = buildAdvisoryVolSurface({ tickerMap, instruments, nowMs });
+  } catch (e) {
+    console.log('📋 Advisory: volatility surface unavailable:', e.message);
+  }
+
   let mandelbrotSpotPathContext = buildMandelbrotSpotPathContext({
     spotPrice,
     spotRows: [],
@@ -12728,6 +12755,9 @@ Spot Price: $${spotPrice.toFixed(2)}
 === OPTIONS MARKET STRUCTURE (PRIMARY ADVISORY EVIDENCE) ===
 ${summarizeSentimentForAdvisor(sentiment?.windows || {}, sentiment?.latest?.marketQuality || [])}
 
+=== VOLATILITY SURFACE (PRIMARY EVIDENCE: IS VOL CHEAP OR RICH WHERE WE TRADE) ===
+${formatVolSurfaceForAdvisor(volSurface)}
+
 === ROLLING OPTION VALUE CONTEXT (PRIMARY ENTRY VALUE EVIDENCE) ===
 ${formatRollingOptionValueContext(rollingOptionValueContext)}
 
@@ -12994,6 +13024,9 @@ ${JSON.stringify(secondOpinion, null, 2)}
 ## Rolling Option Value Context
 ${formatRollingOptionValueContext(rollingOptionValueContext)}
 
+## Volatility Surface
+${formatVolSurfaceForAdvisor(volSurface)}
+
 ## Required Standing Rulebook Coverage
 ${formatRulebookRequirements(rulebookRequirements)}
 
@@ -13025,6 +13058,9 @@ Not available (OpenAI key not set or call failed). Validate and pass through the
 
 === ROLLING OPTION VALUE CONTEXT ===
 ${formatRollingOptionValueContext(rollingOptionValueContext)}
+
+=== VOLATILITY SURFACE ===
+${formatVolSurfaceForAdvisor(volSurface)}
 
 === REQUIRED STANDING RULEBOOK COVERAGE ===
 ${formatRulebookRequirements(rulebookRequirements)}
@@ -13110,6 +13146,9 @@ ${JSON.stringify(finalAgenda, null, 2)}
 
 === ROLLING OPTION VALUE CONTEXT ===
 ${formatRollingOptionValueContext(rollingOptionValueContext)}
+
+=== VOLATILITY SURFACE ===
+${formatVolSurfaceForAdvisor(volSurface)}
 
 === ACCOUNT HEALTH ===
 ${JSON.stringify(accountHealth, null, 2)}
@@ -13266,12 +13305,12 @@ Return the full repaired agenda JSON.`,
   });
 
   return { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion, mandelbrotContext,
-    rollingOptionValueContext, persistedAgenda, spotPrice };
+    rollingOptionValueContext, volSurface, persistedAgenda, spotPrice };
 };
 
 const publishTradingAdvisoryDraft = (draft, { inputSnapshot, checkedSnapshot, attempt }) => {
   const { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion, mandelbrotContext,
-    rollingOptionValueContext, persistedAgenda, spotPrice } = draft;
+    rollingOptionValueContext, volSurface = null, persistedAgenda, spotPrice } = draft;
   const publication = {
     input_as_of: inputSnapshot.marketTimestamp,
     quote_state_checked_at: checkedSnapshot.marketTimestamp,
@@ -13288,7 +13327,7 @@ const publishTradingAdvisoryDraft = (draft, { inputSnapshot, checkedSnapshot, at
   if (secondOpinion) journalEntries.push({ entry_type: 'advisory_taleb', content: JSON.stringify(secondOpinion, null, 2) });
   if (mandelbrotContext) journalEntries.push({ entry_type: 'mandelbrot_archive', content: JSON.stringify(mandelbrotContext, null, 2) });
   journalEntries.push({ entry_type: 'advisory_context', content: JSON.stringify({
-    advisory_id: advisoryId, rolling_option_value_context: rollingOptionValueContext, publication,
+    advisory_id: advisoryId, rolling_option_value_context: rollingOptionValueContext, volatility_surface: volSurface, publication,
   }, null, 2) });
   if (!db?.publishAdvisory) throw new Error('Advisory publication storage unavailable');
   db.publishAdvisory(advisoryId, allRules, journalEntries);
