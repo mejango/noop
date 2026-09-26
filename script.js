@@ -133,6 +133,8 @@ const {
   getBuyPutPriceForEdgeScore,
 } = require('./bot/put-score');
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
+const { buildSmileRows, SMILE_SNAPSHOT_INTERVAL_MS } = require('./bot/iv-smile');
+let lastSmileSnapshotAt = 0;
 const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
 const { summarizeAdvisoryQuotes, candidateSpreadPct } = require('./bot/advisory-quotes');
 const { readAdvisoryMarketSnapshot } = require('./bot/advisory-market-snapshot');
@@ -13488,6 +13490,19 @@ const runBot = async () => {
             oiTickerMap[name] = data;
             tickerMap[name] = data;
           }
+        }
+
+        // Full-chain smile snapshot for dashboard playback, throttled to one per interval.
+        if (Date.now() - lastSmileSnapshotAt >= SMILE_SNAPSHOT_INTERVAL_MS) {
+          try {
+            const expiryByDate = {};
+            for (const i of instruments) expiryByDate[i.instrument_name.split('-')[1]] = i.option_details?.expiry;
+            const smileRows = buildSmileRows(oiTickerMap, expiryByDate);
+            if (smileRows.length) {
+              db.insertSmileSnapshotBatch(smileRows, tickTimestamp);
+              lastSmileSnapshotAt = Date.now();
+            }
+          } catch (e) { console.log(`⚠️ Smile snapshot failed: ${e.message}`); }
         }
 
         // Aggregate OI by put/call and near/far (<30 DTE vs 30+ DTE)

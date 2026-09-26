@@ -11,7 +11,7 @@ export type SmilePoint = {
   oi: number;
 };
 
-export type SmileExpiry = { expiry: number; dte: number; forward: number; points: SmilePoint[] };
+export type SmileExpiry = { expiry: number; dte: number; forward: number; spot: number | null; points: SmilePoint[] };
 
 export type SmileStats = {
   atm: number | null;
@@ -33,10 +33,13 @@ export function deltaX(p: Pick<SmilePoint, 'type' | 'delta'>) {
 export function buildExpiry(expiry: number, tickers: Record<string, RawTicker>, now = Date.now()): SmileExpiry | null {
   const points: SmilePoint[] = [];
   const forwards: number[] = [];
+  const spots: number[] = [];
   for (const [name, t] of Object.entries(tickers)) {
     const op = t.option_pricing;
     const f = num(op?.f) ?? num(t.I);
     if (f && f > 0) forwards.push(f);
+    const spot = num(t.I);
+    if (spot && spot > 0) spots.push(spot);
     const [, , strikeStr, typeStr] = name.split('-');
     const strike = num(strikeStr), delta = num(op?.d), iv = num(op?.i);
     if (!strike || delta == null || !iv || iv <= 0 || !f) continue;
@@ -56,7 +59,32 @@ export function buildExpiry(expiry: number, tickers: Record<string, RawTicker>, 
     expiry,
     dte: Math.max(0, (expiry * 1000 - now) / 86_400_000),
     forward: forwards[Math.floor(forwards.length / 2)],
+    spot: spots.length ? spots.sort((a, b) => a - b)[Math.floor(spots.length / 2)] : null,
     points,
+  };
+}
+
+// Decode one iv_smile_snapshots row. Tuple layout is written by bot/iv-smile.js:
+// [strike, isCall (0|1), delta, iv, bidIv|null, askIv|null, oi], IVs as decimals.
+export type CompactSmileRow = { expiry: number; forward: number; spot: number | null; points: string | (number | null)[][] };
+
+const DATE_FMT = (unix: number) => new Date(unix * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+
+export function fromCompact(row: CompactSmileRow, atMs: number): SmileExpiry {
+  const tuples = (typeof row.points === 'string' ? JSON.parse(row.points) : row.points) as (number | null)[][];
+  const date = DATE_FMT(row.expiry);
+  return {
+    expiry: row.expiry,
+    dte: Math.max(0, (row.expiry * 1000 - atMs) / 86_400_000),
+    forward: row.forward,
+    spot: row.spot,
+    points: tuples.map(([strike, isCall, delta, iv, bi, ai, oi]) => {
+      const type = isCall ? 'C' : 'P';
+      return {
+        name: `ETH-${date}-${strike}-${type}`, strike: strike!, type, delta: delta!, iv: iv! * 100,
+        bidIv: bi != null ? bi * 100 : null, askIv: ai != null ? ai * 100 : null, oi: oi ?? 0,
+      };
+    }),
   };
 }
 

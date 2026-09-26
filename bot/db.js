@@ -420,6 +420,17 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_oi_snapshots_timestamp ON oi_snapshots(timestamp);
 
+  -- Full-chain OTM smile, one row per expiry per snapshot; points is a JSON tuple array (bot/iv-smile.js)
+  CREATE TABLE IF NOT EXISTS iv_smile_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    expiry INTEGER NOT NULL,
+    forward REAL NOT NULL,
+    spot REAL,
+    points TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_iv_smile_snapshots_timestamp ON iv_smile_snapshots(timestamp);
+
   CREATE TABLE IF NOT EXISTS trade_reviews (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     instrument_name TEXT NOT NULL,
@@ -1471,6 +1482,11 @@ const stmts = {
     ORDER BY side
   `),
 
+  insertSmileSnapshot: db.prepare(`
+    INSERT INTO iv_smile_snapshots (timestamp, expiry, forward, spot, points)
+    VALUES (@timestamp, @expiry, @forward, @spot, @points)
+  `),
+
   insertOISnapshot: db.prepare(`
     INSERT INTO oi_snapshots (timestamp, put_oi, call_oi, near_put_oi, near_call_oi,
       far_put_oi, far_call_oi, total_oi, pc_ratio, expiry_count, avg_put_iv, avg_call_iv)
@@ -2440,6 +2456,12 @@ const getAvgCallPremium7d = () => {
   return stmts.getAvgCallPremium7d.get({ since });
 };
 
+const insertSmileSnapshotBatch = (rows, timestamp) => {
+  db.transaction(() => {
+    for (const row of rows) stmts.insertSmileSnapshot.run({ ...row, timestamp });
+  })();
+};
+
 const insertOISnapshot = (data) => {
   stmts.insertOISnapshot.run({
     timestamp: data.timestamp || new Date().toISOString(),
@@ -3019,6 +3041,7 @@ module.exports = {
   loadPriceHistoryFromDb,
   migrateFromJson,
   insertOISnapshot,
+  insertSmileSnapshotBatch,
   insertFundingRates,
   getFundingRates,
   getFundingRatesHourly,

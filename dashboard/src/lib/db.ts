@@ -1283,6 +1283,43 @@ export function getFundingRateAvg24h(symbol = FUNDING_SYMBOL) {
   } catch { return null; }
 }
 
+// iv_smile_snapshots is created by the bot. Prepared lazily so the dashboard keeps working
+// (with empty playback) until the bot has run its migration on this database.
+const lazyStmts = new Map<string, Database.Statement>();
+function lazyAll<T>(sql: string, ...params: unknown[]): T[] {
+  try {
+    let stmt = lazyStmts.get(sql);
+    if (!stmt) { stmt = getDb().prepare(sql); lazyStmts.set(sql, stmt); }
+    return stmt.all(...params) as T[];
+  } catch { return []; }
+}
+
+export type SmileSnapshotRow = { timestamp: string; expiry: number; forward: number; spot: number | null; points: string };
+
+export function getSmileSnapshotTimestamps(since: string) {
+  return lazyAll<{ timestamp: string }>(
+    'SELECT DISTINCT timestamp FROM iv_smile_snapshots WHERE timestamp > ? ORDER BY timestamp', since,
+  ).map(r => r.timestamp);
+}
+
+export function getSmileSnapshots(timestamps: string[]) {
+  if (!timestamps.length) return [];
+  return lazyAll<SmileSnapshotRow>(
+    `SELECT timestamp, expiry, forward, spot, points FROM iv_smile_snapshots
+     WHERE timestamp IN (SELECT value FROM json_each(?)) ORDER BY timestamp, expiry`,
+    JSON.stringify(timestamps),
+  );
+}
+
+// Full-chain snapshot nearest `at`, within 2h before it.
+export function getSmileSnapshotNear(at: Date) {
+  return lazyAll<SmileSnapshotRow>(
+    `SELECT timestamp, expiry, forward, spot, points FROM iv_smile_snapshots
+     WHERE timestamp = (SELECT MAX(timestamp) FROM iv_smile_snapshots WHERE timestamp <= ? AND timestamp > ?)`,
+    at.toISOString(), new Date(at.getTime() - 2 * 3_600_000).toISOString(),
+  );
+}
+
 // Bot-candidate options (its trade zones only) from the snapshot nearest `at`, within 2h before it.
 export function getSmileSnapshotAt(at: Date) {
   try {

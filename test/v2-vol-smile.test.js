@@ -11,7 +11,8 @@ const mod = { exports: {} };
 new Function('module', 'exports', ts.transpileModule(src, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText)(mod, mod.exports);
-const { buildExpiry, ivAtDelta, deltaX, expiryStats } = mod.exports;
+const { buildExpiry, ivAtDelta, deltaX, expiryStats, fromCompact } = mod.exports;
+const { buildSmileRows } = require('../bot/iv-smile');
 
 const tick = (d, i, f = '2000') => ({ option_pricing: { d: String(d), i: String(i), f, bi: String(i - 0.01), ai: String(i + 0.01) }, stats: { oi: '5' } });
 
@@ -54,4 +55,28 @@ test('expiryStats: risk reversal is call minus put', () => {
   assert.equal(s.call10, 63);
   assert.equal(s.rr10, -13);
   assert.ok(s.rr25 < 0);
+});
+
+test('bot snapshot rows decode to exactly the live chain points', () => {
+  const expiry = Date.UTC(2026, 9, 2, 8) / 1000;
+  const tickers = {
+    'ETH-20261002-1600-P': tick(-0.05, 0.70123),
+    'ETH-20261002-1800-P': tick(-0.25, 0.6),
+    'ETH-20261002-2200-P': tick(-0.8, 0.55),
+    'ETH-20261002-2287.5-C': tick(0.25, 0.52),
+    'ETH-20261002-2600-C': tick(0.06, 0.58),
+    'ETH-20261002-4000-C': tick(0.01, 0.95),
+    'ETH-20261009-2600-C': tick(0.06, 0.58), // expiry unknown to the instrument list: skipped
+  };
+  for (const t of Object.values(tickers)) t.I = '1990';
+  const rows = buildSmileRows(tickers, { 20261002: expiry });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].spot, 1990);
+  const at = expiry * 1000 - 5 * 86_400_000;
+  const decoded = fromCompact(rows[0], at);
+  const live = buildExpiry(expiry, Object.fromEntries(Object.entries(tickers).filter(([k]) => k.includes('20261002'))), at);
+  assert.equal(decoded.dte, 5);
+  assert.equal(decoded.forward, live.forward);
+  assert.deepEqual(decoded.points.map(p => [p.name, p.type, p.delta, +p.iv.toFixed(2), +p.bidIv.toFixed(2), p.oi]),
+    live.points.map(p => [p.name, p.type, p.delta, +p.iv.toFixed(2), +p.bidIv.toFixed(2), p.oi]));
 });
