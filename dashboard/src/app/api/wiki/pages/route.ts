@@ -26,6 +26,7 @@ interface WikiPageMeta {
   summary: string;
   status: ReturnType<typeof deriveWikiPageStatus>;
   issues: string[];
+  escalationReason: string | null;
   changeSummary: string | null;
   evidenceCount: number;
   freshnessDays: number;
@@ -71,6 +72,7 @@ export function GET() {
         lastModified: lastEvidenceAt || lastChangedAt,
         lastReviewed,
         issues,
+        escalated: typeof stored.escalated_at === 'string',
         freshnessDays: page.freshnessDays,
       });
 
@@ -84,6 +86,7 @@ export function GET() {
         summary: extractWikiTldr(content),
         status,
         issues,
+        escalationReason: typeof stored.escalation_reason === 'string' ? stored.escalation_reason : null,
         changeSummary: typeof stored.change_summary === 'string' ? stored.change_summary : null,
         evidenceCount: countWikiEvidenceReferences(content),
       };
@@ -94,7 +97,7 @@ export function GET() {
       return acc;
     }, {});
     const briefing = pages.filter((page) => page.briefing);
-    const attention = pages.filter((page) => page.status !== 'current');
+    const attention = pages.filter((page) => page.status === 'needs_attention' || page.status === 'missing');
     const recentChanges = pages
       .filter((page) => page.changeSummary)
       .sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime())
@@ -123,6 +126,7 @@ export function GET() {
         current: counts.current || 0,
         stale: counts.stale || 0,
         needsAttention: counts.needs_attention || 0,
+        fixing: counts.fixing || 0,
         unreviewed: counts.unreviewed || 0,
         missing: counts.missing || 0,
         lastLint,

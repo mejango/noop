@@ -6756,6 +6756,8 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiPagesRouteSource.includes('stored.last_reviewed_at'));
     assert.ok(!wikiPagesRouteSource.includes("const lastReviewed = typeof meta.last_lint"));
     assert.ok(wikiCatalogSource.includes("'needs_attention'"));
+    assert.ok(wikiCatalogSource.includes("args.escalated ? 'needs_attention' : 'fixing'"), 'findings are FIXING until the bot escalates them');
+    assert.ok(wikiPagesRouteSource.includes("escalated: typeof stored.escalated_at === 'string'"));
     assert.ok(wikiCatalogSource.includes('freshnessDays'));
     assert.ok(wikiCatalogSource.includes('reviewedMs < changedMs'));
   });
@@ -6787,17 +6789,18 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiBrowserSource.includes('awaiting page-level validation'));
   });
 
-  test('wiki attention findings remain a manual review queue without autonomous repairs', () => {
+  test('wiki repairs run only as the bounded in-run pass, never as a separate worker', () => {
     assert.ok(!SCRIPT_SOURCE.includes('WIKI_REPAIR_'));
     assert.ok(!SCRIPT_SOURCE.includes('const getWikiRepairSchedule'));
     assert.ok(!SCRIPT_SOURCE.includes('const repairWikiPage'));
     assert.ok(!SCRIPT_SOURCE.includes('repairWikiIssues('));
     assert.ok(!SCRIPT_SOURCE.includes('_wikiRepairInFlight'));
-    assert.ok(SCRIPT_SOURCE.includes('the bot never rewrites Wiki pages in response to lint'));
+    // Aug 13: a 30-min single-page repair worker was removed. Sep 26: one repair pass per
+    // ingest, through the same guarded ingest path, so findings are fixed before anyone sees them.
+    assert.strictEqual(SCRIPT_SOURCE.split('ingestToWiki(entries, { onlyPages: repairPages })').length, 2, 'exactly one lint-driven rewrite path');
     assert.ok(wikiPagesRouteSource.includes('manualReviewPending'));
     assert.ok(!wikiPagesRouteSource.includes('lastRemediationError'));
-    assert.ok(wikiBrowserSource.includes('Manual review:'));
-    assert.ok(wikiBrowserSource.includes('Background repairs are disabled'));
+    assert.ok(wikiBrowserSource.includes('automatic repair failed or is blocked on missing data'));
     assert.ok(!wikiBrowserSource.includes('Attention worker:'));
   });
 
@@ -7226,6 +7229,32 @@ describe('wiki findings feed back into ingest', () => {
     assert.ok(line.includes('best_put=ETH-20261127-1800-P dte=62.1'));
     assert.ok(line.includes('best_call=ETH-20261002-2900-C dte=6.1'));
     assert.ok(!formatTickEvidenceLine({ id: 1, timestamp: 't', summary: '{}' }).includes('best_'), 'older ticks without detail stay unchanged');
+  });
+
+  test('ATTENTION only when automation failed: persisting after repairs, or blocked', () => {
+    const { decideWikiEscalation, getWikiPagesToRepair } = loadProduction(['decideWikiEscalation', 'getWikiPagesToRepair']);
+    const now = '2026-09-26T14:00:00Z';
+    const nit = { type: 'quality', persists: false, description: 'x' };
+    const same = { type: 'quality', persists: true, description: 'x' };
+
+    assert.deepStrictEqual(decideWikiEscalation({ repair_attempts: 3, escalated_at: now }, [], now).patch,
+      { repair_attempts: 0, escalated_at: null, escalation_reason: null }, 'clean page clears everything');
+    assert.strictEqual(decideWikiEscalation({ repair_attempts: 5 }, [nit], now).patch.escalated_at, null,
+      'a new finding is FIXING however many earlier findings were repaired');
+    assert.strictEqual(decideWikiEscalation({ repair_attempts: 1 }, [same], now).patch.escalated_at, null,
+      'one failed repair is still FIXING');
+
+    const escalated = decideWikiEscalation({ repair_attempts: 2 }, [same], now);
+    assert.strictEqual(escalated.patch.escalated_at, now);
+    assert.strictEqual(escalated.notify, true);
+    assert.strictEqual(decideWikiEscalation({ repair_attempts: 3, escalated_at: now }, [same], now).notify, false, 'notify once');
+
+    assert.ok(decideWikiEscalation({}, [{ type: 'blocked', persists: false }], now).patch.escalation_reason.startsWith('blocked'),
+      'blocked goes straight to a human');
+    assert.deepStrictEqual(getWikiPagesToRepair({
+      'revenue/efficiency.md': { issues: ['[blocked] reviews never written'] },
+      'strategy/mistakes.md': { issues: ['[quality] header date ambiguous'] },
+    }), ['strategy/mistakes.md'], 'rewriting cannot fix a blocked finding');
   });
 
   test('findings never become page content, and lint holds a materiality bar', () => {

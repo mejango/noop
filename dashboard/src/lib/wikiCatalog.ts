@@ -1,4 +1,4 @@
-export type WikiPageStatus = 'current' | 'stale' | 'needs_attention' | 'unreviewed' | 'missing';
+export type WikiPageStatus = 'current' | 'stale' | 'fixing' | 'needs_attention' | 'unreviewed' | 'missing';
 
 export interface WikiPageDefinition {
   path: string;
@@ -17,6 +17,8 @@ export interface StoredWikiPageMeta {
   change_summary?: string | null;
   evidence_packet?: string | null;
   issues?: string[];
+  escalated_at?: string | null;
+  escalation_reason?: string | null;
 }
 
 export const WIKI_PAGES: WikiPageDefinition[] = [
@@ -54,11 +56,13 @@ export function deriveWikiPageStatus(args: {
   lastModified: string;
   lastReviewed: string | null;
   issues: string[];
+  escalated?: boolean;
   freshnessDays: number;
   nowMs?: number;
 }): WikiPageStatus {
   if (!args.exists) return 'missing';
-  if (args.issues.length > 0) return 'needs_attention';
+  // ATTENTION is for a human: the bot escalates only findings its repairs could not fix.
+  if (args.issues.length > 0) return args.escalated ? 'needs_attention' : 'fixing';
   if (!args.lastReviewed) return 'unreviewed';
   const changedMs = new Date(args.lastModified).getTime();
   const reviewedMs = new Date(args.lastReviewed).getTime();

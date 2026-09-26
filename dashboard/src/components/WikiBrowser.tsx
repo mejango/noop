@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-type WikiPageStatus = 'current' | 'stale' | 'needs_attention' | 'unreviewed' | 'missing';
+type WikiPageStatus = 'current' | 'stale' | 'fixing' | 'needs_attention' | 'unreviewed' | 'missing';
 
 interface WikiPageMeta {
   path: string;
@@ -18,6 +18,7 @@ interface WikiPageMeta {
   summary: string;
   status: WikiPageStatus;
   issues: string[];
+  escalationReason?: string | null;
   changeSummary: string | null;
   evidenceCount: number;
   freshnessDays: number;
@@ -55,6 +56,7 @@ interface WikiSummary {
   current: number;
   stale: number;
   needsAttention: number;
+  fixing: number;
   unreviewed: number;
   missing: number;
   lastLint: string | null;
@@ -69,6 +71,7 @@ const EMPTY_SUMMARY: WikiSummary = {
   current: 0,
   stale: 0,
   needsAttention: 0,
+  fixing: 0,
   unreviewed: 0,
   missing: 0,
   lastLint: null,
@@ -90,6 +93,7 @@ const CATEGORY_LABELS: Record<string, { label: string; color: string }> = {
 const STATUS_META: Record<WikiPageStatus, { label: string; className: string; dot: string }> = {
   current: { label: 'current', className: 'text-emerald-300 border-emerald-500/25 bg-emerald-500/10', dot: 'bg-emerald-400' },
   stale: { label: 'stale', className: 'text-amber-300 border-amber-500/25 bg-amber-500/10', dot: 'bg-amber-400' },
+  fixing: { label: 'fixing', className: 'text-sky-300 border-sky-500/25 bg-sky-500/10', dot: 'bg-sky-400' },
   needs_attention: { label: 'attention', className: 'text-red-300 border-red-500/25 bg-red-500/10', dot: 'bg-red-400' },
   unreviewed: { label: 'unreviewed', className: 'text-gray-400 border-white/10 bg-white/5', dot: 'bg-gray-500' },
   missing: { label: 'missing', className: 'text-red-300 border-red-500/25 bg-red-500/10', dot: 'bg-red-400' },
@@ -566,9 +570,9 @@ export default function WikiBrowser() {
               <div className="mt-3 grid grid-cols-4 gap-1.5">
                 {[
                   ['current', summary.current, 'text-emerald-300'],
+                  ['fixing', summary.fixing, 'text-sky-300'],
                   ['stale', summary.stale, 'text-amber-300'],
-                  ['attention', summary.needsAttention, 'text-red-300'],
-                  ['unreviewed', summary.unreviewed + summary.missing, 'text-gray-400'],
+                  ['attention', summary.needsAttention + summary.missing, 'text-red-300'],
                 ].map(([label, value, color]) => (
                   <div key={String(label)} className="border border-white/5 bg-white/[0.02] px-2 py-2">
                     <p className={`text-lg leading-none ${color}`}>{value}</p>
@@ -588,7 +592,7 @@ export default function WikiBrowser() {
               )}
               {summary.manualReviewPending > 0 && (
                 <div className="mt-2 border border-amber-500/15 bg-amber-500/5 px-3 py-2 text-[10px] leading-relaxed text-amber-100/70">
-                  Manual review: {summary.manualReviewPending} flagged page{summary.manualReviewPending === 1 ? '' : 's'}. Background repairs are disabled; open a page to generate, review, and apply an AI diff on demand.
+                  {summary.manualReviewPending} page{summary.manualReviewPending === 1 ? ' needs' : 's need'} you: automatic repair failed or is blocked on missing data. Open a page to generate, review, and apply an AI diff.
                 </div>
               )}
             </section>
@@ -619,7 +623,7 @@ export default function WikiBrowser() {
                 <button onClick={() => setView('library')} className="text-[9px] text-gray-600 hover:text-gray-300">View library →</button>
               </div>
               {attention.length === 0 ? (
-                <div className="border border-emerald-500/10 bg-emerald-500/5 px-3 py-2 text-[10px] text-emerald-300">All Wiki pages are current and validated.</div>
+                <div className="border border-emerald-500/10 bg-emerald-500/5 px-3 py-2 text-[10px] text-emerald-300">Nothing needs you.{summary.fixing > 0 ? ` ${summary.fixing} finding${summary.fixing === 1 ? ' is' : 's are'} being fixed automatically.` : ''}</div>
               ) : (
                 <div className="divide-y divide-white/5 border border-white/5">
                   {attention.slice(0, 6).map((page) => (
@@ -627,7 +631,7 @@ export default function WikiBrowser() {
                       <StatusPill status={page.status} />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-[11px] text-gray-300">{page.title}</p>
-                        <p className="truncate text-[9px] text-gray-600">{page.issues[0] || (page.status === 'stale' ? `Evidence is older than its ${page.freshnessDays}d freshness window` : 'Awaiting page-level validation')}</p>
+                        <p className="truncate text-[9px] text-gray-600">{page.escalationReason ? `${page.escalationReason} · ` : ''}{page.issues[0] || 'Page file is missing'}</p>
                       </div>
                       <span className="text-[9px] text-gray-600">{formatRelative(page.lastModified)}</span>
                     </button>

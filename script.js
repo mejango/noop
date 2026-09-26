@@ -4845,6 +4845,27 @@ const buildWikiIngestFindingsContext = (selectedPages, pageMeta = {}, nowMs = Da
 };
 
 const WIKI_INGEST_MAX_EXTRA_PAGES = 3;
+// ATTENTION means the automation failed and a human must act: a finding the lint marks as
+// the same defect after this many repair attempts (the in-run repair, then the next cycle),
+// or a "blocked" finding no rewrite can resolve. Everything else is FIXING.
+const WIKI_ESCALATE_AFTER_ATTEMPTS = 2;
+
+const decideWikiEscalation = (stored = {}, pageIssues = [], now = new Date().toISOString()) => {
+  if (pageIssues.length === 0) {
+    return { patch: { repair_attempts: 0, escalated_at: null, escalation_reason: null }, notify: false };
+  }
+  const persists = pageIssues.some((issue) => issue?.persists === true);
+  // A new finding owes nothing to earlier attempts, which fixed the findings they were given.
+  const attempts = persists ? (stored?.repair_attempts || 0) : 0;
+  const reason = pageIssues.some((issue) => issue?.type === 'blocked')
+    ? 'blocked: needs data or a decision no wiki rewrite can supply'
+    : (persists && attempts >= WIKI_ESCALATE_AFTER_ATTEMPTS ? `survived ${attempts} automatic repairs` : null);
+  if (!reason) return { patch: { repair_attempts: attempts, escalated_at: null, escalation_reason: null }, notify: false };
+  return {
+    patch: { repair_attempts: attempts, escalated_at: stored?.escalated_at || now, escalation_reason: reason },
+    notify: !stored?.escalated_at,
+  };
+};
 const WIKI_INGEST_PAGES_PER_CALL = 5;
 
 // ponytail: mirrors freshnessDays in dashboard/src/lib/wikiCatalog.ts; keep them in sync.
@@ -4869,10 +4890,15 @@ const isWikiPagePastFreshness = (pagePath, stored, nowMs = Date.now()) => {
   return !Number.isFinite(changedMs) || nowMs - changedMs > days * 86400000;
 };
 
+// Flagged pages a rewrite can fix; "blocked" findings wait for a human instead.
+const getWikiPagesToRepair = (pageMeta = {}) => WIKI_ALL_PAGES.filter((pagePath) => (
+  getWikiPageIssueTexts(pageMeta[pagePath]).some((text) => !text.startsWith('[blocked]'))
+));
+
 // Pages the dashboard shows as ATTENTION or STALE. Routing by journal content
 // alone never selected them, so their findings sat unread for weeks.
 const getWikiPagesNeedingIngest = (pageMeta = {}, nowMs = Date.now()) => WIKI_ALL_PAGES.filter((pagePath) => (
-  getWikiPageIssueTexts(pageMeta[pagePath]).length > 0
+  getWikiPageIssueTexts(pageMeta[pagePath]).some((text) => !text.startsWith('[blocked]'))
   || Boolean(pageMeta[pagePath]?.last_ingest_rejection)
   || isWikiPagePastFreshness(pagePath, pageMeta[pagePath], nowMs)
 ));
@@ -5044,7 +5070,7 @@ Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(
   return writeCount;
 };
 
-const ingestToWiki = async (journalEntries) => {
+const ingestToWiki = async (journalEntries, { onlyPages = null } = {}) => {
   if (!journalEntries || journalEntries.length === 0) return;
   if (!process.env.ANTHROPIC_API_KEY) return;
 
@@ -5062,10 +5088,13 @@ const ingestToWiki = async (journalEntries) => {
     pages[page] = readWikiPage(page);
   }
   const pageMeta = getWikiPageMetaMap(readWikiMeta());
-  const routedPages = await inferWikiPagesForJournalEntries(journalEntries);
+  // onlyPages: the in-run repair pass rewrites just the pages the post-ingest lint flagged.
+  const routedPages = onlyPages
+    ? onlyPages.filter((pagePath) => WIKI_ALL_PAGES.includes(pagePath))
+    : await inferWikiPagesForJournalEntries(journalEntries);
   // ponytail: all 14 pages (~155KB) in one non-streamed call overran the 10min timeout and
   // 32k output. Rotate at most 3 extra flagged/stale pages per ingest, stalest first.
-  const pagesNeedingIngest = orderWikiPagesByStaleness(
+  const pagesNeedingIngest = onlyPages ? [] : orderWikiPagesByStaleness(
     getWikiPagesNeedingIngest(pageMeta).filter((pagePath) => !routedPages.includes(pagePath)),
     pageMeta
   ).slice(0, WIKI_INGEST_MAX_EXTRA_PAGES);
@@ -5080,7 +5109,8 @@ const ingestToWiki = async (journalEntries) => {
   selectedPages.splice(0, selectedPages.length, ...researchPages);
   const hasLessons = activeTradeLessons.some((lesson) => lesson.lesson_key);
   for (const pagePath of WIKI_STRATEGY_PAGES) {
-    if ((hasLessons || pagesNeedingIngest.includes(pagePath)) && !selectedPages.includes(pagePath)) selectedPages.push(pagePath);
+    const wanted = onlyPages ? routedPages.includes(pagePath) : (hasLessons || pagesNeedingIngest.includes(pagePath));
+    if (wanted && !selectedPages.includes(pagePath)) selectedPages.push(pagePath);
   }
   // One call's 32k output fits ~10 full rewrites (~3.5k tokens each), and the page cut off
   // last never applied: strategy pages, then revenue/pricing, for weeks. Parallel calls of
@@ -5288,9 +5318,13 @@ If no pages need updating, output: <no_updates/>`;
     meta.last_ingest_updates = updateCount;
     meta.last_evidence_packet = rawEvidencePacket?.relativePath || meta.last_evidence_packet || null;
     for (const pagePath of selectedPages) {
+      // Every ingest handed a page's findings is one repair attempt; the lint escalates a
+      // finding that survives WIKI_ESCALATE_AFTER_ATTEMPTS of them.
+      const hadFindings = getWikiPageIssueTexts(pageMeta[pagePath]).length > 0 || Boolean(pageMeta[pagePath]?.last_ingest_rejection);
       updateWikiPageMeta(meta, pagePath, {
         last_checked_at: ingestedAt,
         evidence_packet: rawEvidencePacket?.relativePath || null,
+        ...(hadFindings ? { repair_attempts: (pageMeta[pagePath]?.repair_attempts || 0) + 1 } : {}),
       });
     }
     for (const update of updatedPages) {
@@ -5298,7 +5332,7 @@ If no pages need updating, output: <no_updates/>`;
         last_evidence_at: ingestedAt,
         last_changed_at: ingestedAt,
         last_reviewed_at: null,
-        issues: [],
+        // issues stay until the lint re-audits: it needs them to tell a persisting defect from a new one
         last_ingest_rejection: null,
         change_summary: summarizeWikiPageChange(
           update.existingContent,
@@ -5520,6 +5554,9 @@ ${pagesContext}
 Use every page above as cross-page context, but report issues only for these target pages:
 ${pagesToReview.map((pagePath) => `- ${pagePath}`).join('\n')}
 
+## Previously Reported Findings
+${pagesToReview.flatMap((pagePath) => getWikiPageIssueTexts(storedPageMeta[pagePath]).map((text) => `- ${pagePath}: ${text}`)).join('\n') || 'None.'}
+
 ## Audit Checklist
 1. **Contradictions**: Do any pages contradict each other?
 2. **Staleness**: Are time-sensitive current-state claims old enough to mislead? Do not call stable historical or structural knowledge stale merely because it is old.
@@ -5535,7 +5572,9 @@ Report only issues that would mislead a trading decision or misstate current or 
 
 ## Instructions
 Return one compact audit object and do not rewrite page content during validation:
-<lint_result>{"issues":[{"page_to_fix":"path","reference_page":"path or null","type":"contradiction|stale|redundant|missing_link|quality","description":"concise actionable finding"}]}</lint_result>
+<lint_result>{"issues":[{"page_to_fix":"path","reference_page":"path or null","type":"contradiction|stale|redundant|missing_link|quality|blocked","persists":false,"description":"concise actionable finding"}]}</lint_result>
+
+Set "persists": true only when the issue is the same defect as a Previously Reported Finding on that page, even if reworded; false when it is new. Use type "blocked" only when no rewrite of any wiki page can resolve the issue because the required data or decision does not exist yet (for example a trade review that was never written); it goes to a human.
 
 Assign page_to_fix to the page whose content should change. For a cross-page conflict, use metadata and exact evidence markers to identify the older or less-supported page; never flag a newer accurate reference page merely because it exposes stale related content. Put that newer page in reference_page instead. Use at most two issues per target page, keep each description under 240 characters, and do not report findings against pages outside the audit scope. If no issues are found, return <lint_result>{"issues":[]}</lint_result>. Return no prose outside the tag.`;
 
@@ -5625,16 +5664,24 @@ Assign page_to_fix to the page whose content should change. For a cross-page con
       issuesByPage.get(issue.page).push(`[${issue.type || 'quality'}] ${issue.description}${reference}`);
     }
     const completionMeta = readWikiMeta();
+    const newEscalations = [];
     let reviewedPageCount = 0;
     for (const pagePath of pagesToReview) {
       if (readWikiPage(pagePath) !== pages[pagePath]) {
         console.log(`📚 Wiki lint: ${pagePath} changed during audit; leaving it unreviewed`);
         continue;
       }
+      const escalation = decideWikiEscalation(
+        getWikiPageMetaMap(completionMeta)[pagePath],
+        validIssues.filter((issue) => issue.page === pagePath),
+        reviewedAt,
+      );
       updateWikiPageMeta(completionMeta, pagePath, {
         last_reviewed_at: reviewedAt,
         issues: issuesByPage.get(pagePath) || [],
+        ...escalation.patch,
       });
+      if (escalation.notify) newEscalations.push({ pagePath, reason: escalation.patch.escalation_reason, issue: (issuesByPage.get(pagePath) || [])[0] });
       reviewedPageCount++;
     }
     if (isFullReview) completionMeta.last_lint = reviewedAt;
@@ -5658,6 +5705,10 @@ Assign page_to_fix to the page whose content should change. For a cross-page con
       `pages reviewed: ${reviewedPageCount}/${pagesToReview.length} scoped (${WIKI_ALL_PAGES.length} total)`,
     ]);
     logWikiMetaSummary('📚 Wiki lint: wrote completion meta', completionMeta);
+    for (const { pagePath, reason, issue } of newEscalations) {
+      console.log(`📚 Wiki lint: escalated ${pagePath} — ${reason}`);
+      sendTelegram(`📚 *Wiki needs you*: ${pagePath}\n${reason}\n${String(issue || '').slice(0, 300)}`);
+    }
 
     console.log(`📚 Wiki lint: complete (${validIssues.length} scoped issue(s), ${reviewedPageCount}/${pagesToReview.length} target page(s), ${outstandingIssueCount} outstanding)`);
     return {
@@ -13929,6 +13980,15 @@ const runBot = async () => {
               console.log(revalidation?.success
                 ? `📚 Post-ingest revalidation: reviewed=${revalidation.reviewedPageCount || 0} outstanding=${revalidation.outstandingIssues || 0}`
                 : `📚 Post-ingest revalidation skipped: ${revalidation?.error || 'not due'}`);
+              // Fix before it reaches anyone: findings used to wait 8h for the next ingest.
+              // One repair pass on just the flagged pages, then re-audit them.
+              const repairPages = revalidation?.success ? getWikiPagesToRepair(getWikiPageMetaMap(readWikiMeta())) : [];
+              if (repairPages.length > 0) {
+                console.log(`📚 In-run repair: ${repairPages.join(', ')}`);
+                const repair = await ingestToWiki(entries, { onlyPages: repairPages });
+                const recheck = repair?.updateCount > 0 ? await lintWiki({ forcePageReview: true }) : null;
+                console.log(`📚 In-run repair: updated=${repair?.updateCount || 0} outstanding=${recheck?.outstandingIssues ?? 'unchanged'}`);
+              }
             } catch (e) {
               console.log('📚 Post-ingest revalidation failed (non-fatal):', e.message);
             } finally {
@@ -13949,8 +14009,8 @@ const runBot = async () => {
         });
       }
 
-      // Run at most one validation pass per day. Findings remain queued for
-      // manual review; the bot never rewrites Wiki pages in response to lint.
+      // Run at most one validation pass per day. Its findings are FIXING until the next
+      // ingest; the only lint-driven rewrite is the bounded in-run repair after each ingest.
       const wikiLintSchedule = getWikiLintSchedule();
       if (process.env.ANTHROPIC_API_KEY && !_wikiIngestInFlight && !_wikiLintInFlight && wikiLintSchedule.due) {
         _wikiLintInFlight = true;
