@@ -52,7 +52,8 @@ async function getChain() {
 export async function GET() {
   try {
     const chain = await getChain();
-    const history = getSmileSnapshotAt(new Date(Date.now() - 24 * 3_600_000)).map(r => ({
+    // Same <2Δ cut as the live chain, so both curves span the same wings.
+    const history = getSmileSnapshotAt(new Date(Date.now() - 24 * 3_600_000)).filter(r => Math.abs(r.delta) >= 0.02).map(r => ({
       name: r.instrument_name, expiry: r.expiry, strike: r.strike,
       type: r.option_type?.toUpperCase().startsWith('P') ? 'P' : 'C',
       delta: r.delta, iv: r.implied_vol * 100, timestamp: r.timestamp,

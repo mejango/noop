@@ -102,7 +102,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
   const callPrev = callRow && data.history?.length ? ivAtDelta(data.history.filter(h => h.expiry === callRow.expiry), 'C', 0.10) : null;
   const putPrev = putRow && data.history?.length ? ivAtDelta(data.history.filter(h => h.expiry === putRow.expiry), 'P', 0.10) : null;
   const zones = data.zones;
-  const heldPts = series.flatMap(s => s.pts.filter(p => p.held != null));
+  const heldPts = series.flatMap(s => s.pts.filter(p => p.held != null)).sort((a, b) => a.x - b.x).map((p, i) => ({ ...p, below: i % 2 === 1 }));
 
   // Term-structure panel data, one row per expiry.
   const term = rows.map(r => ({ label: `${Math.round(r.dte)}d`, expiry: r.expiry, atm: r.stats.atm, rr25: r.stats.rr25, inCall: r.inCall, inPut: r.inPut }));
@@ -237,7 +237,8 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
                   shape={((p: any) => (
                     <g>
                       <circle cx={p.cx} cy={p.cy} r={8} fill="none" stroke="#fff" strokeWidth={1.5} />
-                      <text x={p.cx} y={p.cy - 12} textAnchor="middle" fontSize={9} fill="#ddd">
+                      {/* Alternate above/below so neighbouring positions don't overprint */}
+                      <text x={p.cx} y={p.payload.below ? p.cy + 19 : p.cy - 12} textAnchor="middle" fontSize={9} fill="#ddd">
                         {p.payload.held > 0 ? '+' : ''}{p.payload.held}
                       </text>
                     </g>
