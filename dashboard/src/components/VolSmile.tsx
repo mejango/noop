@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   ResponsiveContainer, ScatterChart, Scatter, XAxis, YAxis, ZAxis, Tooltip, ReferenceLine, ReferenceArea,
-  ComposedChart, Line, Bar, Cell,
+  ComposedChart, Line, Bar, Cell, ErrorBar,
 } from 'recharts';
 import { usePolling } from '@/lib/hooks';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
@@ -51,7 +51,8 @@ const RANGES = ['24h', '3d', '7d', '30d'] as const;
 const SPEEDS = [{ label: '1×', ms: 500 }, { label: '4×', ms: 125 }];
 type Position = { instrument_name: string; amount: number };
 type Row = SmileExpiry & { label: string; stats: SmileStats; inCall: boolean; inPut: boolean; oi: number };
-type Plotted = SmilePoint & { x: number; label: string; held: number | null; iv24: number | null; color: string };
+// spread: [mark − bid IV, ask IV − mark] for the ErrorBar, so the bar spans bid → ask even when the mark sits outside the book.
+type Plotted = SmilePoint & { x: number; label: string; held: number | null; iv24: number | null; color: string; spread: [number, number] | null };
 
 const EMPTY: SmileResponse = { expiries: [], history: [] };
 const NO_EXPIRIES: SmileExpiry[] = [];
@@ -80,6 +81,8 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
   const [axis, setAxis] = useState<Axis>('delta');
   const [view, setView] = useState<'chart' | 'table'>('chart');
   const [showHistory, setShowHistory] = useState(true);
+  // Marks are Derive's model; where nobody quotes both sides the curve is extrapolation, not a price.
+  const [quotedOnly, setQuotedOnly] = useState(true);
   const [skewKey, setSkewKey] = useState<SkewKey>('rr25');
   const skewMetric = SKEW_METRICS.find(m => m.key === skewKey) ?? SKEW_METRICS[0];
 
@@ -175,13 +178,24 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
     const row = rows.find(r => r.expiry === expiry);
     if (!row) return null;
     const color = slotColor(slot);
+    const zoneFor = (p: SmilePoint) => (p.type === 'C' ? (row.inCall ? data.zones?.call : null) : (row.inPut ? data.zones?.put : null));
+    const inZone = (p: SmilePoint) => {
+      const z = zoneFor(p);
+      return !!z && inRange(Math.abs(p.delta), [Math.abs(z.delta[0]), Math.abs(z.delta[1])]);
+    };
+    const twoSided = (p: SmilePoint) => p.bidIv != null && p.askIv != null;
     const pts: Plotted[] = row.points
-      .map(p => ({ ...p, x: xOf(p, spot), label: row.label, held: replay ? null : held.get(p.name) ?? null, iv24: hist24.get(p.name)?.iv ?? null, color }))
+      .map(p => ({ ...p, held: replay ? null : held.get(p.name) ?? null }))
+      .filter(p => !quotedOnly || twoSided(p) || p.held != null) // keep held one-sided strikes visible
+      .map(p => ({
+        ...p, x: xOf(p, spot), label: row.label, iv24: hist24.get(p.name)?.iv ?? null, color,
+        spread: quotedOnly && twoSided(p) && inZone(p) ? [p.iv - p.bidIv!, p.askIv! - p.iv] as [number, number] : null,
+      }))
       .sort((a, b) => a.x - b.x);
     const past = reference.filter(h => h.expiry === expiry).map(h => ({ ...h, x: xOf(h, refSpot) })).sort((a, b) => a.x - b.x);
     return { row, color, pts, past };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }).filter(<T,>(s: T | null): s is T => s != null), [selection, rows, axis, held, hist24, reference, spot, refSpot, replay]);
+  }).filter(<T,>(s: T | null): s is T => s != null), [selection, rows, axis, held, hist24, reference, spot, refSpot, replay, quotedOnly, data.zones]);
 
   // During playback the axes are fixed across all frames, so motion is the data moving, not the scale.
   const replayDomain = useMemo(() => {
@@ -266,6 +280,8 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
           <button className={chip(view === 'chart' && axis === 'strike')} onClick={() => { setView('chart'); setAxis('strike'); }}>% from spot</button>
           <button className={chip(view === 'chart' && axis === 'usd')} onClick={() => { setView('chart'); setAxis('usd'); }}>$ strike</button>
           <button className={chip(view === 'table')} onClick={() => setView('table')}>table</button>
+          <button className={chip(quotedOnly)} onClick={() => setQuotedOnly(v => !v)}
+            title="Plot only strikes with a live bid and ask; show the bid–ask IV range in the bot's zones">bid–ask</button>
           {histAt && <button className={chip(showHistory)} onClick={() => setShowHistory(v => !v)}>{replay ? 'start' : '24h ago'}</button>}
           <button className={chip(replay)} onClick={replay ? exitReplay : enterReplay}>{replay ? '● back to live' : '▶ replay'}</button>
         </div>
@@ -384,6 +400,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
               </span>
             )}
             {heldPts.length > 0 && <span className="text-gray-600">◯ your positions</span>}
+            {quotedOnly && <span className="text-gray-600">│ bid–ask IV in bot zones · two-sided quotes only</span>}
             <span className="text-gray-600">dot size = open interest</span>
           </div>
           <ResponsiveContainer width="100%" height={260}>
@@ -424,7 +441,10 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
               ))}
               {series.map(s => (
                 <Scatter key={s.row.expiry} name={s.row.label} data={s.pts} fill={s.color} fillOpacity={0.75}
-                  line={{ stroke: s.color, strokeWidth: 2 }} isAnimationActive={false} />
+                  line={{ stroke: s.color, strokeWidth: 2 }} isAnimationActive={false}>
+                  {/* recharts 3 resolves a Scatter ErrorBar key against the rendered point, not the row: read payload. */}
+                  {quotedOnly && <ErrorBar dataKey={(pt: { payload?: Plotted }) => pt.payload?.spread} direction="y" stroke={s.color} strokeWidth={1.5} width={5} isAnimationActive={false} />}
+                </Scatter>
               ))}
               {heldPts.length > 0 && (
                 <Scatter data={heldPts} legendType="none" isAnimationActive={false}
