@@ -6772,7 +6772,7 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(SCRIPT_SOURCE.includes('return recordWikiLintFailure'));
     assert.ok(SCRIPT_SOURCE.includes('!result || !Array.isArray(result.issues)'));
     assert.ok(SCRIPT_SOURCE.includes('do not rewrite page content during validation'));
-    assert.ok(SCRIPT_SOURCE.includes('max_tokens: 1800'));
+    assert.ok(SCRIPT_SOURCE.includes('max_tokens: 4096, // up to 28 findings'));
     assert.ok(SCRIPT_SOURCE.includes('changed during audit; leaving it unreviewed'));
     assert.ok(SCRIPT_SOURCE.includes('const pagesToReview = schedule.needsInitialReview'));
     assert.ok(SCRIPT_SOURCE.includes('report issues only for these target pages'));
@@ -7255,6 +7255,15 @@ describe('wiki findings feed back into ingest', () => {
       'revenue/efficiency.md': { issues: ['[blocked] reviews never written'] },
       'strategy/mistakes.md': { issues: ['[quality] header date ambiguous'] },
     }), ['strategy/mistakes.md'], 'rewriting cannot fix a blocked finding');
+  });
+
+  test('a lint finding must quote the current page, which drops stale repeats', () => {
+    const { wikiQuoteAppearsIn } = loadProduction(['wikiQuoteAppearsIn']);
+    const page = '## Strong Correlations\n**14. Post-expiry OI surge as rolling-window noise**\n## New Correlations\n**16. call_dv/implied_vol lead**';
+    assert.ok(wikiQuoteAppearsIn(page, '14. Post-expiry OI surge as rolling-window noise'), 'markdown emphasis is ignored');
+    assert.ok(wikiQuoteAppearsIn('skew `2.57%` today', 'skew 2.57%   today'), 'backticks and whitespace are ignored');
+    assert.ok(!wikiQuoteAppearsIn(page, 'New Correlations: 14. Post-expiry OI surge'), 'a claim about text the page no longer has fails');
+    assert.ok(!wikiQuoteAppearsIn(page, undefined) && !wikiQuoteAppearsIn(page, 'OI'), 'missing or trivial quotes fail');
   });
 
   test('campaign ledger gives every campaign its final verdict so counts are exact', () => {

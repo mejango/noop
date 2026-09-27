@@ -4934,6 +4934,13 @@ const WIKI_INGEST_MAX_EXTRA_PAGES = 3;
 // or a "blocked" finding no rewrite can resolve. Everything else is FIXING.
 const WIKI_ESCALATE_AFTER_ATTEMPTS = 2;
 
+// Markdown emphasis and whitespace differ between a page and a model's copy of it.
+const normalizeWikiQuoteText = (text) => String(text || '').replace(/[`*_]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+const wikiQuoteAppearsIn = (content, quote) => {
+  const needle = normalizeWikiQuoteText(quote);
+  return needle.length >= 8 && normalizeWikiQuoteText(content).includes(needle);
+};
+
 const decideWikiEscalation = (stored = {}, pageIssues = [], now = new Date().toISOString()) => {
   if (pageIssues.length === 0) {
     return { patch: { repair_attempts: 0, escalated_at: null, escalation_reason: null }, notify: false };
@@ -5656,7 +5663,9 @@ Report only issues that would mislead a trading decision or misstate current or 
 
 ## Instructions
 Return one compact audit object and do not rewrite page content during validation:
-<lint_result>{"issues":[{"page_to_fix":"path","reference_page":"path or null","type":"contradiction|stale|redundant|missing_link|quality|blocked","persists":false,"description":"concise actionable finding"}]}</lint_result>
+<lint_result>{"issues":[{"page_to_fix":"path","reference_page":"path or null","type":"contradiction|stale|redundant|missing_link|quality|blocked","persists":false,"quote":"exact text copied from page_to_fix that shows the defect","description":"concise actionable finding"}]}</lint_result>
+
+Every issue must include "quote": a short span (8-200 characters) copied verbatim from the CURRENT text of page_to_fix that shows the defect. Findings whose quote does not appear in the current page are discarded, so re-read the page for each Previously Reported Finding rather than repeating it.
 
 Set "persists": true only when the issue is the same defect as a Previously Reported Finding on that page, even if reworded; false when it is new. Use type "blocked" only when no rewrite of any wiki page can resolve the issue because the required data or decision does not exist yet (for example a trade review that was never written); it goes to a human.
 
@@ -5666,7 +5675,7 @@ Assign page_to_fix to the page whose content should change. For a cross-page con
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
       thinking: { type: 'disabled' },
-      max_tokens: 1800,
+      max_tokens: 4096, // up to 28 findings, each now carrying a verbatim quote
       messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
@@ -5704,10 +5713,16 @@ Assign page_to_fix to the page whose content should change. For a cross-page con
       ...issue,
       page: issue?.page_to_fix || issue?.page,
     }));
-    const validIssues = normalizedIssues.filter((issue) => (
+    const scopedIssues = normalizedIssues.filter((issue) => (
       issue && pagesToReview.includes(issue.page) && typeof issue.description === 'string'
     ));
-    const ignoredIssueCount = normalizedIssues.length - validIssues.length;
+    // Shown its prior findings, the lint repeated them after the page was fixed (#14/#15 were
+    // already under Strong). A finding must quote the current page, or it is dropped.
+    const validIssues = scopedIssues.filter((issue) => wikiQuoteAppearsIn(pages[issue.page], issue.quote));
+    if (validIssues.length < scopedIssues.length) {
+      console.log(`📚 Wiki lint: discarded ${scopedIssues.length - validIssues.length} finding(s) whose quote is not in the current page`);
+    }
+    const ignoredIssueCount = normalizedIssues.length - scopedIssues.length;
     if (validIssues.length > 0) {
       console.log(`📚 Wiki lint: found ${validIssues.length} in-scope issue(s):`);
       for (const issue of validIssues) {
