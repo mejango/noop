@@ -375,6 +375,7 @@ const PUT_EXPIRATION_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
 const PUT_DELTA_RANGE = STRATEGY_FACTS.put_delta_range; // Negative delta for puts
 const BUY_PUT_ADVISORY_DTE_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
 const ADVISORY_OPTION_VALUE_WINDOW_DAYS = 6.2;
+const SELL_CALL_VALUE_DTE_BAND_DAYS = 1.5;
 const BUY_PUT_URGENT_SCORE_NUDGE = 1.005;
 const BUY_PUT_PATIENT_SCORE_NUDGE = 1.02;
 const BUY_PUT_REPRICING_LAG_SCORE_NUDGE = 0.999;
@@ -2411,6 +2412,13 @@ const buildRollingOptionValueContext = ({
   // of quality ranking. Compare that same population and statistic live.
   const currentPutEdge = getBestCurrentBuyPutEdgeCandidate(tickerMap, nowMs);
   const currentCall = getBestCurrentSellCallCandidate(tickerMap, nowMs);
+  // Compare CALL value against history at similar maturity. The light DTE
+  // correction does not make 12 DTE comparable with 5 DTE, so a new weekly
+  // entering the window would otherwise read as a fresh best on roll alone.
+  const callDteBand = currentCall?.dte > 0
+    ? [Math.max(CALL_EXPIRATION_RANGE[0], currentCall.dte - SELL_CALL_VALUE_DTE_BAND_DAYS),
+      Math.min(CALL_EXPIRATION_RANGE[1], currentCall.dte + SELL_CALL_VALUE_DTE_BAND_DAYS)]
+    : CALL_EXPIRATION_RANGE;
   let priorSamples = [];
   let priorBestDetail = null;
   let priorCallSamples = [];
@@ -2445,8 +2453,8 @@ const buildRollingOptionValueContext = ({
           before,
           minDelta: CALL_DELTA_RANGE[0],
           maxDelta: CALL_DELTA_RANGE[1],
-          minDte: CALL_EXPIRATION_RANGE[0],
-          maxDte: CALL_EXPIRATION_RANGE[1],
+          minDte: callDteBand[0],
+          maxDte: callDteBand[1],
         });
       }
       if (typeof db.getBestSellCallScoreDetail === 'function') {
@@ -2455,8 +2463,8 @@ const buildRollingOptionValueContext = ({
           before,
           minDelta: CALL_DELTA_RANGE[0],
           maxDelta: CALL_DELTA_RANGE[1],
-          minDte: CALL_EXPIRATION_RANGE[0],
-          maxDte: CALL_EXPIRATION_RANGE[1],
+          minDte: callDteBand[0],
+          maxDte: callDteBand[1],
         });
       }
       if (typeof db.getRecentSpotPrices === 'function') {
@@ -2653,6 +2661,7 @@ const buildRollingOptionValueContext = ({
       current_vs_prior_best_pct: roundForAdvisory(currentCallVsPriorBestPct, 2),
       percentile_vs_prior_window: roundForAdvisory(callPercentile, 1),
       is_strict_fresh_best: callFreshBest,
+      comparison_dte_band: callDteBand.map((dte) => roundForAdvisory(dte, 1)),
       trend_1h_pct: callTrend1hPct,
       trend_6h_pct: callTrend6hPct,
       trend_24h_pct: callTrend24hPct,
@@ -2778,7 +2787,7 @@ const formatRollingOptionValueContext = (context) => {
     `Sell-call filters: delta ${JSON.stringify(context.sell_call_filters?.delta_range)}; DTE ${JSON.stringify(context.sell_call_filters?.dte_range)}; raw_score=${context.sell_call_filters?.raw_score}; edge_score=${context.sell_call_filters?.edge_score}.`,
     formatAvailability('CALL', call.availability),
     `Current CALL EDGE: ${call.current_score ?? 'unavailable'}${callDetail ? ` (raw=${callDetail.raw_score ?? 'n/a'}, ${callDetail.instrument}, delta=${callDetail.delta}, bid=$${callDetail.bid_price}, two-sided spread/mark=${callDetail.spread_pct ?? 'n/a'}%, DTE=${callDetail.dte}, quote=${callDetail.quote_received_at || 'unknown'})` : ''}.`,
-    `Prior ${context.window_days}d best CALL EDGE: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
+    `Prior ${context.window_days}d best CALL EDGE at DTE ${JSON.stringify(call.comparison_dte_band)}: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
     `Current CALL vs prior best: ${call.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${call.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${formatDetection(call.is_strict_fresh_best)}; samples=${call.samples ?? 0}.`,
     `CALL score trend: 1h=${call.trend_1h_pct ?? 'n/a'}%, 6h=${call.trend_6h_pct ?? 'n/a'}%, 24h=${call.trend_24h_pct ?? 'n/a'}%.`,
     `CALL market context (not part of CALL EDGE): avg_spread=${callMarket.market_avg_spread_pct ?? 'n/a'}%; best_put_score=${callMarket.market_best_put_score ?? 'n/a'}; matched-expiry/delta skew=${callMarket.put_call_iv_skew_pct ?? 'n/a'}% (${callMarket.put_call_iv_skew_matched_pairs ?? 0} matched puts); oi_24h=${callMarket.market_oi_delta_24h_pct ?? 'n/a'}%; pc_oi=${callMarket.market_pc_oi ?? 'n/a'}.`,

@@ -184,3 +184,23 @@ test('actual rolling context retains one-sided entry scores but leaves spreads u
   assert.equal(context.put_value_context.current_detail.quote_received_at, new Date(nowMs).toISOString());
   assert.equal(context.put_value_context.current_detail.spread_basis, 'bid_ask_difference_over_mark');
 });
+
+test('actual rolling context compares CALL value only against history at similar DTE', () => {
+  const calls = [];
+  const api = loadProduction(['buildRollingOptionValueContext'], {
+    bindings: {
+      summarizeAdvisoryQuotes, candidateSpreadPct,
+      ...require('../bot/option-market-quality'),
+      Date: FixedDate,
+      db: { getSellCallScoreSamples: (args) => { calls.push(args); return []; } },
+    },
+  });
+  const context = api.buildRollingOptionValueContext({
+    tickerMap: { [callName]: quote(0.06, 0, 5) }, expectedInstruments,
+    putBudgetRemaining: 100, currentTickTimestamp: new Date(nowMs).toISOString(), spotPrice: 2367.70,
+  });
+  const dte = context.call_value_context.current_detail.dte;
+  assert.ok(calls[0].minDte >= 5 && calls[0].maxDte <= 12);
+  assert.ok(Math.abs(calls[0].minDte - Math.max(5, dte - 1.5)) < 0.1, `minDte ${calls[0].minDte} for dte ${dte}`);
+  assert.ok(Math.abs(calls[0].maxDte - Math.min(12, dte + 1.5)) < 0.1, `maxDte ${calls[0].maxDte} for dte ${dte}`);
+});
