@@ -1499,6 +1499,12 @@ const stmts = {
     WHERE hour > @since AND close > 0 ORDER BY hour ASC
   `),
 
+  getSmileSnapshotsForExpiry: db.prepare(`
+    SELECT timestamp, expiry, points FROM iv_smile_snapshots
+    WHERE expiry = @expiry AND timestamp > @since AND timestamp < @before
+    ORDER BY timestamp ASC
+  `),
+
   insertSmileSnapshot: db.prepare(`
     INSERT INTO iv_smile_snapshots (timestamp, expiry, forward, spot, points)
     VALUES (@timestamp, @expiry, @forward, @spot, @points)
@@ -2476,6 +2482,7 @@ const getAvgCallPremium7d = () => {
 const getVolSurfaceHistoryRows = (since) => stmts.getVolSurfaceHistoryRows.all({ since });
 const getSpotHourlyCloses = (since) => stmts.getSpotHourlyCloses.all({ since });
 
+const getSmileSnapshotsForExpiry = ({ expiry, since, before }) => stmts.getSmileSnapshotsForExpiry.all({ expiry, since, before });
 const insertSmileSnapshotBatch = (rows, timestamp) => {
   db.transaction(() => {
     for (const row of rows) stmts.insertSmileSnapshot.run({ ...row, timestamp });
@@ -3062,6 +3069,7 @@ module.exports = {
   migrateFromJson,
   insertOISnapshot,
   insertSmileSnapshotBatch,
+  getSmileSnapshotsForExpiry,
   getVolSurfaceHistoryRows,
   getSpotHourlyCloses,
   insertFundingRates,

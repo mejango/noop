@@ -204,3 +204,41 @@ test('actual rolling context compares CALL value only against history at similar
   assert.ok(Math.abs(calls[0].minDte - Math.max(5, dte - 1.5)) < 0.1, `minDte ${calls[0].minDte} for dte ${dte}`);
   assert.ok(Math.abs(calls[0].maxDte - Math.min(12, dte + 1.5)) < 0.1, `maxDte ${calls[0].maxDte} for dte ${dte}`);
 });
+
+test('actual rolling context gates CALL/PUT value on IV richness vs each strike\'s own history', () => {
+  const callExpiry = Date.UTC(2026, 8, 25, 8) / 1000;
+  const putExpiry = Date.UTC(2026, 10, 27, 8) / 1000;
+  // 30 snapshots where the call's bid IV ranged 50-59% and the put's ask IV 70-79%.
+  const history = (expiry, point) => Array.from({ length: 30 }, (_, i) => ({ expiry, points: JSON.stringify([point(i)]) }));
+  const smile = {
+    [callExpiry]: history(callExpiry, (i) => [2800, 1, 0.06, 0.55, 0.50 + i / 300, 0.6, 0]),
+    [putExpiry]: history(putExpiry, (i) => [1600, 0, -0.06, 0.75, 0.7, 0.70 + i / 300, 0]),
+  };
+  const api = loadProduction(['buildRollingOptionValueContext', 'formatRollingOptionValueContext'], {
+    bindings: {
+      summarizeAdvisoryQuotes, candidateSpreadPct, ...require('../bot/option-market-quality'),
+      ...require('../bot/iv-richness'), Date: FixedDate,
+      db: { getSmileSnapshotsForExpiry: ({ expiry }) => smile[expiry] || [] },
+    },
+  });
+  const withIv = (q, iv) => ({ ...q, option_pricing: { ...q.option_pricing, ...iv } });
+  const context = api.buildRollingOptionValueContext({
+    tickerMap: {
+      [callName]: withIv(quote(0.06, 0, 5), { bi: 0.60 }), // richer than every sample
+      [putName]: withIv(quote(-0.06, 20), { ai: 0.74 }), // mid-range, not cheap
+    },
+    expectedInstruments, putBudgetRemaining: 100,
+    currentTickTimestamp: new Date(nowMs).toISOString(), spotPrice: 2367.70,
+  });
+  const call = context.call_value_context.iv_richness;
+  assert.equal(call.qualified, 1);
+  assert.equal(call.best_qualified.instrument, callName);
+  assert.equal(call.best_qualified.value_percentile, 100);
+  const put = context.put_value_context.iv_richness;
+  assert.equal(put.measured, 1);
+  assert.equal(put.qualified, 0);
+  assert.equal(put.best_qualified, null);
+  const prompt = api.formatRollingOptionValueContext(context);
+  assert.match(prompt, /CALL IV richness vs own strike history .*best qualifying by EDGE: ETH-20260925-2800-C value_pctl=100/);
+  assert.match(prompt, /PUT IV richness vs own strike history .*best qualifying by EDGE: none/);
+});

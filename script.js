@@ -134,6 +134,7 @@ const {
 } = require('./bot/put-score');
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
 const { buildSmileRows, SMILE_SNAPSHOT_INTERVAL_MS } = require('./bot/iv-smile');
+const { assessRichness } = require('./bot/iv-richness');
 const { buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor } = require('./bot/vol-surface');
 let lastSmileSnapshotAt = 0;
 const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
@@ -2175,6 +2176,29 @@ const getBestCurrentSellCallCandidate = (
   return best;
 };
 
+// Every eligible entry candidate with its fill-side IV (bid for sells, ask for buys) for the
+// per-strike richness check. Same eligibility as the best-candidate pickers above.
+const listRichnessCandidates = (tickerMap = {}, nowMs = Date.now()) => {
+  const calls = [];
+  const puts = [];
+  for (const [name, ticker] of Object.entries(tickerMap || {})) {
+    const parsed = parseAdvisoryOptionInstrument(name);
+    if (!parsed) continue;
+    const dte = computeDteAt(parsed.expiry, nowMs);
+    const delta = Number(ticker?.option_pricing?.d);
+    const base = { instrument: name, expiry: Math.floor(parsed.expiry.getTime() / 1000), strike: parsed.strike };
+    if (parsed.optionType === 'C' && isSellCallCandidateInStrategyRange(dte, delta) && Number(ticker?.b) > 0) {
+      calls.push({ ...base, isCall: true, iv: Number(ticker?.option_pricing?.bi),
+        edge_score: normalizeSellCallScore(Number(ticker.b) / Math.abs(delta), dte) });
+    } else if (parsed.optionType === 'P' && dte >= BUY_PUT_ADVISORY_DTE_RANGE[0] && dte <= BUY_PUT_ADVISORY_DTE_RANGE[1]
+      && delta >= PUT_DELTA_RANGE[0] && delta <= PUT_DELTA_RANGE[1] && Number(ticker?.a) > 0) {
+      puts.push({ ...base, isCall: false, iv: Number(ticker?.option_pricing?.ai),
+        edge_score: normalizeBuyPutScore(Math.abs(delta) / Number(ticker.a), dte) });
+    }
+  }
+  return { calls, puts };
+};
+
 // Spot state from the measured recent slope only; momentum labels never gate decisions.
 const classifySpotPriceAction = (recentSpotPrices = []) => {
   let slopePct = null;
@@ -2475,6 +2499,21 @@ const buildRollingOptionValueContext = ({
     }
   }
 
+  // Per-strike IV vs that strike's own history: the rollover-proof answer to "is now good value".
+  let callRichness = null;
+  let putRichness = null;
+  if (db && typeof db.getSmileSnapshotsForExpiry === 'function') {
+    try {
+      const { calls, puts } = listRichnessCandidates(tickerMap, nowMs);
+      const smileRowsFor = (candidates) => [...new Set(candidates.map((c) => c.expiry))]
+        .flatMap((expiry) => db.getSmileSnapshotsForExpiry({ expiry, since, before }));
+      callRichness = assessRichness(calls, smileRowsFor(calls), 'bid');
+      putRichness = assessRichness(puts, smileRowsFor(puts), 'ask');
+    } catch (e) {
+      console.log(`📋 Advisory context: IV richness query failed: ${e.message}`);
+    }
+  }
+
   const priorScores = priorSamples.map((row) => Number(row.score)).filter((score) => score > 0);
   const priorBestScore = priorScores.length > 0 ? Math.max(...priorScores) : null;
   const currentScore = currentPutEdge ? finiteOrNull(currentPutEdge.edge_score) : null;
@@ -2596,6 +2635,7 @@ const buildRollingOptionValueContext = ({
       current_vs_prior_best_pct: roundForAdvisory(currentVsPriorBestPct, 2),
       percentile_vs_prior_window: roundForAdvisory(percentile, 1),
       is_strict_fresh_best: freshBest,
+      iv_richness: putRichness,
       trend_1h_pct: scoreTrend1hPct,
       trend_6h_pct: computeScoreTrendPct(priorSamples, currentScore, 6),
       trend_24h_pct: computeScoreTrendPct(priorSamples, currentScore, 24),
@@ -2662,6 +2702,7 @@ const buildRollingOptionValueContext = ({
       percentile_vs_prior_window: roundForAdvisory(callPercentile, 1),
       is_strict_fresh_best: callFreshBest,
       comparison_dte_band: callDteBand.map((dte) => roundForAdvisory(dte, 1)),
+      iv_richness: callRichness,
       trend_1h_pct: callTrend1hPct,
       trend_6h_pct: callTrend6hPct,
       trend_24h_pct: callTrend24hPct,
@@ -2754,6 +2795,14 @@ const buildRollingOptionValueContext = ({
   };
 };
 
+const formatIvRichness = (label, sense, r) => {
+  if (!r) return `${label} IV richness vs own strike history: unavailable.`;
+  const fmt = (c) => `${c.instrument} value_pctl=${c.value_percentile} (IV ${c.current_iv_pct}%, ${c.iv_vs_median_pts >= 0 ? '+' : ''}${c.iv_vs_median_pts} pts vs its median, ${c.samples} samples, EDGE=${roundForAdvisory(c.edge_score, 4)})`;
+  return `${label} IV richness vs own strike history (value_pctl = share of the strike's ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d samples with ${sense} now; needs ${r.min_samples}+ samples): `
+    + `${r.measured}/${r.candidates} candidates measured, ${r.qualified} at value_pctl>=${r.qualify_percentile}; `
+    + `best qualifying by EDGE: ${r.best_qualified ? fmt(r.best_qualified) : 'none'}; richest: ${r.richest ? fmt(r.richest) : 'none'}.`;
+};
+
 const formatRollingOptionValueContext = (context) => {
   if (!context?.put_value_context) return 'No rolling option value context available.';
   const put = context.put_value_context;
@@ -2781,6 +2830,7 @@ const formatRollingOptionValueContext = (context) => {
     `Current PUT EDGE: ${put.current_score ?? 'unavailable'}${detail ? ` (raw=${detail.raw_score ?? 'n/a'}, ${detail.instrument}, delta=${detail.delta}, ask=$${detail.ask_price}, two-sided spread/mark=${detail.spread_pct ?? 'n/a'}%, DTE=${detail.dte}, quote=${detail.quote_received_at || 'unknown'})` : ''}.`,
     `Prior ${context.window_days}d best PUT EDGE: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (raw=${prior.raw_score ?? 'n/a'}, ${prior.instrument} at ${prior.timestamp})` : ''}.`,
     `Current PUT vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${formatDetection(put.is_strict_fresh_best)}; samples=${put.samples}.`,
+    formatIvRichness('PUT', 'ask IV at or below', put.iv_richness),
     `PUT score trend: 1h=${put.trend_1h_pct ?? 'n/a'}%, 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
     `PUT EDGE selector: instrument=${selectedPut?.instrument || 'n/a'}; live-ask PUT EDGE=${selectedPut?.put_edge_score ?? 'n/a'}; selection_score=${putResearch.selection_score ?? 'n/a'}; formula=${putResearch.reason || 'n/a'}.`,
     `PUT crash scenarios (informational, not ranking): intrinsic payoff per premium dollar at 30/40/50% spot declines=${JSON.stringify(putResearch.edge_components?.shock_payoff_multiples || {})}. These are expiration payoffs, not predicted resale prices during an earlier crash.`,
@@ -2789,6 +2839,7 @@ const formatRollingOptionValueContext = (context) => {
     `Current CALL EDGE: ${call.current_score ?? 'unavailable'}${callDetail ? ` (raw=${callDetail.raw_score ?? 'n/a'}, ${callDetail.instrument}, delta=${callDetail.delta}, bid=$${callDetail.bid_price}, two-sided spread/mark=${callDetail.spread_pct ?? 'n/a'}%, DTE=${callDetail.dte}, quote=${callDetail.quote_received_at || 'unknown'})` : ''}.`,
     `Prior ${context.window_days}d best CALL EDGE at DTE ${JSON.stringify(call.comparison_dte_band)}: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
     `Current CALL vs prior best: ${call.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${call.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${formatDetection(call.is_strict_fresh_best)}; samples=${call.samples ?? 0}.`,
+    formatIvRichness('CALL', 'bid IV at or above', call.iv_richness),
     `CALL score trend: 1h=${call.trend_1h_pct ?? 'n/a'}%, 6h=${call.trend_6h_pct ?? 'n/a'}%, 24h=${call.trend_24h_pct ?? 'n/a'}%.`,
     `CALL market context (not part of CALL EDGE): avg_spread=${callMarket.market_avg_spread_pct ?? 'n/a'}%; best_put_score=${callMarket.market_best_put_score ?? 'n/a'}; matched-expiry/delta skew=${callMarket.put_call_iv_skew_pct ?? 'n/a'}% (${callMarket.put_call_iv_skew_matched_pairs ?? 0} matched puts); oi_24h=${callMarket.market_oi_delta_24h_pct ?? 'n/a'}%; pc_oi=${callMarket.market_pc_oi ?? 'n/a'}.`,
     `CALL EDGE normalization: edge_score=${callResearch.selection_score ?? 'n/a'}; raw_score=${callResearch.edge_components?.raw_score ?? 'n/a'}; DTE=${callResearch.edge_components?.dte ?? 'n/a'}; factor=${callResearch.edge_components?.normalization_factor ?? 'n/a'}; formula=${callResearch.reason || 'n/a'}.`,
@@ -10654,6 +10705,7 @@ const getMomentumEvidenceDisciplinePrompt = () => [
   'EVIDENCE PRIORITY: This is an options bang-for-buck strategy, not a price-direction strategy.',
   '- Primary evidence: executable bid/ask, spread/depth, IV/skew, DTE, delta, moneyness, OI, funding, candidate score, position PnL, hedge role, and account margin impact.',
   '- Path context comes from the raw 30-day hourly spot path, not from momentum labels. Do not create, preserve, or justify a rule mainly because spot has been rising or falling; direction must be confirmed by option pricing, liquidity, skew, OI, funding, or position-specific risk.',
+  '- Value timing: CALL/PUT EDGE ranks which contract, but it cannot say on its own that now is good value. Raw scores drift with theta and jump when the DTE window rolls to a new expiry. Time entries with IV RICHNESS VS OWN STRIKE HISTORY: a fresh best or high percentile whose candidate sits well below the value_pctl bar is a rollover or decay artifact, not value. Prefer qualifying candidates, ranked by EDGE, and set min_score near that candidate rather than above a rollover jump. With too few richness samples, fall back to the DTE-banded CALL comparison.',
 ].join('\n');
 
 const getBuyPutEntryPriceDisciplinePrompt = () => [
