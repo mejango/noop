@@ -4687,6 +4687,23 @@ const formatTradeReviewCampaignEvidence = (campaign) => {
   return `${header}\n${campaign.reviews.map((review) => `  - ${formatTradeReviewEvidenceLine(review)}`).join('\n')}`;
 };
 
+// Every reviewed campaign, one line each. The packet's campaign section holds only the latest
+// 8, so the wiki could never count wins (it said 7, then 9, then 11; the ledger says 25) and
+// believed the Aug-21 campaigns were unreviewed when both have disciplined_win verdicts.
+const formatCampaignLedger = (campaigns = []) => {
+  if (campaigns.length === 0) return 'No reviewed campaigns.';
+  const totals = {};
+  const lines = campaigns.map((campaign) => {
+    const final = campaign.reviews[campaign.reviews.length - 1] || {};
+    const family = campaign.action_family || 'unknown';
+    const status = final.review_status || 'unreviewed';
+    totals[`${family} ${status}`] = (totals[`${family} ${status}`] || 0) + 1;
+    return `[review:#${final.id}] ${campaign.instrument_name} | ${family} | closed=${String(campaign.closed_at || '').slice(0, 10)} | final=${status} (${final.review_window_days}d) | pnl=${formatWikiNumber(campaign.pnl_realized, 2, '$')}`;
+  });
+  const totalsLine = Object.entries(totals).sort().map(([key, count]) => `${key}=${count}`).join(', ');
+  return [`Totals (${campaigns.length} campaigns): ${totalsLine}`, ...lines].join('\n');
+};
+
 const writeRawEvidencePacket = (journalEntries = []) => {
   if (!db) return null;
   const createdAt = new Date().toISOString();
@@ -4698,6 +4715,7 @@ const writeRawEvidencePacket = (journalEntries = []) => {
   const recentOrders = db.getRecentOrders(since7d, 20) || [];
   const recentTradeReviews = db.getRecentTradeReviews(24) || [];
   const recentTradeCampaigns = groupTradeReviewsForWiki(recentTradeReviews, 8);
+  const allTradeCampaigns = groupTradeReviewsForWiki(db.getRecentTradeReviews(5000) || [], Infinity);
   const entriesText = journalEntries
     .map((entry) => `- [${entry.type || entry.entry_type || 'unknown'}] ${String(entry.content || '').replace(/\s+/g, ' ').slice(0, 260)}`)
     .join('\n');
@@ -4718,7 +4736,10 @@ const writeRawEvidencePacket = (journalEntries = []) => {
     '## Factual Order Activity (last 7d)',
     recentOrders.length > 0 ? recentOrders.map(formatOrderEvidenceLine).join('\n') : 'No recent orders.',
     '',
-    '## Reviewed Trade Campaigns',
+    '## Campaign Ledger (every reviewed campaign; authoritative for campaign counts and review status)',
+    formatCampaignLedger(allTradeCampaigns),
+    '',
+    '## Reviewed Trade Campaigns (latest, with every review window)',
     recentTradeCampaigns.length > 0 ? recentTradeCampaigns.map(formatTradeReviewCampaignEvidence).join('\n\n') : 'No reviewed campaigns.',
     '',
     '## New Journal Entries',
@@ -5571,7 +5592,7 @@ ${pagesToReview.flatMap((pagePath) => getWikiPageIssueTexts(storedPageMeta[pageP
 8. **Live-state boundaries**: Do strategy pages avoid embedding current spot, skew, score, budget, or gate values that belong in research/advisory state?
 
 ## Materiality Bar
-Report only issues that would mislead a trading decision or misstate current or historical fact: contradictions, wrong numbers or units, stale live state, unsupported material claims, or strategy pages inventing rules. Do not report formatting, column consistency, wording, epistemic tone, caveat placement, sub-1% rounding, or cross-reference tidiness. Values that agree at their stated precision are consistent: timestamps within 5 minutes (01:31 and 01:32 both describe 01:31:58), approximate '~' figures such as DTE on rows hours apart, and rounded totals. Flag them only when they differ beyond that precision. Every rewrite is re-audited, so nitpicks keep sound pages flagged forever. A sound page returns no issues; do not search for something to report.
+Report only issues that would mislead a trading decision or misstate current or historical fact: contradictions, wrong numbers or units, stale live state, unsupported material claims, or strategy pages inventing rules. Do not report formatting, column consistency, wording, epistemic tone, caveat placement, sub-1% rounding, or cross-reference tidiness. Values that agree at their stated precision are consistent: timestamps within 5 minutes (01:31 and 01:32 both describe 01:31:58), approximate '~' figures such as DTE on rows hours apart, and rounded totals. Flag them only when they differ beyond that precision. Every rewrite is re-audited, so nitpicks keep sound pages flagged forever. A sound page returns no issues; do not search for something to report. Cite a rule only if it is written in the Wiki Schema above; never infer one. A classification or hold the page states a reason for (for example "awaiting cross-cycle confirmation") is a judgment call, not a defect.
 
 ## Instructions
 Return one compact audit object and do not rewrite page content during validation:

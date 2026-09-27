@@ -7257,6 +7257,23 @@ describe('wiki findings feed back into ingest', () => {
     }), ['strategy/mistakes.md'], 'rewriting cannot fix a blocked finding');
   });
 
+  test('campaign ledger gives every campaign its final verdict so counts are exact', () => {
+    const { formatCampaignLedger, groupTradeReviewsForWiki } = loadProduction(['formatCampaignLedger', 'groupTradeReviewsForWiki']);
+    const review = (id, instrument, closed, status, days) => ({
+      id, instrument_name: instrument, closed_at: closed, action_family: 'short_call_campaign',
+      review_status: status, review_window_days: days, pnl_realized: 10,
+    });
+    const campaigns = groupTradeReviewsForWiki([
+      review(1, 'ETH-20260821-2050-C', '2026-08-21', 'execution_mistake', 1),
+      review(2, 'ETH-20260821-2050-C', '2026-08-21', 'disciplined_win', 7),
+      review(3, 'ETH-20260925-2700-C', '2026-09-25', 'risk_mistake', 3),
+    ], Infinity);
+    const ledger = formatCampaignLedger(campaigns);
+    assert.ok(ledger.startsWith('Totals (2 campaigns): short_call_campaign disciplined_win=1, short_call_campaign risk_mistake=1'));
+    assert.ok(ledger.includes('[review:#2] ETH-20260821-2050-C | short_call_campaign | closed=2026-08-21 | final=disciplined_win (7d)'),
+      'the verdict is the longest review window, cited by its marker');
+  });
+
   test('findings never become page content, and lint holds a materiality bar', () => {
     assert.ok(SCRIPT_SOURCE.includes('/^#+\\s*(outstanding\\s+)?validation findings/im'), 'ingest rejects a leaked findings section');
     assert.ok(SCRIPT_SOURCE.includes('## Materiality Bar'), 'every rewrite is re-audited; nitpicks would keep sound pages flagged');
