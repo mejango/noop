@@ -14166,7 +14166,9 @@ const runBot = async () => {
         if (botData.lastJournalGeneration > lastIngestMs) {
           console.log('📓 Last journal never finished its wiki ingest (restart mid-chain?) — rerunning journal chain');
           botData.lastJournalGeneration = 0;
-        } else if (botData.lastJournalGeneration > botData.lastAdvisoryRun) {
+        } else if (botData.lastJournalGeneration > (botData.lastAdvisorySuccess || 0)) {
+          // Success, not start: lastAdvisoryRun is stamped when a run begins, so a restart
+          // mid-advisory (Step 1 alone runs ~8 min) looked finished and was never rerun.
           console.log('📋 Advisory missed after last journal (restart mid-chain?) — running now');
           generateTradingAdvisory({ trigger: 'catchup' }).catch(e => {
             console.log(`📋 Catch-up advisory failed (non-fatal): ${e.message}`);
