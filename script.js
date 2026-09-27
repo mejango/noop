@@ -6264,7 +6264,11 @@ const callOpenAI = async (systemPrompt, userPrompt, {
 };
 
 const ANTHROPIC_SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
-const ANTHROPIC_STRATEGY_MODEL = process.env.ANTHROPIC_STRATEGY_MODEL || 'claude-fable-5-1';
+const ANTHROPIC_STRATEGY_MODEL = process.env.ANTHROPIC_STRATEGY_MODEL || 'claude-opus-5-5';
+// Opus 5.5 always thinks and defaults to medium effort. The primary agenda runs at max;
+// synthesis and repair rework an existing agenda and run at medium.
+const ANTHROPIC_PRIMARY_EFFORT = 'max';
+const ANTHROPIC_SYNTHESIS_EFFORT = 'medium';
 
 // Thinking blocks can precede text; never interpret them as the final answer.
 const getAnthropicResponseText = (data) => {
@@ -6345,11 +6349,13 @@ const callAnthropicWithMinuteBoundaryRetry = async ({
   spreadAfterBoundary = false,
   maxServerErrorRetries = 2,
   thinking = { type: 'disabled' },
+  effort = null,
 }) => {
   const attemptCall = () => axios.post('https://api.anthropic.com/v1/messages', {
     model,
     max_tokens: maxTokens,
     thinking,
+    ...(effort ? { output_config: { effort } } : {}),
     system,
     messages,
   }, {
@@ -12730,9 +12736,9 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
     console.log(`📋 Advisory Step 0 failed (non-fatal): ${e.message}`);
   }
 
-  // ── Step 1: Primary Advisor (Claude Fable 5.1, Spitznagel temperament) ───────────
+  // ── Step 1: Primary Advisor (Claude Opus 5.5, Spitznagel temperament) ───────────
 
-  console.log('📋 Advisory Step 1: Primary advisor (Claude Fable 5.1)...');
+  console.log('📋 Advisory Step 1: Primary advisor (Claude Opus 5.5)...');
 
   const primarySystemPrompt = `You are a senior options strategist with Mark Spitznagel's temperament. Your philosophy:
 - Arithmetic discipline above all: PUT entries follow the direct PUT EDGE price contract, budget, margin, and execution checks
@@ -12969,13 +12975,14 @@ Produce your trading agenda JSON now.`;
     const primaryResponse = await callAnthropicWithMinuteBoundaryRetry({
       label: 'Advisory Step 1',
       model: advisoryAnthropicModel,
-      maxTokens: 16384,
+      // Thinking tokens count against max_tokens; max effort needs room beyond a 16k-token agenda.
+      maxTokens: 64000,
       thinking: { type: 'adaptive' },
+      effort: ANTHROPIC_PRIMARY_EFFORT,
       system: primarySystemPrompt,
       messages: [{ role: 'user', content: primaryUserPrompt }],
-      // Fable 5.1 thinks before a 16k-token agenda; both the run and its scheduled retry
-      // hit exactly 120s. 10 min matches the SDK default. Drop to effort:'medium' if too slow.
-      timeout: 600000,
+      // A thinking run before a 16k-token agenda outlasted 120s; max effort can run many minutes.
+      timeout: 1200000,
     });
 
     const primaryText = getAnthropicResponseText(primaryResponse.data);
@@ -13096,12 +13103,12 @@ Output JSON only:
     console.log(`📋 Taleb review failed (non-fatal): ${e.message}`);
   }
 
-  // ── Step 3: Synthesis (Claude Sonnet) ───────────────────────────────────────
+  // ── Step 3: Synthesis (Claude Opus 5.5) ───────────────────────────────────────
 
-  console.log('📋 Advisory Step 3: Synthesis (Claude Sonnet)...');
+  console.log('📋 Advisory Step 3: Synthesis (Claude Opus 5.5)...');
 
   let finalAgenda = primaryAgenda; // Default: use primary if synthesis fails
-  const synthesisAnthropicModel = ANTHROPIC_SONNET_MODEL;
+  const synthesisAnthropicModel = ANTHROPIC_STRATEGY_MODEL;
 
   const synthesisSystemPrompt = secondOpinion
     ? `You are the Synthesizer on a trading council. You have two advisor inputs. Your job is to produce the final trading agenda.
@@ -13224,9 +13231,12 @@ Synthesize the final agenda now.`;
     const synthesisResponse = await callAnthropicWithMinuteBoundaryRetry({
       label: 'Advisory Step 3',
       model: synthesisAnthropicModel,
-      // It rewrites the full agenda Step 1 produced with 16384; 3072 truncated it into
-      // "no JSON" and silently published the unsynthesized primary agenda (2 of 3 runs, Sep 25).
-      maxTokens: 16384,
+      // It rewrites the full agenda Step 1 produced; 3072 truncated it into "no JSON" and
+      // silently published the unsynthesized primary agenda (2 of 3 runs, Sep 25). Thinking
+      // tokens count against this too.
+      maxTokens: 32000,
+      thinking: { type: 'adaptive' },
+      effort: ANTHROPIC_SYNTHESIS_EFFORT,
       system: synthesisSystemPrompt,
       messages: [{ role: 'user', content: synthesisUserPrompt }],
       timeout: 600000,
@@ -13268,7 +13278,9 @@ Synthesize the final agenda now.`;
       const repairResponse = await callAnthropicWithMinuteBoundaryRetry({
         label: 'Advisory Step 3b',
         model: synthesisAnthropicModel,
-        maxTokens: 16384, // returns the full repaired agenda, same size as Step 1's
+        maxTokens: 32000, // the full repaired agenda plus thinking, same as Step 1
+        thinking: { type: 'adaptive' },
+        effort: ANTHROPIC_SYNTHESIS_EFFORT,
         system: `You repair an options bot standing rulebook. Add or amend only the missing watcher rules needed to satisfy REQUIRED STANDING RULEBOOK COVERAGE. The favorable conditions must come from the supplied market, account, and position facts. Preserve valid existing rules unless they contradict risk discipline.
 ${getAdvisoryDataQualityPrompt()}
 ${getMomentumEvidenceDisciplinePrompt()}

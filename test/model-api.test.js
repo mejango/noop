@@ -14,7 +14,7 @@ function loadHelpers(post, env = { OPENAI_API_KEY: 'test-key' }) {
   const context = vm.createContext({ axios: { post }, process: { env }, console: { log() {} } });
   vm.runInContext(`${helperSource}\nthis.api = {
     callOpenAI, getAnthropicResponseText, getAnthropicResponseFailure, OPENAI_STRATEGY_MODEL,
-    OPENAI_CONFIRMATION_MODEL, ANTHROPIC_STRATEGY_MODEL, ANTHROPIC_SONNET_MODEL,
+    OPENAI_CONFIRMATION_MODEL, ANTHROPIC_STRATEGY_MODEL, ANTHROPIC_PRIMARY_EFFORT, ANTHROPIC_SYNTHESIS_EFFORT, ANTHROPIC_SONNET_MODEL,
   };`, context);
   return context.api;
 }
@@ -32,7 +32,9 @@ test('Astra sends a reasoning-compatible request and returns the answer', async 
     return { data: { choices: [{ finish_reason: 'stop', message: { content: '{"regime":"calm"}' } }] } };
   });
   assert.equal(await api.callOpenAI('system', 'user'), '{"regime":"calm"}');
-  assert.equal(api.ANTHROPIC_STRATEGY_MODEL, 'claude-fable-5-1');
+  assert.equal(api.ANTHROPIC_STRATEGY_MODEL, 'claude-opus-5-5');
+  assert.equal(api.ANTHROPIC_PRIMARY_EFFORT, 'max');
+  assert.equal(api.ANTHROPIC_SYNTHESIS_EFFORT, 'medium');
   assert.equal(api.ANTHROPIC_SONNET_MODEL, 'claude-sonnet-5');
 });
 
