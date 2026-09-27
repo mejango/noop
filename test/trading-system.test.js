@@ -805,11 +805,12 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(SCRIPT_SOURCE.includes('Express other selectivity through min_score, min_bid'));
   });
 
-  test('advisor prompt defines rolling CALL EDGE with the DTE formula', () => {
-    assert.ok(SCRIPT_SOURCE.includes('getSellCallScoreSamples'));
+  test('advisor prompt judges CALL EDGE against the fixed floor, not a rolling best', () => {
+    assert.ok(!SCRIPT_SOURCE.includes('getSellCallScoreSamples'));
     assert.ok(SCRIPT_SOURCE.includes('call_value_context'));
     assert.ok(SCRIPT_SOURCE.includes('Current CALL EDGE:'));
-    assert.ok(SCRIPT_SOURCE.includes('Prior ${context.window_days}d best CALL EDGE'));
+    assert.ok(SCRIPT_SOURCE.includes('CALL value vs fixed floor:'));
+    assert.ok(!SCRIPT_SOURCE.includes('best CALL EDGE'));
     assert.ok(SCRIPT_SOURCE.includes('CALL EDGE normalization:'));
     assert.ok(SCRIPT_SOURCE.includes('CALL EDGE = raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}'));
   });
@@ -7235,7 +7236,7 @@ describe('wiki findings feed back into ingest', () => {
     const { decideWikiEscalation, getWikiPagesToRepair } = loadProduction(['decideWikiEscalation', 'getWikiPagesToRepair']);
     const now = '2026-09-26T14:00:00Z';
     const nit = { type: 'quality', persists: false, description: 'x' };
-    const same = { type: 'quality', persists: true, description: 'x' };
+    const same = { type: 'quality', persists: true, confirmed: true, description: 'x' };
 
     assert.deepStrictEqual(decideWikiEscalation({ repair_attempts: 3, escalated_at: now }, [], now).patch,
       { repair_attempts: 0, escalated_at: null, escalation_reason: null }, 'clean page clears everything');
@@ -7248,8 +7249,10 @@ describe('wiki findings feed back into ingest', () => {
     assert.strictEqual(escalated.patch.escalated_at, now);
     assert.strictEqual(escalated.notify, true);
     assert.strictEqual(decideWikiEscalation({ repair_attempts: 3, escalated_at: now }, [same], now).notify, false, 'notify once');
+    assert.strictEqual(decideWikiEscalation({ repair_attempts: 5 }, [{ ...same, confirmed: false }], now).patch.escalated_at, null,
+      'the lint alone cannot page a human; an independent judge must confirm');
 
-    assert.ok(decideWikiEscalation({}, [{ type: 'blocked', persists: false }], now).patch.escalation_reason.startsWith('blocked'),
+    assert.ok(decideWikiEscalation({}, [{ type: 'blocked', persists: false, confirmed: true }], now).patch.escalation_reason.startsWith('blocked'),
       'blocked goes straight to a human');
     assert.deepStrictEqual(getWikiPagesToRepair({
       'revenue/efficiency.md': { issues: ['[blocked] reviews never written'] },

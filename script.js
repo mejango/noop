@@ -134,7 +134,6 @@ const {
 } = require('./bot/put-score');
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
 const { buildSmileRows, SMILE_SNAPSHOT_INTERVAL_MS } = require('./bot/iv-smile');
-const { assessRichness } = require('./bot/iv-richness');
 const { buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor } = require('./bot/vol-surface');
 let lastSmileSnapshotAt = 0;
 const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
@@ -376,7 +375,6 @@ const PUT_EXPIRATION_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
 const PUT_DELTA_RANGE = STRATEGY_FACTS.put_delta_range; // Negative delta for puts
 const BUY_PUT_ADVISORY_DTE_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
 const ADVISORY_OPTION_VALUE_WINDOW_DAYS = 6.2;
-const SELL_CALL_VALUE_DTE_BAND_DAYS = 1.5;
 const BUY_PUT_URGENT_SCORE_NUDGE = 1.005;
 const BUY_PUT_PATIENT_SCORE_NUDGE = 1.02;
 const BUY_PUT_REPRICING_LAG_SCORE_NUDGE = 0.999;
@@ -2176,29 +2174,6 @@ const getBestCurrentSellCallCandidate = (
   return best;
 };
 
-// Every eligible entry candidate with its fill-side IV (bid for sells, ask for buys) for the
-// per-strike richness check. Same eligibility as the best-candidate pickers above.
-const listRichnessCandidates = (tickerMap = {}, nowMs = Date.now()) => {
-  const calls = [];
-  const puts = [];
-  for (const [name, ticker] of Object.entries(tickerMap || {})) {
-    const parsed = parseAdvisoryOptionInstrument(name);
-    if (!parsed) continue;
-    const dte = computeDteAt(parsed.expiry, nowMs);
-    const delta = Number(ticker?.option_pricing?.d);
-    const base = { instrument: name, expiry: Math.floor(parsed.expiry.getTime() / 1000), strike: parsed.strike };
-    if (parsed.optionType === 'C' && isSellCallCandidateInStrategyRange(dte, delta) && Number(ticker?.b) > 0) {
-      calls.push({ ...base, isCall: true, iv: Number(ticker?.option_pricing?.bi),
-        edge_score: normalizeSellCallScore(Number(ticker.b) / Math.abs(delta), dte) });
-    } else if (parsed.optionType === 'P' && dte >= BUY_PUT_ADVISORY_DTE_RANGE[0] && dte <= BUY_PUT_ADVISORY_DTE_RANGE[1]
-      && delta >= PUT_DELTA_RANGE[0] && delta <= PUT_DELTA_RANGE[1] && Number(ticker?.a) > 0) {
-      puts.push({ ...base, isCall: false, iv: Number(ticker?.option_pricing?.ai),
-        edge_score: normalizeBuyPutScore(Math.abs(delta) / Number(ticker.a), dte) });
-    }
-  }
-  return { calls, puts };
-};
-
 // Spot state from the measured recent slope only; momentum labels never gate decisions.
 const classifySpotPriceAction = (recentSpotPrices = []) => {
   let slopePct = null;
@@ -2436,17 +2411,8 @@ const buildRollingOptionValueContext = ({
   // of quality ranking. Compare that same population and statistic live.
   const currentPutEdge = getBestCurrentBuyPutEdgeCandidate(tickerMap, nowMs);
   const currentCall = getBestCurrentSellCallCandidate(tickerMap, nowMs);
-  // Compare CALL value against history at similar maturity. The light DTE
-  // correction does not make 12 DTE comparable with 5 DTE, so a new weekly
-  // entering the window would otherwise read as a fresh best on roll alone.
-  const callDteBand = currentCall?.dte > 0
-    ? [Math.max(CALL_EXPIRATION_RANGE[0], currentCall.dte - SELL_CALL_VALUE_DTE_BAND_DAYS),
-      Math.min(CALL_EXPIRATION_RANGE[1], currentCall.dte + SELL_CALL_VALUE_DTE_BAND_DAYS)]
-    : CALL_EXPIRATION_RANGE;
   let priorSamples = [];
   let priorBestDetail = null;
-  let priorCallSamples = [];
-  let priorCallBestDetail = null;
   let recentSpotPrices = [];
 
   if (db) {
@@ -2471,46 +2437,11 @@ const buildRollingOptionValueContext = ({
           maxDte: BUY_PUT_ADVISORY_DTE_RANGE[1],
         });
       }
-      if (typeof db.getSellCallScoreSamples === 'function') {
-        priorCallSamples = db.getSellCallScoreSamples({
-          since,
-          before,
-          minDelta: CALL_DELTA_RANGE[0],
-          maxDelta: CALL_DELTA_RANGE[1],
-          minDte: callDteBand[0],
-          maxDte: callDteBand[1],
-        });
-      }
-      if (typeof db.getBestSellCallScoreDetail === 'function') {
-        priorCallBestDetail = db.getBestSellCallScoreDetail({
-          since,
-          before,
-          minDelta: CALL_DELTA_RANGE[0],
-          maxDelta: CALL_DELTA_RANGE[1],
-          minDte: callDteBand[0],
-          maxDte: callDteBand[1],
-        });
-      }
       if (typeof db.getRecentSpotPrices === 'function') {
         recentSpotPrices = db.getRecentSpotPrices(new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString());
       }
     } catch (e) {
       console.log(`📋 Advisory context: rolling option value query failed: ${e.message}`);
-    }
-  }
-
-  // Per-strike IV vs that strike's own history: the rollover-proof answer to "is now good value".
-  let callRichness = null;
-  let putRichness = null;
-  if (db && typeof db.getSmileSnapshotsForExpiry === 'function') {
-    try {
-      const { calls, puts } = listRichnessCandidates(tickerMap, nowMs);
-      const smileRowsFor = (candidates) => [...new Set(candidates.map((c) => c.expiry))]
-        .flatMap((expiry) => db.getSmileSnapshotsForExpiry({ expiry, since, before }));
-      callRichness = assessRichness(calls, smileRowsFor(calls), 'bid');
-      putRichness = assessRichness(puts, smileRowsFor(puts), 'ask');
-    } catch (e) {
-      console.log(`📋 Advisory context: IV richness query failed: ${e.message}`);
     }
   }
 
@@ -2522,19 +2453,9 @@ const buildRollingOptionValueContext = ({
     ? (priorScores.filter((score) => score <= currentScore).length / priorScores.length) * 100
     : null;
   const freshBest = currentScore == null ? null : currentScore > 0 && priorBestScore > 0 && currentScore > priorBestScore;
-  const priorCallScores = priorCallSamples.map((row) => Number(row.score)).filter((score) => score > 0);
-  const priorCallBestScore = priorCallScores.length > 0 ? Math.max(...priorCallScores) : null;
+  // CALL value is absolute: the live best against the fixed floor, never against recent history.
+  // A rolling best relaxes in quiet weeks, which is when thin premium precedes breakouts.
   const currentCallScore = currentCall ? finiteOrNull(currentCall.selection_score) : null;
-  const currentCallVsPriorBestPct = currentCallScore != null && priorCallBestScore > 0
-    ? (currentCallScore / priorCallBestScore) * 100
-    : null;
-  const callPercentile = currentCallScore > 0 && priorCallScores.length > 0
-    ? (priorCallScores.filter((score) => score <= currentCallScore).length / priorCallScores.length) * 100
-    : null;
-  const callFreshBest = currentCallScore == null ? null : currentCallScore > 0 && priorCallBestScore > 0 && currentCallScore > priorCallBestScore;
-  const callTrend1hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 1);
-  const callTrend6hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 6);
-  const callTrend24hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 24);
   const callResearchContext = currentCall
     ? buildSellCallEdge({ score: currentCall.score, dte: currentCall.dte })
     : null;
@@ -2635,7 +2556,6 @@ const buildRollingOptionValueContext = ({
       current_vs_prior_best_pct: roundForAdvisory(currentVsPriorBestPct, 2),
       percentile_vs_prior_window: roundForAdvisory(percentile, 1),
       is_strict_fresh_best: freshBest,
-      iv_richness: putRichness,
       trend_1h_pct: scoreTrend1hPct,
       trend_6h_pct: computeScoreTrendPct(priorSamples, currentScore, 6),
       trend_24h_pct: computeScoreTrendPct(priorSamples, currentScore, 24),
@@ -2697,15 +2617,9 @@ const buildRollingOptionValueContext = ({
     call_value_context: {
       availability: quoteSummary.call,
       current_score: roundForAdvisory(currentCallScore, 2),
-      prior_window_best_score: roundForAdvisory(priorCallBestScore, 2),
-      current_vs_prior_best_pct: roundForAdvisory(currentCallVsPriorBestPct, 2),
-      percentile_vs_prior_window: roundForAdvisory(callPercentile, 1),
-      is_strict_fresh_best: callFreshBest,
-      comparison_dte_band: callDteBand.map((dte) => roundForAdvisory(dte, 1)),
-      iv_richness: callRichness,
-      trend_1h_pct: callTrend1hPct,
-      trend_6h_pct: callTrend6hPct,
-      trend_24h_pct: callTrend24hPct,
+      floor_score: SELL_CALL_FALLBACK_MIN_SCORE,
+      floor_min_bid: SELL_CALL_FALLBACK_MIN_BID,
+      clears_floor: currentCall ? currentCallScore >= SELL_CALL_FALLBACK_MIN_SCORE && currentCall.bid_price >= SELL_CALL_FALLBACK_MIN_BID : null,
       market_context: {
         market_avg_spread_pct: roundForAdvisory(sellCallMarketContext.market_avg_spread != null ? sellCallMarketContext.market_avg_spread * 100 : null, 2),
         market_avg_depth: roundForAdvisory(sellCallMarketContext.market_avg_depth, 2),
@@ -2752,16 +2666,6 @@ const buildRollingOptionValueContext = ({
         expiry: currentCall.expiry,
         dte: roundForAdvisory(currentCall.dte, 1),
       } : null,
-      prior_window_best_detail: priorCallBestDetail ? {
-        timestamp: priorCallBestDetail.timestamp,
-        instrument: priorCallBestDetail.instrument_name,
-        delta: roundForAdvisory(Number(priorCallBestDetail.delta), 4),
-        bid_price: roundForAdvisory(Number(priorCallBestDetail.bid_price), 4),
-        strike: Number(priorCallBestDetail.strike),
-        expiry: Number(priorCallBestDetail.expiry),
-        dte: roundForAdvisory(Number(priorCallBestDetail.dte), 1),
-      } : null,
-      samples: priorCallScores.length,
     },
     spot_repricing_lag_context: repricingLag,
     recent_relative_value_context: recentRelativeValue,
@@ -2795,14 +2699,6 @@ const buildRollingOptionValueContext = ({
   };
 };
 
-const formatIvRichness = (label, sense, r) => {
-  if (!r) return `${label} IV richness vs own strike history: unavailable.`;
-  const fmt = (c) => `${c.instrument} value_pctl=${c.value_percentile} (IV ${c.current_iv_pct}%, ${c.iv_vs_median_pts >= 0 ? '+' : ''}${c.iv_vs_median_pts} pts vs its median, ${c.samples} samples, EDGE=${roundForAdvisory(c.edge_score, 4)})`;
-  return `${label} IV richness vs own strike history (value_pctl = share of the strike's ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d samples with ${sense} now; needs ${r.min_samples}+ samples): `
-    + `${r.measured}/${r.candidates} candidates measured, ${r.qualified} at value_pctl>=${r.qualify_percentile}; `
-    + `best qualifying by EDGE: ${r.best_qualified ? fmt(r.best_qualified) : 'none'}; richest: ${r.richest ? fmt(r.richest) : 'none'}.`;
-};
-
 const formatRollingOptionValueContext = (context) => {
   if (!context?.put_value_context) return 'No rolling option value context available.';
   const put = context.put_value_context;
@@ -2817,7 +2713,6 @@ const formatRollingOptionValueContext = (context) => {
   const prior = put.prior_window_best_detail;
   const putResearch = put.research_context || {};
   const callDetail = call.current_detail;
-  const callPrior = call.prior_window_best_detail;
   const callResearch = call.research_context || {};
   const callMarket = call.market_context || {};
   const availability = context.quote_availability || {};
@@ -2830,17 +2725,13 @@ const formatRollingOptionValueContext = (context) => {
     `Current PUT EDGE: ${put.current_score ?? 'unavailable'}${detail ? ` (raw=${detail.raw_score ?? 'n/a'}, ${detail.instrument}, delta=${detail.delta}, ask=$${detail.ask_price}, two-sided spread/mark=${detail.spread_pct ?? 'n/a'}%, DTE=${detail.dte}, quote=${detail.quote_received_at || 'unknown'})` : ''}.`,
     `Prior ${context.window_days}d best PUT EDGE: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (raw=${prior.raw_score ?? 'n/a'}, ${prior.instrument} at ${prior.timestamp})` : ''}.`,
     `Current PUT vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${formatDetection(put.is_strict_fresh_best)}; samples=${put.samples}.`,
-    formatIvRichness('PUT', 'ask IV at or below', put.iv_richness),
     `PUT score trend: 1h=${put.trend_1h_pct ?? 'n/a'}%, 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
     `PUT EDGE selector: instrument=${selectedPut?.instrument || 'n/a'}; live-ask PUT EDGE=${selectedPut?.put_edge_score ?? 'n/a'}; selection_score=${putResearch.selection_score ?? 'n/a'}; formula=${putResearch.reason || 'n/a'}.`,
     `PUT crash scenarios (informational, not ranking): intrinsic payoff per premium dollar at 30/40/50% spot declines=${JSON.stringify(putResearch.edge_components?.shock_payoff_multiples || {})}. These are expiration payoffs, not predicted resale prices during an earlier crash.`,
     `Sell-call filters: delta ${JSON.stringify(context.sell_call_filters?.delta_range)}; DTE ${JSON.stringify(context.sell_call_filters?.dte_range)}; raw_score=${context.sell_call_filters?.raw_score}; edge_score=${context.sell_call_filters?.edge_score}.`,
     formatAvailability('CALL', call.availability),
     `Current CALL EDGE: ${call.current_score ?? 'unavailable'}${callDetail ? ` (raw=${callDetail.raw_score ?? 'n/a'}, ${callDetail.instrument}, delta=${callDetail.delta}, bid=$${callDetail.bid_price}, two-sided spread/mark=${callDetail.spread_pct ?? 'n/a'}%, DTE=${callDetail.dte}, quote=${callDetail.quote_received_at || 'unknown'})` : ''}.`,
-    `Prior ${context.window_days}d best CALL EDGE at DTE ${JSON.stringify(call.comparison_dte_band)}: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
-    `Current CALL vs prior best: ${call.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${call.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${formatDetection(call.is_strict_fresh_best)}; samples=${call.samples ?? 0}.`,
-    formatIvRichness('CALL', 'bid IV at or above', call.iv_richness),
-    `CALL score trend: 1h=${call.trend_1h_pct ?? 'n/a'}%, 6h=${call.trend_6h_pct ?? 'n/a'}%, 24h=${call.trend_24h_pct ?? 'n/a'}%.`,
+    `CALL value vs fixed floor: CALL EDGE ${call.current_score ?? 'unavailable'} vs floor ${call.floor_score}, bid floor $${call.floor_min_bid}; clears_floor=${formatDetection(call.clears_floor)}. The floor is absolute; do not lower min_score below it because recent premiums were weak.`,
     `CALL market context (not part of CALL EDGE): avg_spread=${callMarket.market_avg_spread_pct ?? 'n/a'}%; best_put_score=${callMarket.market_best_put_score ?? 'n/a'}; matched-expiry/delta skew=${callMarket.put_call_iv_skew_pct ?? 'n/a'}% (${callMarket.put_call_iv_skew_matched_pairs ?? 0} matched puts); oi_24h=${callMarket.market_oi_delta_24h_pct ?? 'n/a'}%; pc_oi=${callMarket.market_pc_oi ?? 'n/a'}.`,
     `CALL EDGE normalization: edge_score=${callResearch.selection_score ?? 'n/a'}; raw_score=${callResearch.edge_components?.raw_score ?? 'n/a'}; DTE=${callResearch.edge_components?.dte ?? 'n/a'}; factor=${callResearch.edge_components?.normalization_factor ?? 'n/a'}; formula=${callResearch.reason || 'n/a'}.`,
     `Spot-lag repricing check: detected=${formatDetection(lag.is_detected)}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%; spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%; near_best=${lag.current_vs_prior_best_pct ?? 'n/a'}%; reason=${lag.reason || 'n/a'}.`,
@@ -4934,6 +4825,27 @@ const WIKI_INGEST_MAX_EXTRA_PAGES = 3;
 // or a "blocked" finding no rewrite can resolve. Everything else is FIXING.
 const WIKI_ESCALATE_AFTER_ATTEMPTS = 2;
 
+const WIKI_ESCALATE_MIN_CONFIDENCE = 0.8; // ponytail: untuned; a false "fix asap" costs more than a late one
+
+// Probability each finding is a real, still-present, material defect; null when no judge is
+// available, which keeps findings for repair but lets none escalate.
+const judgeWikiFindings = async (issues = []) => {
+  const client = getTypeSafe();
+  if (!client || issues.length === 0) return null;
+  try {
+    const { answers } = await client.systemOne({
+      state: Object.fromEntries(issues.map((issue, i) => [`finding_${i}`, { page: issue.page, quote: issue.quote, finding: issue.description }])),
+      questions: Object.fromEntries(issues.map((_, i) => [`finding_${i}`, typesafe.noul(
+        `Is \`finding_${i}.finding\` a real defect, still present in \`finding_${i}.quote\`, that would mislead a trading decision or misstate a fact? No if the finding says the issue is resolved or does not persist, concedes the text is consistent, or concerns wording, phrasing, or formatting.`,
+      )])),
+    });
+    return issues.map((_, i) => answers[`finding_${i}`]?.noul ?? null);
+  } catch (e) {
+    console.log('📚 Wiki lint: finding judgment failed; keeping findings, escalating none:', e.message);
+    return null;
+  }
+};
+
 // Markdown emphasis and whitespace differ between a page and a model's copy of it.
 const normalizeWikiQuoteText = (text) => String(text || '').replace(/[`*_]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
 const wikiQuoteAppearsIn = (content, quote) => {
@@ -4948,9 +4860,12 @@ const decideWikiEscalation = (stored = {}, pageIssues = [], now = new Date().toI
   const persists = pageIssues.some((issue) => issue?.persists === true);
   // A new finding owes nothing to earlier attempts, which fixed the findings they were given.
   const attempts = persists ? (stored?.repair_attempts || 0) : 0;
-  const reason = pageIssues.some((issue) => issue?.type === 'blocked')
+  // Only findings the independent judge confirmed reach a human.
+  const reason = pageIssues.some((issue) => issue?.type === 'blocked' && issue?.confirmed)
     ? 'blocked: needs data or a decision no wiki rewrite can supply'
-    : (persists && attempts >= WIKI_ESCALATE_AFTER_ATTEMPTS ? `survived ${attempts} automatic repairs` : null);
+    : (pageIssues.some((issue) => issue?.persists === true && issue?.confirmed) && attempts >= WIKI_ESCALATE_AFTER_ATTEMPTS
+      ? `survived ${attempts} automatic repairs`
+      : null);
   if (!reason) return { patch: { repair_attempts: attempts, escalated_at: null, escalation_reason: null }, notify: false };
   return {
     patch: { repair_attempts: attempts, escalated_at: stored?.escalated_at || now, escalation_reason: reason },
@@ -5718,9 +5633,18 @@ Assign page_to_fix to the page whose content should change. For a cross-page con
     ));
     // Shown its prior findings, the lint repeated them after the page was fixed (#14/#15 were
     // already under Strong). A finding must quote the current page, or it is dropped.
-    const validIssues = scopedIssues.filter((issue) => wikiQuoteAppearsIn(pages[issue.page], issue.quote));
-    if (validIssues.length < scopedIssues.length) {
-      console.log(`📚 Wiki lint: discarded ${scopedIssues.length - validIssues.length} finding(s) whose quote is not in the current page`);
+    const quotedIssues = scopedIssues.filter((issue) => wikiQuoteAppearsIn(pages[issue.page], issue.quote));
+    if (quotedIssues.length < scopedIssues.length) {
+      console.log(`📚 Wiki lint: discarded ${scopedIssues.length - quotedIssues.length} finding(s) whose quote is not in the current page`);
+    }
+    // The lint grades its own work; its first escalations included "Issue does not persist".
+    // A second model must agree a finding is real to keep it, and agree strongly to page anyone.
+    const judgments = await judgeWikiFindings(quotedIssues);
+    const validIssues = quotedIssues
+      .map((issue, i) => ({ ...issue, confirmed: (judgments?.[i] ?? 0) >= WIKI_ESCALATE_MIN_CONFIDENCE }))
+      .filter((issue, i) => judgments?.[i] == null || judgments[i] >= 0.5);
+    if (validIssues.length < quotedIssues.length) {
+      console.log(`📚 Wiki lint: discarded ${quotedIssues.length - validIssues.length} finding(s) the independent judge rejected`);
     }
     const ignoredIssueCount = normalizedIssues.length - scopedIssues.length;
     if (validIssues.length > 0) {
@@ -8444,14 +8368,14 @@ const validateRestingSellCallEntryOrder = ({
       continue;
     }
 
-    const minBid = Number(criteria.min_bid ?? 0);
+    const minBid = Math.max(Number(criteria.min_bid ?? 0), SELL_CALL_FALLBACK_MIN_BID);
     if (minBid > 0 && orderLimitPrice < minBid) {
       reasons.push(`rule ${rule.id}: order limit $${orderLimitPrice.toFixed(4)} below min_bid $${minBid.toFixed(4)}`);
       continue;
     }
 
     const configuredMinScore = Number(criteria.min_score ?? 0);
-    const minScore = configuredMinScore > 0 ? configuredMinScore : SELL_CALL_FALLBACK_MIN_SCORE;
+    const minScore = Math.max(configuredMinScore > 0 ? configuredMinScore : 0, SELL_CALL_FALLBACK_MIN_SCORE);
     if (edgeScore + 1e-9 < minScore) {
       reasons.push(`rule ${rule.id}: order CALL EDGE ${edgeScore.toFixed(2)} below min_score ${minScore.toFixed(2)}`);
       continue;
@@ -9616,14 +9540,17 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         // buy_put cost discipline is handled by total budget_limit/put budget
         // plus score/value filters; per-contract max_cost is deprecated.
         const maxCost = rule.action === 'buy_put' ? null : criteria.max_cost ?? null;
-        const minBid = Number(criteria.min_bid ?? 0) > 0 ? Number(criteria.min_bid) : null;
+        const minBid = rule.action === 'sell_call'
+          ? Math.max(Number(criteria.min_bid ?? 0), SELL_CALL_FALLBACK_MIN_BID)
+          : Number(criteria.min_bid ?? 0) > 0 ? Number(criteria.min_bid) : null;
         const minScore = Number(criteria.min_score ?? 0) > 0 ? Number(criteria.min_score) : null;
         // Legacy min_edge_score is retired; continuous PUT/CALL EDGE is the score contract.
         // Saved sell-call rules from the former composite-edge system only have
         // min_edge_score. Run those through the established normalized floor
         // until the next advisory replaces them with an explicit min_score.
+        // The floor binds: a rule may demand more than it, never less.
         const sellCallMinScore = rule.action === 'sell_call'
-          ? (minScore ?? SELL_CALL_FALLBACK_MIN_SCORE)
+          ? Math.max(minScore ?? 0, SELL_CALL_FALLBACK_MIN_SCORE)
           : null;
         const rawValueSignal = criteria.value_signal ?? criteria.buy_put_signal;
         const valueSignal = normalizeBuyPutValueSignal(rawValueSignal);
@@ -10726,7 +10653,7 @@ const getMomentumEvidenceDisciplinePrompt = () => [
   'EVIDENCE PRIORITY: This is an options bang-for-buck strategy, not a price-direction strategy.',
   '- Primary evidence: executable bid/ask, spread/depth, IV/skew, DTE, delta, moneyness, OI, funding, candidate score, position PnL, hedge role, and account margin impact.',
   '- Path context comes from the raw 30-day hourly spot path, not from momentum labels. Do not create, preserve, or justify a rule mainly because spot has been rising or falling; direction must be confirmed by option pricing, liquidity, skew, OI, funding, or position-specific risk.',
-  '- Value timing: CALL/PUT EDGE ranks which contract, but it cannot say on its own that now is good value. Raw scores drift with theta and jump when the DTE window rolls to a new expiry. Time entries with IV RICHNESS VS OWN STRIKE HISTORY: a fresh best or high percentile whose candidate sits well below the value_pctl bar is a rollover or decay artifact, not value. Prefer qualifying candidates, ranked by EDGE, and set min_score near that candidate rather than above a rollover jump. With too few richness samples, fall back to the DTE-banded CALL comparison.',
+  `- Sell-call value is absolute: sell only when CALL EDGE >= ${SELL_CALL_FALLBACK_MIN_SCORE} and bid >= $${SELL_CALL_FALLBACK_MIN_BID}. Never set min_score below that floor because recent premiums were weak; quiet weeks make thin premium look good just before breakouts (backtest: floor +$8 vs rolling best -$318 over Jul 25-Sep 27 2026).`,
 ].join('\n');
 
 const getBuyPutEntryPriceDisciplinePrompt = () => [
