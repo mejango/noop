@@ -10,7 +10,9 @@ import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import { deltaX, expiryStats, fromCompact, ivAtDelta, type CompactSmileRow, type SmileExpiry, type SmilePoint, type SmileStats } from '@/lib/vol-smile';
 
 // Fixed slots: an expiry keeps its color while selected, whatever else is toggled.
-const SLOT_COLORS = [chartColors.primary, chartColors.secondary, '#c084fc', '#fde047'];
+const SLOT_COLORS = [chartColors.primary, chartColors.secondary, '#c084fc', '#fde047', '#f472b6', '#60a5fa', '#a3e635', '#fdba74'];
+// Past the palette, spread hues by the golden angle so any number of expiries stay distinguishable.
+const slotColor = (slot: number) => SLOT_COLORS[slot] ?? `hsl(${(slot * 137.5) % 360} 70% 65%)`;
 const PUT_ZONE = '#f87171';
 const CALL_ZONE = '#10b981';
 const DELTA_TICKS = [-0.4, -0.25, 0, 0.25, 0.4];
@@ -152,12 +154,13 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
   const toggle = (expiry: number) => {
     const cur = selection;
     if (cur.some(s => s.expiry === expiry)) return setPicked(cur.filter(s => s.expiry !== expiry));
-    const free = SLOT_COLORS.findIndex((_, i) => !cur.some(s => s.slot === i));
-    if (free >= 0) setPicked([...cur, { expiry, slot: free }]);
+    let free = 0;
+    while (cur.some(s => s.slot === free)) free++;
+    setPicked([...cur, { expiry, slot: free }]);
   };
   const colorOf = (expiry: number) => {
     const s = selection.find(x => x.expiry === expiry);
-    return s ? SLOT_COLORS[s.slot] : null;
+    return s ? slotColor(s.slot) : null;
   };
 
   const held = useMemo(() => new Map(positions.filter(p => Number(p.amount) !== 0).map(p => [p.instrument_name, Number(p.amount)])), [positions]);
@@ -171,7 +174,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
   const series = useMemo(() => selection.map(({ expiry, slot }) => {
     const row = rows.find(r => r.expiry === expiry);
     if (!row) return null;
-    const color = SLOT_COLORS[slot];
+    const color = slotColor(slot);
     const pts: Plotted[] = row.points
       .map(p => ({ ...p, x: xOf(p, spot), label: row.label, held: replay ? null : held.get(p.name) ?? null, iv24: hist24.get(p.name)?.iv ?? null, color }))
       .sort((a, b) => a.x - b.x);
