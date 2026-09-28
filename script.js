@@ -3776,6 +3776,16 @@ const getSpotAtOrBefore = (rows, timestamp) => {
   return best;
 };
 
+// IV as decimals in, vol points out: "52.1% → 47.3% (−4.8 vol pts)".
+const formatReviewIvChange = (ivOpen, ivClose) => {
+  const pts = (v) => (Number(v) > 0 ? Number((v * 100).toFixed(1)) : null);
+  const open = pts(ivOpen), close = pts(ivClose);
+  if (open == null && close == null) return 'N/A (no recorded quote for this instrument)';
+  const change = open != null && close != null ? ` (${close - open >= 0 ? '+' : '−'}${Math.abs(close - open).toFixed(1)} vol pts)` : '';
+  const show = (v) => (v == null ? 'N/A' : `${v}%`);
+  return `${show(open)} → ${show(close)}${change}. For a short option a falling IV earns value independent of spot; for a long option it costs value.`;
+};
+
 const buildTradeReviewEvidenceWindow = (campaign, priceWindow) => {
   const closedAtMs = new Date(campaign.closed_at).getTime();
   const requestedHorizonMs = new Date(campaign.horizon_end_at).getTime();
@@ -4082,6 +4092,9 @@ const reviewClosedTrades = async () => {
         const effectivePnlRealized = campaign.pnl_realized + expirySettlementCashflow;
         const effectivePremiumClosed = campaign.premium_closed + (expirySettlementValue || 0);
         const closeReason = campaign.close_orders?.some((order) => order?._source === 'synthetic_expiry') ? 'expiry' : 'offsetting order';
+        // The instrument's own IV at open and close: separates a vol move from a spot move in the P&L.
+        const ivOpen = db.getInstrumentIvNear(campaign.instrument_name, campaign.opened_at)?.implied_vol ?? null;
+        const ivClose = db.getInstrumentIvNear(campaign.instrument_name, campaign.closed_at)?.implied_vol ?? null;
 
         const reviewPrompt = `You are reviewing a CLOSED options trade campaign for a Spitznagel-style ETH tail-hedging bot.
 
@@ -4118,6 +4131,7 @@ Campaign:
 - Spot at open: ${campaign.spot_open != null ? `$${campaign.spot_open}` : 'N/A'}
 - Spot at close: ${spotAtClose != null ? `$${spotAtClose}` : 'N/A'}
 - Expiry settlement value: ${expirySettlementValue != null ? `$${expirySettlementValue.toFixed(4)}${expirySettlementValue > 0 && campaign.action_family === 'short_call_campaign' ? ' (forced buyback at expiry: call expired ITM, paid intrinsic, already included in realized cashflow)' : ''}` : 'N/A'}
+- Instrument IV at open → close: ${formatReviewIvChange(ivOpen, ivClose)}
 - Spot range while open: ${whileOpen.length > 0 ? `$${Math.min(...whileOpen.map(p => p.price)).toFixed(2)} -> $${Math.max(...whileOpen.map(p => p.price)).toFixed(2)}` : 'N/A'}
 - Spot range after close but before expiry: ${afterCloseBeforeExpiry.length > 0 ? `$${Math.min(...afterCloseBeforeExpiry.map(p => p.price)).toFixed(2)} -> $${Math.max(...afterCloseBeforeExpiry.map(p => p.price)).toFixed(2)}` : 'N/A'}
 - Post-expiry spot context (not valid for option payoff evaluation): ${postExpiryContext.length > 0 ? `$${Math.min(...postExpiryContext.map(p => p.price)).toFixed(2)} -> $${Math.max(...postExpiryContext.map(p => p.price)).toFixed(2)}` : 'N/A'}
@@ -4181,6 +4195,8 @@ Output JSON only:
           spot_max_while_open: whileOpen.length > 0 ? Math.max(...whileOpen.map(p => p.price)) : null,
           spot_min_after_close: afterCloseBeforeExpiry.length > 0 ? Math.min(...afterCloseBeforeExpiry.map(p => p.price)) : null,
           spot_max_after_close: afterCloseBeforeExpiry.length > 0 ? Math.max(...afterCloseBeforeExpiry.map(p => p.price)) : null,
+          iv_open: ivOpen,
+          iv_close: ivClose,
         });
         console.log(`🧾 Trade review stored for ${campaign.instrument_name} [${campaign.review_window_days}d]: ${result.status}`);
         storedCount += 1;
@@ -4758,7 +4774,8 @@ const formatCampaignLedger = (campaigns = []) => {
     const family = campaign.action_family || 'unknown';
     const status = final.review_status || 'unreviewed';
     totals[`${family} ${status}`] = (totals[`${family} ${status}`] || 0) + 1;
-    return `[review:#${final.id}] ${campaign.instrument_name} | ${family} | closed=${String(campaign.closed_at || '').slice(0, 10)} | final=${status} (${final.review_window_days}d) | pnl=${formatWikiNumber(campaign.pnl_realized, 2, '$')}`;
+    const iv = final.iv_open > 0 && final.iv_close > 0 ? ` | iv=${(final.iv_open * 100).toFixed(1)}→${(final.iv_close * 100).toFixed(1)}` : '';
+    return `[review:#${final.id}] ${campaign.instrument_name} | ${family} | closed=${String(campaign.closed_at || '').slice(0, 10)} | final=${status} (${final.review_window_days}d) | pnl=${formatWikiNumber(campaign.pnl_realized, 2, '$')}${iv}`;
   });
   const totalsLine = Object.entries(totals).sort().map(([key, count]) => `${key}=${count}`).join(', ');
   return [`Totals (${campaigns.length} campaigns): ${totalsLine}`, ...lines].join('\n');
@@ -4795,6 +4812,9 @@ const writeRawEvidencePacket = (journalEntries = []) => {
     '',
     '## Factual Order Activity (last 7d)',
     recentOrders.length > 0 ? recentOrders.map(formatOrderEvidenceLine).join('\n') : 'No recent orders.',
+    '',
+    '## Volatility Surface (computed; authoritative for IV levels, percentiles and 24h/7d moves)',
+    formatVolSurfaceForAdvisor(buildStoredVolSurface()),
     '',
     '## Campaign Ledger (every reviewed campaign; authoritative for campaign counts and review status)',
     formatCampaignLedger(allTradeCampaigns),
@@ -6029,6 +6049,9 @@ const generateJournalEntries = async (tickSummary, botData) => {
         } catch { return null; }
       })(),
       cross_correlations: correlations,
+      // The trade zones' ATM, wings, risk reversal, term slope and IV − realized, each with its 30d
+      // percentile and 24h/7d move: the dashboard's smile panel, as the journal's own evidence.
+      volatility_surface: formatVolSurfaceForAdvisor(buildStoredVolSurface()),
       put_price_divergence: putPriceDivergence,
       recent_orders: recentOrders.map(o => ({
         timestamp: o.timestamp,
@@ -6143,6 +6166,7 @@ ETH direction is second-order evidence. Notice spot moves, but do not let them o
 The journal (observation, hypothesis, regime_note) should track:
 - Is OTM put protection getting cheaper or more expensive? (IV environment, skew, put delta-value scores)
 - Is call premium rich or thin? (call IV, premium/delta ratios, term structure)
+- How is the volatility surface moving? Use snapshot.volatility_surface for IV levels, percentiles and 24h/7d moves in both trade zones; cite its numbers instead of inferring IV from scores, and relate the moves to spot, OI and funding.
 - Are macro conditions building toward a crash? (flows, leverage, funding, OI structure)
 - What regime are we in and what does it mean for BOTH put buying AND call selling?
 - Where is the cheap convexity in the put chain right now?
@@ -6559,7 +6583,13 @@ const formatSignedPct = (value, digits = 1) => {
 
 // 30d percentile history is ~720 hourly samples; rebuilding it once an hour is plenty.
 let volSurfaceHistoryCache = null;
-const buildAdvisoryVolSurface = ({ tickerMap, instruments, nowMs }) => {
+const smileRowsToSurfaceExpiries = (rows) => rows.map(r => ({
+  expiry: r.expiry,
+  points: (typeof r.points === 'string' ? JSON.parse(r.points) : r.points)
+    .map(([, isCall, delta, iv]) => ({ type: isCall ? 'C' : 'P', delta, iv: iv * 100 })),
+}));
+
+const buildVolSurfaceAt = (expiries, nowMs) => {
   if (!db?.getVolSurfaceHistoryRows) return null;
   const DAY = 86_400_000;
   const zones = { call_dte_range: CALL_EXPIRATION_RANGE, put_dte_range: PUT_EXPIRATION_RANGE };
@@ -6568,13 +6598,27 @@ const buildAdvisoryVolSurface = ({ tickerMap, instruments, nowMs }) => {
     const rows = db.getVolSurfaceHistoryRows(new Date(nowMs - 30 * DAY).toISOString());
     volSurfaceHistoryCache = { at: nowMs, history: buildSurfaceHistory(rows, spotRows, zones) };
   }
+  return buildVolSurface({ current: { atMs: nowMs, expiries }, spotRows, history: volSurfaceHistoryCache.history, zones });
+};
+
+const buildAdvisoryVolSurface = ({ tickerMap, instruments, nowMs }) => {
   const expiryByDate = {};
   for (const i of instruments || []) expiryByDate[i.instrument_name.split('-')[1]] = i.option_details?.expiry;
-  const expiries = buildSmileRows(tickerMap, expiryByDate).map(r => ({
-    expiry: r.expiry,
-    points: JSON.parse(r.points).map(([, isCall, delta, iv]) => ({ type: isCall ? 'C' : 'P', delta, iv: iv * 100 })),
-  }));
-  return buildVolSurface({ current: { atMs: nowMs, expiries }, spotRows, history: volSurfaceHistoryCache.history, zones });
+  return buildVolSurfaceAt(smileRowsToSurfaceExpiries(buildSmileRows(tickerMap, expiryByDate)), nowMs);
+};
+
+// The same surface for the journal and wiki, which run without live tickers: the newest stored
+// full-chain smile (written every 15 min), dated to when it was captured. Null if it is stale.
+const buildStoredVolSurface = () => {
+  try {
+    const rows = db?.getLatestSmileSnapshot?.() || [];
+    const atMs = rows.length ? Date.parse(rows[0].timestamp) : NaN;
+    if (!Number.isFinite(atMs) || Date.now() - atMs > 60 * 60 * 1000) return null;
+    return buildVolSurfaceAt(smileRowsToSurfaceExpiries(rows), atMs);
+  } catch (e) {
+    console.log('📈 Stored vol surface unavailable:', e.message);
+    return null;
+  }
 };
 
 const summarizeSentimentForAdvisor = (sentimentWindows, marketQualityRows = []) => {

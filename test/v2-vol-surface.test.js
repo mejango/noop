@@ -76,8 +76,13 @@ test('surface compares live zones against their own hourly history and realized 
   assert.ok(s.realized_vol.rv7d > 0);
   assert.equal(s.call_iv_minus_rv7d, +(45 - s.realized_vol.rv7d).toFixed(1));
 
+  // History call ATM 24h ago ≈ 30 + 24 × 10/47 = 35.1; put ATM flat at 50; no sample 7d back.
+  assert.equal(s.call_zone.atm_iv_move.d24h, +(45 - (30 + 24 * (10 / 47))).toFixed(1));
+  assert.equal(s.call_zone.atm_iv_move.d7d, null, 'only 48h of history');
+  assert.equal(s.put_zone.atm_iv_move.d24h, 0);
+
   const text = formatVolSurfaceForAdvisor(s);
-  assert.match(text, /CALL zone 2026-10-02 \(6d\): ATM 45 \(pctl 100\)/);
+  assert.match(text, /CALL zone 2026-10-02 \(6d\): ATM 45 \(pctl 100\) \[Δ24h \+9\.9, Δ7d n\/a\]/);
   assert.match(text, /n=48/);
   assert.match(formatVolSurfaceForAdvisor(null), /unavailable/);
 });

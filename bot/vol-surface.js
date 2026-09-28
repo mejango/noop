@@ -98,6 +98,7 @@ function buildSurfaceHistory(rows, spotRows, zones) {
     const put = zone('P', zones.put_dte_range);
     const rv7 = realizedVol(closesUpTo(spotRows, atMs, 24 * 7));
     history.push({
+      at: atMs,
       call_atm: call?.atm ?? null,
       call_wing_premium: call?.wing_premium ?? null,
       put_atm: put?.atm ?? null,
@@ -123,14 +124,30 @@ function buildVolSurface({ current, spotRows, history, zones }) {
   const rv7 = realizedVol(closesUpTo(spotRows, current.atMs, 24 * 7));
   const rv30 = realizedVol(closesUpTo(spotRows, current.atMs, 24 * 30));
   const pct = (key, value) => percentile(value, history.map(h => h[key]));
+  // How each measure moved: now minus the history sample nearest 24h / 7d ago. A percentile says
+  // where vol sits in its month; the move says which way it is going, which the level alone hides.
+  const then = (key, ageMs) => {
+    const target = current.atMs - ageMs, tolerance = Math.max(2 * 3_600_000, ageMs / 12);
+    let best = null;
+    for (const h of history) {
+      if (h.at == null || h[key] == null || Math.abs(h.at - target) > tolerance) continue;
+      if (!best || Math.abs(h.at - target) < Math.abs(best.at - target)) best = h;
+    }
+    return best ? best[key] : null;
+  };
+  const move = (key, value) => {
+    const change = (ageMs) => { const past = then(key, ageMs); return value != null && past != null ? round(value - past) : null; };
+    return { d24h: change(DAY_MS), d7d: change(7 * DAY_MS) };
+  };
   const termSlope = call?.atm != null && put?.atm != null ? put.atm - call.atm : null;
   const callVrp = call?.atm != null && rv7 != null ? call.atm - rv7 : null;
   const describe = (z, prefix) => z && {
     expiry: new Date(z.expiry * 1000).toISOString().slice(0, 10),
     dte: round(z.dte, 1),
-    atm_iv: round(z.atm), atm_iv_pctl: pct(`${prefix}_atm`, z.atm),
+    atm_iv: round(z.atm), atm_iv_pctl: pct(`${prefix}_atm`, z.atm), atm_iv_move: move(`${prefix}_atm`, z.atm),
     wing10_iv: round(z.wing10),
     wing_premium: round(z.wing_premium), wing_premium_pctl: pct(`${prefix}_wing_premium`, z.wing_premium),
+    wing_premium_move: move(`${prefix}_wing_premium`, z.wing_premium),
     rr25: round(z.rr25),
   };
   return {
@@ -138,9 +155,9 @@ function buildVolSurface({ current, spotRows, history, zones }) {
     realized_vol: { rv7d: round(rv7), rv30d: round(rv30) },
     call_zone: describe(call, 'call'),
     put_zone: describe(put, 'put'),
-    call_iv_minus_rv7d: round(callVrp), call_iv_minus_rv7d_pctl: pct('call_vrp', callVrp),
+    call_iv_minus_rv7d: round(callVrp), call_iv_minus_rv7d_pctl: pct('call_vrp', callVrp), call_iv_minus_rv7d_move: move('call_vrp', callVrp),
     put_iv_minus_rv30d: round(put?.atm != null && rv30 != null ? put.atm - rv30 : null),
-    term_slope: round(termSlope), term_slope_pctl: pct('term_slope', termSlope),
+    term_slope: round(termSlope), term_slope_pctl: pct('term_slope', termSlope), term_slope_move: move('term_slope', termSlope),
   };
 }
 
@@ -148,15 +165,16 @@ function formatVolSurfaceForAdvisor(s) {
   if (!s || (!s.call_zone && !s.put_zone)) return 'Volatility surface unavailable (no quotes in the call or put DTE window).';
   const f = (v, signed = false) => (v == null ? 'n/a' : `${signed && v > 0 ? '+' : ''}${v}`);
   const p = (v) => (v == null ? '' : ` (pctl ${v})`);
+  const m = (mv) => (mv && (mv.d24h != null || mv.d7d != null) ? ` [Δ24h ${f(mv.d24h, true)}, Δ7d ${f(mv.d7d, true)}]` : '');
   const zone = (label, z, wingLabel, vrp) => (z
-    ? `${label} ${z.expiry} (${z.dte}d): ATM ${f(z.atm_iv)}${p(z.atm_iv_pctl)} | 10Δ ${wingLabel} ${f(z.wing10_iv)} | wing premium over ATM ${f(z.wing_premium, true)}${p(z.wing_premium_pctl)} | 25Δ RR (call−put) ${f(z.rr25, true)}${vrp}`
+    ? `${label} ${z.expiry} (${z.dte}d): ATM ${f(z.atm_iv)}${p(z.atm_iv_pctl)}${m(z.atm_iv_move)} | 10Δ ${wingLabel} ${f(z.wing10_iv)} | wing premium over ATM ${f(z.wing_premium, true)}${p(z.wing_premium_pctl)}${m(z.wing_premium_move)} | 25Δ RR (call−put) ${f(z.rr25, true)}${vrp}`
     : `${label}: no expiry in window.`);
   return [
-    `IV and realized vol in annualized vol points. pctl = percentile vs hourly samples over the last 30d (n=${s.history_samples}); ATM is one-sided (nearest-50Δ call for the call zone, put for the put zone) to match history.`,
+    `IV and realized vol in annualized vol points. pctl = percentile vs hourly samples over the last 30d (n=${s.history_samples}); Δ24h/Δ7d = now minus the same zone measure that long ago (the zone's expiry can roll in between). ATM is one-sided (nearest-50Δ call for the call zone, put for the put zone) to match history.`,
     `Realized vol (hourly closes): 7d ${f(s.realized_vol.rv7d)} | 30d ${f(s.realized_vol.rv30d)}.`,
-    zone('CALL zone', s.call_zone, 'call', ` | ATM IV − RV7d ${f(s.call_iv_minus_rv7d, true)}${p(s.call_iv_minus_rv7d_pctl)}`),
+    zone('CALL zone', s.call_zone, 'call', ` | ATM IV − RV7d ${f(s.call_iv_minus_rv7d, true)}${p(s.call_iv_minus_rv7d_pctl)}${m(s.call_iv_minus_rv7d_move)}`),
     zone('PUT zone', s.put_zone, 'put', ` | ATM IV − RV30d ${f(s.put_iv_minus_rv30d, true)}`),
-    `Term structure: put-zone ATM − call-zone ATM ${f(s.term_slope, true)}${p(s.term_slope_pctl)}; negative means the front expiry is priced above the back (inverted).`,
+    `Term structure: put-zone ATM − call-zone ATM ${f(s.term_slope, true)}${p(s.term_slope_pctl)}${m(s.term_slope_move)}; negative means the front expiry is priced above the back (inverted).`,
     'Definitions, not rules: a high call wing premium and positive IV − RV mean calls are paid above realized movement; a low put-zone ATM or wing-premium percentile means protection is cheap relative to its own month.',
   ].join('\n');
 }

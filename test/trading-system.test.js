@@ -7269,6 +7269,16 @@ describe('wiki findings feed back into ingest', () => {
     assert.ok(!wikiQuoteAppearsIn(page, undefined) && !wikiQuoteAppearsIn(page, 'OI'), 'missing or trivial quotes fail');
   });
 
+  test('reviews, journal and wiki all see how IV moved', () => {
+    const { formatReviewIvChange } = loadProduction(['formatReviewIvChange']);
+    assert.match(formatReviewIvChange(0.521, 0.473), /^52\.1% → 47\.3% \(−4\.8 vol pts\)/);
+    assert.match(formatReviewIvChange(null, 0.5), /^N\/A → 50%\. /);
+    assert.match(formatReviewIvChange(null, null), /no recorded quote/);
+    assert.ok(SCRIPT_SOURCE.includes('volatility_surface: formatVolSurfaceForAdvisor(buildStoredVolSurface())'), 'journal snapshot');
+    assert.ok(SCRIPT_SOURCE.includes("'## Volatility Surface (computed; authoritative for IV levels, percentiles and 24h/7d moves)'"), 'wiki evidence');
+    assert.ok(SCRIPT_SOURCE.includes('- Instrument IV at open → close: ${formatReviewIvChange(ivOpen, ivClose)}'), 'trade review prompt');
+  });
+
   test('campaign ledger gives every campaign its final verdict so counts are exact', () => {
     const { formatCampaignLedger, groupTradeReviewsForWiki } = loadProduction(['formatCampaignLedger', 'groupTradeReviewsForWiki']);
     const review = (id, instrument, closed, status, days) => ({

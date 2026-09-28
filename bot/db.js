@@ -654,6 +654,8 @@ try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_put_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE oi_snapshots ADD COLUMN avg_call_iv REAL'); } catch {}
 try { db.exec('ALTER TABLE trade_reviews ADD COLUMN review_window_days INTEGER NOT NULL DEFAULT 1'); } catch {}
 try { db.exec('ALTER TABLE trade_reviews ADD COLUMN horizon_end_at TEXT'); } catch {}
+try { db.exec('ALTER TABLE trade_reviews ADD COLUMN iv_open REAL'); } catch {}
+try { db.exec('ALTER TABLE trade_reviews ADD COLUMN iv_close REAL'); } catch {}
 try { db.exec('ALTER TABLE trade_lessons ADD COLUMN lesson_key TEXT'); } catch {}
 try { db.exec('ALTER TABLE trade_lessons ADD COLUMN title TEXT'); } catch {}
 try { db.exec('ALTER TABLE trade_lessons ADD COLUMN category TEXT'); } catch {}
@@ -1118,12 +1120,12 @@ const stmts = {
       instrument_name, action_family, opened_at, closed_at, review_window_days, horizon_end_at, order_ids,
       review_status, review_confidence, summary, lessons, pnl_realized,
       premium_opened, premium_closed, spot_open, spot_close,
-      spot_min_while_open, spot_max_while_open, spot_min_after_close, spot_max_after_close
+      spot_min_while_open, spot_max_while_open, spot_min_after_close, spot_max_after_close, iv_open, iv_close
     ) VALUES (
       @instrument_name, @action_family, @opened_at, @closed_at, @review_window_days, @horizon_end_at, @order_ids,
       @review_status, @review_confidence, @summary, @lessons, @pnl_realized,
       @premium_opened, @premium_closed, @spot_open, @spot_close,
-      @spot_min_while_open, @spot_max_while_open, @spot_min_after_close, @spot_max_after_close
+      @spot_min_while_open, @spot_max_while_open, @spot_min_after_close, @spot_max_after_close, @iv_open, @iv_close
     )
   `),
 
@@ -1132,7 +1134,7 @@ const stmts = {
       review_status, review_confidence, summary, lessons, pnl_realized,
       premium_opened, premium_closed, spot_open, spot_close,
       spot_min_while_open, spot_max_while_open, spot_min_after_close, spot_max_after_close,
-      created_at
+      iv_open, iv_close, created_at
     FROM trade_reviews
     WHERE is_active = 1
     ORDER BY closed_at DESC
@@ -1497,6 +1499,17 @@ const stmts = {
   getSpotHourlyCloses: db.prepare(`
     SELECT hour, close FROM spot_prices_hourly
     WHERE hour > @since AND close > 0 ORDER BY hour ASC
+  `),
+
+  getLatestSmileSnapshot: db.prepare(`
+    SELECT timestamp, expiry, points FROM iv_smile_snapshots
+    WHERE timestamp = (SELECT MAX(timestamp) FROM iv_smile_snapshots)
+  `),
+
+  getInstrumentIvNear: db.prepare(`
+    SELECT implied_vol, timestamp FROM options_snapshots
+    WHERE instrument_name = @instrument AND implied_vol > 0 AND timestamp <= @at
+    ORDER BY timestamp DESC LIMIT 1
   `),
 
   getSmileSnapshotsForExpiry: db.prepare(`
@@ -2482,6 +2495,10 @@ const getAvgCallPremium7d = () => {
 const getVolSurfaceHistoryRows = (since) => stmts.getVolSurfaceHistoryRows.all({ since });
 const getSpotHourlyCloses = (since) => stmts.getSpotHourlyCloses.all({ since });
 
+// Every expiry of the newest full-chain smile snapshot (one snapshot writes all rows at once).
+const getLatestSmileSnapshot = () => stmts.getLatestSmileSnapshot.all();
+// The instrument's last recorded IV at or before `at` (vol as a decimal), or null.
+const getInstrumentIvNear = (instrument, at) => stmts.getInstrumentIvNear.get({ instrument, at }) || null;
 const getSmileSnapshotsForExpiry = ({ expiry, since, before }) => stmts.getSmileSnapshotsForExpiry.all({ expiry, since, before });
 const insertSmileSnapshotBatch = (rows, timestamp) => {
   db.transaction(() => {
@@ -2663,6 +2680,8 @@ const insertTradeReview = (review) => {
     spot_max_while_open: review.spot_max_while_open ?? null,
     spot_min_after_close: review.spot_min_after_close ?? null,
     spot_max_after_close: review.spot_max_after_close ?? null,
+    iv_open: review.iv_open ?? null,
+    iv_close: review.iv_close ?? null,
   });
 };
 
@@ -3070,6 +3089,8 @@ module.exports = {
   insertOISnapshot,
   insertSmileSnapshotBatch,
   getSmileSnapshotsForExpiry,
+  getLatestSmileSnapshot,
+  getInstrumentIvNear,
   getVolSurfaceHistoryRows,
   getSpotHourlyCloses,
   insertFundingRates,
