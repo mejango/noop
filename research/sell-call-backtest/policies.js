@@ -8,6 +8,8 @@ const {
   SELL_CALL_EDGE_DTE_EXPONENT,
   normalizeSellCallScore,
 } = require('../../bot/call-score');
+const { callFairEdge } = require('../../bot/call-fair-value');
+const { realizedVol } = require('../../bot/vol-surface');
 
 const CURRENT_EDGE_VERSION = `sell-call-edge-dte-${SELL_CALL_EDGE_REFERENCE_DTE}-exponent-${SELL_CALL_EDGE_DTE_EXPONENT}`;
 const HISTORICAL_COMPOSITE_EDGE_VERSION = 'sell-call-edge-2026-07-08';
@@ -135,6 +137,72 @@ function makeCurrentEdgePolicy(options = {}) {
   };
 }
 
+// Stand-in for the advisor's rolling high-score gate: sell the best CALL EDGE only when it ranks at
+// or above minPercentile of the per-frame best edges seen over the prior windowDays.
+function makeRollingBestPolicy(options = {}) {
+  const minBid = Number(options.minBid ?? strategyFacts.sell_call_fallback_min_bid);
+  const windowMs = Number(options.windowDays ?? 6.2) * 24 * HOUR_MS;
+  const minPercentile = Number(options.minPercentile ?? 80);
+  const history = [];
+  let current = null;
+  return {
+    name: 'rolling_best',
+    description: `Best CALL EDGE at >= ${minPercentile}th percentile of its prior ${options.windowDays ?? 6.2}d`,
+    onFrame(frame) {
+      if (current) history.push(current);
+      while (history.length && history[0].t < frame.timestamp_ms - windowMs) history.shift();
+      const best = frame.candidates.filter((c) => c.bid_price >= minBid)
+        .map((c) => ({ c, edge: currentEdgeScore(c).score })).sort((a, b) => b.edge - a.edge)[0];
+      current = best ? { t: frame.timestamp_ms, edge: best.edge } : null;
+    },
+    select({ candidates }) {
+      const best = candidates.filter((c) => c.bid_price >= minBid)
+        .map((c) => ({ c, edge: currentEdgeScore(c).score })).sort((a, b) => b.edge - a.edge)[0];
+      if (!best || history.length < 24) return null;
+      const pct = history.filter((h) => h.edge <= best.edge).length / history.length * 100;
+      if (pct < minPercentile) return null;
+      return { candidate: best.c, score: best.edge, model_version: 'rolling-best', diagnostics: { percentile: pct } };
+    },
+    getArtifacts() { return []; },
+  };
+}
+
+// Sell the call whose bid most exceeds its fair value at forecast realized vol.
+// forecast: rv3 | rv7 | max (the larger of the two, cautious when vol is rising).
+// rank: edge (dollars over fair) | ratio (bid / fair). minEdge is dollars per contract.
+function makeFairValuePolicy(options = {}) {
+  const minBid = Number(options.minBid ?? strategyFacts.sell_call_fallback_min_bid);
+  const minEdge = Number(options.minEdge ?? 0);
+  const forecast = options.forecast || 'rv7';
+  const rank = options.rank || 'edge';
+  const spots = [];
+  let rv = null;
+  return {
+    name: `fair_value_${forecast}_${rank}_${minEdge}`,
+    description: `Bid minus fair value at ${forecast} realized vol, ranked by ${rank}, edge >= $${minEdge}`,
+    onFrame(frame) {
+      spots.push(frame.spot_price);
+      if (spots.length > 24 * 7 + 1) spots.shift();
+      const rv3 = realizedVol(spots.slice(-(24 * 3 + 1)));
+      const rv7 = spots.length > 24 * 7 ? realizedVol(spots) : null;
+      rv = forecast === 'rv3' ? rv3 : forecast === 'rv7' ? rv7 : (rv3 != null && rv7 != null ? Math.max(rv3, rv7) : null);
+    },
+    select({ frame, candidates }) {
+      if (!(rv > 0)) return null;
+      const ranked = candidates
+        .filter((c) => c.bid_price >= minBid)
+        .map((c) => ({ c, v: callFairEdge({ bid: c.bid_price, spot: frame.spot_price, strike: c.strike, dte: c.dte, rv }) }))
+        .filter((x) => x.v && x.v.edge >= minEdge && x.v.fair > 0)
+        .map((x) => ({ ...x, key: rank === 'ratio' ? x.c.bid_price / x.v.fair : x.v.edge }))
+        .sort((a, b) => b.key - a.key);
+      if (!ranked.length) return null;
+      const { c, v, key } = ranked[0];
+      return { candidate: c, score: key, model_version: 'call-fair-value', diagnostics: { rv, ...v } };
+    },
+    getArtifacts() { return []; },
+  };
+}
+
 class WalkForwardLearnedPolicy {
   constructor(examples = [], options = {}) {
     this.name = 'learned_walk_forward';
@@ -234,4 +302,6 @@ module.exports = {
   makeLearnedPolicy,
   makeNoCallPolicy,
   makeRawScorePolicy,
+  makeRollingBestPolicy,
+  makeFairValuePolicy,
 };
