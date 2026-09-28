@@ -801,6 +801,13 @@ function rangeFromRequestUrl(url: string | null, fallback: string): string {
 
 export default function OverviewPage() {
   const [range, setRange] = useState<string>('14d');
+  // Main chart series the legend can toggle; RAW scores start hidden (EDGE is what the bot acts on).
+  const [hiddenLines, setHiddenLines] = useState<Set<string>>(() => new Set(['bestPut', 'bestCall']));
+  const toggleLine = useCallback((key: string) => setHiddenLines((prev) => {
+    const next = new Set(prev);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return next;
+  }), []);
   const [posSort, setPosSort] = useState<{ key: string; asc: boolean }>({ key: 'instrument_name', asc: true });
   const mobile = useIsMobile();
   const primaryYAxisWidth = mobile ? 45 : 70;
@@ -1648,30 +1655,28 @@ export default function OverviewPage() {
           )}
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.primary }} /> ETH CG</span>
-          <span className="flex items-center gap-1">
-            <span
-              className="w-3 h-0.5 inline-block"
-              style={{ background: 'repeating-linear-gradient(to right, rgba(255,255,255,0.9) 0 4px, transparent 4px 6px)' }}
-            />
-            ETH L
-          </span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.red, opacity: 0.7 }} /> PUT RAW</span>
-          <span className="flex items-center gap-1">
-            <span
-              className="w-3 h-0.5 inline-block"
-              style={{ background: 'repeating-linear-gradient(to right, #fb7185 0 2px, transparent 2px 5px)' }}
-            />
-            PUT EDGE
-          </span>
-          <span className="flex items-center gap-1"><span className="w-3 h-0.5 inline-block" style={{ background: chartColors.secondary, opacity: 0.7 }} /> CALL RAW</span>
-          <span className="flex items-center gap-1">
-            <span
-              className="w-3 h-0.5 inline-block"
-              style={{ background: 'repeating-linear-gradient(to right, #3b82f6 0 2px, transparent 2px 5px)' }}
-            />
-            CALL EDGE
-          </span>
+          {([
+            { key: 'price', label: 'ETH CG', swatch: chartColors.primary },
+            { key: 'lyraSpot', label: 'ETH L', swatch: 'repeating-linear-gradient(to right, rgba(255,255,255,0.9) 0 4px, transparent 4px 6px)' },
+            { key: 'bestPut', label: 'PUT RAW', swatch: `repeating-linear-gradient(to right, ${chartColors.red} 0 2px, transparent 2px 5px)` },
+            { key: 'putEdge', label: 'PUT EDGE', swatch: '#fb7185' },
+            { key: 'bestCall', label: 'CALL RAW', swatch: `repeating-linear-gradient(to right, ${chartColors.secondary} 0 2px, transparent 2px 5px)` },
+            { key: 'callEdge', label: 'CALL EDGE', swatch: chartColors.blue },
+          ]).map(({ key, label, swatch }) => {
+            const hidden = hiddenLines.has(key);
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => toggleLine(key)}
+                aria-pressed={!hidden}
+                title={hidden ? `Show ${label}` : `Hide ${label}`}
+                className={`flex items-center gap-1 transition-opacity hover:text-gray-300 ${hidden ? 'opacity-40 line-through' : ''}`}
+              >
+                <span className="w-3 h-0.5 inline-block" style={{ background: swatch }} /> {label}
+              </button>
+            );
+          })}
           {visibleTradeMarkerKinds.map((kind) => {
             const markerStyle = tradeMarkerStyles[kind];
             return (
@@ -1825,12 +1830,13 @@ export default function OverviewPage() {
               )}
 
               {/* ETH price line */}
-              <Line yAxisId="price" type="monotone" dataKey="price" stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls isAnimationActive={false} />
+              <Line yAxisId="price" type="monotone" dataKey="price" hide={hiddenLines.has('price')} stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls isAnimationActive={false} />
               {/* Lyra spot price line */}
               <Line
                 yAxisId="price"
                 type="monotone"
                 dataKey="lyraSpot"
+                hide={hiddenLines.has('lyraSpot')}
                 stroke="#ffffff"
                 strokeOpacity={0.9}
                 strokeDasharray="5 4"
@@ -1840,10 +1846,10 @@ export default function OverviewPage() {
                 isAnimationActive={false}
               />
               {/* PUT/CALL value overlays */}
-              <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" stroke={chartColors.red} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
-              <Line yAxisId="putVal" type="stepAfter" dataKey="putEdge" stroke="#fb7185" strokeDasharray="2 4" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} />
-              <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" stroke={chartColors.secondary} strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
-              <Line yAxisId="callVal" type="stepAfter" dataKey="callEdge" stroke={chartColors.blue} strokeDasharray="2 4" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} />
+              <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" hide={hiddenLines.has('bestPut')} stroke={chartColors.red} strokeDasharray="2 4" strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
+              <Line yAxisId="putVal" type="stepAfter" dataKey="putEdge" hide={hiddenLines.has('putEdge')} stroke="#fb7185" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} />
+              <Line yAxisId="callVal" type="stepAfter" dataKey="bestCall" hide={hiddenLines.has('bestCall')} stroke={chartColors.secondary} strokeDasharray="2 4" strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
+              <Line yAxisId="callVal" type="stepAfter" dataKey="callEdge" hide={hiddenLines.has('callEdge')} stroke={chartColors.blue} strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} />
 
               {visibleTradesEnriched.map((trade) => {
                 const markerSpot = normalizeEthSpot(trade.index_price)
@@ -2001,128 +2007,6 @@ export default function OverviewPage() {
           </ResponsiveContainer>
         </Card>
       )}
-
-      {/* Momentum Bar — two rows: medium (top) + short (bottom) */}
-      {momentumData.length > 0 && (() => {
-        const MomentumTooltipBar = ({ data }: { data: typeof momentumData }) => {
-          // eslint-disable-next-line react-hooks/rules-of-hooks
-          const [hover, setHover] = useState<{ idx: number; x: number; y: number } | null>(null);
-          // eslint-disable-next-line react-hooks/rules-of-hooks
-          const [pinned, setPinned] = useState<{ idx: number; x: number; y: number } | null>(null);
-          const active = pinned ?? hover;
-          const hovered = active ? data[active.idx] : null;
-
-          const onCellEnter = (i: number, e: React.MouseEvent) => {
-            if (!pinned) setHover({ idx: i, x: e.clientX, y: e.clientY });
-          };
-          const onCellMove = (i: number, e: React.MouseEvent) => {
-            if (!pinned) setHover({ idx: i, x: e.clientX, y: e.clientY });
-          };
-          const onCellClick = (i: number, e: React.MouseEvent) => {
-            e.stopPropagation();
-            if (pinned) { setPinned(null); } else { setPinned({ idx: i, x: e.clientX, y: e.clientY }); }
-          };
-
-          const leftPad = margins.left + primaryYAxisWidth;
-          const cellPosition = (i: number) => {
-            const span = xDomain[1] - xDomain[0] || 1;
-            const start = Math.max(xDomain[0], data[i].ts);
-            const end = Math.min(xDomain[1], data[i + 1]?.ts ?? xDomain[1]);
-            return {
-              left: `${(start - xDomain[0]) / span * 100}%`,
-              width: `${Math.max(0, end - start) / span * 100}%`,
-            };
-          };
-
-          return (
-            <div style={{ paddingLeft: leftPad, paddingRight: margins.right }}>
-              <div className="relative" style={{ height: 28 }}>
-                <span className="absolute right-full pr-1 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 whitespace-nowrap">medium term</span>
-                <div className="relative overflow-hidden h-full">
-                  {data.map((d, i) => (
-                    <div
-                      key={i}
-                      className="absolute h-full"
-                      style={{ ...cellPosition(i), background: momentumBarColorMedium(d.momentum, d.mediumDerivative) }}
-                      onMouseEnter={(e) => onCellEnter(i, e)}
-                      onMouseMove={(e) => onCellMove(i, e)}
-                      onMouseLeave={() => { if (!pinned) setHover(null); }}
-                      onClick={(e) => onCellClick(i, e)}
-                    />
-                  ))}
-                </div>
-              </div>
-              <div className="relative -mt-px" style={{ height: 28 }}>
-                <span className="absolute right-full pr-1 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 whitespace-nowrap">short term</span>
-                <div className="relative overflow-hidden h-full">
-                  {data.map((d, i) => (
-                    <div
-                      key={i}
-                      className="absolute h-full"
-                      style={{ ...cellPosition(i), background: momentumBarColorShort(d.shortMomentum, d.shortDerivative) }}
-                      onMouseEnter={(e) => onCellEnter(i, e)}
-                      onMouseMove={(e) => onCellMove(i, e)}
-                      onMouseLeave={() => { if (!pinned) setHover(null); }}
-                      onClick={(e) => onCellClick(i, e)}
-                    />
-                  ))}
-                </div>
-              </div>
-              {pinned && createPortal(
-                <div className="fixed inset-0" style={{ zIndex: 9998 }} onClick={() => setPinned(null)} />,
-                document.body
-              )}
-              {hovered && active && createPortal(
-                <div
-                  className="fixed pointer-events-none"
-                  style={{ top: active.y - 12, left: active.x, transform: 'translate(-50%, -100%)', zIndex: 9999 }}
-                >
-                  <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                    <div className="text-gray-400 mb-1">{new Date(hovered.ts).toLocaleString()}</div>
-                    <div className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-sm inline-block" style={{ background: momentumBarColorMedium(hovered.momentum, hovered.mediumDerivative) }} />
-                      <span className="text-white">Medium: {hovered.momentum}</span>
-                      <span className="text-gray-500">{hovered.mediumDerivative ?? 'n/a'}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-sm inline-block" style={{ background: momentumBarColorShort(hovered.shortMomentum, hovered.shortDerivative) }} />
-                      <span className="text-white">Short: {hovered.shortMomentum}</span>
-                      <span className="text-gray-500">{hovered.shortDerivative ?? 'n/a'}</span>
-                    </div>
-                  </div>
-                </div>,
-                document.body
-              )}
-            </div>
-          );
-        };
-        return (
-        <Card>
-          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
-            <span className="text-xs font-medium text-gray-400">Momentum</span>
-            <div className="flex gap-3 text-xs text-gray-500">
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#4ade80' }} /> bright = accelerating</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#166534' }} /> dim = decelerating</span>
-              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: '#555' }} /> neutral</span>
-            </div>
-          </div>
-          <div>
-            <MomentumTooltipBar data={momentumData} />
-            {/* Time axis */}
-            <div style={{ paddingLeft: margins.left + primaryYAxisWidth, paddingRight: margins.right }}>
-              <div className="relative mt-1 h-4">
-                {xTicks.map((ts, i) => (
-                  <span key={ts} className="absolute text-[10px] text-gray-500 whitespace-nowrap"
-                    style={{ left: `${i / (xTicks.length - 1) * 100}%`, transform: 'translateX(-50%)' }}>
-                    {xTickFormatter(ts)}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-        </Card>
-        );
-      })()}
 
       {/* DEX Liquidity (TVL) */}
       {filteredLiquidity.length > 0 && (() => {
@@ -2555,6 +2439,128 @@ export default function OverviewPage() {
             </div>
             <VolSmile positions={account.positions} />
           </Card>
+        );
+      })()}
+
+      {/* Momentum Bar — two rows: medium (top) + short (bottom) */}
+      {momentumData.length > 0 && (() => {
+        const MomentumTooltipBar = ({ data }: { data: typeof momentumData }) => {
+          // eslint-disable-next-line react-hooks/rules-of-hooks
+          const [hover, setHover] = useState<{ idx: number; x: number; y: number } | null>(null);
+          // eslint-disable-next-line react-hooks/rules-of-hooks
+          const [pinned, setPinned] = useState<{ idx: number; x: number; y: number } | null>(null);
+          const active = pinned ?? hover;
+          const hovered = active ? data[active.idx] : null;
+
+          const onCellEnter = (i: number, e: React.MouseEvent) => {
+            if (!pinned) setHover({ idx: i, x: e.clientX, y: e.clientY });
+          };
+          const onCellMove = (i: number, e: React.MouseEvent) => {
+            if (!pinned) setHover({ idx: i, x: e.clientX, y: e.clientY });
+          };
+          const onCellClick = (i: number, e: React.MouseEvent) => {
+            e.stopPropagation();
+            if (pinned) { setPinned(null); } else { setPinned({ idx: i, x: e.clientX, y: e.clientY }); }
+          };
+
+          const leftPad = margins.left + primaryYAxisWidth;
+          const cellPosition = (i: number) => {
+            const span = xDomain[1] - xDomain[0] || 1;
+            const start = Math.max(xDomain[0], data[i].ts);
+            const end = Math.min(xDomain[1], data[i + 1]?.ts ?? xDomain[1]);
+            return {
+              left: `${(start - xDomain[0]) / span * 100}%`,
+              width: `${Math.max(0, end - start) / span * 100}%`,
+            };
+          };
+
+          return (
+            <div style={{ paddingLeft: leftPad, paddingRight: margins.right }}>
+              <div className="relative" style={{ height: 28 }}>
+                <span className="absolute right-full pr-1 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 whitespace-nowrap">medium term</span>
+                <div className="relative overflow-hidden h-full">
+                  {data.map((d, i) => (
+                    <div
+                      key={i}
+                      className="absolute h-full"
+                      style={{ ...cellPosition(i), background: momentumBarColorMedium(d.momentum, d.mediumDerivative) }}
+                      onMouseEnter={(e) => onCellEnter(i, e)}
+                      onMouseMove={(e) => onCellMove(i, e)}
+                      onMouseLeave={() => { if (!pinned) setHover(null); }}
+                      onClick={(e) => onCellClick(i, e)}
+                    />
+                  ))}
+                </div>
+              </div>
+              <div className="relative -mt-px" style={{ height: 28 }}>
+                <span className="absolute right-full pr-1 top-1/2 -translate-y-1/2 text-[10px] text-gray-500 whitespace-nowrap">short term</span>
+                <div className="relative overflow-hidden h-full">
+                  {data.map((d, i) => (
+                    <div
+                      key={i}
+                      className="absolute h-full"
+                      style={{ ...cellPosition(i), background: momentumBarColorShort(d.shortMomentum, d.shortDerivative) }}
+                      onMouseEnter={(e) => onCellEnter(i, e)}
+                      onMouseMove={(e) => onCellMove(i, e)}
+                      onMouseLeave={() => { if (!pinned) setHover(null); }}
+                      onClick={(e) => onCellClick(i, e)}
+                    />
+                  ))}
+                </div>
+              </div>
+              {pinned && createPortal(
+                <div className="fixed inset-0" style={{ zIndex: 9998 }} onClick={() => setPinned(null)} />,
+                document.body
+              )}
+              {hovered && active && createPortal(
+                <div
+                  className="fixed pointer-events-none"
+                  style={{ top: active.y - 12, left: active.x, transform: 'translate(-50%, -100%)', zIndex: 9999 }}
+                >
+                  <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                    <div className="text-gray-400 mb-1">{new Date(hovered.ts).toLocaleString()}</div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-sm inline-block" style={{ background: momentumBarColorMedium(hovered.momentum, hovered.mediumDerivative) }} />
+                      <span className="text-white">Medium: {hovered.momentum}</span>
+                      <span className="text-gray-500">{hovered.mediumDerivative ?? 'n/a'}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2 h-2 rounded-sm inline-block" style={{ background: momentumBarColorShort(hovered.shortMomentum, hovered.shortDerivative) }} />
+                      <span className="text-white">Short: {hovered.shortMomentum}</span>
+                      <span className="text-gray-500">{hovered.shortDerivative ?? 'n/a'}</span>
+                    </div>
+                  </div>
+                </div>,
+                document.body
+              )}
+            </div>
+          );
+        };
+        return (
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
+            <span className="text-xs font-medium text-gray-400">Momentum</span>
+            <div className="flex gap-3 text-xs text-gray-500">
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#4ade80' }} /> bright = accelerating</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block" style={{ background: '#166534' }} /> dim = decelerating</span>
+              <span className="flex items-center gap-1"><span className="w-3 h-2 rounded-sm inline-block border border-white/10" style={{ background: '#555' }} /> neutral</span>
+            </div>
+          </div>
+          <div>
+            <MomentumTooltipBar data={momentumData} />
+            {/* Time axis */}
+            <div style={{ paddingLeft: margins.left + primaryYAxisWidth, paddingRight: margins.right }}>
+              <div className="relative mt-1 h-4">
+                {xTicks.map((ts, i) => (
+                  <span key={ts} className="absolute text-[10px] text-gray-500 whitespace-nowrap"
+                    style={{ left: `${i / (xTicks.length - 1) * 100}%`, transform: 'translateX(-50%)' }}>
+                    {xTickFormatter(ts)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        </Card>
         );
       })()}
 
