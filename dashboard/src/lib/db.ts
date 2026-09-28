@@ -17,7 +17,7 @@ const MEASUREMENT_WINDOW_DAYS = 6.2;
 // Dashboard image is built independently from the bot image; the production
 // parity test keeps these values aligned with bot/call-score.js.
 const SELL_CALL_EDGE_REFERENCE_DTE = 8.5;
-const SELL_CALL_EDGE_DTE_EXPONENT = 0.12;
+const SELL_CALL_EDGE_DTE_EXPONENT = 0.6; // keep in sync with bot/call-score.js
 const BUY_PUT_EDGE_REFERENCE_DTE = 60;
 const BUY_PUT_EDGE_DTE_EXPONENT = 0.8;
 const BUY_PUT_EDGE_MIN_DTE = 45;

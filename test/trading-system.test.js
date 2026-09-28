@@ -783,7 +783,7 @@ describe('Standing rulebook coverage requirements', () => {
 
     assert.ok(requirement);
     assert.ok(requirement.instruction.includes('min_score'));
-    assert.ok(requirement.instruction.includes('(8.5 / DTE)^0.12'));
+    assert.ok(requirement.instruction.includes(`(8.5 / DTE)^${require('../bot/call-score').SELL_CALL_EDGE_DTE_EXPONENT}`));
     assert.ok(requirement.instruction.includes('min_bid'));
   });
 
@@ -805,12 +805,11 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(SCRIPT_SOURCE.includes('Express other selectivity through min_score, min_bid'));
   });
 
-  test('advisor prompt judges CALL EDGE against the fixed floor, not a rolling best', () => {
-    assert.ok(!SCRIPT_SOURCE.includes('getSellCallScoreSamples'));
+  test('advisor prompt defines rolling CALL EDGE with the DTE formula', () => {
+    assert.ok(SCRIPT_SOURCE.includes('getSellCallScoreSamples'));
     assert.ok(SCRIPT_SOURCE.includes('call_value_context'));
     assert.ok(SCRIPT_SOURCE.includes('Current CALL EDGE:'));
-    assert.ok(SCRIPT_SOURCE.includes('CALL value vs fixed floor:'));
-    assert.ok(!SCRIPT_SOURCE.includes('best CALL EDGE'));
+    assert.ok(SCRIPT_SOURCE.includes('Prior ${context.window_days}d best CALL EDGE'));
     assert.ok(SCRIPT_SOURCE.includes('CALL EDGE normalization:'));
     assert.ok(SCRIPT_SOURCE.includes('CALL EDGE = raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}'));
   });
@@ -6994,7 +6993,8 @@ describe('Sell-call DTE-normalized edge chart', () => {
     assert.ok(SCRIPT_SOURCE.includes('edge_score: entryBestSellCall.selection_score'));
     assert.ok(SCRIPT_SOURCE.includes('normalization: entryBestSellCall.research?.edge_components'));
     assert.ok(chartDbSource.includes('const SELL_CALL_EDGE_REFERENCE_DTE = 8.5'));
-    assert.ok(chartDbSource.includes('const SELL_CALL_EDGE_DTE_EXPONENT = 0.12'));
+    // The dashboard keeps its own copy of the exponent; it must match the bot's.
+    assert.ok(chartDbSource.includes(`const SELL_CALL_EDGE_DTE_EXPONENT = ${require('../bot/call-score').SELL_CALL_EDGE_DTE_EXPONENT};`));
     assert.ok(chartDbSource.includes('raw_score * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / dte, ${SELL_CALL_EDGE_DTE_EXPONENT}) AS edge_score'));
   });
 

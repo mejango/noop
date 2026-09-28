@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { SELL_CALL_EDGE_DTE_EXPONENT } = require('../bot/call-score');
 const { test } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -127,8 +128,8 @@ test('legacy CALL quotes are individually normalized before choosing the maximum
   f.candidate('sell_call', { dte: 5, bid: 4.75, raw: 1 }); // RAW 95 wins after normalization.
   const rows = f.get('sell_call');
   assert.equal(rows.length, 1);
-  close(rows[0].edge_score, 95 * Math.pow(8.5 / 5, 0.12));
-  assert.ok(rows[0].edge_score > 100 * Math.pow(8.5 / 12, 0.12));
+  close(rows[0].edge_score, 95 * Math.pow(8.5 / 5, SELL_CALL_EDGE_DTE_EXPONENT));
+  assert.ok(rows[0].edge_score > 100 * Math.pow(8.5 / 12, SELL_CALL_EDGE_DTE_EXPONENT));
 });
 
 test('missing or nonpositive executable quotes and out-of-policy deltas or DTE do not manufacture legacy EDGE', t => {

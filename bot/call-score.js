@@ -1,11 +1,12 @@
 'use strict';
 
-// A light DTE correction for bid / abs(delta). The reference is the midpoint
-// of the 5-12 DTE strategy window. A dense Railway-history backtest found 0.12
-// to be the two-decimal upper edge of the stable trading plateau; the first
-// decision/P&L cliff appeared at 0.1220.
+// DTE correction for bid / abs(delta), referenced to the 5-12 DTE window's midpoint.
+// Calibrated so the best candidate's score does not drift as an expiry ages from 12 to
+// 5 DTE (scripts/study-call-dte-exponent.js, Feb-Sep 2026): the weekly slide is flat at
+// 0.6, where 0.12 left a +31% jump at each weekly rollover and a steady slide after it.
+// The dashboard's lib/db.ts keeps a copy; change both together.
 const SELL_CALL_EDGE_REFERENCE_DTE = 8.5;
-const SELL_CALL_EDGE_DTE_EXPONENT = 0.12;
+const SELL_CALL_EDGE_DTE_EXPONENT = 0.6;
 
 const normalizeSellCallScore = (rawScore, dte) => {
   const raw = Number(rawScore);

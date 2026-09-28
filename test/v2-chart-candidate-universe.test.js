@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { SELL_CALL_EDGE_DTE_EXPONENT } = require('../bot/call-score');
 const { test } = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -177,7 +178,7 @@ test('RAW and EDGE independently choose their maxima from the same eligible PUT 
   ]) f.legacyEdge(row);
   assert.deepEqual(values(f.api.getBestOptionsOverTime(SINCE)[0]), [0.005, 100]);
   close(f.api.getBuyPutEdgeOverTime(SINCE)[0].edge_score, 0.0045 * (78 / 60) ** 0.8);
-  close(f.api.getSellCallEdgeOverTime(SINCE)[0].edge_score, 95 * (8.5 / 5) ** 0.12);
+  close(f.api.getSellCallEdgeOverTime(SINCE)[0].edge_score, 95 * (8.5 / 5) ** SELL_CALL_EDGE_DTE_EXPONENT);
   assert.equal(f.api.getOptionsHeatmap(SINCE).length, 4);
 });
 

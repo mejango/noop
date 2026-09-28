@@ -1,6 +1,7 @@
 'use strict';
 
 const test = require('node:test');
+const { SELL_CALL_EDGE_DTE_EXPONENT } = require('../bot/call-score');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -69,7 +70,7 @@ test('archives committed WAL evidence without changing source bytes, and raw dat
   assert.equal(manifest.tables.options_snapshots.rows, 1);
   assert.equal(manifest.schema.sha256.length, 64);
   assert.equal(manifest.policy_reference.files['bot/call-score.js'].sha256.length, 64);
-  assert.equal(manifest.policy_reference.normalization.call.exponent, 0.12);
+  assert.equal(manifest.policy_reference.normalization.call.exponent, SELL_CALL_EDGE_DTE_EXPONENT);
 
   const archived = new Database(outPath, { readonly: true, fileMustExist: true });
   assert.equal(archived.pragma('journal_mode', { simple: true }), 'delete');
