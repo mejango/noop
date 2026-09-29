@@ -13101,7 +13101,9 @@ Produce your trading agenda JSON now.`;
         }
         console.log(`📋 Advisory Step 1: got ${primaryAgenda.entry_rules?.length || 0} entry rules, ${primaryAgenda.exit_rules?.length || 0} exit rules`);
       } else {
-        throw new Error('No JSON block found in primary response');
+        // Max-effort thinking counts against max_tokens; say which limit ended the answer.
+        const d = primaryResponse.data || {};
+        throw new Error(`No JSON block found in primary response (stop_reason=${d.stop_reason}, output_tokens=${d.usage?.output_tokens}, text_chars=${primaryText.length})`);
       }
     } catch (parseErr) {
       console.log('📋 Advisory Step 1: JSON parse failed:', parseErr.message);
