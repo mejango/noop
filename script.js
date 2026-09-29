@@ -4709,12 +4709,18 @@ const formatWikiNumber = (value, digits = 2, prefix = '') => {
   return Number.isFinite(numeric) ? `${prefix}${numeric.toFixed(digits)}` : 'unknown';
 };
 
+// Ticks still store momentum labels for the dashboard strip; since ff1e2ab no decision uses them,
+// and the journal and wiki kept narrating them (then fed them back to the advisor through the wiki).
+const withoutMomentumLabels = (tick) => {
+  if (!tick || typeof tick !== 'object') return tick;
+  const { medium_momentum, short_momentum, ...rest } = tick;
+  return rest;
+};
+
 const formatTickEvidenceLine = (row) => {
   const parsed = parseTickSummary(row) || {};
-  const medium = parsed.medium_momentum?.main || parsed.medium_momentum || 'unknown';
-  const short = parsed.short_momentum?.main || parsed.short_momentum || 'unknown';
   const source = row.id != null ? `tick:#${row.id}` : `tick:${row.timestamp}`;
-  return `[${source}] ${row.timestamp} | spot=${formatWikiNumber(parsed.price, 2, '$')} | medium=${medium} | short=${short} | put_score=${formatWikiNumber(parsed.current_best_put, 4)} | call_score=${formatWikiNumber(parsed.current_best_call, 4)}${formatTickBestLeg('best_put', parsed.best_put_detail)}${formatTickBestLeg('best_call', parsed.best_call_detail)}`;
+  return `[${source}] ${row.timestamp} | spot=${formatWikiNumber(parsed.price, 2, '$')} | put_score=${formatWikiNumber(parsed.current_best_put, 4)} | call_score=${formatWikiNumber(parsed.current_best_call, 4)}${formatTickBestLeg('best_put', parsed.best_put_detail)}${formatTickBestLeg('best_call', parsed.best_call_detail)}`;
 };
 
 // Without the instrument and DTE here, each parallel ingest call derived DTE on its own
@@ -5312,6 +5318,7 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 12. Strategy pages are Learning-owned views. They may summarize canonical [lesson:key] records, including status and contradictions, but must not invent independent execution rules or present disputed lessons as settled
 13. Strategy pages contain durable conditional rules, not the current spot, skew, score, budget, gate state, or other live snapshot values. Live market state belongs in research pages and the trading advisory
 14. The Outstanding Validation Findings are instructions to you, not page content. Never write a findings, validation, audit, or resolved-issues section into a page; remove any such section a page already has
+15. Momentum labels (short/medium momentum states such as "upward/accelerating") are no longer tracked or used by any decision. Remove them from current-state sections; describe price action with measured spot values
 
 Output your updates as XML blocks. Only include pages that need changes:
 
@@ -6006,17 +6013,15 @@ const generateJournalEntries = async (tickSummary, botData) => {
 
     // Build snapshot
     const snapshot = {
-      current_tick: tickSummary,
+      current_tick: withoutMomentumLabels(tickSummary),
       stats,
       recent_ticks_24h: sampledTicks.map(t => {
-        try { return { timestamp: t.timestamp, ...JSON.parse(t.summary) }; } catch { return t; }
+        try { return { timestamp: t.timestamp, ...withoutMomentumLabels(JSON.parse(t.summary)) }; } catch { return t; }
       }),
       onchain_24h: sampledOnchain,
       prices_7d: sampledPrices.map(p => ({
         timestamp: p.timestamp,
         price: p.price,
-        medium_momentum: p.medium_momentum_main || null,
-        short_momentum: p.short_momentum_main || null,
       })),
       sizing_note: 'All position sizing is margin-aware — advisory sets budget_limit per rule based on account margin health',
       previous_journal: previousJournal,
@@ -6174,8 +6179,9 @@ The journal (observation, hypothesis, regime_note) should track:
 
 Analyze the provided snapshot across three time scales:
 
-**Short-term (hours):** Price action, short momentum shifts, spike events — how do they affect put pricing AND call premium?
-**Medium-term (days):** Trend direction changes, momentum regime shifts, onchain flow patterns, protection cost trends, premium harvest trends.
+**Short-term (hours):** Measured spot moves, spike events, IV moves — how do they affect put pricing AND call premium?
+**Medium-term (days):** Trend changes in the measured spot path, onchain flow patterns, protection cost trends, premium harvest trends.
+Momentum labels are not supplied: a Sep-2026 backtest found they add whipsaw, not information, so no decision uses them. Describe price action from the measured spot path (prices_7d, recent ticks) and never name a momentum state.
 **Long-term (week+):** Structural patterns, correlation shifts, regime transitions, compounding geometry of both put protection and call financing.
 
 **Recent trades:** The snapshot includes recent_orders — actual put buys and call sells executed by the bot. Evaluate PUT trades first: was the timing good, was the strike/delta appropriate, did we get good value on protection? Then evaluate CALL trades: was premium rich, was the strike safe, was the risk-adjusted return good?

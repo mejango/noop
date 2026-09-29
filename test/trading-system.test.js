@@ -7269,6 +7269,15 @@ describe('wiki findings feed back into ingest', () => {
     assert.ok(!wikiQuoteAppearsIn(page, undefined) && !wikiQuoteAppearsIn(page, 'OI'), 'missing or trivial quotes fail');
   });
 
+  test('momentum labels reach neither the journal nor the wiki evidence', () => {
+    const { withoutMomentumLabels, formatTickEvidenceLine } = loadProduction(['withoutMomentumLabels', 'formatTickEvidenceLine']);
+    assert.deepStrictEqual(withoutMomentumLabels({ price: 1, medium_momentum: { main: 'upward' }, short_momentum: 'x' }), { price: 1 });
+    const line = formatTickEvidenceLine({ id: 1, timestamp: 't', summary: JSON.stringify({ price: 2685, medium_momentum: { main: 'upward' } }) });
+    assert.ok(!/medium=|short=|upward/.test(line), line);
+    assert.ok(!SCRIPT_SOURCE.includes('medium_momentum: p.medium_momentum_main'), 'prices_7d no longer carries labels');
+    assert.ok(SCRIPT_SOURCE.includes('current_tick: withoutMomentumLabels(tickSummary)'));
+  });
+
   test('reviews, journal and wiki all see how IV moved', () => {
     const { formatReviewIvChange } = loadProduction(['formatReviewIvChange']);
     assert.match(formatReviewIvChange(0.521, 0.473), /^52\.1% → 47\.3% \(−4\.8 vol pts\)/);
