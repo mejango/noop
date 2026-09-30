@@ -6349,9 +6349,10 @@ const callOpenAI = async (systemPrompt, userPrompt, {
 
 const ANTHROPIC_SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
 const ANTHROPIC_STRATEGY_MODEL = process.env.ANTHROPIC_STRATEGY_MODEL || 'claude-opus-5-5';
-// Opus 5.5 always thinks and defaults to medium effort. The primary agenda runs at max;
-// synthesis and repair rework an existing agenda and run at medium.
-const ANTHROPIC_PRIMARY_EFFORT = 'max';
+// Opus 5.5 always thinks and defaults to medium effort. At max, thinking consumed the whole
+// 64k max_tokens with no text in 3 of 4 scheduled Step 1 runs (Sep 29: stop_reason=max_tokens,
+// output_tokens=64000, text_chars=0), so every agent runs at medium.
+const ANTHROPIC_PRIMARY_EFFORT = 'medium';
 const ANTHROPIC_SYNTHESIS_EFFORT = 'medium';
 
 // Thinking blocks can precede text; never interpret them as the final answer.

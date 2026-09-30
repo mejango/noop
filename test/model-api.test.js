@@ -33,7 +33,7 @@ test('Astra sends a reasoning-compatible request and returns the answer', async 
   });
   assert.equal(await api.callOpenAI('system', 'user'), '{"regime":"calm"}');
   assert.equal(api.ANTHROPIC_STRATEGY_MODEL, 'claude-opus-5-5');
-  assert.equal(api.ANTHROPIC_PRIMARY_EFFORT, 'max');
+  assert.equal(api.ANTHROPIC_PRIMARY_EFFORT, 'medium');
   assert.equal(api.ANTHROPIC_SYNTHESIS_EFFORT, 'medium');
   assert.equal(api.ANTHROPIC_SONNET_MODEL, 'claude-sonnet-5');
 });
