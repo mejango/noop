@@ -22,7 +22,7 @@ export default function VolatilityPricing() {
   const score = unavailable ? null : data.score;
   const status = unavailable ? 'Quotes unavailable' : loading && !data.asOf ? 'Loading volatility…'
     : score != null ? data.label : data.currentIv != null ? 'Current IV' : data.historyDays < MIN_HISTORY_DAYS ? 'Building history' : 'Limited quote coverage';
-  const historyLabel = data.historyDays ? `${score != null ? 'Compared with' : 'History:'} ${data.historyDays} recorded days${data.provisional ? ' · Provisional' : ''}` : 'Waiting for full-chain history';
+  const historyLabel = data.historyDays ? `${data.historyDays} days${data.provisional ? ' (provisional)' : ''}` : 'No history yet';
 
   useEffect(() => {
     if (open) dialog.current?.showModal();
@@ -49,10 +49,14 @@ export default function VolatilityPricing() {
           </div>
           <div className="flex justify-between text-[10px] text-gray-500"><span>Cheap</span><span>Typical</span><span>Expensive</span></div>
         </> : !unavailable && data.currentIv != null ? <p className="text-xs text-gray-400">
-          {data.historyDays < MIN_HISTORY_DAYS ? `Pricing comparison starts after ${MIN_HISTORY_DAYS} recorded days.` : 'Historical pricing comparison has limited quote coverage.'}
+          {data.historyDays < MIN_HISTORY_DAYS ? `Comparison needs ${MIN_HISTORY_DAYS} days.` : 'Limited quote coverage.'}
         </p> : null}
         <div className="text-xs text-gray-500">{unavailable ? 'Refresh to get current options quotes' : historyLabel}</div>
-        {score != null && <div className="text-[10px] text-gray-400">{data.qualifier}{data.currentIv != null ? ` · IV ${data.currentIv.toFixed(1)}%` : ''} · {age}</div>}
+        {score != null && <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-400">
+          <span>{data.qualifier}</span>
+          {data.currentIv != null && <span>IV {data.currentIv.toFixed(1)}%</span>}
+          <span>{age}</span>
+        </div>}
       </button>
 
       <dialog ref={dialog} onCancel={() => setOpen(false)} onClose={() => setOpen(false)}
@@ -63,15 +67,15 @@ export default function VolatilityPricing() {
           <div className="flex justify-between items-start gap-4 mb-4">
             <div>
               <h2 id="volatility-pricing-title" className="text-lg text-juice-orange font-semibold">Volatility Pricing</h2>
-              <p className="text-sm text-gray-400 mt-1">{status}{score != null ? ` · ${score} / 100` : ''}</p>
+              <p className="flex gap-4 text-sm text-gray-400 mt-1"><span>{status}</span>{score != null && <span>{score} / 100</span>}</p>
             </div>
             <button type="button" onClick={() => setOpen(false)} aria-label="Close volatility breakdown" className="px-3 py-1 rounded border border-gray-700 hover:bg-gray-800">✕</button>
           </div>
           {unavailable && <div role="alert" className="mb-4 flex items-center justify-between gap-4 text-sm text-amber-400">
-            <span>Current quotes unavailable.{data.asOf ? ` The last snapshot is ${age}.` : ' No snapshot has loaded.'}</span>
+            <span>Quotes unavailable.{data.asOf ? ` Last update: ${age}.` : ''}</span>
             <button type="button" onClick={refetch} className="border border-gray-600 rounded px-3 py-1" disabled={loading}>{loading ? 'Refreshing…' : 'Retry'}</button>
           </div>}
-          <p className="text-xs text-gray-400 mb-4">{historyLabel}. Brighter green means historically cheaper volatility. Each cell shows IV, then its pricing percentile (0 = cheapest, 100 = most expensive).</p>
+          <p className="text-xs text-gray-400 mb-4">IV / percentile. Brighter = cheaper.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs border-separate border-spacing-1">
               <caption className="sr-only">Implied volatility and historical pricing percentile by strike distance and days to expiry</caption>
@@ -86,7 +90,7 @@ export default function VolatilityPricing() {
                   const p = unavailable ? null : cell?.percentile;
                   return <td key={dte} className="rounded p-3 text-center min-w-[88px] tabular-nums"
                     style={{ backgroundColor: p != null ? `hsl(165 55% ${12 + (100 - p) * 0.25}%)` : '#252525' }}
-                    title={cell ? `${cell.samples} daily observations. ${cell.iv == null ? 'No reliable quoted interpolation at this strike and maturity.' : p == null ? 'Historical percentile unavailable.' : 'Percentile vs comparable strike distance and maturity.'}` : 'No data yet'}>
+                    title={cell ? `${cell.samples} days. ${cell.iv == null ? 'No quote.' : p == null ? 'No percentile.' : 'Historical percentile.'}` : 'No data yet'}>
                     <div className="text-sm">{!unavailable && cell?.iv != null ? `${cell.iv.toFixed(1)}%` : '—'}</div>
                     <div className="text-[10px] text-gray-300 mt-1">{p != null ? `${Math.round(p)} / 100` : 'Unrated'}</div>
                     <div className="text-[9px] text-gray-400 mt-1">{cell?.samples ?? 0} days</div>
@@ -96,14 +100,13 @@ export default function VolatilityPricing() {
             </table>
           </div>
           <div className="mt-5 space-y-2 text-xs text-gray-500 leading-relaxed">
-            <p>Cheap means low relative to recorded history; it does not predict returns or establish fair value.</p>
-            {data.historyFrom && data.historyTo && <p>History: {date(data.historyFrom)} – {date(data.historyTo)} (UTC), up to one year. {data.measured}/{data.total} cells rated.</p>}
-            {data.asOf && <p>Quotes: {new Date(data.asOf).toLocaleString()} · {age}</p>}
+            {data.historyFrom && data.historyTo && <p>History: {date(data.historyFrom)} – {date(data.historyTo)} (UTC)</p>}
+            {data.asOf && <p>Updated {age}</p>}
             <details>
-              <summary className="cursor-pointer text-gray-400">How the score works</summary>
+              <summary className="cursor-pointer text-gray-400">Method</summary>
               <div className="mt-2 space-y-2">
-                <p>Equal weight across comparable cells; the meter is their median historical percentile. At least 13 of 25 cells across three strike levels and three maturities must be rated. Each cell needs {MIN_HISTORY_DAYS} recorded days; histories under 30 days are provisional.</p>
-                <p>Strikes track distance from spot. DTE means days to expiry; values are interpolated between listed strikes and expiries, using quote-backed mark IV. Missing or wide quotes stay unrated. No extrapolation.</p>
+                <p>Median historical percentile. Minimum {MIN_HISTORY_DAYS} days; provisional under 30. Coverage: {data.measured}/{data.total} cells.</p>
+                <p>Strikes relative to spot. DTE = days to expiry. IV interpolated from quoted strikes and expiries.</p>
               </div>
             </details>
           </div>
