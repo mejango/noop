@@ -70,11 +70,24 @@ test('insufficient history or narrow coverage never becomes a broad market score
   const empty = buildVolatilityPricing(frame(), []);
   assert.equal(empty.score, null);
   assert.equal(empty.cells[0].iv, 50);
-  assert.equal(buildVolatilityPricing(frame(), history(6)).score, null);
+  assert.equal(buildVolatilityPricing(frame(), history(1)).score, null);
+  assert.equal(empty.currentIv, 50);
   const narrow = { at: now, expiries: [expiry(7)] };
   const result = buildVolatilityPricing(narrow, history());
   assert.equal(result.score, null);
   assert.equal(result.measured, 5);
+});
+
+
+test('five recorded days show a provisional score instead of a blank meter', () => {
+  const result = buildVolatilityPricing(frame(now, 40), history(5));
+  assert.equal(result.score, 0);
+  assert.equal(result.label, 'Cheap');
+  assert.equal(result.provisional, true);
+  assert.equal(result.measured, 25);
+  assert.equal(result.currentIv, 40);
+  assert.equal(buildVolatilityPricing(frame(), history(2)).score, 50);
+  assert.equal(buildVolatilityPricing(frame(), history(2)).provisional, true);
 });
 
 // Exercise the production endpoint with isolated upstream/data-store adapters.

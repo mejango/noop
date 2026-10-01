@@ -2,7 +2,7 @@ import type { SmileExpiry } from './vol-smile';
 
 export const TENORS = [7, 14, 30, 60, 90];
 export const OFFSETS = [-0.1, -0.05, 0, 0.05, 0.1];
-const MIN_DAYS = 7;
+export const MIN_HISTORY_DAYS = 2;
 const DAY = 86_400_000;
 
 export type PricingFrame = { at: number; expiries: SmileExpiry[] };
@@ -13,7 +13,7 @@ export type PricingCell = {
 export type VolatilityPricingData = {
   asOf: string; score: number | null; label: string; qualifier: string;
   historyDays: number; historyFrom: string | null; historyTo: string | null;
-  provisional: boolean; measured: number; total: number; spot: number | null;
+  provisional: boolean; measured: number; total: number; spot: number | null; currentIv: number | null;
   cells: PricingCell[];
 };
 
@@ -78,7 +78,7 @@ export function buildVolatilityPricing(current: PricingFrame, history: PricingFr
     const iv = ivAtTenor(current.expiries, dte, offset);
     const past = frames.map(f => ivAtTenor(f.expiries, dte, offset)).filter((v): v is number => v != null);
     // Midrank ties: an unchanged market reads 50, not expensive.
-    const percentile = iv != null && past.length >= MIN_DAYS
+    const percentile = iv != null && past.length >= MIN_HISTORY_DAYS
       ? 100 * past.reduce((n, v) => n + (v < iv ? 1 : v === iv ? 0.5 : 0), 0) / past.length : null;
     return { dte, offset, strike: spot == null ? null : spot * (1 + offset), iv, percentile, samples: past.length };
   }));
@@ -90,14 +90,15 @@ export function buildVolatilityPricing(current: PricingFrame, history: PricingFr
   const label = score == null ? 'Insufficient history / coverage' : score <= 25 ? 'Cheap' : score >= 75 ? 'Expensive' : 'Typical';
   const cheap = measured.filter(c => c.percentile! <= 25).length;
   const expensive = measured.filter(c => c.percentile! >= 75).length;
-  const qualifier = score == null ? 'Need 7 daily observations and broad quoted coverage'
+  const qualifier = score == null ? `Need ${MIN_HISTORY_DAYS} daily observations and broad quoted coverage`
     : cheap >= measured.length * 0.7 ? 'Cheap broadly'
     : expensive >= measured.length * 0.7 ? 'Expensive broadly'
     : cheap > 0 && expensive > 0 ? 'Mixed across strikes and maturities' : 'Broadly similar pricing';
   return {
     asOf: new Date(current.at).toISOString(), score, label, qualifier, spot, cells,
+    currentIv: cells.some(c => c.iv != null) ? median(cells.filter(c => c.iv != null).map(c => c.iv!)) : null,
     historyDays: frames.length, historyFrom: frames.length ? new Date(frames[0].at).toISOString() : null,
     historyTo: frames.length ? new Date(frames[frames.length - 1].at).toISOString() : null,
-    provisional: measured.some(c => c.samples < 30), measured: measured.length, total: cells.length,
+    provisional: frames.length < 30 || measured.some(c => c.samples < 30), measured: measured.length, total: cells.length,
   };
 }

@@ -2,10 +2,10 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useLiveTimeAgo, usePolling } from '@/lib/hooks';
-import { TENORS, OFFSETS, type VolatilityPricingData } from '@/lib/volatility-pricing';
+import { TENORS, OFFSETS, MIN_HISTORY_DAYS, type VolatilityPricingData } from '@/lib/volatility-pricing';
 
 const EMPTY: VolatilityPricingData = {
-  asOf: '', score: null, label: '', qualifier: '', spot: null, cells: [],
+  asOf: '', score: null, label: '', qualifier: '', spot: null, currentIv: null, cells: [],
   historyDays: 0, historyFrom: null, historyTo: null, provisional: false, measured: 0, total: 25,
 };
 const money = (v: number) => v.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
@@ -21,8 +21,8 @@ export default function VolatilityPricing() {
   const unavailable = !!error || stale;
   const score = unavailable ? null : data.score;
   const status = unavailable ? 'Quotes unavailable' : loading && !data.asOf ? 'Loading volatility…'
-    : score != null ? data.label : data.historyDays < 7 ? 'Building history' : 'Limited quote coverage';
-  const historyLabel = data.historyDays ? `Compared with ${data.historyDays} recorded days${data.provisional ? ' · Provisional' : ''}` : 'Waiting for full-chain history';
+    : score != null ? data.label : data.currentIv != null ? 'Current IV' : data.historyDays < MIN_HISTORY_DAYS ? 'Building history' : 'Limited quote coverage';
+  const historyLabel = data.historyDays ? `${score != null ? 'Compared with' : 'History:'} ${data.historyDays} recorded days${data.provisional ? ' · Provisional' : ''}` : 'Waiting for full-chain history';
 
   useEffect(() => {
     if (open) dialog.current?.showModal();
@@ -39,17 +39,20 @@ export default function VolatilityPricing() {
         </div>
         <div className="flex items-baseline justify-between gap-3">
           <span className={`text-lg font-medium ${score != null && score <= 25 ? 'text-emerald-300' : score != null && score >= 75 ? 'text-amber-400' : 'text-gray-300'}`}>{status}</span>
-          <span className="text-xl tabular-nums text-gray-200">{score ?? '—'}<span className="text-xs text-gray-500"> / 100</span></span>
+          <span className="text-xl tabular-nums text-gray-200">{score != null ? <>{score}<span className="text-xs text-gray-500"> / 100</span></> : !unavailable && data.currentIv != null ? `${data.currentIv.toFixed(1)}%` : '—'}</span>
         </div>
-        <div className="relative h-2 rounded-full bg-gradient-to-r from-emerald-400/80 via-gray-600 to-amber-500/70"
-          role={score != null ? 'meter' : undefined} aria-label="Volatility pricing: low means historically cheap"
-          aria-valuemin={score != null ? 0 : undefined} aria-valuemax={score != null ? 100 : undefined}
-          aria-valuenow={score ?? undefined} aria-valuetext={score != null ? `${status}, ${score} out of 100` : undefined}>
-          {score != null && <span className="absolute top-1/2 w-1 h-4 rounded bg-white shadow -translate-x-1/2 -translate-y-1/2" style={{ left: `${score}%` }} />}
-        </div>
-        <div className="flex justify-between text-[10px] text-gray-500"><span>Cheap</span><span>Typical</span><span>Expensive</span></div>
+        {score != null ? <>
+          <div className="relative h-2 rounded-full bg-gradient-to-r from-emerald-400/80 via-gray-600 to-amber-500/70"
+            role="meter" aria-label="Volatility pricing: low means historically cheap"
+            aria-valuemin={0} aria-valuemax={100} aria-valuenow={score} aria-valuetext={`${status}, ${score} out of 100`}>
+            <span className="absolute top-1/2 w-1 h-4 rounded bg-white shadow -translate-x-1/2 -translate-y-1/2" style={{ left: `${score}%` }} />
+          </div>
+          <div className="flex justify-between text-[10px] text-gray-500"><span>Cheap</span><span>Typical</span><span>Expensive</span></div>
+        </> : !unavailable && data.currentIv != null ? <p className="text-xs text-gray-400">
+          {data.historyDays < MIN_HISTORY_DAYS ? `Pricing comparison starts after ${MIN_HISTORY_DAYS} recorded days.` : 'Historical pricing comparison has limited quote coverage.'}
+        </p> : null}
         <div className="text-xs text-gray-500">{unavailable ? 'Refresh to get current options quotes' : historyLabel}</div>
-        {score != null && <div className="text-[10px] text-gray-400">{data.qualifier} · {data.measured}/{data.total} cells · {age}</div>}
+        {score != null && <div className="text-[10px] text-gray-400">{data.qualifier}{data.currentIv != null ? ` · IV ${data.currentIv.toFixed(1)}%` : ''} · {age}</div>}
       </button>
 
       <dialog ref={dialog} onCancel={() => setOpen(false)} onClose={() => setOpen(false)}
@@ -99,7 +102,7 @@ export default function VolatilityPricing() {
             <details>
               <summary className="cursor-pointer text-gray-400">How the score works</summary>
               <div className="mt-2 space-y-2">
-                <p>Equal weight across comparable cells; the meter is their median historical percentile. At least 13 of 25 cells across three strike levels and three maturities must be rated. Each cell needs seven recorded days; histories under 30 days are provisional.</p>
+                <p>Equal weight across comparable cells; the meter is their median historical percentile. At least 13 of 25 cells across three strike levels and three maturities must be rated. Each cell needs {MIN_HISTORY_DAYS} recorded days; histories under 30 days are provisional.</p>
                 <p>Strikes track distance from spot. DTE means days to expiry; values are interpolated between listed strikes and expiries, using quote-backed mark IV. Missing or wide quotes stay unrated. No extrapolation.</p>
               </div>
             </details>
