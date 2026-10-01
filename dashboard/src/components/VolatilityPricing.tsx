@@ -14,21 +14,17 @@ const date = (v: string) => new Date(v).toLocaleDateString(undefined, { month: '
 
 function QuoteSide({ label, quote, unavailable }: { label: 'Bid' | 'Ask'; quote?: PricingQuote; unavailable: boolean }) {
   const percentile = unavailable ? null : quote?.percentile;
-  return <div className="px-2 py-2" style={{ backgroundColor: pricingColor(percentile ?? null) }}>
-    <div className="flex justify-between gap-2 text-xs">
-      <span className="text-gray-300">{label}</span>
-      <span>{!unavailable && quote?.iv != null ? `${quote.iv.toFixed(1)}%` : '—'}</span>
-    </div>
-    <div className="flex justify-between gap-2 mt-1">
-      <span className="text-[9px] text-gray-400">{quote?.samples ?? 0}h</span>
-      <span className="text-[10px] text-gray-300">{percentile != null ? `${Math.round(percentile)} / 100` : 'Unrated'}</span>
-    </div>
+  return <div className="px-2 py-2" style={{ backgroundColor: pricingColor(percentile ?? null, label === 'Bid' ? 'bid' : 'ask') }}>
+    <div className="text-[10px] text-gray-300">{label}</div>
+    <div className="mt-1 text-gray-100">{percentile != null ? <><span className="text-lg font-medium">{Math.round(percentile)}</span><span className="text-[9px] text-gray-300"> / 100</span></> : <span className="text-xs text-gray-400">Unrated</span>}</div>
+    <div className="text-[10px] text-gray-300 mt-1">IV {!unavailable && quote?.iv != null ? `${quote.iv.toFixed(1)}%` : '—'}</div>
     <div className={`flex h-1.5 mt-1 rounded-sm overflow-hidden ${(quote?.history?.length ?? 0) > 16 ? 'gap-0' : 'gap-px'}`} role="img"
       aria-label={`${label}: ${quote?.samples ?? 0} hourly observations, oldest to newest, followed by now`}>
       {(quote?.history ?? []).map((point, index, points) => <span key={point.at} className="flex-1 min-w-0"
-        style={{ backgroundColor: pricingColor(unavailable ? null : point.percentile) }}
+        style={{ backgroundColor: pricingColor(unavailable ? null : point.percentile, label === 'Bid' ? 'bid' : 'ask') }}
         title={`${label} ${index === points.length - 1 ? 'now' : `${new Date(point.from ?? point.at).toLocaleString()}${point.from !== point.at ? ` – ${new Date(point.at).toLocaleTimeString()}` : ''}`}: ${point.iv != null ? `${point.iv.toFixed(1)}% IV` : 'No quote'}${point.percentile != null ? `, ${Math.round(point.percentile)}/100` : ''}`} />)}
     </div>
+    <div className="text-[9px] text-gray-400 mt-1">{quote?.samples ?? 0}h</div>
   </div>;
 }
 
@@ -95,7 +91,7 @@ export default function VolatilityPricing() {
       <dialog ref={dialog} onCancel={() => setOpen(false)} onClose={() => setOpen(false)}
         onClick={e => { if (e.target === e.currentTarget) setOpen(false); }}
         aria-labelledby="volatility-pricing-title"
-        className="w-[min(1200px,calc(100vw-32px))] max-h-[85vh] overflow-y-auto rounded-lg border border-gray-700 bg-[#181818] text-gray-200 p-0 backdrop:bg-black/75">
+        className="w-[min(1600px,calc(100vw-32px))] max-h-[85vh] overflow-y-auto rounded-lg border border-gray-700 bg-[#181818] text-gray-200 p-0 backdrop:bg-black/75">
         <div className="p-5 md:p-6">
           <div className="flex justify-between items-start gap-4 mb-4">
             <div>
@@ -108,7 +104,7 @@ export default function VolatilityPricing() {
             <span>Quotes unavailable.{data.asOf ? ` Last update: ${age}.` : ''}</span>
             <button type="button" onClick={refetch} className="border border-gray-600 rounded px-3 py-1" disabled={loading}>{loading ? 'Refreshing…' : 'Retry'}</button>
           </div>}
-          <p className="text-xs text-gray-400 mb-4">Bid / ask IV and percentile. Brighter = cheaper. History → now.</p>
+          <p className="text-xs text-gray-400 mb-4">0 = cheap, 100 = expensive. Brighter = cheaper. History → now.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs border-separate border-spacing-1">
               <caption className="sr-only">Implied volatility and historical pricing percentile by strike distance and days to expiry</caption>
@@ -121,14 +117,13 @@ export default function VolatilityPricing() {
                 {TENORS.map(dte => {
                   const cell = data.cells.find(c => c.offset === offset && c.dte === dte);
                   const active = selected?.offset === offset && selected?.dte === dte;
-                  return <td key={dte} className="p-0 min-w-[112px] tabular-nums">
+                  return <td key={dte} className="p-0 min-w-[156px] tabular-nums">
                     <button type="button" disabled={unavailable || !cell}
                       onClick={() => { setSelected({ offset, dte }); setCopied(null); }} aria-pressed={active}
                       aria-label={`${offsetLabel(offset)}, ${dte} DTE: view contracts`}
-                      className={`w-full rounded overflow-hidden text-center focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:cursor-default ${active ? 'ring-2 ring-inset ring-white' : 'hover:ring-1 hover:ring-inset hover:ring-white/50'}`}
+                      className={`grid grid-cols-2 gap-px w-full rounded overflow-hidden text-center focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:cursor-default ${active ? 'ring-2 ring-inset ring-white' : 'hover:ring-1 hover:ring-inset hover:ring-white/50'}`}
                       style={{ backgroundColor: '#252525' }}>
                       <QuoteSide label="Bid" quote={cell?.bid} unavailable={unavailable} />
-                      <div className="h-px bg-black/30" />
                       <QuoteSide label="Ask" quote={cell?.ask} unavailable={unavailable} />
                     </button>
                   </td>;

@@ -15,8 +15,8 @@ export type VolatilityInstrument = {
   bid: number | null; bidAmount: number | null; bidIv: number | null;
 };
 export type PricingHistoryPoint = { at: string; from?: string; iv: number | null; percentile: number | null };
-export const pricingColor = (percentile: number | null) => percentile == null
-  ? '#252525' : `hsl(165 55% ${12 + (100 - percentile) * 0.25}%)`;
+export const pricingColor = (percentile: number | null, side: 'bid' | 'ask' = 'ask') => percentile == null
+  ? '#252525' : `hsl(${side === 'bid' ? 0 : 165} 55% ${12 + (100 - percentile) * 0.25}%)`;
 
 export type PricingQuote = {
   iv: number | null;
