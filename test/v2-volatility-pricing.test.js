@@ -23,6 +23,15 @@ function expiry(dte, iv = 50, spot = 2000) {
 const frame = (at = now, iv = 50, spot = 2000) => ({ at, expiries: [1, 3, 7, 14, 30, 45, 60, 90, 180, 365].map(d => expiry(d, iv, spot)) });
 const history = (count = 30, iv = 50) => Array.from({ length: count * 24 }, (_, i) => frame(now - (i + 1) * HOUR, iv));
 
+test('bright red highlights expensive bids; bright green highlights cheap asks', () => {
+  assert.equal(pricingColor(100, 'bid'), 'hsl(0 55% 37%)');
+  assert.equal(pricingColor(0, 'bid'), 'hsl(0 55% 12%)');
+  assert.equal(pricingColor(0, 'ask'), 'hsl(165 55% 37%)');
+  assert.equal(pricingColor(100, 'ask'), 'hsl(165 55% 12%)');
+  assert.equal(pricingColor(null, 'bid'), '#252525');
+  assert.equal(pricingColor(null, 'ask'), '#252525');
+});
+
 test('constant maturity interpolates total variance, refusing unbracketed horizons', () => {
   const expiries = [expiry(10, 40), expiry(20, 60)];
   assert.equal(ivAtTenor(expiries, 15, 0), Math.sqrt((40 ** 2 * 10 + 60 ** 2 * 20) / 2 / 15));

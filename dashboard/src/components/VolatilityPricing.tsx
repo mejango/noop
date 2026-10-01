@@ -104,7 +104,7 @@ export default function VolatilityPricing() {
             <span>Quotes unavailable.{data.asOf ? ` Last update: ${age}.` : ''}</span>
             <button type="button" onClick={refetch} className="border border-gray-600 rounded px-3 py-1" disabled={loading}>{loading ? 'Refreshing…' : 'Retry'}</button>
           </div>}
-          <p className="text-xs text-gray-400 mb-4">0 = cheap, 100 = expensive. Brighter = cheaper. History → now.</p>
+          <p className="text-xs text-gray-400 mb-4">Bright red = expensive bids. Bright green = cheap asks. History → now.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs border-separate border-spacing-1">
               <caption className="sr-only">Implied volatility and historical pricing percentile by strike distance and days to expiry</caption>
