@@ -1,8 +1,11 @@
 import type { SmileExpiry } from './vol-smile';
 
-export const TENORS = [7, 14, 30, 60, 90];
-export const OFFSETS = [-0.1, -0.05, 0, 0.05, 0.1];
-export const MIN_HISTORY_DAYS = 2;
+export const TENORS = [1, 3, 7, 14, 30, 45, 60, 90, 180];
+export const OFFSETS = [-0.2, -0.15, -0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2];
+export const MIN_HISTORY_SAMPLES = 24;
+export const HISTORY_DAYS = 30;
+const HOUR = 3_600_000;
+const SUMMARY_TENORS = [7, 14, 30, 60, 90];
 const DAY = 86_400_000;
 
 export type PricingFrame = { at: number; expiries: SmileExpiry[] };
@@ -10,7 +13,7 @@ export type VolatilityInstrument = {
   name: string; type: 'P' | 'C'; strike: number; expiry: number; dte: number;
   ask: number; askAmount: number; askIv: number;
 };
-export type PricingHistoryPoint = { at: string; iv: number | null; percentile: number | null };
+export type PricingHistoryPoint = { at: string; from?: string; iv: number | null; percentile: number | null };
 export const pricingColor = (percentile: number | null) => percentile == null
   ? '#252525' : `hsl(165 55% ${12 + (100 - percentile) * 0.25}%)`;
 
@@ -21,7 +24,7 @@ export type PricingCell = {
 };
 export type VolatilityPricingData = {
   asOf: string; score: number | null; label: string; qualifier: string;
-  historyDays: number; historyFrom: string | null; historyTo: string | null;
+  historyDays: number; historySamples: number; historyFrom: string | null; historyTo: string | null;
   provisional: boolean; measured: number; total: number; spot: number | null; currentIv: number | null;
   cells: PricingCell[];
 };
@@ -88,50 +91,89 @@ export function nearestVolatilityInstruments(expiries: SmileExpiry[], dte: numbe
   });
 }
 
-export function buildVolatilityPricing(current: PricingFrame, history: PricingFrame[]): VolatilityPricingData {
-  // One observation per completed UTC day: dense recording days get no extra weight.
-  const daily = new Map<string, PricingFrame>();
-  const today = new Date(current.at).toISOString().slice(0, 10);
-  for (const f of [...history].sort((a, b) => a.at - b.at)) {
-    if (!Number.isFinite(f.at) || f.at >= current.at || f.at < current.at - 365 * DAY) continue;
-    const day = new Date(f.at).toISOString().slice(0, 10);
-    if (day !== today) daily.set(day, f);
+// Keep the last snapshot in each completed UTC hour. No extra weight for a
+// busy recorder, no partial current-hour observation mixed into history.
+export function sampleHourly<T>(items: T[], at: (item: T) => number, now: number): T[] {
+  const hours = new Map<number, T>();
+  for (const item of items) {
+    const t = at(item), hour = Math.floor(t / HOUR);
+    if (!Number.isFinite(t) || t < now - HISTORY_DAYS * DAY || hour >= Math.floor(now / HOUR)) continue;
+    const prior = hours.get(hour);
+    if (!prior || at(prior) < t) hours.set(hour, item);
   }
-  const frames = Array.from(daily.values());
+  return Array.from(hours.values()).sort((a, b) => at(a) - at(b));
+}
+
+// Bound the rendered strip while all hourly samples still determine the score.
+// Missing hours stay gaps; the current point stays exact and separate.
+function colorPath(points: PricingHistoryPoint[]): PricingHistoryPoint[] {
+  const past = points.slice(0, -1), size = Math.max(1, Math.ceil(past.length / 48));
+  const out: PricingHistoryPoint[] = [];
+  for (let i = 0; i < past.length; i += size) {
+    const chunk = past.slice(i, i + size);
+    const quoted = chunk.every(p => p.iv != null);
+    const rated = chunk.every(p => p.percentile != null);
+    out.push({ at: chunk[chunk.length - 1].at, from: chunk[0].at,
+      iv: quoted ? chunk.reduce((sum, p) => sum + p.iv!, 0) / chunk.length : null,
+      percentile: rated ? chunk.reduce((sum, p) => sum + p.percentile!, 0) / chunk.length : null });
+  }
+  return [...out, points[points.length - 1]];
+}
+
+export function buildVolatilityPricing(current: PricingFrame, history: PricingFrame[]): VolatilityPricingData {
+  const frames = sampleHourly(history, f => f.at, current.at);
+  const byHour = new Map(frames.map(f => [Math.floor(f.at / HOUR), f]));
+  const hours: number[] = [];
+  if (frames.length) for (let h = Math.floor(frames[0].at / HOUR); h < Math.floor(current.at / HOUR); h++) hours.push(h);
   const spot = current.expiries.find(e => e.spot != null && e.spot > 0)?.spot ?? null;
   const cells = OFFSETS.flatMap(offset => TENORS.map(dte => {
     const iv = ivAtTenor(current.expiries, dte, offset);
-    const observed = frames.map(f => ({ at: new Date(f.at).toISOString(), iv: ivAtTenor(f.expiries, dte, offset) }));
-    const past = observed.map(p => p.iv).filter((v): v is number => v != null);
+    const observed = hours.map(h => {
+      const f = byHour.get(h);
+      return { at: new Date(f?.at ?? h * HOUR).toISOString(), iv: f ? ivAtTenor(f.expiries, dte, offset) : null };
+    });
+    const past = observed.map(p => p.iv).filter((v): v is number => v != null).sort((a, b) => a - b);
     // One fixed baseline for the whole color strip and today's cell.
     // Midrank ties: an unchanged market reads 50, not expensive.
-    const rank = (value: number | null) => value != null && past.length >= MIN_HISTORY_DAYS
-      ? 100 * past.reduce((n, v) => n + (v < value ? 1 : v === value ? 0.5 : 0), 0) / past.length : null;
+    const rank = (value: number | null) => {
+      if (value == null || past.length < MIN_HISTORY_SAMPLES) return null;
+      const bound = (upper: boolean) => {
+        let lo = 0, hi = past.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >>> 1;
+          if (past[mid] < value || (upper && past[mid] === value)) lo = mid + 1;
+          else hi = mid;
+        }
+        return lo;
+      };
+      return 50 * (bound(false) + bound(true)) / past.length;
+    };
     const percentile = rank(iv);
-    const history = [...observed, { at: new Date(current.at).toISOString(), iv }]
-      .map(p => ({ ...p, percentile: rank(p.iv) }));
+    const history = colorPath([...observed, { at: new Date(current.at).toISOString(), iv }]
+      .map(p => ({ ...p, percentile: rank(p.iv) })));
     const strike = spot == null ? null : spot * (1 + offset);
     return { dte, offset, strike, iv, percentile, samples: past.length, history,
       instruments: strike == null ? [] : nearestVolatilityInstruments(current.expiries, dte, strike, offset),
     };
   }));
   const measured = cells.filter(c => c.percentile != null);
-  // A broad label needs most of the grid, spanning both strikes and horizons.
-  const broad = measured.length >= 13 && new Set(measured.map(c => c.dte)).size >= 3
-    && new Set(measured.map(c => c.offset)).size >= 3;
-  const score = broad ? Math.round(median(measured.map(c => c.percentile!))) : null;
+  // Keep the headline comparable as the exploration grid expands.
+  const summary = measured.filter(c => SUMMARY_TENORS.includes(c.dte) && Math.abs(c.offset) <= 0.1);
+  const broad = summary.length >= 13 && new Set(summary.map(c => c.dte)).size >= 3
+    && new Set(summary.map(c => c.offset)).size >= 3;
+  const score = broad ? Math.round(median(summary.map(c => c.percentile!))) : null;
   const label = score == null ? 'Insufficient history / coverage' : score <= 25 ? 'Cheap' : score >= 75 ? 'Expensive' : 'Typical';
-  const cheap = measured.filter(c => c.percentile! <= 25).length;
-  const expensive = measured.filter(c => c.percentile! >= 75).length;
-  const qualifier = score == null ? `Need ${MIN_HISTORY_DAYS} daily observations and broad quoted coverage`
-    : cheap >= measured.length * 0.7 ? 'Cheap broadly'
-    : expensive >= measured.length * 0.7 ? 'Expensive broadly'
+  const cheap = summary.filter(c => c.percentile! <= 25).length;
+  const expensive = summary.filter(c => c.percentile! >= 75).length;
+  const qualifier = score == null ? `Need ${MIN_HISTORY_SAMPLES} hourly observations and broad quoted coverage`
+    : cheap >= summary.length * 0.7 ? 'Cheap broadly'
+    : expensive >= summary.length * 0.7 ? 'Expensive broadly'
     : cheap > 0 && expensive > 0 ? 'Mixed across strikes and maturities' : 'Broadly similar pricing';
   return {
     asOf: new Date(current.at).toISOString(), score, label, qualifier, spot, cells,
     currentIv: cells.some(c => c.iv != null) ? median(cells.filter(c => c.iv != null).map(c => c.iv!)) : null,
-    historyDays: frames.length, historyFrom: frames.length ? new Date(frames[0].at).toISOString() : null,
+    historyDays: frames.length ? Math.ceil((current.at - frames[0].at) / DAY) : 0, historySamples: frames.length, historyFrom: frames.length ? new Date(frames[0].at).toISOString() : null,
     historyTo: frames.length ? new Date(frames[frames.length - 1].at).toISOString() : null,
-    provisional: frames.length < 30 || measured.some(c => c.samples < 30), measured: measured.length, total: cells.length,
+    provisional: frames.length < 7 * 24, measured: measured.length, total: cells.length,
   };
 }

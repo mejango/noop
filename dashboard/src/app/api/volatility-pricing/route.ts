@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { getSmileSnapshots, getSmileSnapshotTimestamps } from '@/lib/db';
 import { getChain } from '@/lib/smile-chain';
 import { fromCompact } from '@/lib/vol-smile';
-import { buildVolatilityPricing, type PricingFrame, type VolatilityPricingData } from '@/lib/volatility-pricing';
+import { buildVolatilityPricing, sampleHourly, HISTORY_DAYS, type PricingFrame, type VolatilityPricingData } from '@/lib/volatility-pricing';
 
 export const dynamic = 'force-dynamic';
 let cached: { at: number; data: VolatilityPricingData } | null = null;
@@ -14,12 +14,12 @@ export async function GET() {
     if (!chain.expiries.length || Date.now() - chain.at > 5 * 60_000) {
       return NextResponse.json({ error: 'Fresh options quotes unavailable' }, { status: 503 });
     }
-    const days = new Map<string, string>();
-    for (const t of getSmileSnapshotTimestamps(new Date(chain.at - 365 * 86_400_000).toISOString())) {
-      if (Date.parse(t) < chain.at && t.slice(0, 10) !== new Date(chain.at).toISOString().slice(0, 10)) days.set(t.slice(0, 10), t);
-    }
+    const timestamps = sampleHourly(
+      getSmileSnapshotTimestamps(new Date(chain.at - HISTORY_DAYS * 86_400_000).toISOString()),
+      t => Date.parse(t), chain.at,
+    );
     const frames = new Map<string, PricingFrame>();
-    for (const row of getSmileSnapshots(Array.from(days.values()))) {
+    for (const row of getSmileSnapshots(timestamps)) {
       const at = Date.parse(row.timestamp);
       const frame = frames.get(row.timestamp) ?? { at, expiries: [] };
       try { frame.expiries.push(fromCompact(row, at)); } catch { continue; }

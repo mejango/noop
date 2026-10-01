@@ -2,11 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useLiveTimeAgo, usePolling } from '@/lib/hooks';
-import { TENORS, OFFSETS, MIN_HISTORY_DAYS, pricingColor, type VolatilityPricingData } from '@/lib/volatility-pricing';
+import { TENORS, OFFSETS, MIN_HISTORY_SAMPLES, pricingColor, type VolatilityPricingData } from '@/lib/volatility-pricing';
 
 const EMPTY: VolatilityPricingData = {
   asOf: '', score: null, label: '', qualifier: '', spot: null, currentIv: null, cells: [],
-  historyDays: 0, historyFrom: null, historyTo: null, provisional: false, measured: 0, total: 25,
+  historyDays: 0, historySamples: 0, historyFrom: null, historyTo: null, provisional: false, measured: 0, total: TENORS.length * OFFSETS.length,
 };
 const money = (v: number) => v.toLocaleString(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 const offsetLabel = (v: number) => v === 0 ? 'At spot' : `${v > 0 ? '+' : '−'}${Math.round(Math.abs(v) * 100)}%`;
@@ -24,8 +24,8 @@ export default function VolatilityPricing() {
   const unavailable = !!error || stale;
   const score = unavailable ? null : data.score;
   const status = unavailable ? 'Quotes unavailable' : loading && !data.asOf ? 'Loading volatility…'
-    : score != null ? data.label : data.currentIv != null ? 'Current IV' : data.historyDays < MIN_HISTORY_DAYS ? 'Building history' : 'Limited quote coverage';
-  const historyLabel = data.historyDays ? `${data.historyDays} days${data.provisional ? ' (provisional)' : ''}` : 'No history yet';
+    : score != null ? data.label : data.currentIv != null ? 'Current IV' : data.historySamples < MIN_HISTORY_SAMPLES ? 'Building history' : 'Limited quote coverage';
+  const historyLabel = data.historyDays ? `${data.historyDays} days / ${data.historySamples} hours${data.provisional ? ' (provisional)' : ''}` : 'No history yet';
   const selectedCell = selected ? data.cells.find(c => c.offset === selected.offset && c.dte === selected.dte) : null;
 
   useEffect(() => {
@@ -62,7 +62,7 @@ export default function VolatilityPricing() {
           </div>
           <div className="flex justify-between text-[10px] text-gray-500"><span>Cheap</span><span>Typical</span><span>Expensive</span></div>
         </> : !unavailable && data.currentIv != null ? <p className="text-xs text-gray-400">
-          {data.historyDays < MIN_HISTORY_DAYS ? `Comparison needs ${MIN_HISTORY_DAYS} days.` : 'Limited quote coverage.'}
+          {data.historySamples < MIN_HISTORY_SAMPLES ? `Comparison needs ${MIN_HISTORY_SAMPLES} hourly samples.` : 'Limited quote coverage.'}
         </p> : null}
         <div className="text-xs text-gray-500">{unavailable ? 'Refresh to get current options quotes' : historyLabel}</div>
         {score != null && <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-400">
@@ -75,7 +75,7 @@ export default function VolatilityPricing() {
       <dialog ref={dialog} onCancel={() => setOpen(false)} onClose={() => setOpen(false)}
         onClick={e => { if (e.target === e.currentTarget) setOpen(false); }}
         aria-labelledby="volatility-pricing-title"
-        className="w-[min(850px,calc(100vw-32px))] max-h-[85vh] overflow-y-auto rounded-lg border border-gray-700 bg-[#181818] text-gray-200 p-0 backdrop:bg-black/75">
+        className="w-[min(1200px,calc(100vw-32px))] max-h-[85vh] overflow-y-auto rounded-lg border border-gray-700 bg-[#181818] text-gray-200 p-0 backdrop:bg-black/75">
         <div className="p-5 md:p-6">
           <div className="flex justify-between items-start gap-4 mb-4">
             <div>
@@ -88,7 +88,7 @@ export default function VolatilityPricing() {
             <span>Quotes unavailable.{data.asOf ? ` Last update: ${age}.` : ''}</span>
             <button type="button" onClick={refetch} className="border border-gray-600 rounded px-3 py-1" disabled={loading}>{loading ? 'Refreshing…' : 'Retry'}</button>
           </div>}
-          <p className="text-xs text-gray-400 mb-4">IV / percentile. Brighter = cheaper. History → today. Click for contracts.</p>
+          <p className="text-xs text-gray-400 mb-4">Hourly IV / percentile. Brighter = cheaper. History → now. Click for contracts.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs border-separate border-spacing-1">
               <caption className="sr-only">Implied volatility and historical pricing percentile by strike distance and days to expiry</caption>
@@ -110,12 +110,13 @@ export default function VolatilityPricing() {
                       style={{ backgroundColor: pricingColor(p ?? null) }}>
                     <div className="text-sm">{!unavailable && cell?.iv != null ? `${cell.iv.toFixed(1)}%` : '—'}</div>
                     <div className="text-[10px] text-gray-300 mt-1">{p != null ? `${Math.round(p)} / 100` : 'Unrated'}</div>
-                    <div className="flex h-2 gap-px mt-2 rounded-sm overflow-hidden" role="img"
-                      aria-label={`${cell?.samples ?? 0} recorded days, oldest to newest, followed by today`}>
+                    <div className={`flex h-2 mt-2 rounded-sm overflow-hidden ${(cell?.history?.length ?? 0) > 16 ? 'gap-0' : 'gap-px'}`} role="img"
+                      aria-label={`${cell?.samples ?? 0} hourly observations, oldest to newest, followed by now`}>
                       {(cell?.history ?? []).map((point, index, points) => <span key={point.at} className="flex-1 min-w-0"
                         style={{ backgroundColor: pricingColor(unavailable ? null : point.percentile) }}
-                        title={`${index === points.length - 1 ? 'Today' : date(point.at)}: ${point.iv != null ? `${point.iv.toFixed(1)}% IV` : 'No quote'}${point.percentile != null ? `, ${Math.round(point.percentile)}/100` : ''}`} />)}
+                        title={`${index === points.length - 1 ? 'Now' : `${new Date(point.from ?? point.at).toLocaleString()}${point.from !== point.at ? ` – ${new Date(point.at).toLocaleTimeString()}` : ''}`}: ${point.iv != null ? `${point.iv.toFixed(1)}% IV` : 'No quote'}${point.percentile != null ? `, ${Math.round(point.percentile)}/100` : ''}`} />)}
                     </div>
+                    <div className="text-[9px] text-gray-400 mt-1">{cell?.samples ?? 0}h</div>
                     </button>
                   </td>;
                 })}
@@ -153,9 +154,9 @@ export default function VolatilityPricing() {
             <details>
               <summary className="cursor-pointer text-gray-400">Method</summary>
               <div className="mt-2 space-y-2">
-                <p>Median historical percentile. Minimum {MIN_HISTORY_DAYS} days; provisional under 30. Coverage: {data.measured}/{data.total} cells.</p>
+                <p>Hourly samples, up to 30 days. Minimum {MIN_HISTORY_SAMPLES}; provisional under 7 days. Meter: ±10%, 7–90 DTE.</p>
                 <p>Strikes relative to spot. DTE = days to expiry. IV interpolated from quoted strikes and expiries.</p>
-                <p>History colors use the same reference period as today. Contracts match nearest quoted expiry, then strike.</p>
+                <p>Strip colors average hourly percentiles; gaps stay blank. Contracts match nearest quoted expiry, then strike.</p>
               </div>
             </details>
           </div>
