@@ -34,13 +34,15 @@ test('buildExpiry keeps OTM wings only and drops sub-2Δ noise', () => {
 
 test('live chain retains actual ask price and size separately from mark and ask IV', () => {
   const e = buildExpiry(1_900_000_000, {
-    'ETH-X-1600-P': { ...tick(-0.05, 0.70), a: '12.5', A: '3' },
+    'ETH-X-1600-P': { ...tick(-0.05, 0.70), a: '12.5', A: '3', b: '11.5', B: '2' },
     'ETH-X-1800-P': tick(-0.25, 0.60),
     'ETH-X-2200-C': tick(0.25, 0.52),
     'ETH-X-2600-C': tick(0.06, 0.58),
   }, 1_899_000_000_000);
   assert.equal(e.points[0].askPrice, 12.5);
   assert.equal(e.points[0].askAmount, 3);
+  assert.equal(e.points[0].bidPrice, 11.5);
+  assert.equal(e.points[0].bidAmount, 2);
   assert.equal(e.points[1].askPrice, null);
   assert.equal(e.points[1].askAmount, null);
 });

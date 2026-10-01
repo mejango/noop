@@ -12,15 +12,20 @@ export type PricingFrame = { at: number; expiries: SmileExpiry[] };
 export type VolatilityInstrument = {
   name: string; type: 'P' | 'C'; strike: number; expiry: number; dte: number;
   ask: number; askAmount: number; askIv: number;
+  bid: number | null; bidAmount: number | null; bidIv: number | null;
 };
 export type PricingHistoryPoint = { at: string; from?: string; iv: number | null; percentile: number | null };
 export const pricingColor = (percentile: number | null) => percentile == null
   ? '#252525' : `hsl(165 55% ${12 + (100 - percentile) * 0.25}%)`;
 
-export type PricingCell = {
-  dte: number; offset: number; strike: number | null; iv: number | null;
+export type PricingQuote = {
+  iv: number | null;
   percentile: number | null; samples: number;
-  history: PricingHistoryPoint[]; instruments: VolatilityInstrument[];
+  history: PricingHistoryPoint[];
+};
+export type PricingCell = PricingQuote & {
+  dte: number; offset: number; strike: number | null;
+  bid: PricingQuote; ask: PricingQuote; instruments: VolatilityInstrument[];
 };
 export type VolatilityPricingData = {
   asOf: string; score: number | null; label: string; qualifier: string;
@@ -35,24 +40,31 @@ const median = (values: number[]) => {
   return s.length % 2 ? s[i] : (s[i - 1] + s[i]) / 2;
 };
 
-// Quote-backed mark IV, sampled at fixed strike/spot distance. Never extrapolate
+export type IvSide = 'mark' | 'bid' | 'ask';
+
+// Quote-backed IV, sampled at fixed strike/spot distance. Never extrapolate
 // beyond quoted strikes or bridge missing quotes across the smile.
-export function ivAtOffset(e: SmileExpiry, offset: number): number | null {
+export function ivAtOffset(e: SmileExpiry, offset: number, side: IvSide = 'mark'): number | null {
   if (!(e.spot && e.spot > 0)) return null;
   const strike = e.spot * (1 + offset);
   const points = e.points.filter(p => Number.isFinite(p.strike) && p.strike > 0)
     .sort((a, b) => a.strike - b.strike);
-  const valid = (p: typeof points[number]) => Number.isFinite(p.iv) && p.iv > 0
-    && p.bidIv != null && p.askIv != null && p.bidIv > 0 && p.askIv >= p.bidIv
-    && (p.askIv - p.bidIv) / p.iv <= 0.5;
+  const value = (p: typeof points[number]) => side === 'bid' ? p.bidIv : side === 'ask' ? p.askIv : p.iv;
+  const valid = (p: typeof points[number]) => {
+    const iv = value(p);
+    if (iv == null || !Number.isFinite(iv) || iv <= 0) return false;
+    const twoSided = p.bidIv != null && p.askIv != null && p.bidIv > 0 && p.askIv > 0;
+    if (side === 'mark' && !twoSided) return false;
+    return !twoSided || (p.askIv! >= p.bidIv! && (p.askIv! - p.bidIv!) / p.iv <= 0.5);
+  };
   for (let i = 0; i < points.length; i++) {
     const p = points[i];
-    if (p.strike === strike) return valid(p) ? p.iv : null;
+    if (p.strike === strike) return valid(p) ? value(p) : null;
     const lo = points[i - 1];
     if (lo && lo.strike < strike && p.strike > strike) {
       if (!valid(lo) || !valid(p)) return null;
       const w = (strike - lo.strike) / (p.strike - lo.strike);
-      return lo.iv + w * (p.iv - lo.iv);
+      return value(lo)! + w * (value(p)! - value(lo)!);
     }
   }
   return null;
@@ -60,13 +72,13 @@ export function ivAtOffset(e: SmileExpiry, offset: number): number | null {
 
 // Constant maturity via total-variance interpolation between listed expiries.
 // Matching these horizons in history avoids expiry-roll and ageing artifacts.
-export function ivAtTenor(expiries: SmileExpiry[], dte: number, offset: number): number | null {
+export function ivAtTenor(expiries: SmileExpiry[], dte: number, offset: number, side: IvSide = 'mark'): number | null {
   const sorted = expiries.filter(e => e.dte > 0).sort((a, b) => a.dte - b.dte);
   for (let i = 0; i < sorted.length; i++) {
     const hi = sorted[i], lo = sorted[i - 1];
-    if (Math.abs(hi.dte - dte) < 1e-6) return ivAtOffset(hi, offset);
+    if (Math.abs(hi.dte - dte) < 1e-6) return ivAtOffset(hi, offset, side);
     if (lo && lo.dte < dte && hi.dte > dte) {
-      const a = ivAtOffset(lo, offset), b = ivAtOffset(hi, offset);
+      const a = ivAtOffset(lo, offset, side), b = ivAtOffset(hi, offset, side);
       if (a == null || b == null) return null;
       const w = (dte - lo.dte) / (hi.dte - lo.dte);
       return Math.sqrt(((1 - w) * a * a * lo.dte + w * b * b * hi.dte) / dte);
@@ -84,7 +96,9 @@ export function nearestVolatilityInstruments(expiries: SmileExpiry[], dte: numbe
       .filter(p => p.type === type && p.name && Number.isFinite(p.askPrice) && p.askPrice! > 0
         && Number.isFinite(p.askAmount) && p.askAmount! > 0 && p.askIv != null && p.askIv > 0)
       .map(p => ({ name: p.name, type, strike: p.strike, expiry: e.expiry, dte: e.dte,
-        ask: p.askPrice!, askAmount: p.askAmount!, askIv: p.askIv! })));
+        ask: p.askPrice!, askAmount: p.askAmount!, askIv: p.askIv!,
+        bid: p.bidPrice != null && p.bidPrice > 0 && p.bidAmount != null && p.bidAmount > 0 ? p.bidPrice : null,
+        bidAmount: p.bidAmount ?? null, bidIv: p.bidIv })));
     candidates.sort((a, b) => Math.abs(a.dte - dte) - Math.abs(b.dte - dte)
       || Math.abs(a.strike - strike) - Math.abs(b.strike - strike) || a.name.localeCompare(b.name));
     return candidates.length ? [candidates[0]] : [];
@@ -127,32 +141,36 @@ export function buildVolatilityPricing(current: PricingFrame, history: PricingFr
   if (frames.length) for (let h = Math.floor(frames[0].at / HOUR); h < Math.floor(current.at / HOUR); h++) hours.push(h);
   const spot = current.expiries.find(e => e.spot != null && e.spot > 0)?.spot ?? null;
   const cells = OFFSETS.flatMap(offset => TENORS.map(dte => {
-    const iv = ivAtTenor(current.expiries, dte, offset);
-    const observed = hours.map(h => {
-      const f = byHour.get(h);
-      return { at: new Date(f?.at ?? h * HOUR).toISOString(), iv: f ? ivAtTenor(f.expiries, dte, offset) : null };
-    });
-    const past = observed.map(p => p.iv).filter((v): v is number => v != null).sort((a, b) => a - b);
-    // One fixed baseline for the whole color strip and today's cell.
-    // Midrank ties: an unchanged market reads 50, not expensive.
-    const rank = (value: number | null) => {
-      if (value == null || past.length < MIN_HISTORY_SAMPLES) return null;
-      const bound = (upper: boolean) => {
-        let lo = 0, hi = past.length;
-        while (lo < hi) {
-          const mid = (lo + hi) >>> 1;
-          if (past[mid] < value || (upper && past[mid] === value)) lo = mid + 1;
-          else hi = mid;
-        }
-        return lo;
+    const assess = (side: IvSide): PricingQuote => {
+      const iv = ivAtTenor(current.expiries, dte, offset, side);
+      const observed = hours.map(h => {
+        const f = byHour.get(h);
+        return { at: new Date(f?.at ?? h * HOUR).toISOString(), iv: f ? ivAtTenor(f.expiries, dte, offset, side) : null };
+      });
+      const past = observed.map(p => p.iv).filter((v): v is number => v != null).sort((a, b) => a - b);
+      // One fixed baseline for the whole color strip and today's cell.
+      // Midrank ties: an unchanged market reads 50, not expensive.
+      const rank = (value: number | null) => {
+        if (value == null || past.length < MIN_HISTORY_SAMPLES) return null;
+        const bound = (upper: boolean) => {
+          let lo = 0, hi = past.length;
+          while (lo < hi) {
+            const mid = (lo + hi) >>> 1;
+            if (past[mid] < value || (upper && past[mid] === value)) lo = mid + 1;
+            else hi = mid;
+          }
+          return lo;
+        };
+        return 50 * (bound(false) + bound(true)) / past.length;
       };
-      return 50 * (bound(false) + bound(true)) / past.length;
+      const percentile = rank(iv);
+      const history = colorPath([...observed, { at: new Date(current.at).toISOString(), iv }]
+        .map(p => ({ ...p, percentile: rank(p.iv) })));
+      return { iv, percentile, samples: past.length, history };
     };
-    const percentile = rank(iv);
-    const history = colorPath([...observed, { at: new Date(current.at).toISOString(), iv }]
-      .map(p => ({ ...p, percentile: rank(p.iv) })));
+    const mark = assess('mark'), bid = assess('bid'), ask = assess('ask');
     const strike = spot == null ? null : spot * (1 + offset);
-    return { dte, offset, strike, iv, percentile, samples: past.length, history,
+    return { dte, offset, strike, ...mark, bid, ask,
       instruments: strike == null ? [] : nearestVolatilityInstruments(current.expiries, dte, strike, offset),
     };
   }));

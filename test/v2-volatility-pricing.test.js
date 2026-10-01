@@ -101,6 +101,41 @@ test('hourly percentiles resolve values between the old 20-point steps', () => {
   assert.equal(result.total, 81);
 });
 
+test('bid and ask priciness each use their own historical quote side', () => {
+  const past = history(5);
+  past.forEach(f => f.expiries.forEach(e => e.points.forEach(p => { p.bidIv = 40; p.askIv = 60; })));
+  const current = frame();
+  current.expiries.forEach(e => e.points.forEach(p => { p.bidIv = 47; p.askIv = 55; }));
+  const cell = buildVolatilityPricing(current, past).cells.find(c => c.dte === 30 && c.offset === 0);
+  assert.equal(cell.percentile, 50);
+  assert.equal(cell.bid.iv, 47);
+  assert.equal(cell.bid.percentile, 100);
+  assert.equal(cell.ask.iv, 55);
+  assert.equal(cell.ask.percentile, 0);
+  assert.equal(cell.bid.history.at(-1).percentile, 100);
+  assert.equal(cell.ask.history.at(-1).percentile, 0);
+});
+
+test('a missing ask cannot hide a valid bid or manufacture an ask percentile', () => {
+  const current = frame();
+  const past = history(2);
+  [current, ...past].forEach(f => f.expiries.forEach(e => e.points.forEach(p => { p.askIv = null; })));
+  const cell = buildVolatilityPricing(current, past).cells.find(c => c.dte === 30 && c.offset === 0);
+  assert.equal(cell.bid.iv, 49);
+  assert.equal(cell.bid.samples, 48);
+  assert.equal(cell.bid.percentile, 50);
+  assert.equal(cell.ask.iv, null);
+  assert.equal(cell.ask.samples, 0);
+  assert.equal(cell.ask.percentile, null);
+  assert.equal(cell.iv, null);
+});
+
+test('bid and ask maturity interpolation uses the selected side variance', () => {
+  const expiries = [expiry(10, 40), expiry(20, 60)];
+  assert.equal(ivAtTenor(expiries, 15, 0, 'bid'), Math.sqrt((39 ** 2 * 10 + 59 ** 2 * 20) / 2 / 15));
+  assert.equal(ivAtTenor(expiries, 15, 0, 'ask'), Math.sqrt((41 ** 2 * 10 + 61 ** 2 * 20) / 2 / 15));
+});
+
 test('history path stays chronological, bounded and ends at the exact current color', () => {
   const result = buildVolatilityPricing(frame(now, 30), history(30));
   const cell = result.cells[0];
@@ -146,7 +181,7 @@ test('expanding the exploration grid preserves the headline meter comparison', (
 
 function quotedExpiry(dte) {
   const e = expiry(dte);
-  e.points.forEach(p => { p.name = `ETH-${dte}D-${p.strike}-${p.type}`; p.askPrice = 12; p.askAmount = 3; });
+  e.points.forEach(p => { p.name = `ETH-${dte}D-${p.strike}-${p.type}`; p.askPrice = 12; p.askAmount = 3; p.bidPrice = 11; p.bidAmount = 2; });
   return e;
 }
 
@@ -157,6 +192,9 @@ test('cell click matches actual buyable contracts by maturity then strike and op
   assert.equal(call.ask, 12);
   assert.equal(call.askIv, 51);
   assert.equal(call.askAmount, 3);
+  assert.equal(call.bid, 11);
+  assert.equal(call.bidAmount, 2);
+  assert.equal(call.bidIv, 49);
   const [put] = nearestVolatilityInstruments(expiries, 30, 1900, -0.05);
   assert.equal(put.name, 'ETH-29D-1900-P');
   assert.deepEqual(nearestVolatilityInstruments(expiries, 30, 2000, 0).map(p => p.type), ['P', 'C']);
