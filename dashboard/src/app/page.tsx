@@ -3,12 +3,13 @@
 import { useState, useMemo, useCallback, useEffect, useRef, ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { usePolling, useIsMobile } from '@/lib/hooks';
-import { formatUSD, momentumColor, dteDays } from '@/lib/format';
+import { formatUSD, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import { DASHBOARD_RANGES } from '@/lib/dashboard-ranges';
 import { buildOptionsCashflowChart, cashflowDisplayDomain, type CashflowBucket } from '@/lib/options-cashflow-chart';
 import Card from '@/components/Card';
 import VolSmile from '@/components/VolSmile';
+import VolatilityPricing from '@/components/VolatilityPricing';
 import { Bot, User } from 'lucide-react';
 import {
   ComposedChart, Line, Bar, Scatter, XAxis, YAxis, Tooltip,
@@ -1515,7 +1516,7 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      {/* Left: Range + Best Options | Right: Momentum */}
+      {/* Left: Range + Best Options | Right: Volatility pricing */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
         <Card title="Price Range" subtitle="High / Low" className="flex flex-col">
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
@@ -1607,24 +1608,7 @@ export default function OverviewPage() {
           </div>
         </Card>
 
-        <Card title="Current Momentum" className="sm:col-span-2 flex flex-col overflow-hidden">
-          <div className="flex-1 flex flex-col justify-center gap-2 min-w-0">
-            <div className="flex items-center gap-3 min-w-0">
-              <span className="text-xs text-gray-500 whitespace-nowrap shrink-0">Medium term</span>
-              <span className={`text-sm font-medium ${momentumColor(stats.medium_momentum)}`}>
-                {stats.medium_momentum || 'neutral'}
-              </span>
-              {stats.medium_derivative && <span className="text-xs text-gray-500 truncate">({stats.medium_derivative})</span>}
-            </div>
-            <div className="flex items-center gap-3 min-w-0">
-              <span className="text-xs text-gray-500 w-20 shrink-0">Short term</span>
-              <span className={`text-sm font-medium ${momentumColor(stats.short_momentum)}`}>
-                {stats.short_momentum || 'neutral'}
-              </span>
-              {stats.short_derivative && <span className="text-xs text-gray-500 truncate">({stats.short_derivative})</span>}
-            </div>
-          </div>
-        </Card>
+        <VolatilityPricing />
       </div>
 
       {/* Time Range Selector */}
