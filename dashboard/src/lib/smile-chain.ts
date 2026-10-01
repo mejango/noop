@@ -36,6 +36,10 @@ async function loadChain() {
 let cached: { at: number; expiries: SmileExpiry[] } | null = null;
 let inFlight: Promise<SmileExpiry[]> | null = null;
 
+export function getCachedChain() {
+  return cached;
+}
+
 export async function getChain() {
   if (cached && Date.now() - cached.at < CHAIN_TTL_MS) return cached;
   inFlight ??= loadChain().finally(() => { inFlight = null; });

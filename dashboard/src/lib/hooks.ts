@@ -14,7 +14,7 @@ type PollingResult<T> = {
   settledUrl: string | null;
 };
 
-export function usePolling<T>(url: string, initialData: T, interval = 60_000): PollingResult<T> {
+export function usePolling<T>(url: string, initialData: T, interval = 60_000, timeoutMs?: number): PollingResult<T> {
   const [data, setData] = useState<T>(initialData);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +30,8 @@ export function usePolling<T>(url: string, initialData: T, interval = 60_000): P
     const controller = new AbortController();
     abortRef.current = controller;
     setLoading(true);
+    let timedOut = false;
+    const timer = timeoutMs == null ? null : setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
 
     try {
       const res = await fetch(url, { signal: controller.signal });
@@ -41,15 +43,16 @@ export function usePolling<T>(url: string, initialData: T, interval = 60_000): P
       setError(null);
       setFetchTick(t => t + 1);
     } catch (e: unknown) {
-      if (controller.signal.aborted || requestId !== requestIdRef.current) return;
-      setError(e instanceof Error ? e.message : 'Fetch failed');
+      if (requestId !== requestIdRef.current || (controller.signal.aborted && !timedOut)) return;
+      setError(timedOut ? 'Request timed out' : e instanceof Error ? e.message : 'Fetch failed');
     } finally {
+      if (timer) clearTimeout(timer);
       if (requestId === requestIdRef.current) {
         setSettledUrl(url);
         setLoading(false);
       }
     }
-  }, [url]);
+  }, [url, timeoutMs]);
 
   useEffect(() => {
     void fetchData();

@@ -28,6 +28,7 @@ export type PricingCell = PricingQuote & {
   bid: PricingQuote; ask: PricingQuote; instruments: VolatilityInstrument[];
 };
 export type VolatilityPricingData = {
+  source?: 'live' | 'snapshot';
   asOf: string; score: number | null; label: string; qualifier: string;
   historyDays: number; historySamples: number; historyFrom: string | null; historyTo: string | null;
   provisional: boolean; measured: number; total: number; spot: number | null; currentIv: number | null;

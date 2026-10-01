@@ -213,7 +213,7 @@ test('cell click matches actual buyable contracts by maturity then strike and op
 });
 
 // Exercise the production endpoint with isolated upstream/data-store adapters.
-function endpoint({ chain = { at: Date.now(), expiries: frame().expiries }, timestamps = [], fail = false } = {}) {
+function endpoint({ chain = { at: Date.now(), expiries: frame().expiries }, timestamps = [], fail = false, pending = false, cachedChain, snapshotRows = [] } = {}) {
   let picked;
   const route = { exports: {} };
   const source = fs.readFileSync(`${__dirname}/../dashboard/src/app/api/volatility-pricing/route.ts`, 'utf8');
@@ -224,9 +224,13 @@ function endpoint({ chain = { at: Date.now(), expiries: frame().expiries }, time
     if (name === '@/lib/db') return {
       getSmileSnapshotTimestamps: () => timestamps,
       getSmileSnapshots: ts => { picked = ts; return []; },
+      getSmileSnapshotNear: () => snapshotRows,
     };
-    if (name === '@/lib/smile-chain') return { getChain: async () => { if (fail) throw new Error('Upstream unavailable'); return chain; } };
-    if (name === '@/lib/vol-smile') return { fromCompact: () => { throw new Error('No rows expected'); } };
+    if (name === '@/lib/smile-chain') return {
+      getCachedChain: () => cachedChain === undefined ? (fail || pending ? null : chain) : cachedChain,
+      getChain: async () => { if (pending) return new Promise(() => {}); if (fail) throw new Error('Upstream unavailable'); return chain; },
+    };
+    if (name === '@/lib/vol-smile') return { fromCompact: row => row.decoded };
     if (name === '@/lib/volatility-pricing') return mod.exports;
     throw new Error(`Unexpected module: ${name}`);
   });
@@ -251,5 +255,27 @@ test('endpoint selects the latest completed hourly snapshots, including earlier 
 test('endpoint rejects stale, missing and failed upstream quotes', async () => {
   assert.equal((await endpoint({ chain: { at: Date.now() - 6 * 60000, expiries: frame().expiries } }).GET()).status, 503);
   assert.equal((await endpoint({ chain: { at: Date.now(), expiries: [] } }).GET()).status, 503);
-  assert.equal((await endpoint({ fail: true }).GET()).status, 502);
+  assert.equal((await endpoint({ fail: true }).GET()).status, 503);
+});
+
+
+test('endpoint serves a recorded snapshot while the live chain is still pending', async () => {
+  const at = Date.now() - 12 * 60000;
+  const snapshotRows = frame(at).expiries.map(decoded => ({ timestamp: new Date(at).toISOString(), decoded }));
+  const api = endpoint({ pending: true, snapshotRows });
+  const start = performance.now();
+  const response = await api.GET();
+  assert.ok(performance.now() - start < 1000, 'must not wait for external requests');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.source, 'snapshot');
+  assert.equal(response.body.asOf, new Date(at).toISOString());
+  assert.equal(response.body.cells.length, 81);
+  assert.deepEqual(response.body.cells[0].instruments, []);
+});
+
+test('endpoint stops waiting after three seconds if live and recorded data are unavailable', async () => {
+  const start = performance.now();
+  const response = await endpoint({ pending: true }).GET();
+  assert.equal(response.status, 503);
+  assert.ok(performance.now() - start < 5000);
 });

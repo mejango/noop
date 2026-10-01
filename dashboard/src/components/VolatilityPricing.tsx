@@ -29,19 +29,19 @@ function QuoteSide({ label, quote, unavailable }: { label: 'Bid' | 'Ask'; quote?
 }
 
 export default function VolatilityPricing() {
-  const { data, error, loading, refetch } = usePolling('/api/volatility-pricing', EMPTY, 60_000);
+  const { data, error, loading, refetch } = usePolling('/api/volatility-pricing', EMPTY, 15_000, 8_000);
   const age = useLiveTimeAgo(data.asOf);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<{ offset: number; dte: number } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const contractPanel = useRef<HTMLElement>(null);
-  const stale = !!data.asOf && Date.now() - Date.parse(data.asOf) > 5 * 60_000;
-  const unavailable = !!error || stale;
+  const stale = !!data.asOf && Date.now() - Date.parse(data.asOf) > (data.source === 'snapshot' ? 20 : 5) * 60_000;
+  const unavailable = stale || (!!error && !data.asOf);
   const score = unavailable ? null : data.score;
   const status = unavailable ? 'Quotes unavailable' : loading && !data.asOf ? 'Loading volatility…'
     : score != null ? data.label : data.currentIv != null ? 'Mark IV' : data.historySamples < MIN_HISTORY_SAMPLES ? 'Building history' : 'Limited quote coverage';
-  const historyLabel = data.historyDays ? `${data.historyDays} days / ${data.historySamples} hours${data.provisional ? ' (provisional)' : ''}` : 'No history yet';
+  const historyLabel = !data.asOf && loading ? '' : data.historyDays ? `${data.historyDays} days / ${data.historySamples} hours${data.provisional ? ' (provisional)' : ''}` : 'No history yet';
   const selectedCell = selected ? data.cells.find(c => c.offset === selected.offset && c.dte === selected.dte) : null;
 
   useEffect(() => {
@@ -84,7 +84,7 @@ export default function VolatilityPricing() {
         {score != null && <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-400">
           <span>{data.qualifier}</span>
           {data.currentIv != null && <span>Mark IV {data.currentIv.toFixed(1)}%</span>}
-          <span>{age}</span>
+          <span>{data.source === 'snapshot' ? 'Snapshot ' : ''}{age}</span>
         </div>}
       </button>
 
@@ -156,7 +156,7 @@ export default function VolatilityPricing() {
                   </div>
                 </div>)}
                 {copied === 'failed' && <p role="status" className="text-xs text-amber-400">Copy unavailable.</p>}
-              </div> : <p className="text-xs text-gray-500">No quoted contract.</p>}
+              </div> : <p className="text-xs text-gray-500">{data.source === 'snapshot' ? 'Live quotes refreshing…' : 'No quoted contract.'}</p>}
           </section>}
           <div className="mt-5 space-y-2 text-xs text-gray-500 leading-relaxed">
             {data.historyFrom && data.historyTo && <p>History: {date(data.historyFrom)} – {date(data.historyTo)} (UTC)</p>}
