@@ -9,6 +9,8 @@ export type SmilePoint = {
   bidIv: number | null;
   askIv: number | null;
   oi: number;
+  askPrice?: number | null;
+  askAmount?: number | null;
 };
 
 export type SmileExpiry = { expiry: number; dte: number; forward: number; spot: number | null; points: SmilePoint[] };
@@ -19,7 +21,7 @@ export type SmileStats = {
   put10: number | null; call10: number | null; rr10: number | null;
 };
 
-type RawTicker = { I?: string; option_pricing?: Record<string, string | null> | null; stats?: { oi?: string } | null };
+type RawTicker = { a?: string; A?: string; I?: string; option_pricing?: Record<string, string | null> | null; stats?: { oi?: string } | null };
 
 const num = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
 
@@ -50,6 +52,7 @@ export function buildExpiry(expiry: number, tickers: Record<string, RawTicker>, 
       name, strike, type, delta, iv: iv * 100,
       bidIv: bi && bi > 0 ? bi * 100 : null, askIv: ai && ai > 0 ? ai * 100 : null,
       oi: num(t.stats?.oi) ?? 0,
+      askPrice: num(t.a), askAmount: num(t.A),
     });
   }
   if (points.length < 4 || !forwards.length) return null;

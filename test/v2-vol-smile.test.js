@@ -32,6 +32,19 @@ test('buildExpiry keeps OTM wings only and drops sub-2Δ noise', () => {
   assert.ok(Math.abs(e.dte - 1_000_000 / 86_400) < 1e-9);
 });
 
+test('live chain retains actual ask price and size separately from mark and ask IV', () => {
+  const e = buildExpiry(1_900_000_000, {
+    'ETH-X-1600-P': { ...tick(-0.05, 0.70), a: '12.5', A: '3' },
+    'ETH-X-1800-P': tick(-0.25, 0.60),
+    'ETH-X-2200-C': tick(0.25, 0.52),
+    'ETH-X-2600-C': tick(0.06, 0.58),
+  }, 1_899_000_000_000);
+  assert.equal(e.points[0].askPrice, 12.5);
+  assert.equal(e.points[0].askAmount, 3);
+  assert.equal(e.points[1].askPrice, null);
+  assert.equal(e.points[1].askAmount, null);
+});
+
 test('ivAtDelta interpolates within quoted range and refuses to extrapolate', () => {
   const pts = [{ type: 'C', delta: 0.05, iv: 60 }, { type: 'C', delta: 0.15, iv: 50 }, { type: 'P', delta: -0.10, iv: 70 }];
   assert.equal(ivAtDelta(pts, 'C', 0.10), 55);

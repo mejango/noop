@@ -9,7 +9,7 @@ new Function('module', 'exports', ts.transpileModule(
   fs.readFileSync(`${__dirname}/../dashboard/src/lib/volatility-pricing.ts`, 'utf8'),
   { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
 ).outputText)(mod, mod.exports);
-const { ivAtOffset, ivAtTenor, buildVolatilityPricing } = mod.exports;
+const { ivAtOffset, ivAtTenor, buildVolatilityPricing, nearestVolatilityInstruments, pricingColor } = mod.exports;
 const DAY = 86400000;
 const now = Date.parse('2026-10-01T12:00:00Z');
 function expiry(dte, iv = 50, spot = 2000) {
@@ -88,6 +88,48 @@ test('five recorded days show a provisional score instead of a blank meter', () 
   assert.equal(result.currentIv, 40);
   assert.equal(buildVolatilityPricing(frame(), history(2)).score, 50);
   assert.equal(buildVolatilityPricing(frame(), history(2)).provisional, true);
+});
+
+test('history strip preserves chronology, shares one baseline and ends at the cell color', () => {
+  const result = buildVolatilityPricing(frame(now, 30), [frame(now - DAY, 40), frame(now - 3 * DAY, 60), frame(now - 2 * DAY, 50)]);
+  const cell = result.cells[0];
+  assert.deepEqual(cell.history.map(p => p.iv), [60, 50, 40, 30]);
+  assert.deepEqual(cell.history.map(p => Math.round(p.percentile)), [83, 50, 17, 0]);
+  assert.equal(cell.history.at(-1).percentile, cell.percentile);
+  assert.equal(pricingColor(cell.history.at(-1).percentile), pricingColor(cell.percentile));
+});
+
+test('history strip retains missing quotes as gaps', () => {
+  const missing = frame(now - 2 * DAY);
+  missing.expiries.find(e => e.dte === 30).points.forEach(p => { p.askIv = null; });
+  const result = buildVolatilityPricing(frame(), [frame(now - 3 * DAY), missing, frame(now - DAY)]);
+  const cell = result.cells.find(c => c.dte === 30 && c.offset === 0);
+  assert.equal(cell.samples, 2);
+  assert.equal(cell.history.length, 4);
+  assert.equal(cell.history[1].iv, null);
+  assert.equal(cell.history[1].percentile, null);
+  assert.equal(pricingColor(cell.history[1].percentile), '#252525');
+});
+
+function quotedExpiry(dte) {
+  const e = expiry(dte);
+  e.points.forEach(p => { p.name = `ETH-${dte}D-${p.strike}-${p.type}`; p.askPrice = 12; p.askAmount = 3; });
+  return e;
+}
+
+test('cell click matches actual buyable contracts by maturity then strike and option side', () => {
+  const expiries = [quotedExpiry(7), quotedExpiry(29), quotedExpiry(60)];
+  const [call] = nearestVolatilityInstruments(expiries, 30, 2100, 0.05);
+  assert.equal(call.name, 'ETH-29D-2100-C');
+  assert.equal(call.ask, 12);
+  assert.equal(call.askIv, 51);
+  assert.equal(call.askAmount, 3);
+  const [put] = nearestVolatilityInstruments(expiries, 30, 1900, -0.05);
+  assert.equal(put.name, 'ETH-29D-1900-P');
+  assert.deepEqual(nearestVolatilityInstruments(expiries, 30, 2000, 0).map(p => p.type), ['P', 'C']);
+  expiries[1].points.find(p => p.strike === 2100).askAmount = 0;
+  assert.notEqual(nearestVolatilityInstruments(expiries, 30, 2100, 0.05)[0].name, call.name);
+  assert.deepEqual(nearestVolatilityInstruments([expiry(30)], 30, 2100, 0.05), []);
 });
 
 // Exercise the production endpoint with isolated upstream/data-store adapters.

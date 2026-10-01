@@ -6,9 +6,18 @@ export const MIN_HISTORY_DAYS = 2;
 const DAY = 86_400_000;
 
 export type PricingFrame = { at: number; expiries: SmileExpiry[] };
+export type VolatilityInstrument = {
+  name: string; type: 'P' | 'C'; strike: number; expiry: number; dte: number;
+  ask: number; askAmount: number; askIv: number;
+};
+export type PricingHistoryPoint = { at: string; iv: number | null; percentile: number | null };
+export const pricingColor = (percentile: number | null) => percentile == null
+  ? '#252525' : `hsl(165 55% ${12 + (100 - percentile) * 0.25}%)`;
+
 export type PricingCell = {
   dte: number; offset: number; strike: number | null; iv: number | null;
   percentile: number | null; samples: number;
+  history: PricingHistoryPoint[]; instruments: VolatilityInstrument[];
 };
 export type VolatilityPricingData = {
   asOf: string; score: number | null; label: string; qualifier: string;
@@ -63,6 +72,22 @@ export function ivAtTenor(expiries: SmileExpiry[], dte: number, offset: number):
   return null;
 }
 
+// Closest listed maturity, then strike. Only quotes with an actual ask and size
+// can be shown as buyable. ATM offers both sides; wings keep their option type.
+export function nearestVolatilityInstruments(expiries: SmileExpiry[], dte: number, strike: number, offset: number): VolatilityInstrument[] {
+  const types: ('P' | 'C')[] = offset === 0 ? ['P', 'C'] : offset < 0 ? ['P'] : ['C'];
+  return types.flatMap(type => {
+    const candidates = expiries.filter(e => e.dte > 0).flatMap(e => e.points
+      .filter(p => p.type === type && p.name && Number.isFinite(p.askPrice) && p.askPrice! > 0
+        && Number.isFinite(p.askAmount) && p.askAmount! > 0 && p.askIv != null && p.askIv > 0)
+      .map(p => ({ name: p.name, type, strike: p.strike, expiry: e.expiry, dte: e.dte,
+        ask: p.askPrice!, askAmount: p.askAmount!, askIv: p.askIv! })));
+    candidates.sort((a, b) => Math.abs(a.dte - dte) - Math.abs(b.dte - dte)
+      || Math.abs(a.strike - strike) - Math.abs(b.strike - strike) || a.name.localeCompare(b.name));
+    return candidates.length ? [candidates[0]] : [];
+  });
+}
+
 export function buildVolatilityPricing(current: PricingFrame, history: PricingFrame[]): VolatilityPricingData {
   // One observation per completed UTC day: dense recording days get no extra weight.
   const daily = new Map<string, PricingFrame>();
@@ -76,11 +101,19 @@ export function buildVolatilityPricing(current: PricingFrame, history: PricingFr
   const spot = current.expiries.find(e => e.spot != null && e.spot > 0)?.spot ?? null;
   const cells = OFFSETS.flatMap(offset => TENORS.map(dte => {
     const iv = ivAtTenor(current.expiries, dte, offset);
-    const past = frames.map(f => ivAtTenor(f.expiries, dte, offset)).filter((v): v is number => v != null);
+    const observed = frames.map(f => ({ at: new Date(f.at).toISOString(), iv: ivAtTenor(f.expiries, dte, offset) }));
+    const past = observed.map(p => p.iv).filter((v): v is number => v != null);
+    // One fixed baseline for the whole color strip and today's cell.
     // Midrank ties: an unchanged market reads 50, not expensive.
-    const percentile = iv != null && past.length >= MIN_HISTORY_DAYS
-      ? 100 * past.reduce((n, v) => n + (v < iv ? 1 : v === iv ? 0.5 : 0), 0) / past.length : null;
-    return { dte, offset, strike: spot == null ? null : spot * (1 + offset), iv, percentile, samples: past.length };
+    const rank = (value: number | null) => value != null && past.length >= MIN_HISTORY_DAYS
+      ? 100 * past.reduce((n, v) => n + (v < value ? 1 : v === value ? 0.5 : 0), 0) / past.length : null;
+    const percentile = rank(iv);
+    const history = [...observed, { at: new Date(current.at).toISOString(), iv }]
+      .map(p => ({ ...p, percentile: rank(p.iv) }));
+    const strike = spot == null ? null : spot * (1 + offset);
+    return { dte, offset, strike, iv, percentile, samples: past.length, history,
+      instruments: strike == null ? [] : nearestVolatilityInstruments(current.expiries, dte, strike, offset),
+    };
   }));
   const measured = cells.filter(c => c.percentile != null);
   // A broad label needs most of the grid, spanning both strikes and horizons.
