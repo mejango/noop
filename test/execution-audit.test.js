@@ -44,6 +44,8 @@ function production(names, dependencies = {}) {
   }
   const sandbox = {
     ...imported,
+    DERIVE_CONFIG: require('../bot/derive-config').getDeriveConfig({}),
+    ...require('../bot/derive-config'),
     console: quiet,
     process: { env: {} },
     Date,

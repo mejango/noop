@@ -1,10 +1,10 @@
 import { buildExpiry, type SmileExpiry } from './vol-smile';
 
-const API = 'https://api.lyra.finance/public';
+import { getDeriveConfig, fetchInstruments } from '../../../bot/derive-config';
 const CHAIN_TTL_MS = 60_000;
 
 async function post<T>(method: string, body: object): Promise<T> {
-  const res = await fetch(`${API}/${method}`, {
+  const res = await fetch(`${getDeriveConfig().baseUrl}/public/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'User-Agent': 'noop-dashboard/1.0' },
     body: JSON.stringify(body),
@@ -20,7 +20,7 @@ async function post<T>(method: string, body: object): Promise<T> {
 type Instrument = { instrument_name: string; option_details: { expiry: number } };
 
 async function loadChain() {
-  const instruments = await post<Instrument[]>('get_instruments', { currency: 'ETH', expired: false, instrument_type: 'option' });
+  const instruments = await fetchInstruments(post, getDeriveConfig().version, { currency: 'ETH', expired: false, instrument_type: 'option' }) as Instrument[];
   const expiries = new Map<string, number>();
   for (const i of instruments) expiries.set(i.instrument_name.split('-')[1], i.option_details.expiry);
   const chains = await Promise.all(Array.from(expiries, async ([date, expiry]) => {

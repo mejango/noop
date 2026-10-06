@@ -31,6 +31,7 @@ function fixture(t, { putTable = true, callTable = true } = {}) {
   const dependencies = {
     'better-sqlite3': function () { return db; }, path,
     './strategy-config': { BOT_CONFIG: {} },
+    '../../../bot/derive-config': require('../bot/derive-config'),
     '../../../bot/economic-events': {}, '../../../bot/open-interest': {}, '../../../bot/funding-rates': {},
   };
   const module = { exports: {} };

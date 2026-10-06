@@ -31,6 +31,8 @@ function loadProduction(names, { bindings = {}, source = SCRIPT_SOURCE } = {}) {
   const policyModules = ['trade-policy', 'order-pricing'].map(name => path.join(ROOT, `bot/${name}.js`));
   const supplied = {
     BOT_CONFIG,
+    DERIVE_CONFIG: require('../../bot/derive-config').getDeriveConfig({}),
+    ...require('../../bot/derive-config'),
     STRATEGY_FACTS: require('../../bot/strategy-facts.json'),
     ...require('../../bot/put-score'),
     ...require('../../bot/call-score'),

@@ -52,3 +52,7 @@ knowledge/.meta.json
 **/.ssh
 **/id_rsa
 **/id_ed25519
+
+.derive-v3/
+.playwright-mcp/
+dashboard/.next-v3-testnet/

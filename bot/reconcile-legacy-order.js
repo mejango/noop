@@ -229,11 +229,10 @@ async function main(argv = process.argv.slice(2)) {
   }
   const fs = require('node:fs');
   const path = require('node:path');
-  // Read literal deployment identity without importing the bot's startup code.
-  const source = fs.readFileSync(path.join(__dirname, '../script.js'), 'utf8');
-  const accountAddress = /^const DERIVE_ACCOUNT_ADDRESS = '(0x[\da-fA-F]{40})';$/m.exec(source)?.[1];
-  const accountId = Number(/^const SUBACCOUNT_ID = (\d+);$/m.exec(source)?.[1]);
-  if (!accountAddress || !Number.isSafeInteger(accountId) || accountId <= 0) throw new Error('Configured account identity unavailable');
+  const { getDeriveConfig, authHeaders } = require('./derive-config');
+  const config = getDeriveConfig();
+  const accountAddress = config.wallet;
+  const accountId = config.subaccountId;
   const databasePath = process.env.NOOP_DB_PATH || path.join(process.env.DATA_DIR || path.join(__dirname, '../data'), 'noop.db');
   if (!fs.existsSync(databasePath) || !fs.statSync(databasePath).isFile()) throw new Error('Existing bot database is required for legacy recovery');
   const db = require('./db');
@@ -244,9 +243,8 @@ async function main(argv = process.argv.slice(2)) {
     const read = async (method, params) => {
       if (!['get_order', 'get_order_history', 'get_trade_history'].includes(method)) throw new Error('Only read-only recovery endpoints are allowed');
       const timestamp = Date.now();
-      const response = await axios.post(`https://api.lyra.finance/private/${method}`, params, {
-        headers: { 'X-LyraWallet': accountAddress, 'X-LyraTimestamp': String(timestamp),
-          'X-LyraSignature': await wallet.signMessage(String(timestamp)) }, timeout: 15000 });
+      const response = await axios.post(`${config.baseUrl}/private/${method}`, params, {
+        headers: authHeaders(config, timestamp, await wallet.signMessage(String(timestamp))), timeout: 15000 });
       if (response.data?.error || !response.data?.result) throw new Error(`Venue ${method} evidence unavailable`);
       return response.data.result;
     };

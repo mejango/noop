@@ -17,6 +17,7 @@ function loadTs(file, overrides = {}, globals = {}) {
     exports: result, process, Buffer, Response, Request, Headers, AbortSignal, console, Error,
     require(name) {
       if (Object.hasOwn(overrides, name)) return overrides[name];
+      if (name === '../../../bot/derive-config') return require('../bot/derive-config');
       return require(name);
     },
     ...globals,

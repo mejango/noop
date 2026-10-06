@@ -61,6 +61,7 @@ function fixture(t) {
   const api = loadTs('dashboard/src/lib/db.ts', {
     'better-sqlite3': function () { return connection; }, path,
     './strategy-config': { BOT_CONFIG: {} },
+    '../../../bot/derive-config': require('../bot/derive-config'),
     '../../../bot/economic-events': {}, '../../../bot/open-interest': {}, '../../../bot/funding-rates': {},
   });
   let next = 0;

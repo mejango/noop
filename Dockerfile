@@ -6,7 +6,7 @@ WORKDIR /dashboard
 COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci
 COPY dashboard/ ./
-COPY bot/config.json bot/strategy-facts.json bot/economic-events.js bot/open-interest.js bot/funding-rates.js /bot/
+COPY bot/config.json bot/strategy-facts.json bot/economic-events.js bot/open-interest.js bot/funding-rates.js bot/derive-config.js /bot/
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV BOT_CONFIG_PATH=/bot/config.json
 RUN npm run build
@@ -25,7 +25,7 @@ RUN npm ci --omit=dev
 # Copy bot
 COPY bot/ ./bot/
 COPY script.js ./
-COPY scripts/archive-v2-data.js scripts/import-economic-events.js ./scripts/
+COPY scripts/archive-v2-data.js scripts/import-economic-events.js scripts/derive-preflight.js scripts/verify-db-continuity.js ./scripts/
 
 # Copy knowledge wiki templates (used to seed empty volumes on first deploy)
 COPY knowledge/ ./knowledge-templates/

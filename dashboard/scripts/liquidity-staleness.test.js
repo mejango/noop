@@ -12,6 +12,7 @@ const stubDb = class { prepare() { return { all: () => rows, get: () => undefine
 new Function('module', 'exports', 'require', js)(m, m.exports, (name) => {
   if (name === 'better-sqlite3') return { default: stubDb, __esModule: true };
   if (name === './strategy-config') return { BOT_CONFIG: {} };
+  if (name.includes('derive-config')) return require('../../bot/derive-config');
   if (name.includes('economic-events')) return { getEconomicHistory: () => [] };
   if (name.includes('open-interest')) return { HOURLY_OPEN_INTEREST_SQL: '', openInterestHourBounds: () => ({}) };
   if (name.includes('funding-rates')) return { FUNDING_EXCHANGE: '', FUNDING_SYMBOL: '' };

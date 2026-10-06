@@ -2,9 +2,8 @@ import { privateKeyToAccount } from 'viem/accounts';
 import fs from 'fs';
 import path from 'path';
 
-const DERIVE_WALLET = '0xD87890df93bf74173b51077e5c6cD12121d87903';
-const SUBACCOUNT_ID = 25923;
-const BASE_URL = 'https://api.lyra.finance';
+import { getDeriveConfig, authHeaders } from '../../../bot/derive-config';
+const config = () => getDeriveConfig();
 const CACHE_TTL = 30_000; // 30s
 const REQUEST_TIMEOUT_MS = 15_000;
 let cachedPrivateKey: `0x${string}` | null = null;
@@ -33,11 +32,7 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
   const timestamp = Date.now();
   const signature = await account.signMessage({ message: timestamp.toString() });
   return {
-    'X-LyraWallet': DERIVE_WALLET,
-    'X-LyraTimestamp': timestamp.toString(),
-    'X-LyraSignature': signature,
-    'Content-Type': 'application/json',
-    'User-Agent': 'noop-dashboard/1.0',
+    ...authHeaders(config(), timestamp, signature),
   };
 }
 
@@ -100,7 +95,7 @@ function accountRows(result: unknown, field: string, name: string, numbers: stri
 
 async function lyraPost<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
   const headers = await getAuthHeaders();
-  const res = await fetch(`${BASE_URL}${endpoint}`, {
+  const res = await fetch(`${config().baseUrl}${endpoint}`, {
     method: 'POST',
     headers,
     body: JSON.stringify(body),
@@ -117,7 +112,7 @@ async function lyraPost<T>(endpoint: string, body: Record<string, unknown>): Pro
   if (!Array.isArray(result)) {
     const row = record(result, 'API result');
     if (row.failed_to_fetch === true || row.error) throw new Error('Account data unavailable');
-    if (row.subaccount_id != null && Number(row.subaccount_id) !== SUBACCOUNT_ID) throw new Error('Account data unavailable: subaccount mismatch');
+    if (row.subaccount_id != null && Number(row.subaccount_id) !== config().subaccountId) throw new Error('Account data unavailable: subaccount mismatch');
   }
   return result as T;
 }
@@ -126,7 +121,7 @@ async function lyraPost<T>(endpoint: string, body: Record<string, unknown>): Pro
 export async function getPositions(): Promise<any[]> {
   return cachedRequest('positions', async () => {
     const result = await lyraPost<{ positions: unknown[] }>('/private/get_positions', {
-      subaccount_id: SUBACCOUNT_ID,
+      subaccount_id: config().subaccountId,
     });
     return accountRows(result, 'positions', 'instrument_name', ['amount', 'average_price', 'mark_price', 'mark_value', 'unrealized_pnl', 'index_price'])
       .map((position) => {
@@ -145,7 +140,7 @@ export async function getPositions(): Promise<any[]> {
 export async function getCollaterals(): Promise<any[]> {
   return cachedRequest('collaterals', async () => {
     const result = await lyraPost<{ collaterals: unknown[] }>('/private/get_collaterals', {
-      subaccount_id: SUBACCOUNT_ID,
+      subaccount_id: config().subaccountId,
     });
     return accountRows(result, 'collaterals', 'asset_name', ['amount', 'mark_price'])
       .map((collateral) => {
@@ -162,7 +157,7 @@ export async function getTradeHistory(fromMs: number, toMs?: number): Promise<an
   const cacheKey = `trades_${Math.floor(fromMs / hourMs)}_${toMs ? Math.floor(toMs / hourMs) : 'now'}`;
   return cachedRequest(cacheKey, async () => {
     const body: Record<string, unknown> = {
-      subaccount_id: SUBACCOUNT_ID,
+      subaccount_id: config().subaccountId,
       from_timestamp: fromMs,
       page_size: 100,
     };
@@ -199,7 +194,7 @@ export async function getSubaccount(): Promise<{
     margin_usage_pct: number | null;
   }>('subaccount', async () => {
     const result = await lyraPost<Record<string, unknown>>('/private/get_subaccount', {
-      subaccount_id: SUBACCOUNT_ID,
+      subaccount_id: config().subaccountId,
     });
     record(result, 'subaccount');
     requireNumbers(result, ['initial_margin', 'maintenance_margin', 'subaccount_value', 'collaterals_value', 'collaterals_initial_margin', 'collaterals_maintenance_margin', 'positions_initial_margin', 'open_orders_margin'], 'subaccount');

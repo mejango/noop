@@ -101,6 +101,8 @@ test('malformed spot, positions, metadata and expiry maps cannot masquerade as e
 function productionAdapter(name, response) {
   const requests = [];
   const bindings = {
+    DERIVE_CONFIG: require('../bot/derive-config').getDeriveConfig({}),
+    ...require('../bot/derive-config'),
     axios: { post: async (...args) => { requests.push(args); if (response instanceof Error) throw response; return response; } },
     API_URL: { GET_TICKERS: '/tickers', GET_INSTRUMENTS: '/instruments' },
     console: { log() {}, error() {} },

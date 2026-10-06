@@ -15,3 +15,7 @@ bot_data.json
 knowledge/.history/
 knowledge/.meta.json
 .DS_Store
+
+.derive-v3/
+.playwright-mcp/
+dashboard/.next-v3-testnet/

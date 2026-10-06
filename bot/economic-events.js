@@ -53,20 +53,24 @@ function normalizeEvent(input) {
   if (event.event_type === 'transfer' && event.realized_pnl_usd != null) throw new Error('Capital transfers are not realized profit');
   return event;
 }
-function normalizeV2Trade(trade, accountId) {
+function normalizeV2Trade(trade, accountId, version = 'v2') {
+  if (!['v2', 'v3'].includes(version)) throw new Error('Unsupported trade API version');
   if (!trade?.trade_id || !trade.instrument_name || !['buy', 'sell'].includes(trade.direction)) throw new Error('Trade history is missing durable trade identity or direction');
   if (accountIdentity(trade.subaccount_id) !== accountIdentity(accountId)) throw new Error('Trade account mismatch');
   if (trade.is_transfer !== false) throw new Error('Transfer trade identity is missing or requires explicit transfer accounting');
-  // Pinned official V2 schema requires this field; only settled is terminal success.
-  if (trade.tx_status !== 'settled') {
+  // Settlement is explicit for each API version; intermediate/error batches stay unresolved.
+  if (version === 'v3' ? trade.batch_status !== 'Settled' : trade.tx_status !== 'settled') {
     throw new Error('Trade settlement status is unresolved or unsupported');
   }
   const amount = decimal(trade.trade_amount ?? trade.amount);
   const price = decimal(trade.trade_price ?? trade.price);
   if (amount.startsWith('-') || amount === '0' || price.startsWith('-')) throw new Error('Invalid executed trade amount or price');
   const premium = multiply(amount, price);
-  // V2 option premiums are quoted in USD. Perpetual/other trades require their own valuation semantics.
+  // Option premiums are quoted in USD. Perpetual/other trades require their own valuation semantics.
   if (!/^ETH-\d{8}-[\d.]+-[CP]$/.test(trade.instrument_name)) throw new Error('Unsupported trade instrument in options accounting');
+  // These are durable database identifiers, not a transport-version switch.
+  // Preserve V2 identity/format so a replay through V3 cannot duplicate a fill.
+  // raw_json retains the original venue evidence without rewriting old receipts.
   return normalizeEvent({
     event_id: `v2:${accountId}:trade:${trade.trade_id}`, account_id: accountId, event_type: 'trade',
     timestamp: trade.timestamp, instrument_name: trade.instrument_name, currency: 'USD', amount,
@@ -186,7 +190,7 @@ function paginationInteger(value, field) {
       || !Number.isSafeInteger(Number(value)) || Number(value) < 0) throw new Error(`Invalid history pagination ${field}`);
   return Number(value);
 }
-async function syncV2Trades({ store, accountId, post, from = 0, to = Date.now(), maxPages = 20, pageSize = 1000 }) {
+async function syncV2Trades({ store, accountId, post, from = 0, to = Date.now(), maxPages = 20, pageSize = 1000, version = 'v2' }) {
   accountId = accountIdentity(accountId);
   if (!Number.isInteger(maxPages) || maxPages < 1 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 1000) {
     throw new Error('Invalid trade history pagination limits');
@@ -217,7 +221,7 @@ async function syncV2Trades({ store, accountId, post, from = 0, to = Date.now(),
       expectedPagination = metadata;
       let newCount = 0;
       for (const row of result.trades) {
-        const event = normalizeV2Trade(row,accountId);
+        const event = normalizeV2Trade(row,accountId,version);
         const fingerprint = JSON.stringify(Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'raw_json')));
         if (seen.has(event.event_id)) {
           if (seen.get(event.event_id) !== fingerprint) throw new Error('Conflicting repeated trade identity');

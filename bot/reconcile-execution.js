@@ -167,6 +167,9 @@ async function main(argv = process.argv.slice(2)) {
     if (!submission) throw new Error('Unknown submission');
     const request = JSON.parse(submission.request_json);
     if (!request.account_address || !request.subaccount_id) throw new Error('Stored account identity is incomplete');
+    const { getDeriveConfig, authHeaders } = require('./derive-config');
+    const config = getDeriveConfig();
+    if ((request.api_version || (/^\d{19}$/.test(String(request.nonce)) ? 'v3' : 'v2')) !== config.version || request.account_address.toLowerCase() !== config.wallet.toLowerCase() || Number(request.subaccount_id) !== config.subaccountId) throw new Error('Stored submission belongs to a different venue/account; reconcile with its original environment');
     const fs = require('fs');
     const { Wallet } = require('ethers');
     const wallet = new Wallet((process.env.PRIVATE_KEY || fs.readFileSync('./.private_key.txt', 'utf8')).trim());
@@ -174,9 +177,8 @@ async function main(argv = process.argv.slice(2)) {
     const read = async (method, params) => {
       if (!['get_order', 'get_order_history', 'get_trade_history'].includes(method)) throw new Error('Recovery supports read-only endpoints');
       const timestamp = Date.now();
-      const response = await axios.post(`https://api.lyra.finance/private/${method}`, params, {
-        headers: { 'X-LyraWallet': request.account_address, 'X-LyraTimestamp': String(timestamp),
-          'X-LyraSignature': await wallet.signMessage(String(timestamp)) }, timeout: 15000 });
+      const response = await axios.post(`${config.baseUrl}/private/${method}`, params, {
+        headers: authHeaders(config, timestamp, await wallet.signMessage(String(timestamp))), timeout: 15000 });
       if (response.data?.error || !response.data?.result) throw new Error(`Venue ${method} evidence unavailable`);
       return response.data.result;
     };

@@ -105,6 +105,8 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { getDeriveConfig, orderNonce, fetchInstruments } = require('./bot/derive-config');
+const DERIVE_CONFIG = getDeriveConfig();
 const { getInstrumentPriceStep, roundToStep, getStepDecimals, normalizePriceToStep, normalizeOrderPriceForVenue, avoidRoundNumberRestingPrice, computePostOnlyRetryPrice } = require('./bot/order-pricing');
 const { normalizeDesiredExitOrder, compareRestingExitOrder, resolveDesiredExitOrderType, getDesiredSellPutRemainingAmount } = require('./bot/resting-exit-plan');
 const {
@@ -159,15 +161,14 @@ if (db) {
 
 // Lyra API endpoints
 const API_URL = {
-  GET_TICKERS: 'https://api.lyra.finance/public/get_tickers',
-  GET_INSTRUMENTS: 'https://api.lyra.finance/public/get_instruments',
-  PLACE_ORDER: 'https://api.lyra.finance/private/order',
-  GET_OPEN_ORDERS: 'https://api.lyra.finance/private/get_open_orders',
-  GET_ORDER_HISTORY: 'https://api.lyra.finance/private/get_order_history',
-  GET_TRADE_HISTORY: 'https://api.lyra.finance/private/get_trade_history',
-  CANCEL_ORDER: 'https://api.lyra.finance/private/cancel',
-  GET_ORDER: 'https://api.lyra.finance/private/get_order',
-  GET_SUBACCOUNT: 'https://api.lyra.finance/private/get_subaccount',
+  GET_TICKERS: `${DERIVE_CONFIG.baseUrl}/public/get_tickers`,
+  PLACE_ORDER: `${DERIVE_CONFIG.baseUrl}/private/order`,
+  GET_OPEN_ORDERS: `${DERIVE_CONFIG.baseUrl}/private/get_open_orders`,
+  GET_ORDER_HISTORY: `${DERIVE_CONFIG.baseUrl}/private/get_order_history`,
+  GET_TRADE_HISTORY: `${DERIVE_CONFIG.baseUrl}/private/get_trade_history`,
+  CANCEL_ORDER: `${DERIVE_CONFIG.baseUrl}/private/cancel`,
+  GET_ORDER: `${DERIVE_CONFIG.baseUrl}/private/get_order`,
+  GET_SUBACCOUNT: `${DERIVE_CONFIG.baseUrl}/private/get_subaccount`,
 }
 
 // CoinGecko API for spot price
@@ -195,10 +196,10 @@ const assertGraphQLSuccess = (response) => {
 };
 
 // Common configuration
-const DERIVE_ACCOUNT_ADDRESS = '0xD87890df93bf74173b51077e5c6cD12121d87903';
+const DERIVE_ACCOUNT_ADDRESS = DERIVE_CONFIG.wallet;
 const ACTION_TYPEHASH = '0x4d7a9f27c403ff9c0f19bce61d76d82f9aa29f8d6d4b0c5474607d9770d1af17';
 const TRADE_MODULE_ADDRESS = '0xB8D20c2B7a1Ad2EE33Bc50eF10876eD3035b5e7b';
-const DOMAIN_SEPARATOR = '0xd96e5f90797da7ec8dc4e276260c7f3f87fedf68775fbe1ef116e996fc60441b';
+const DOMAIN_SEPARATOR = DERIVE_CONFIG.domainSeparator;
 
 // Common trading parameters (single source of truth: bot/config.json)
 const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'config.json'), 'utf-8'));
@@ -224,7 +225,7 @@ const CALL_EXPOSURE_LIMIT_PCT = getCallExposureLimitPct(CALL_EXPOSURE_CAP_PCT);
 const CALL_BREAKOUT_OVERRIDE_LIMIT_PCT = getCallExposureLimitPct(CALL_BREAKOUT_OVERRIDE_CAP_PCT);
 const CALL_ENTRY_BUFFER_PCT = BOT_CONFIG.CALL_ENTRY_BUFFER_PCT || 0.05;
 const CALL_ENTRY_CAP_PCT = Math.max(0, CALL_EXPOSURE_CAP_PCT - CALL_ENTRY_BUFFER_PCT);
-const SUBACCOUNT_ID = 25923;
+const SUBACCOUNT_ID = DERIVE_CONFIG.subaccountId;
 // The automatic ledger starts before this process can trade and resumes from the
 // same durable boundary after restarts. Older history is an explicit import.
 const ECONOMIC_TRACKING_START = economicStore?.startTracking(SUBACCOUNT_ID, Date.now()) || null;
@@ -2911,6 +2912,7 @@ function encodeTradeData(order, assetAddress, optionSubId) {
 
 // Place order function
 const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, reduceOnly = true, timeInForce = 'ioc', instrument = null, beforeSend = null) => {
+  if (DERIVE_CONFIG.maintenance) throw new Error('Derive maintenance: order placement disabled');
   let limitPriceString = String(price);
   try {
     const wallet = createWallet();
@@ -2934,7 +2936,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         // Noop submits sparse discretionary orders, not continuous maker quotes.
         // Venue-side MMP has been causing opaque sell-order cancellations and poor reconciliation.
         mmp: false,
-        nonce: parseInt(`${timestamp}${Math.floor(Math.random() * 1000)}`),
+        nonce: orderNonce(DERIVE_CONFIG.version, timestamp),
         signer: wallet.address,
         order_type: 'limit',
         reduce_only: reduceOnly,
@@ -2974,9 +2976,9 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
       order,
       {
         headers: {
-          'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-          'X-LyraTimestamp': timestamp.toString(),
-          'X-LyraSignature': signature,
+          [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+          [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(),
+          [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature,
         },
       }
     );
@@ -3043,8 +3045,8 @@ const venueHasNonce = async (nonce, sinceMs) => {
     const response = await axios.post(API_URL.GET_ORDER_HISTORY, {
       subaccount_id: SUBACCOUNT_ID, from_timestamp: Math.max(0, sinceMs - 10 * 60 * 1000), page, page_size: 100,
     }, {
-      headers: { 'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(), 'X-LyraSignature': signature },
+      headers: { [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+        [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(), [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature },
       timeout: 10000,
     });
     if (response.data?.error) throw new Error(`Order history unavailable: ${stringifyApiError(response.data.error)}`);
@@ -3065,9 +3067,9 @@ const fetchOpenOrders = async (options = {}) => {
       subaccount_id: SUBACCOUNT_ID,
     }, {
       headers: {
-        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(),
-        'X-LyraSignature': signature,
+        [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+        [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(),
+        [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature,
       },
       timeout: 10000,
     });
@@ -3162,8 +3164,8 @@ const fetchOrderHistoryRecord = async (orderId) => {
     const response = await axios.post(API_URL.GET_ORDER_HISTORY, {
       subaccount_id: SUBACCOUNT_ID, from_timestamp: 0, page, page_size: 100,
     }, {
-      headers: { 'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(), 'X-LyraSignature': signature },
+      headers: { [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+        [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(), [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature },
       timeout: 10000,
     });
     if (response.data?.error) throw new Error(`Order history unavailable: ${stringifyApiError(response.data.error)}`);
@@ -3188,14 +3190,14 @@ const fetchOrderStatus = async (orderId) => {
     const wallet = createWallet();
     const timestamp = Date.now();
     const signature = await signMessage(wallet, timestamp);
-    const response = await axios.post('https://api.lyra.finance/private/get_order', {
+    const response = await axios.post(`${DERIVE_CONFIG.baseUrl}/private/get_order`, {
       subaccount_id: SUBACCOUNT_ID,
       order_id: orderId,
     }, {
       headers: {
-        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(),
-        'X-LyraSignature': signature,
+        [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+        [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(),
+        [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature,
       },
       timeout: 10000,
     });
@@ -3276,9 +3278,9 @@ const cancelOrder = async (orderId, instrumentName) => {
       instrument_name: instrumentName,
     }, {
       headers: {
-        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(),
-        'X-LyraSignature': signature,
+        [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+        [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(),
+        [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature,
       },
       timeout: 10000,
     });
@@ -3302,13 +3304,13 @@ const fetchPositions = async (options = {}) => {
     const wallet = createWallet();
     const timestamp = Date.now();
     const signature = await signMessage(wallet, timestamp);
-    const response = await axios.post('https://api.lyra.finance/private/get_positions', {
+    const response = await axios.post(`${DERIVE_CONFIG.baseUrl}/private/get_positions`, {
       subaccount_id: SUBACCOUNT_ID,
     }, {
       headers: {
-        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(),
-        'X-LyraSignature': signature,
+        [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+        [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(),
+        [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature,
       },
       timeout: 10000,
     });
@@ -3352,9 +3354,9 @@ const fetchTradeHistory = async (fromTimestampMs, toTimestampMs) => {
     if (toTimestampMs) body.to_timestamp = toTimestampMs;
     const response = await axios.post(API_URL.GET_TRADE_HISTORY, body, {
       headers: {
-        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(),
-        'X-LyraSignature': signature,
+        [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+        [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(),
+        [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature,
       },
       timeout: 15000,
     });
@@ -3372,13 +3374,13 @@ const fetchCollaterals = async () => {
     const wallet = createWallet();
     const timestamp = Date.now();
     const signature = await signMessage(wallet, timestamp);
-    const response = await axios.post('https://api.lyra.finance/private/get_collaterals', {
+    const response = await axios.post(`${DERIVE_CONFIG.baseUrl}/private/get_collaterals`, {
       subaccount_id: SUBACCOUNT_ID,
     }, {
       headers: {
-        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(),
-        'X-LyraSignature': signature,
+        [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+        [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(),
+        [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature,
       },
       timeout: 10000,
     });
@@ -3406,9 +3408,9 @@ const fetchSubaccount = async ({ forObservation = false } = {}) => {
       subaccount_id: SUBACCOUNT_ID,
     }, {
       headers: {
-        'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS,
-        'X-LyraTimestamp': timestamp.toString(),
-        'X-LyraSignature': signature,
+        [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+        [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(),
+        [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature,
       },
       timeout: 10000,
     });
@@ -3466,19 +3468,11 @@ const fetchSubaccount = async ({ forObservation = false } = {}) => {
 const fetchAndFilterInstruments = async (spotPrice, { throwOnError = false } = {}) => {
   try {
     console.log('🔍 Fetching all instruments...');
-    const response = await axios.post(API_URL.GET_INSTRUMENTS, {
-      currency: 'ETH',
-      expired: false,
-      instrument_type: 'option'
-    }, throwOnError ? { timeout: 15000 } : undefined);
-
-    if (!response.data.result) {
-      if (throwOnError) throw new Error('Instrument response unavailable');
-      console.log('No instruments found');
-      return { putCandidates: [], callCandidates: [] };
-    }
-
-    const instruments = response.data.result;
+    const instruments = await fetchInstruments(async (method, params) => {
+      const response = await axios.post(`${DERIVE_CONFIG.baseUrl}/public/${method}`, params, { timeout: 15000 });
+      if (response.data?.error) throw new Error(stringifyApiError(response.data.error));
+      return response.data?.result;
+    }, DERIVE_CONFIG.version, { currency: 'ETH', expired: false, instrument_type: 'option' });
     console.log(`📊 Found ${instruments.length} total instruments`);
 
     // Filter for OTM put candidates; delta and value discipline are applied after ticker enrichment.
@@ -13665,17 +13659,23 @@ const syncEconomicEvidence = async (now = Date.now()) => {
   lastEconomicSyncAt = now;
 
   const lastCovered = economicStore.latestCoverage(SUBACCOUNT_ID, 'trades', ECONOMIC_TRACKING_START);
-  const from = Math.max(Date.parse(ECONOMIC_TRACKING_START), Date.parse(lastCovered || ECONOMIC_TRACKING_START) - 60000);
+  const cursor = Date.parse(lastCovered || ECONOMIC_TRACKING_START);
+  const boundary = DERIVE_CONFIG.historyFrom ? Date.parse(DERIVE_CONFIG.historyFrom) : 0;
+  if (DERIVE_CONFIG.version === 'v3' && cursor < boundary) {
+    console.log('Accounting evidence incomplete: V2 coverage has not reached cutover; preserving the existing cursor and pending history work');
+    return;
+  }
+  const from = Math.max(Date.parse(ECONOMIC_TRACKING_START), cursor - 60000, boundary);
   try {
     economicStore.recordExposure(SUBACCOUNT_ID, String(PUT_INSURED_EXTERNAL_ETH), now);
     const result = await syncV2TradesProgressively({
-      store: economicStore, accountId: SUBACCOUNT_ID, from, to: now,
+      store: economicStore, accountId: SUBACCOUNT_ID, from, to: now, version: DERIVE_CONFIG.version,
       post: async (body) => {
         const wallet = createWallet();
         const timestamp = Date.now();
         const signature = await signMessage(wallet, timestamp);
         const response = await axios.post(API_URL.GET_TRADE_HISTORY, body, {
-          headers: { 'X-LyraWallet': DERIVE_ACCOUNT_ADDRESS, 'X-LyraTimestamp': String(timestamp), 'X-LyraSignature': signature },
+          headers: { [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS, [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: String(timestamp), [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature },
           timeout: 15000,
         });
         if (response.data?.error) throw new Error(stringifyApiError(response.data.error));
@@ -13689,6 +13689,14 @@ const syncEconomicEvidence = async (now = Date.now()) => {
 };
 
 const runBot = async () => {
+  if (DERIVE_CONFIG.maintenance) {
+    console.log('Derive maintenance: trading, account reconciliation and observations paused');
+    if (process.connected && typeof process.send === 'function') {
+      try { process.send({ type: 'bot_heartbeat', at: Date.now() }, () => {}); } catch { /* supervisor detects missing heartbeats */ }
+    }
+    setTimeout(runBotWithWatchdog, 60000);
+    return;
+  }
   try {
   const now = Date.now();
 
@@ -14508,7 +14516,7 @@ if (db?.deactivateStaleEmergencyBuybackRules) {
   }
 }
 
-sendTelegram('🔄 *NOOP Bot restarted*');
+if (!DERIVE_CONFIG.maintenance) sendTelegram('🔄 *NOOP Bot restarted*');
 
 // Defer first run if the bot ran recently (prevents premature runs on redeploy)
 const timeSinceLastCheck = Date.now() - botData.lastCheck;

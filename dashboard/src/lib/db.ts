@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { getDeriveConfig } from '../../../bot/derive-config';
 import path from 'path';
 import { BOT_CONFIG } from './strategy-config';
 import { getEconomicHistory as readEconomicHistory } from '../../../bot/economic-events';
@@ -694,7 +695,7 @@ export type EconomicHistory = {
 
 /** Shared, read-only ledger reader for the V2 subaccount. */
 export function getEconomicHistory(from: string, to: string): EconomicHistory {
-  return readEconomicHistory(getDb(), '25923', from, to) as EconomicHistory;
+  return readEconomicHistory(getDb(), String(getDeriveConfig().subaccountId), from, to) as EconomicHistory;
 }
 
 export function getOptionsHeatmap(since: string, limit = 12000, bucketMs = 0) {
