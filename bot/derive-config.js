@@ -23,10 +23,11 @@ function getDeriveConfig(env = process.env) {
   if (!/^0x[\da-fA-F]{40}$/.test(wallet)) throw new Error('DERIVE_WALLET must be the confirmed account owner');
   if (!/^[1-9]\d*$/.test(rawId) || !Number.isSafeInteger(Number(rawId))) throw new Error('DERIVE_SUBACCOUNT_ID must be explicitly confirmed for V3');
   if (env.DERIVE_MAINTENANCE && !['true', 'false'].includes(env.DERIVE_MAINTENANCE)) throw new Error('DERIVE_MAINTENANCE must be true or false');
+  if (env.DERIVE_COLLECT_DATA && !['true', 'false'].includes(env.DERIVE_COLLECT_DATA)) throw new Error('DERIVE_COLLECT_DATA must be true or false');
   const historyFrom = env.DERIVE_HISTORY_FROM || null;
   if (version === 'v3' && (!historyFrom || !Number.isFinite(Date.parse(historyFrom)))) throw new Error('DERIVE_HISTORY_FROM must specify the V3 history boundary as an ISO timestamp');
   return { version, network, baseUrl, domainSeparator, wallet, subaccountId: Number(rawId),
-    historyFrom, maintenance: env.DERIVE_MAINTENANCE ? env.DERIVE_MAINTENANCE === 'true' : version === 'v3', headerPrefix: version === 'v3' ? 'X-Derive' : 'X-Lyra' };
+    historyFrom, collectData: env.DERIVE_COLLECT_DATA === 'true', maintenance: env.DERIVE_MAINTENANCE ? env.DERIVE_MAINTENANCE === 'true' : version === 'v3', headerPrefix: version === 'v3' ? 'X-Derive' : 'X-Lyra' };
 }
 
 function authHeaders(config, timestamp, signature) {

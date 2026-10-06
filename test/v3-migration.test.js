@@ -151,3 +151,46 @@ test('preflight never treats 503 or mismatched account evidence as readiness', a
     ? { instruments: [{ instrument_name: 'ETH-option' }], pagination: { count: 1, num_pages: 1 } }
     : { subaccount_id: 999, positions: [], collaterals: [] } }), /mismatched/);
 });
+
+test('collection mode appends observations and accounting without touching orders, decisions or advisory', async () => {
+  const writes = [], heartbeats = [], delays = [];
+  const instrument = { instrument_name: 'ETH-20261127-1600-P' };
+  const forbidden = () => { throw new Error('Trading/advisory capability invoked during collection'); };
+  const config = getDeriveConfig({ ...env, DERIVE_COLLECT_DATA: 'true' });
+  const account = { subaccount_id: 78645 };
+  const bindings = {
+    DERIVE_CONFIG: config, console: { log() {}, error: forbidden },
+    process: { connected: true, send: m => heartbeats.push(m), env: { ANTHROPIC_API_KEY: 'test' } },
+    setTimeout: (_fn, ms) => delays.push(ms), runBotWithWatchdog() {},
+    fetchDeriveSpotPrice: async () => null, fetchCoinGeckoSpotPrice: async () => null,
+    normalizeEthSpotPrice: () => null,
+    fetchAndFilterInstruments: async () => ({ instruments: [], putCandidates: [instrument], callCandidates: [] }),
+    fetchTickersByExpiry: async () => ({ [instrument.instrument_name]: { quote_received_at: new Date().toISOString(), quote_source: 'derive-v2/get_tickers' } }),
+    fetchPositions: async () => [], observationUniverse: () => [instrument], missingExpiryDates: () => [],
+    manageOpenOrders: forbidden, evaluateTradingRules: forbidden, confirmAndExecutePending: forbidden,
+    maybeResetPutCycle: forbidden, generateTradingAdvisory: forbidden, sendTelegram: forbidden,
+    syncEconomicEvidence: async () => writes.push('accounting'),
+    enrichCandidateFromTicker: () => ({ details: {} }), fetchSubaccount: async () => account,
+    buildPortfolioObservation: a => { assert.equal(a, account); return { timestamp: new Date().toISOString() }; },
+    determineCheckInterval: () => 60000, botData: {}, persistCycleState: () => writes.push('cycle'),
+    filterValidOptions: x => x, PUT_DELTA_RANGE: [0, 1], CALL_DELTA_RANGE: [0, 1],
+    summarizeBestCandidate: () => null,
+    db: {
+      getObservationInstruments: () => [],
+      insertOptionsSnapshotBatch: rows => { assert.equal(rows.length, 1); writes.push('options'); },
+      getGrossOptionsCashflow: () => ({ gross_options_cashflow: 0 }),
+      insertPortfolioSnapshot: () => writes.push('portfolio'),
+      evaluateDueDecisionOutcomes: forbidden, refreshPositionLifecycle: forbidden,
+      getActiveRules: () => [], insertTick: () => writes.push('tick'),
+    },
+  };
+  const run = vm.compileFunction(`${declaration(SCRIPT_SOURCE, 'runBot')}; return runBot;`, Object.keys(bindings))(...Object.values(bindings));
+  await run();
+  assert.deepEqual(writes, ['accounting', 'options', 'portfolio', 'tick', 'cycle']);
+  assert.equal(heartbeats.length, 1);
+  assert.deepEqual(delays, [60000]);
+  for (const name of ['placeOrder', 'cancelOrder']) {
+    const invoke = vm.compileFunction(`${declaration(SCRIPT_SOURCE, name)}; return ${name};`, ['DERIVE_CONFIG'])(config);
+    await assert.rejects(invoke(), /maintenance/);
+  }
+});

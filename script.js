@@ -3268,6 +3268,7 @@ const fetchOrderStatus = async (orderId) => {
 
 // Cancel a specific order on Derive
 const cancelOrder = async (orderId, instrumentName) => {
+  if (DERIVE_CONFIG.maintenance) throw new Error('Derive maintenance: order cancellation disabled');
   try {
     const wallet = createWallet();
     const timestamp = Date.now();
@@ -13689,7 +13690,7 @@ const syncEconomicEvidence = async (now = Date.now()) => {
 };
 
 const runBot = async () => {
-  if (DERIVE_CONFIG.maintenance) {
+  if (DERIVE_CONFIG.maintenance && !DERIVE_CONFIG.collectData) {
     console.log('Derive maintenance: trading, account reconciliation and observations paused');
     if (process.connected && typeof process.send === 'function') {
       try { process.send({ type: 'bot_heartbeat', at: Date.now() }, () => {}); } catch { /* supervisor detects missing heartbeats */ }
@@ -14075,6 +14076,7 @@ const runBot = async () => {
 
     console.log(`📊 ${Object.keys(tickerMap).length} tickers | ${putCandidates.length} put + ${callCandidates.length} call candidates`);
 
+    if (!DERIVE_CONFIG.maintenance) {
     // ── Put budget cycle management ───────────────────────────────
     if (spotPrice) {
       try {
@@ -14117,6 +14119,8 @@ const runBot = async () => {
       sendTelegram(`❌ *Trading system error*: ${error.message}`);
     }
 
+    }
+
     await syncEconomicEvidence(Date.now());
 
     // Persist the observation universe, independently of entry eligibility.
@@ -14149,7 +14153,7 @@ const runBot = async () => {
       } catch (e) { console.log('DB: portfolio snapshot deferred:', e.message); }
 
       try {
-        if (typeof db.evaluateDueDecisionOutcomes === 'function') {
+        if (!DERIVE_CONFIG.maintenance && typeof db.evaluateDueDecisionOutcomes === 'function') {
           const outcomeResult = db.evaluateDueDecisionOutcomes({ now: new Date().toISOString(), limit: 750 });
           if (outcomeResult?.scanned > 0) {
             console.log(`📊 Decision outcomes labeled: scanned=${outcomeResult.scanned} evaluated=${outcomeResult.evaluated} missing=${outcomeResult.missing}`);
@@ -14160,7 +14164,7 @@ const runBot = async () => {
       }
 
       try {
-        if (typeof db.refreshPositionLifecycle === 'function') {
+        if (!DERIVE_CONFIG.maintenance && typeof db.refreshPositionLifecycle === 'function') {
           const lifecycleResult = db.refreshPositionLifecycle();
           if (lifecycleResult?.refreshed > 0) {
             console.log(`📊 Position lifecycle refreshed: ${lifecycleResult.refreshed} instrument/family rows`);
@@ -14236,6 +14240,17 @@ const runBot = async () => {
         db.insertTick(tickTimestamp, JSON.stringify(tickSummary));
       } catch (e) {
         console.log('DB: tick write failed:', e.message);
+      }
+
+      if (DERIVE_CONFIG.maintenance) {
+        console.log('Derive collection complete: trading and advisory updates remain paused');
+        botData.lastCheck = now;
+        persistCycleState();
+        if (process.connected && typeof process.send === 'function') {
+          try { process.send({ type: 'bot_heartbeat', at: Date.now() }, () => {}); } catch { /* supervisor detects missing heartbeats */ }
+        }
+        setTimeout(runBotWithWatchdog, checkInterval);
+        return;
       }
 
       if (
@@ -14505,7 +14520,7 @@ console.log('='.repeat(70));
 console.log(' ');
 loadData();
 
-if (db?.deactivateStaleEmergencyBuybackRules) {
+if (!DERIVE_CONFIG.maintenance && db?.deactivateStaleEmergencyBuybackRules) {
   try {
     const removed = db.deactivateStaleEmergencyBuybackRules();
     if (removed > 0) {

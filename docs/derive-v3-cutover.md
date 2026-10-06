@@ -63,6 +63,20 @@ The bot still defaults to V2 for an unchanged deployment. Setting
 `DERIVE_API_VERSION=v3` requires an explicit owner, subaccount, and history boundary,
 and defaults to maintenance mode. Both services use the same configuration.
 
+## Collect data while trading is paused
+
+Set `DERIVE_MAINTENANCE=true` and `DERIVE_COLLECT_DATA=true` to resume the
+existing market, options, smile, open-interest, onchain and portfolio snapshot
+writers and settled-trade ingestion. This uses the same database, schema, ledger
+identifiers and normalized formats. The existing session signer authenticates V3
+reads; the production read-only preflight passed again at 19:49 UTC.
+
+Collection mode skips order reconciliation, placement/cancellation, budget-cycle
+resets, pending-action execution, decision/lifecycle relabeling, and advisory
+publication. Direct placement and cancellation guards remain active. Set
+`DERIVE_COLLECT_DATA=false` to return to the full maintenance pause. Unresolved
+V2 orders remain preserved until their terminal state can be established.
+
 ## During the outage
 
 1. Stop the production bot worker (keep the dashboard available where deployed
