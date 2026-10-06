@@ -194,3 +194,25 @@ test('collection mode appends observations and accounting without touching order
     await assert.rejects(invoke(), /maintenance/);
   }
 });
+
+test('paused advisors honor explicit opt-in, retry delays and in-flight work without enabling execution', async () => {
+  const calls = [];
+  const now = Date.now();
+  const make = (overrides = {}) => {
+    const bindings = { DERIVE_CONFIG: getDeriveConfig({ ...env, DERIVE_ADVISORS_ENABLED: 'true' }),
+      process: { env: { ANTHROPIC_API_KEY: 'test' } }, _advisoryInFlight: false, _advisoryCatchupChecked: false,
+      botData: {}, JOURNAL_INTERVAL_MS: 8 * 3600000,
+      generateTradingAdvisory: async x => calls.push(x.trigger), console: { log() {} }, ...overrides };
+    return vm.compileFunction(`${declaration(SCRIPT_SOURCE, 'schedulePausedAdvisory')}; return schedulePausedAdvisory;`, Object.keys(bindings))(...Object.values(bindings));
+  };
+  make({ DERIVE_CONFIG: getDeriveConfig(env) })(2700, now);
+  make({ _advisoryInFlight: true })(2700, now);
+  make({ botData: { nextAdvisoryRetryAt: now + 1000 } })(2700, now);
+  make({ _advisoryCatchupChecked: true, botData: { lastAdvisorySuccess: now } })(2700, now);
+  make()(null, now);
+  assert.equal(calls.length, 0);
+  make()(2700, now);
+  make({ botData: { nextAdvisoryRetryAt: now - 1000 } })(2700, now);
+  assert.deepEqual(calls, ['execution-paused', 'execution-paused']);
+  assert.equal(getDeriveConfig({ ...env, DERIVE_ADVISORS_ENABLED: 'true' }).maintenance, true);
+});

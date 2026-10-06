@@ -77,6 +77,16 @@ publication. Direct placement and cancellation guards remain active. Set
 `DERIVE_COLLECT_DATA=false` to return to the full maintenance pause. Unresolved
 V2 orders remain preserved until their terminal state can be established.
 
+## Advisors while execution is paused
+
+With `DERIVE_MAINTENANCE=true` and `DERIVE_COLLECT_DATA=true`, set
+`DERIVE_ADVISORS_ENABLED=true` to publish fresh reviewed advisories independently
+of execution. It requests a fresh advisory after restart, then follows the
+existing eight-hour cadence and persisted retry timing. In-flight work is not
+duplicated. This does not enable order management, pending-action execution,
+placement, cancellation, or budget-cycle resets. Set the flag to `false` to pause
+advisories again. Existing rulebook publication remains transactional.
+
 ## During the outage
 
 1. Stop the production bot worker (keep the dashboard available where deployed

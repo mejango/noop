@@ -13689,6 +13689,19 @@ const syncEconomicEvidence = async (now = Date.now()) => {
   }
 };
 
+// Advisory publication can run independently while all execution stays paused.
+const schedulePausedAdvisory = (spotPrice, now = Date.now()) => {
+  if (!DERIVE_CONFIG.advisorsEnabled || !process.env.ANTHROPIC_API_KEY || !spotPrice || _advisoryInFlight) return;
+  const retryAt = botData.nextAdvisoryRetryAt || 0;
+  const due = retryAt ? now >= retryAt
+    : !_advisoryCatchupChecked || now - (botData.lastAdvisorySuccess || 0) >= JOURNAL_INTERVAL_MS;
+  if (!due) return;
+  _advisoryCatchupChecked = true;
+  generateTradingAdvisory({ trigger: 'execution-paused' }).catch(error => {
+    console.log(`📋 Paused-execution advisory failed (will retry): ${error.message}`);
+  });
+};
+
 const runBot = async () => {
   if (DERIVE_CONFIG.maintenance && !DERIVE_CONFIG.collectData) {
     console.log('Derive maintenance: trading, account reconciliation and observations paused');
@@ -14243,7 +14256,8 @@ const runBot = async () => {
       }
 
       if (DERIVE_CONFIG.maintenance) {
-        console.log('Derive collection complete: trading and advisory updates remain paused');
+        if (DERIVE_CONFIG.advisorsEnabled) schedulePausedAdvisory(spotPrice);
+        console.log(`Derive collection complete: trading paused; advisors ${DERIVE_CONFIG.advisorsEnabled ? 'enabled' : 'paused'}`);
         botData.lastCheck = now;
         persistCycleState();
         if (process.connected && typeof process.send === 'function') {
