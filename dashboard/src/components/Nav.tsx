@@ -47,7 +47,7 @@ function getPutBudgetPortfolioValue(
 
 export default function Nav() {
   const STATS_INTERVAL = 60_000;
-  const { data: stats, fetchTick } = usePolling<NavStats>('/api/stats', emptyStats, STATS_INTERVAL);
+  const { data: stats, fetchTick, dataUrl: statsDataUrl } = usePolling<NavStats>('/api/stats', emptyStats, STATS_INTERVAL);
   const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
   const b = stats.budget || emptyBudget;
   const liveAgo = useLiveTimeAgo(stats.last_price_time);
@@ -75,7 +75,7 @@ export default function Nav() {
         <div className="flex items-center gap-2 md:gap-4 text-xs md:text-sm flex-wrap justify-end">
           <span className="font-semibold">
             <span className="text-gray-400">ETH</span>{' '}
-            <span className="text-juice-orange">{formatUSD(stats.last_price)}</span>
+            <span className="text-juice-orange">{statsDataUrl ? formatUSD(stats.last_price) : '—'}</span>
             {stats.lyra_spot != null && stats.lyra_spot > 0 && (
               <><span className="text-gray-500 mx-0.5">/</span><span className="text-white">{formatUSD(stats.lyra_spot)}</span></>
             )}
@@ -101,8 +101,8 @@ export default function Nav() {
               <span className="text-gray-600 hidden md:inline">|</span>
             </>
           )}
-          <span className="text-gray-400 hidden md:inline">PUT <span className="text-white">{formatUSD(putRemaining)}</span>/<span className="text-gray-500">{formatUSD(putTotalBudget)}</span></span>
-          <span className="text-gray-500 text-xs hidden md:inline">{b.putDaysLeft > 0 ? `${b.putDaysLeft}d left` : 'cycle ended'}</span>
+          <span className="text-gray-400 hidden md:inline">PUT <span className="text-white">{statsDataUrl ? formatUSD(putRemaining) : '—'}</span>/<span className="text-gray-500">{statsDataUrl ? formatUSD(putTotalBudget) : '—'}</span></span>
+          <span className="text-gray-500 text-xs hidden md:inline">{!statsDataUrl ? 'Loading…' : b.putDaysLeft > 0 ? `${b.putDaysLeft}d left` : 'cycle ended'}</span>
         </div>
       </div>
     </nav>

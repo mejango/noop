@@ -815,7 +815,7 @@ export default function OverviewPage() {
   const baseMargins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
   // Reserve the portfolio axis gutter on every chart so timestamps line up.
   const margins = { ...baseMargins, right: baseMargins.right + primaryYAxisWidth };
-  const { data: stats } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
+  const { data: stats, dataUrl: statsDataUrl } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
   const chartUrl = `/api/chart?range=${encodeURIComponent(range)}`;
   const {
     data: chart,
@@ -1522,15 +1522,15 @@ export default function OverviewPage() {
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">3d</span>
-              <span className="text-emerald-400">{formatUSD(stats.three_day_high)}</span>
+              <span className="text-emerald-400">{statsDataUrl ? formatUSD(stats.three_day_high) : '—'}</span>
               <span className="text-gray-600">/</span>
-              <span className="text-red-400">{formatUSD(stats.three_day_low)}</span>
+              <span className="text-red-400">{statsDataUrl ? formatUSD(stats.three_day_low) : '—'}</span>
             </div>
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">7d</span>
-              <span className="text-emerald-400">{formatUSD(stats.seven_day_high)}</span>
+              <span className="text-emerald-400">{statsDataUrl ? formatUSD(stats.seven_day_high) : '—'}</span>
               <span className="text-gray-600">/</span>
-              <span className="text-red-400">{formatUSD(stats.seven_day_low)}</span>
+              <span className="text-red-400">{statsDataUrl ? formatUSD(stats.seven_day_low) : '—'}</span>
             </div>
           </div>
         </Card>
@@ -1556,7 +1556,7 @@ export default function OverviewPage() {
               </span>
               <span className="text-gray-600">/</span>
               <span className="relative group/pc">
-                <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : 'NO ELIGIBLE'}</span>
+                <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : !latestTick ? 'Loading…' : 'NO ELIGIBLE'}</span>
                 {latestTick?.best_put_detail && (
                   <div className="absolute left-0 bottom-full mb-1 hidden group-hover/pc:block z-20 pointer-events-none">
                     <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
@@ -3009,7 +3009,7 @@ export default function OverviewPage() {
                     </td>
                     <td className="py-1.5 px-3 text-right tabular-nums text-xs">
                       <span className="relative inline-block group/pn">
-                        <span style={{ color: chartColors.red }} className="cursor-help">{Number(d.current_best_put ?? 0) > 0 ? Number(d.current_best_put).toFixed(6) : 'NO ELIGIBLE'}</span>
+                        <span style={{ color: chartColors.red }} className="cursor-help">{Number(d.current_best_put ?? 0) > 0 ? Number(d.current_best_put).toFixed(6) : !latestTick ? 'Loading…' : 'NO ELIGIBLE'}</span>
                         {d.best_put_detail && (
                           <div className="absolute right-0 top-full mt-1 hidden group-hover/pn:block z-20 pointer-events-none">
                             <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">

@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { cachedJsonRoute } from '@/lib/response-cache';
 import { getSmileSnapshots, getSmileSnapshotTimestamps, getSmileSnapshotNear } from '@/lib/db';
 import { getChain, getCachedChain } from '@/lib/smile-chain';
 import { fromCompact } from '@/lib/vol-smile';
@@ -26,7 +27,7 @@ function historyAt(at: number) {
   return historyCache.frames;
 }
 
-export async function GET() {
+async function getPricingResponse() {
   try {
     // Do not put external API requests on the snapshot response's critical path.
     const refresh = getChain().catch(() => null);
@@ -61,4 +62,12 @@ export async function GET() {
   } catch (e: unknown) {
     return NextResponse.json({ error: e instanceof Error ? e.message : 'Options data unavailable' }, { status: 502 });
   }
+}
+
+export function GET(request: Request) {
+  return cachedJsonRoute(request, 'volatility-pricing', getPricingResponse, {
+    freshMs: 10_000,
+    staleMs: 20_000,
+    browserMaxAgeSeconds: 5,
+  });
 }

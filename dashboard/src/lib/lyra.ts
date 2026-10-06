@@ -97,7 +97,7 @@ async function lyraPost<T>(endpoint: string, body: Record<string, unknown>): Pro
   const headers = await getAuthHeaders();
   const res = await fetch(`${config().baseUrl}${endpoint}`, {
     method: 'POST',
-    headers,
+    headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     redirect: 'error',

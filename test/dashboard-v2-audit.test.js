@@ -25,11 +25,12 @@ function loadTs(file, overrides = {}, globals = {}) {
   return result;
 }
 
-function client(response) {
+function client(response, env = {}) {
   return loadTs('dashboard/src/lib/lyra.ts', {
     'viem/accounts': { privateKeyToAccount: () => ({ signMessage: async () => 'test-only' }) },
+    '../../../bot/derive-config': { ...require('../bot/derive-config'), getDeriveConfig: () => require('../bot/derive-config').getDeriveConfig(env) },
   }, {
-    process: { env: { PRIVATE_KEY: '0x' + '2'.repeat(64) } },
+    process: { env: { PRIVATE_KEY: '0x' + '2'.repeat(64), ...env } },
     fetch: async (...args) => ({ ok: true, json: async () => response(...args) }),
   });
 }
@@ -140,4 +141,35 @@ test('actual dashboard DB getters use C quotes and bounded historical observatio
   assert.equal(db.prepare('SELECT total_changes() AS count').get().count, changes);
   db.close();
   fs.rmSync(fixtureDir, { recursive: true, force: true });
+});
+
+
+test('dashboard private requests send JSON content type required by V3', async () => {
+  const api = client((url, init) => {
+    assert.equal(url, 'https://api.derive.xyz/v3/private/get_positions');
+    assert.equal(init.headers['Content-Type'], 'application/json');
+    assert.equal(init.headers['X-DeriveWallet'], '0x' + '1'.repeat(40));
+    assert.equal(JSON.parse(init.body).subaccount_id, 25923);
+    return { result: { subaccount_id: 25923, positions: [] } };
+  }, { DERIVE_API_VERSION: 'v3', DERIVE_WALLET: '0x' + '1'.repeat(40),
+    DERIVE_SUBACCOUNT_ID: '25923', DERIVE_HISTORY_FROM: '2026-10-06T17:55:00Z' });
+  assert.deepEqual(Array.from(await api.getPositions()), []);
+});
+
+test('indexed coverage queries retain exact bounds and counts including empty ranges', () => {
+  const Database = require('better-sqlite3');
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE options_snapshots(timestamp TEXT); CREATE INDEX idx_timestamp ON options_snapshots(timestamp);');
+  const source = fs.readFileSync(path.join(root, 'dashboard/src/lib/db.ts'), 'utf8');
+  const sql = name => source.match(new RegExp(name + ': d.prepare\\(`([\\s\\S]*?)`\\)'))[1];
+  const all = db.prepare(sql('getOptionsCoverageAll'));
+  const window = db.prepare(sql('getOptionsCoverageSince'));
+  for (const values of [[], ['2026-10-01', '2026-10-03', '2026-10-03']]) {
+    for (const value of values) db.prepare('INSERT INTO options_snapshots VALUES (?)').run(value);
+    assert.deepEqual(all.get(), db.prepare('SELECT MIN(timestamp) first_timestamp, MAX(timestamp) last_timestamp, COUNT(*) total_rows FROM options_snapshots').get());
+    for (const since of ['2026-09-01', '2026-10-02', '2026-11-01']) {
+      assert.deepEqual(window.get(since, since, since), db.prepare('SELECT MIN(timestamp) first_timestamp, MAX(timestamp) last_timestamp, COUNT(*) total_rows FROM options_snapshots WHERE timestamp >= ?').get(since));
+    }
+  }
+  db.close();
 });

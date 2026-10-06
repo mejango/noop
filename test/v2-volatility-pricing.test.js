@@ -213,14 +213,21 @@ test('cell click matches actual buyable contracts by maturity then strike and op
 });
 
 // Exercise the production endpoint with isolated upstream/data-store adapters.
-function endpoint({ chain = { at: Date.now(), expiries: frame().expiries }, timestamps = [], fail = false, pending = false, cachedChain, snapshotRows = [] } = {}) {
+function endpoint({ chain = { at: Date.now(), expiries: frame().expiries }, timestamps = [], fail = false, pending = false, cachedChain, snapshotRows = [], compressed = false } = {}) {
   let picked;
   const route = { exports: {} };
   const source = fs.readFileSync(`${__dirname}/../dashboard/src/app/api/volatility-pricing/route.ts`, 'utf8');
   new Function('module', 'exports', 'require', ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText)(route, route.exports, name => {
-    if (name === 'next/server') return { NextResponse: { json: (body, init) => ({ body, status: init?.status ?? 200 }) } };
+    if (name === 'next/server') return { NextResponse: { json: (body, init) => compressed ? new Response(JSON.stringify(body), { status: init?.status ?? 200 }) : ({ body, status: init?.status ?? 200 }) } };
+    if (name === '@/lib/response-cache') {
+      if (!compressed) return { cachedJsonRoute: (_req, _key, loader) => loader() };
+      const cache = { exports: {} };
+      const code = ts.transpileModule(fs.readFileSync(`${__dirname}/../dashboard/src/lib/response-cache.ts`, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+      new Function('module', 'exports', 'require', code)(cache, cache.exports, require);
+      return cache.exports;
+    }
     if (name === '@/lib/db') return {
       getSmileSnapshotTimestamps: () => timestamps,
       getSmileSnapshots: ts => { picked = ts; return []; },
@@ -278,4 +285,19 @@ test('endpoint stops waiting after three seconds if live and recorded data are u
   const response = await endpoint({ pending: true }).GET();
   assert.equal(response.status, 503);
   assert.ok(performance.now() - start < 5000);
+});
+
+
+test('volatility endpoint compresses repeated history and retains equivalent JSON on cache hits', async () => {
+  const api = endpoint({ compressed: true });
+  const request = new Request('http://localhost/api/volatility-pricing', { headers: { 'Accept-Encoding': 'gzip' } });
+  const response = await api.GET(request);
+  assert.equal(response.headers.get('content-encoding'), 'gzip');
+  const zipped = Buffer.from(await response.arrayBuffer());
+  const raw = require('node:zlib').gunzipSync(zipped);
+  assert.equal(JSON.parse(raw).cells.length, 81);
+  assert.ok(zipped.length < raw.length / 2);
+  const next = await api.GET(new Request('http://localhost/api/volatility-pricing'));
+  assert.equal(next.headers.get('x-noop-cache'), 'hit');
+  assert.deepEqual(await next.json(), JSON.parse(raw));
 });
