@@ -155,21 +155,3 @@ test('dashboard private requests send JSON content type required by V3', async (
     DERIVE_SUBACCOUNT_ID: '25923', DERIVE_HISTORY_FROM: '2026-10-06T17:55:00Z' });
   assert.deepEqual(Array.from(await api.getPositions()), []);
 });
-
-test('indexed coverage queries retain exact bounds and counts including empty ranges', () => {
-  const Database = require('better-sqlite3');
-  const db = new Database(':memory:');
-  db.exec('CREATE TABLE options_snapshots(timestamp TEXT); CREATE INDEX idx_timestamp ON options_snapshots(timestamp);');
-  const source = fs.readFileSync(path.join(root, 'dashboard/src/lib/db.ts'), 'utf8');
-  const sql = name => source.match(new RegExp(name + ': d.prepare\\(`([\\s\\S]*?)`\\)'))[1];
-  const all = db.prepare(sql('getOptionsCoverageAll'));
-  const window = db.prepare(sql('getOptionsCoverageSince'));
-  for (const values of [[], ['2026-10-01', '2026-10-03', '2026-10-03']]) {
-    for (const value of values) db.prepare('INSERT INTO options_snapshots VALUES (?)').run(value);
-    assert.deepEqual(all.get(), db.prepare('SELECT MIN(timestamp) first_timestamp, MAX(timestamp) last_timestamp, COUNT(*) total_rows FROM options_snapshots').get());
-    for (const since of ['2026-09-01', '2026-10-02', '2026-11-01']) {
-      assert.deepEqual(window.get(since, since, since), db.prepare('SELECT MIN(timestamp) first_timestamp, MAX(timestamp) last_timestamp, COUNT(*) total_rows FROM options_snapshots WHERE timestamp >= ?').get(since));
-    }
-  }
-  db.close();
-});

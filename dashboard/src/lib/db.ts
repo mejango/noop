@@ -120,15 +120,18 @@ function prepareAll(d: Database.Database) {
     `),
     getOptionsCoverageAll: d.prepare(`
       SELECT
-        (SELECT MIN(timestamp) FROM options_snapshots) as first_timestamp,
-        (SELECT MAX(timestamp) FROM options_snapshots) as last_timestamp,
-        (SELECT COUNT(*) FROM options_snapshots) as total_rows
+        MIN(timestamp) as first_timestamp,
+        MAX(timestamp) as last_timestamp,
+        COUNT(*) as total_rows
+      FROM options_snapshots
     `),
     getOptionsCoverageSince: d.prepare(`
       SELECT
-        (SELECT MIN(timestamp) FROM options_snapshots WHERE timestamp >= ?) as first_timestamp,
-        (SELECT MAX(timestamp) FROM options_snapshots WHERE timestamp >= ?) as last_timestamp,
-        (SELECT COUNT(*) FROM options_snapshots WHERE timestamp >= ?) as total_rows
+        MIN(timestamp) as first_timestamp,
+        MAX(timestamp) as last_timestamp,
+        COUNT(*) as total_rows
+      FROM options_snapshots
+      WHERE timestamp >= ?
     `),
 
     getBestOptionsOverTime: d.prepare(`
@@ -769,7 +772,7 @@ export function getOptionsCoverage(since: string) {
     last_timestamp: string | null;
     total_rows: number;
   } | undefined;
-  const window = getStmts().getOptionsCoverageSince.get(since, since, since) as {
+  const window = getStmts().getOptionsCoverageSince.get(since) as {
     first_timestamp: string | null;
     last_timestamp: string | null;
     total_rows: number;
