@@ -1,9 +1,9 @@
 # Derive V3 cutover — 2026-10-06
 
-Production deployment `e0b92c36-ace7-4cbe-935a-6f1e7ce1055e` is running V3
-in maintenance mode in Singapore. Trading remains disabled pending the order
-reconciliation described below. Deployment used a local working-tree snapshot;
-this revision records the deployed migration and its verification evidence.
+Production V3 data collection and reviewed advisories are running. The operator
+explicitly approved live trading after the checks and reconciliation below;
+execution is enabled by deploying with `DERIVE_MAINTENANCE=false`. The original database,
+schema, record identities, and normalized formats remain in use.
 
 ## Execution record
 
@@ -22,10 +22,10 @@ this revision records the deployed migration and its verification evidence.
   own typed-data digest, and the signing domain matches. No order was placed.
 - Maintenance ticks now send supervisor heartbeats, preventing periodic
   container restarts. The combined image includes the preflight script.
-- Local orders `544b3605-acc7-4597-8122-370f9e8ae038` and
-  `17612d7f-ae4b-48cf-8cce-588d5976496d` remain marked open. V3 returns
+- At the initial pause, local orders `544b3605-acc7-4597-8122-370f9e8ae038` and
+  `17612d7f-ae4b-48cf-8cce-588d5976496d` remained marked open. V3 returned
   `11006 / Order does not exist` for both; V2 still returns HTTP 503. Their local
-  status has deliberately not been overwritten. All execution submissions are
+  status was initially preserved; see the later operator reconciliation below. All execution submissions are
   already accounted or rejected. One pending replacement action is preserved.
 - The previous testnet account `78645` now returns `14000 / Account not found`.
   Testnet order placement has not been performed. Mainnet signing was checked
@@ -62,6 +62,33 @@ this revision records the deployed migration and its verification evidence.
 The bot still defaults to V2 for an unchanged deployment. Setting
 `DERIVE_API_VERSION=v3` requires an explicit owner, subaccount, and history boundary,
 and defaults to maintenance mode. Both services use the same configuration.
+
+## Execution readiness — October 6
+
+- Existing signer `0x4e6741f92bA22Cd2b4FAebae47666f6792CBBC0e` has
+  `trade:all` protocol authority covering subaccount `25923`. Its reported expiry
+  is **2026-11-03 18:00:35 UTC**; arrange replacement/renewal before then.
+- Fresh account check at 20:47 UTC: all five position quantities still match the
+  migration baseline, positive initial/maintenance margins, no liquidation flag,
+  and no venue open orders.
+- Advisory `adv_1791319426162` published seven validated rules at 20:47 UTC.
+  Order, pending-action, and submission hashes were unchanged by publication.
+- The operator confirmed both carried V2 buyback orders were **not filled**.
+  Combined with the empty V3 open-order list, this was used to retire their local
+  status as `cancelled`, with zero filled amount/value. This is an explicitly
+  operator-backed reconciliation, **not a recovered venue cancellation receipt**.
+  Original rows and evidence are retained in the transactional journal entry and
+  `/data/archive/derive-v3-operator-reconciliation-20261006.json`.
+- Pending action `12618` was canceled as `inactive_rule` after the fresh advisory
+  superseded its old rule. Its original intent is preserved in the same audit.
+  No historical fill, receipt, budget, identity or schema was rewritten.
+- The operator explicitly approved live production trading after the initial
+  enablement attempt was held for explicit approval. Final checks at 20:52 UTC
+  confirmed trading scope, subaccount access, no IP restriction, positive margins,
+  zero pending actions, zero unresolved submissions, and a fresh successful advisory.
+- Resume with `DERIVE_MAINTENANCE=false`; collection and normal advisory scheduling
+  continue. `DERIVE_COLLECT_DATA=true` and `DERIVE_ADVISORS_ENABLED=true` preserve
+  the option to pause execution independently by restoring maintenance mode.
 
 ## Collect data while trading is paused
 
@@ -176,7 +203,7 @@ API-specific status fields are interpreted at ingestion, not by rewriting histor
 ## Enable and observe
 
 After Derive confirms trading is open, account/order reconciliation is complete,
-and the signer has been validated on testnet, set `DERIVE_MAINTENANCE=false` on the
+and signer authority and V3 signing have been validated, set `DERIVE_MAINTENANCE=false` on the
 bot and restart it. Observe the first account read, advisory, submission receipt,
 fill reconciliation, and settled trade ingestion before leaving it unattended.
 Keep the dashboard configuration aligned.
