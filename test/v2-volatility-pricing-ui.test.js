@@ -23,7 +23,7 @@ function fixture() {
   return {
     asOf, score: 13, label: 'Cheap', qualifier: 'Cheap broadly', spot: 2615, currentIv: 49.5,
     historyDays: 11, historySamples: 251, historyFrom: null, historyTo: null,
-    provisional: false, measured: 81, total: 81,
+    provisional: false, measured: 135, total: 135,
     cells: pricing.OFFSETS.flatMap(offset => pricing.TENORS.map(dte => ({
       offset, dte, strike: 2615 * (1 + offset), ...quote(49.5, 13),
       bid: quote(38.8, 0), ask: quote(58.8, 97), instruments: [],

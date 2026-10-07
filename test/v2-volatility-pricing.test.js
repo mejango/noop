@@ -15,7 +15,7 @@ const HOUR = 3600000;
 const now = Date.parse('2026-10-01T12:00:00Z');
 function expiry(dte, iv = 50, spot = 2000) {
   return { dte, expiry: (now + dte * DAY) / 1000, spot, forward: spot, points:
-    [-0.2, -0.15, -0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2].map(offset => ({
+    [-0.5, -0.45, -0.4, -0.35, -0.3, -0.25, -0.2, -0.15, -0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2].map(offset => ({
       strike: spot * (1 + offset), type: offset < 0 ? 'P' : 'C', delta: 0.25,
       iv, bidIv: iv - 1, askIv: iv + 1, oi: 10,
     })) };
@@ -44,16 +44,17 @@ test('constant maturity interpolates total variance, refusing unbracketed horizo
 
 test('missing, crossed and wide quotes are not interpolated through or extrapolated', () => {
   const e = expiry(30);
+  const atSpot = e.points.find(p => p.strike === e.spot);
   assert.equal(ivAtOffset(e, 0.5), null);
-  e.points[4].askIv = null;
+  atSpot.askIv = null;
   assert.equal(ivAtOffset(e, 0), null);
   assert.equal(ivAtOffset(e, 0.025), null);
-  e.points[4].askIv = 40;
+  atSpot.askIv = 40;
   assert.equal(ivAtOffset(e, 0), null);
-  e.points[4].askIv = 100;
+  atSpot.askIv = 100;
   assert.equal(ivAtOffset(e, 0), null);
-  e.points[4].bidIv = 50.004;
-  e.points[4].askIv = 50.003;
+  atSpot.bidIv = 50.004;
+  atSpot.askIv = 50.003;
   for (const side of ['mark', 'bid', 'ask']) {
     assert.equal(ivAtOffset(e, 0, side), null, 'rounding cannot hide a crossed raw market');
     assert.equal(ivAtOffset(e, 0.025, side), null);
@@ -94,7 +95,7 @@ test('insufficient history or narrow coverage never becomes a broad market score
   const narrow = { at: now, expiries: [expiry(7)] };
   const result = buildVolatilityPricing(narrow, history());
   assert.equal(result.score, null);
-  assert.equal(result.measured, 9);
+  assert.equal(result.measured, 15);
 });
 
 
@@ -103,7 +104,7 @@ test('five recorded days show a provisional score instead of a blank meter', () 
   assert.equal(result.score, 0);
   assert.equal(result.label, 'Cheap');
   assert.equal(result.provisional, true);
-  assert.equal(result.measured, 81);
+  assert.equal(result.measured, 135);
   assert.equal(result.currentIv, 40);
   assert.equal(buildVolatilityPricing(frame(), history(2)).score, 50);
   assert.equal(buildVolatilityPricing(frame(), history(2)).provisional, true);
@@ -115,7 +116,7 @@ test('hourly percentiles resolve values between the old 20-point steps', () => {
   const cell = result.cells.find(c => c.dte === 30 && c.offset === 0);
   assert.ok(Math.abs(cell.percentile - 11 / 120 * 100) < 1e-9);
   assert.equal(cell.samples, 120);
-  assert.equal(result.total, 81);
+  assert.equal(result.total, 135);
 });
 
 test('bid and ask priciness each use their own historical quote side', () => {
@@ -274,8 +275,8 @@ test('expanding the exploration grid preserves the headline meter comparison', (
   const result = buildVolatilityPricing(current, history(5));
   assert.equal(result.score, 50);
   assert.equal(result.currentIv, 50);
-  assert.equal(result.measured, 81);
-  assert.equal(result.total, 81);
+  assert.equal(result.measured, 135);
+  assert.equal(result.total, 135);
   for (const side of ['mark', 'bid', 'ask']) {
     const summary = summarizePricingSide(result.cells, side);
     assert.equal(summary.score, 50);
@@ -357,7 +358,7 @@ test('endpoint selects the latest completed hourly snapshots, including earlier 
   assert.deepEqual(api.picked(), [iso(lastHour - HOUR + 30 * 60000), iso(lastHour + 20 * 60000)]);
   assert.equal(response.body.score, null);
   assert.equal(response.body.historySamples, 0);
-  assert.equal(response.body.cells.length, 81);
+  assert.equal(response.body.cells.length, 135);
 });
 
 test('endpoint rejects stale, missing and failed upstream quotes', async () => {
@@ -377,7 +378,7 @@ test('endpoint serves a recorded snapshot while the live chain is still pending'
   assert.equal(response.status, 200);
   assert.equal(response.body.source, 'snapshot');
   assert.equal(response.body.asOf, new Date(at).toISOString());
-  assert.equal(response.body.cells.length, 81);
+  assert.equal(response.body.cells.length, 135);
   assert.deepEqual(response.body.cells[0].instruments, []);
 });
 
@@ -396,7 +397,7 @@ test('volatility endpoint compresses repeated history and retains equivalent JSO
   assert.equal(response.headers.get('content-encoding'), 'gzip');
   const zipped = Buffer.from(await response.arrayBuffer());
   const raw = require('node:zlib').gunzipSync(zipped);
-  assert.equal(JSON.parse(raw).cells.length, 81);
+  assert.equal(JSON.parse(raw).cells.length, 135);
   assert.ok(zipped.length < raw.length / 2);
   const next = await api.GET(new Request('http://localhost/api/volatility-pricing'));
   assert.equal(next.headers.get('x-noop-cache'), 'hit');

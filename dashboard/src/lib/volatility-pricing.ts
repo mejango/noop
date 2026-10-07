@@ -1,7 +1,7 @@
 import type { SmileExpiry } from './vol-smile';
 
 export const TENORS = [1, 3, 7, 14, 30, 45, 60, 90, 180];
-export const OFFSETS = [-0.2, -0.15, -0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2];
+export const OFFSETS = [-0.5, -0.45, -0.4, -0.35, -0.3, -0.25, -0.2, -0.15, -0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2];
 export const MIN_HISTORY_SAMPLES = 24;
 export const HISTORY_DAYS = 30;
 const HOUR = 3_600_000;
