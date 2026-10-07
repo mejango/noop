@@ -12,14 +12,26 @@ const money = (v: number) => v.toLocaleString(undefined, { style: 'currency', cu
 const offsetLabel = (v: number) => v === 0 ? 'At spot' : `${v > 0 ? '+' : '−'}${Math.round(Math.abs(v) * 100)}%`;
 const date = (v: string) => new Date(v).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 
-const scoreClass = (score: number | null) => score != null && score <= 25 ? 'text-emerald-300' : score != null && score >= 75 ? 'text-amber-400' : 'text-gray-300';
-
-function SideSummary({ label, summary, unavailable }: { label: string; summary: ReturnType<typeof summarizePricingSide>; unavailable: boolean }) {
-  const score = unavailable ? null : summary.score;
-  return <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[10px]"
-    title={unavailable ? 'Quotes unavailable' : `${summary.qualifier}; ${summary.measured}/${summary.total} core cells rated`}>
-    <span className="text-gray-400">{label}</span>
-    <span className={scoreClass(score)}>{unavailable ? 'Unavailable' : score == null ? 'Unrated' : `${summary.label} · ${score}/100`}</span>
+function SideSummary({ side, summary, unavailable, loading }: { side: 'bid' | 'ask'; summary: ReturnType<typeof summarizePricingSide>; unavailable: boolean; loading: boolean }) {
+  const score = unavailable || loading ? null : summary.score;
+  const label = side === 'bid' ? 'Sell at bid' : 'Buy at ask';
+  const status = unavailable ? 'Unavailable' : loading ? 'Loading…' : score == null ? 'Unrated'
+    : side === 'bid' ? score <= 25 ? 'Low bids' : score >= 75 ? 'High bids' : 'Typical bids' : summary.label;
+  return <div role="group" aria-label={`${label} pricing`} className={`min-w-0 rounded border p-3 space-y-2 ${side === 'bid' ? 'border-red-400/20 bg-red-400/[0.025]' : 'border-emerald-400/20 bg-emerald-400/[0.025]'}`}
+    title={unavailable ? 'Quotes unavailable' : loading ? 'Loading quotes' : `${summary.measured}/${summary.total} core cells rated against their own history`}>
+    <div className={`text-xs ${side === 'bid' ? 'text-red-300' : 'text-emerald-300'}`}>{label}</div>
+    <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-gray-100">
+      <span className="text-base font-medium">{status}</span>
+      <span className="text-lg tabular-nums whitespace-nowrap">{score != null ? <>{score}<span className="text-[10px] text-gray-400"> / 100</span></> : '—'}</span>
+    </div>
+    {score != null ? <>
+      <div className="relative h-1.5 rounded-full" role="meter" aria-label={`${label} historical IV percentile`}
+        aria-valuemin={0} aria-valuemax={100} aria-valuenow={score} aria-valuetext={`${status}, ${score} out of 100`}
+        style={{ background: `linear-gradient(to right, ${pricingColor(0, side)}, ${pricingColor(100, side)})` }}>
+        <span className="absolute top-1/2 w-0.5 h-3 rounded bg-white -translate-x-1/2 -translate-y-1/2" style={{ left: `${score}%` }} />
+      </div>
+      <div className="flex justify-between gap-2 text-[9px] text-gray-500"><span>{side === 'bid' ? 'Low bids' : 'Cheap'}</span><span>{side === 'bid' ? 'High bids' : 'Expensive'}</span></div>
+    </> : <div className="text-[10px] text-gray-500">{unavailable ? 'Quotes unavailable' : loading ? 'Fetching quotes' : 'More history or coverage needed'}</div>}
   </div>;
 }
 
@@ -51,11 +63,12 @@ export default function VolatilityPricing() {
   const contractPanel = useRef<HTMLElement>(null);
   const stale = !!data.asOf && Date.now() - Date.parse(data.asOf) > (data.source === 'snapshot' ? 20 : 5) * 60_000;
   const unavailable = stale || (!!error && !data.asOf);
-  const score = unavailable ? null : data.score;
+  const initialLoading = loading && !data.asOf;
+  const score = unavailable || initialLoading ? null : data.score;
   const askSummary = summarizePricingSide(data.cells, 'ask');
   const bidSummary = summarizePricingSide(data.cells, 'bid');
-  const status = unavailable ? 'Quotes unavailable' : loading && !data.asOf ? 'Loading volatility…'
-    : score != null ? data.label : data.currentIv != null ? 'Mark IV' : data.historySamples < MIN_HISTORY_SAMPLES ? 'Building history' : 'Limited quote coverage';
+  const markReference = unavailable ? 'Mark reference unavailable' : initialLoading ? null
+    : `Mark reference: ${score != null ? `${data.label} · ${score}/100` : 'Unrated'}${data.currentIv != null ? ` · IV ${data.currentIv.toFixed(1)}%` : ''}`;
   const historyLabel = !data.asOf && loading ? '' : data.historyDays ? `${data.historyDays} days / ${data.historySamples} hours${data.provisional ? ' (provisional)' : ''}` : 'No history yet';
   const selectedCell = selected ? data.cells.find(c => c.offset === selected.offset && c.dte === selected.dte) : null;
 
@@ -81,30 +94,16 @@ export default function VolatilityPricing() {
           <h3 className="text-sm font-semibold text-juice-orange">Volatility Pricing</h3>
           <span className="text-[10px] text-gray-500">View breakdown ↗</span>
         </div>
-        <div className="flex items-baseline justify-between gap-3">
-          <span className={`text-lg font-medium ${scoreClass(score)}`}>{score != null ? `Mark IV · ${status}` : status}</span>
-          <span className="text-xl tabular-nums text-gray-200">{score != null ? <>{score}<span className="text-xs text-gray-500"> / 100</span></> : !unavailable && data.currentIv != null ? `${data.currentIv.toFixed(1)}%` : '—'}</span>
+        <div className="grid grid-cols-2 gap-3 w-full">
+          <SideSummary side="bid" summary={bidSummary} unavailable={unavailable} loading={initialLoading} />
+          <SideSummary side="ask" summary={askSummary} unavailable={unavailable} loading={initialLoading} />
         </div>
-        {score != null ? <>
-          <div className="relative h-2 rounded-full bg-gradient-to-r from-emerald-400/80 via-gray-600 to-amber-500/70"
-            role="meter" aria-label="Mark IV pricing: low means historically cheap"
-            aria-valuemin={0} aria-valuemax={100} aria-valuenow={score} aria-valuetext={`${status}, ${score} out of 100`}>
-            <span className="absolute top-1/2 w-1 h-4 rounded bg-white shadow -translate-x-1/2 -translate-y-1/2" style={{ left: `${score}%` }} />
-          </div>
-          <div className="flex justify-between text-[10px] text-gray-500"><span>Cheap</span><span>Typical</span><span>Expensive</span></div>
-        </> : !unavailable && data.currentIv != null ? <p className="text-xs text-gray-400">
-          {data.historySamples < MIN_HISTORY_SAMPLES ? `Comparison needs ${MIN_HISTORY_SAMPLES} hourly samples.` : 'Limited quote coverage.'}
-        </p> : null}
-        <div className="flex flex-wrap gap-x-5 gap-y-1 border-t border-white/5 pt-2">
-          <SideSummary label="Ask IV · buy at ask" summary={askSummary} unavailable={unavailable} />
-          <SideSummary label="Bid IV · sell at bid" summary={bidSummary} unavailable={unavailable} />
+        <div className="text-[10px] text-gray-500">IV percentile against each side’s history</div>
+        {markReference && <div className="text-[10px] text-gray-500">{markReference}</div>}
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-500">
+          <span>{unavailable ? 'Refresh to get current options quotes' : historyLabel}</span>
+          {data.asOf && <span>{data.source === 'snapshot' ? 'Snapshot ' : ''}{age}</span>}
         </div>
-        <div className="text-xs text-gray-500">{unavailable ? 'Refresh to get current options quotes' : historyLabel}</div>
-        {score != null && <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-400">
-          <span>{data.qualifier}</span>
-          {data.currentIv != null && <span>Mark IV {data.currentIv.toFixed(1)}%</span>}
-          <span>{data.source === 'snapshot' ? 'Snapshot ' : ''}{age}</span>
-        </div>}
       </button>
 
       <dialog ref={dialog} onCancel={() => setOpen(false)} onClose={() => setOpen(false)}
@@ -113,21 +112,20 @@ export default function VolatilityPricing() {
         className="w-[min(1600px,calc(100vw-32px))] max-h-[85vh] overflow-y-auto rounded-lg border border-gray-700 bg-[#181818] text-gray-200 p-0 backdrop:bg-black/75">
         <div className="p-5 md:p-6">
           <div className="flex justify-between items-start gap-4 mb-4">
-            <div>
-              <h2 id="volatility-pricing-title" className="text-lg text-juice-orange font-semibold">Volatility Pricing</h2>
-              <p className="flex gap-4 text-sm text-gray-400 mt-1"><span>{score != null ? `Mark IV · ${status}` : status}</span>{score != null && <span>{score} / 100</span>}</p>
-              <div className="flex flex-wrap gap-x-5 gap-y-1 mt-2">
-                <SideSummary label="Ask IV · buy at ask" summary={askSummary} unavailable={unavailable} />
-                <SideSummary label="Bid IV · sell at bid" summary={bidSummary} unavailable={unavailable} />
-              </div>
-            </div>
+            <h2 id="volatility-pricing-title" className="text-lg text-juice-orange font-semibold">Volatility Pricing</h2>
             <button type="button" onClick={() => setOpen(false)} aria-label="Close volatility breakdown" className="px-3 py-1 rounded border border-gray-700 hover:bg-gray-800">✕</button>
           </div>
+          <div className="grid grid-cols-2 gap-3 max-w-2xl">
+            <SideSummary side="bid" summary={bidSummary} unavailable={unavailable} loading={initialLoading} />
+            <SideSummary side="ask" summary={askSummary} unavailable={unavailable} loading={initialLoading} />
+          </div>
+          <p className="mt-2 text-[10px] text-gray-500">IV percentile against each side’s history</p>
+          {markReference && <p className="mt-1 text-[10px] text-gray-500">{markReference}</p>}
           {unavailable && <div role="alert" className="mb-4 flex items-center justify-between gap-4 text-sm text-amber-400">
             <span>Quotes unavailable.{data.asOf ? ` Last update: ${age}.` : ''}</span>
             <button type="button" onClick={refetch} className="border border-gray-600 rounded px-3 py-1" disabled={loading}>{loading ? 'Refreshing…' : 'Retry'}</button>
           </div>}
-          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+          <div className="flex flex-wrap items-center justify-between gap-3 mt-4 mb-3">
             <div role="group" aria-label="Volatility quote view" className="flex gap-1 rounded border border-gray-700 p-1 text-xs">
               <button type="button" aria-pressed={view === 'quotes'} onClick={() => setView('quotes')}
                 className={`rounded px-3 py-1.5 ${view === 'quotes' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>Bid &amp; ask</button>
@@ -140,7 +138,7 @@ export default function VolatilityPricing() {
           </div>
           <p className="text-xs text-gray-400 mb-2">{view === 'mark'
             ? 'Mark IV is a valuation reference, not the price available to buy. Ask and bid IV can rank differently.'
-            : 'Headline = mark IV. Bid = what buyers offer; ask = what sellers ask. Each is ranked against its own history: 0 = low, 100 = high.'}</p>
+            : 'Bid = what buyers offer; ask = what sellers ask. Each is ranked against its own history: 0 = low, 100 = high.'}</p>
           <p className="text-[10px] text-gray-500 mb-4">Summaries use the median across ±10% strikes at 7, 14, 30, 60 and 90 DTE. The grid includes additional strikes and maturities. History → now.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs border-separate border-spacing-1">
@@ -155,14 +153,14 @@ export default function VolatilityPricing() {
                   const cell = data.cells.find(c => c.offset === offset && c.dte === dte);
                   const active = selected?.offset === offset && selected?.dte === dte;
                   return <td key={dte} className={`p-0 tabular-nums ${view === 'mark' ? 'min-w-[82px]' : 'min-w-[172px]'}`}>
-                    <button type="button" disabled={unavailable || !cell}
+                    <button type="button" disabled={unavailable || initialLoading || !cell}
                       onClick={() => { setSelected({ offset, dte }); setCopied(null); }} aria-pressed={active}
                       aria-label={`${offsetLabel(offset)}, ${dte} DTE: view contracts`}
                       className={`grid ${view === 'mark' ? 'grid-cols-1' : 'grid-cols-2'} gap-px w-full rounded overflow-hidden text-center focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:cursor-default ${active ? 'ring-2 ring-inset ring-white' : 'hover:ring-1 hover:ring-inset hover:ring-white/50'}`}
                       style={{ backgroundColor: '#252525' }}>
-                      {view === 'mark' ? <QuoteSide label="Mark" quote={cell} unavailable={unavailable} /> : <>
-                        <QuoteSide label="Bid" quote={cell?.bid} unavailable={unavailable} />
-                        <QuoteSide label="Ask" quote={cell?.ask} unavailable={unavailable} />
+                      {view === 'mark' ? <QuoteSide label="Mark" quote={cell} unavailable={unavailable || initialLoading} /> : <>
+                        <QuoteSide label="Bid" quote={cell?.bid} unavailable={unavailable || initialLoading} />
+                        <QuoteSide label="Ask" quote={cell?.ask} unavailable={unavailable || initialLoading} />
                       </>}
                     </button>
                   </td>;
@@ -203,7 +201,7 @@ export default function VolatilityPricing() {
             <details>
               <summary className="cursor-pointer text-gray-400">Method</summary>
               <div className="mt-2 space-y-2">
-                <p>Hourly samples, up to 30 days. Minimum {MIN_HISTORY_SAMPLES}; provisional under 7 days. The meter uses mark IV; ask and bid summaries use the same strikes and maturities, with their own quote history.</p>
+                <p>Hourly samples, up to 30 days. Minimum {MIN_HISTORY_SAMPLES}; provisional under 7 days. Bid and ask meters use the same strikes and maturities, each with its own quote history. Mark IV is a separate valuation reference.</p>
                 <p>Strikes relative to spot. DTE = days to expiry. IV interpolated from quoted strikes and expiries.</p>
                 <p>Bid and ask each use their own history. Strips average hourly percentiles; gaps stay blank. Contracts match nearest quoted expiry, then strike.</p>
               </div>

@@ -33,7 +33,7 @@ function fixture() {
 
 // Keep React's rendered elements while driving the component's state and event
 // handlers directly. Polling is isolated; quote formatting and colors are real.
-function mount(data) {
+function mount(data, { loading = false, error = null } = {}) {
   let cursor = 0;
   const states = [];
   const Component = load('components/VolatilityPricing.tsx', name => {
@@ -46,7 +46,7 @@ function mount(data) {
         return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }];
       },
     };
-    if (name === '@/lib/hooks') return { usePolling: () => ({ data, error: null, loading: false, refetch: () => {} }), useLiveTimeAgo: () => '1m ago' };
+    if (name === '@/lib/hooks') return { usePolling: () => ({ data, error, loading, refetch: () => {} }), useLiveTimeAgo: () => '1m ago' };
     if (name === '@/lib/volatility-pricing') return pricing;
     throw new Error(`Unexpected module: ${name}`);
   }).default;
@@ -66,16 +66,34 @@ const cell = tree => find(tree, node => node.type === 'button' && node.props['ar
 const quoteToggle = tree => find(tree, node => node.type === 'button' && node.props.children === 'Bid & ask');
 const markToggle = tree => find(tree, node => node.type === 'button' && node.props.children === 'Mark');
 const card = tree => find(tree, node => node.type === 'button' && node.props['aria-haspopup'] === 'dialog');
+const summary = (tree, side) => find(tree, node => typeof node.type === 'function' && node.props.side === side && node.props.summary);
+const meters = html => Array.from(html.matchAll(/<div\b[^>]*\brole="meter"[^>]*>/g), match => ({
+  label: match[0].match(/aria-label="([^"]+)"/)[1],
+  score: Number(match[0].match(/aria-valuenow="([^"]+)"/)[1]),
+  status: match[0].match(/aria-valuetext="([^"]+)"/)[1],
+}));
+
+test('card and dialog lead with independent bid and ask prices, with mark only a secondary reference', () => {
+  const tree = mount(fixture())();
+  const headline = renderToStaticMarkup(card(tree));
+  assert.deepEqual(meters(headline), [
+    { label: 'Sell at bid historical IV percentile', score: 0, status: 'Low bids, 0 out of 100' },
+    { label: 'Buy at ask historical IV percentile', score: 97, status: 'Expensive, 97 out of 100' },
+  ]);
+  assert.ok(headline.includes('Mark reference: Cheap · 13/100 · IV 49.5%'));
+  assert.ok(!headline.includes('Mark IV · Cheap'));
+  const renderedBid = renderToStaticMarkup(summary(card(tree), 'bid'));
+  const renderedAsk = renderToStaticMarkup(summary(card(tree), 'ask'));
+  assert.ok(renderedBid.includes('Low bids'));
+  assert.ok(!renderedBid.includes('Cheap'));
+  assert.ok(renderedAsk.includes('Expensive'));
+  const dialog = find(tree, node => node.type === 'dialog');
+  assert.deepEqual(meters(renderToStaticMarkup(dialog)), meters(headline));
+});
 
 test('breakdown opens with red bid and green ask squares while mark remains an optional view', () => {
   const render = mount(fixture());
   let tree = render();
-  const headline = renderToStaticMarkup(card(tree));
-  assert.ok(headline.includes('Mark IV · Cheap'));
-  assert.ok(headline.includes('Ask IV · buy at ask'));
-  assert.ok(headline.includes('Expensive · 97/100'));
-  assert.ok(headline.includes('Bid IV · sell at bid'));
-  assert.ok(headline.includes('Cheap · 0/100'));
   assert.equal(quoteToggle(tree).props['aria-pressed'], true);
   let renderedCell = renderToStaticMarkup(cell(tree));
   assert.ok(renderedCell.includes('>Bid</div>'));
@@ -133,12 +151,51 @@ test('insufficient ask coverage is unrated while the mark remains rated', () => 
   const data = fixture();
   data.cells.forEach(c => { c.ask.percentile = null; });
   const tree = mount(data)();
-  const summaries = find(card(tree), node => node.type === 'div' && node.props.className.includes('border-t'));
-  const ask = React.Children.toArray(summaries.props.children)[0];
-  const renderedAsk = renderToStaticMarkup(ask);
+  const renderedAsk = renderToStaticMarkup(summary(card(tree), 'ask'));
   assert.ok(renderedAsk.includes('Unrated'));
-  assert.ok(!renderedAsk.includes('97/100'));
-  assert.ok(renderToStaticMarkup(card(tree)).includes('Mark IV · Cheap'));
+  assert.deepEqual(meters(renderedAsk), []);
+  assert.deepEqual(meters(renderToStaticMarkup(card(tree))).map(m => m.score), [0]);
+  assert.ok(renderToStaticMarkup(card(tree)).includes('Mark reference: Cheap · 13/100'));
+});
+
+test('bid and ask remain independently rated when mark history is unavailable', () => {
+  const data = fixture();
+  data.score = null;
+  data.label = 'Insufficient history / coverage';
+  data.currentIv = null;
+  data.cells.forEach(c => { c.percentile = null; c.iv = null; });
+  const headline = renderToStaticMarkup(card(mount(data)()));
+  assert.deepEqual(meters(headline).map(m => [m.score, m.status]), [
+    [0, 'Low bids, 0 out of 100'], [97, 'Expensive, 97 out of 100'],
+  ]);
+  assert.ok(headline.includes('Mark reference: Unrated'));
+});
+
+test('initial loading and failed quotes never show old side scores or mark context', () => {
+  const data = fixture();
+  data.asOf = '';
+  for (const options of [{ loading: true }, { error: 'Quotes failed' }]) {
+    const tree = mount(data, options)();
+    const headline = renderToStaticMarkup(card(tree));
+    assert.deepEqual(meters(headline), []);
+    assert.ok(!headline.includes('13/100'));
+    assert.ok(!headline.includes('49.5%'));
+    assert.ok(headline.includes(options.loading ? 'Loading…' : 'Quotes unavailable'));
+    assert.equal(cell(tree).props.disabled, true);
+    const renderedCell = renderToStaticMarkup(cell(tree));
+    assert.ok(!renderedCell.includes('38.8%'));
+    assert.ok(!renderedCell.includes('58.8%'));
+  }
+});
+
+test('bid summary names low, typical and high bids without a buy-side cheap label', () => {
+  for (const [score, label] of [[0, 'Low bids'], [50, 'Typical bids'], [100, 'High bids']]) {
+    const data = fixture();
+    data.cells.forEach(c => { c.bid.percentile = score; });
+    const html = renderToStaticMarkup(summary(card(mount(data)()), 'bid'));
+    assert.equal(meters(html)[0].status, `${label}, ${score} out of 100`);
+    assert.ok(!html.includes('Cheap'));
+  }
 });
 
 test('contract selection still works in mark and bid/ask views', () => {
