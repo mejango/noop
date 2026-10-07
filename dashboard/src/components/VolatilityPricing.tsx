@@ -25,14 +25,15 @@ function SideSummary({ label, summary, unavailable }: { label: string; summary: 
 
 function QuoteSide({ label, quote, unavailable }: { label: 'Mark' | 'Bid' | 'Ask'; quote?: PricingQuote; unavailable: boolean }) {
   const percentile = unavailable ? null : quote?.percentile;
-  return <div className="px-2 py-2" style={{ backgroundColor: pricingColor(percentile ?? null) }}>
+  const side = label === 'Bid' ? 'bid' : label === 'Ask' ? 'ask' : 'mark';
+  return <div className="px-2 py-2" style={{ backgroundColor: pricingColor(percentile ?? null, side) }}>
     <div className="text-[10px] text-gray-300">{label}</div>
     <div className="mt-1 text-gray-100 whitespace-nowrap">{percentile != null ? <><span className="text-lg font-medium">{Math.round(percentile)}</span><span className="text-[9px] text-gray-300"> / 100</span></> : <span className="text-xs text-gray-400">Unrated</span>}</div>
     <div className="text-[10px] text-gray-300 mt-1">IV {!unavailable && quote?.iv != null ? `${quote.iv.toFixed(1)}%` : '—'}</div>
     <div className={`flex h-1.5 mt-1 rounded-sm overflow-hidden ${(quote?.history?.length ?? 0) > 16 ? 'gap-0' : 'gap-px'}`} role="img"
       aria-label={unavailable ? `${label}: quotes unavailable` : `${label}: ${quote?.samples ?? 0} hourly observations, oldest to newest, followed by now`}>
       {(quote?.history ?? []).map((point, index, points) => <span key={point.at} className="flex-1 min-w-0"
-        style={{ backgroundColor: pricingColor(unavailable ? null : point.percentile) }}
+        style={{ backgroundColor: pricingColor(unavailable ? null : point.percentile, side) }}
         title={unavailable ? `${label}: quotes unavailable` : `${label} ${index === points.length - 1 ? 'now' : `${new Date(point.from ?? point.at).toLocaleString()}${point.from !== point.at ? ` – ${new Date(point.at).toLocaleTimeString()}` : ''}`}: ${point.iv != null ? `${point.iv.toFixed(1)}% IV` : 'No quote'}${point.percentile != null ? `, ${Math.round(point.percentile)}/100` : ''}`} />)}
     </div>
     <div className="text-[9px] text-gray-400 mt-1">{quote?.samples ?? 0}h</div>
@@ -43,7 +44,7 @@ export default function VolatilityPricing() {
   const { data, error, loading, refetch } = usePolling('/api/volatility-pricing', EMPTY, 15_000, 8_000);
   const age = useLiveTimeAgo(data.asOf);
   const [open, setOpen] = useState(false);
-  const [view, setView] = useState<'mark' | 'quotes'>('mark');
+  const [view, setView] = useState<'mark' | 'quotes'>('quotes');
   const [selected, setSelected] = useState<{ offset: number; dte: number } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -74,7 +75,7 @@ export default function VolatilityPricing() {
 
   return (
     <div className="glass sm:col-span-2 overflow-hidden">
-      <button type="button" onClick={() => { setView('mark'); setOpen(true); }} aria-haspopup="dialog"
+      <button type="button" onClick={() => { setView('quotes'); setOpen(true); }} aria-haspopup="dialog"
         className="w-full h-full text-left p-4 flex flex-col gap-2 hover:bg-white/[0.025] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-juice-orange">
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-sm font-semibold text-juice-orange">Volatility Pricing</h3>
@@ -128,16 +129,18 @@ export default function VolatilityPricing() {
           </div>}
           <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
             <div role="group" aria-label="Volatility quote view" className="flex gap-1 rounded border border-gray-700 p-1 text-xs">
-              <button type="button" aria-pressed={view === 'mark'} onClick={() => setView('mark')}
-                className={`rounded px-3 py-1.5 ${view === 'mark' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>Mark</button>
               <button type="button" aria-pressed={view === 'quotes'} onClick={() => setView('quotes')}
                 className={`rounded px-3 py-1.5 ${view === 'quotes' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>Bid &amp; ask</button>
+              <button type="button" aria-pressed={view === 'mark'} onClick={() => setView('mark')}
+                className={`rounded px-3 py-1.5 ${view === 'mark' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>Mark</button>
             </div>
-            <p className="text-[10px] text-gray-400"><span className="text-emerald-300">0 · Historically cheap</span> → 50 · Typical → <span className="text-amber-400">100 · Historically expensive</span></p>
+            {view === 'quotes'
+              ? <p className="text-[10px] text-gray-400"><span className="text-red-300">Bright red = historically expensive bids.</span> <span className="text-emerald-300">Bright green = historically cheap asks.</span></p>
+              : <p className="text-[10px] text-gray-400"><span className="text-emerald-300">0 · Historically cheap</span> → 50 · Typical → <span className="text-amber-400">100 · Historically expensive</span></p>}
           </div>
           <p className="text-xs text-gray-400 mb-2">{view === 'mark'
             ? 'Mark IV is a valuation reference, not the price available to buy. Ask and bid IV can rank differently.'
-            : 'Ask = buy at the quoted ask; bid = sell at the quoted bid. Each side is ranked against its own history.'}</p>
+            : 'Headline = mark IV. Bid = what buyers offer; ask = what sellers ask. Each is ranked against its own history: 0 = low, 100 = high.'}</p>
           <p className="text-[10px] text-gray-500 mb-4">Summaries use the median across ±10% strikes at 7, 14, 30, 60 and 90 DTE. The grid includes additional strikes and maturities. History → now.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs border-separate border-spacing-1">

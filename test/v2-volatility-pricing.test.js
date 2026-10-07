@@ -23,13 +23,15 @@ function expiry(dte, iv = 50, spot = 2000) {
 const frame = (at = now, iv = 50, spot = 2000) => ({ at, expiries: [1, 3, 7, 14, 30, 45, 60, 90, 180, 365].map(d => expiry(d, iv, spot)) });
 const history = (count = 30, iv = 50) => Array.from({ length: count * 24 }, (_, i) => frame(now - (i + 1) * HOUR, iv));
 
-test('mark, bid and ask share a cheap green, typical neutral, expensive amber scale', () => {
-  for (const side of ['mark', 'bid', 'ask']) {
-    assert.equal(pricingColor(0, side), 'hsl(165 55% 27%)');
-    assert.equal(pricingColor(50, side), 'hsl(165 0% 18%)');
-    assert.equal(pricingColor(100, side), 'hsl(38 55% 27%)');
-    assert.equal(pricingColor(null, side), '#252525');
-  }
+test('bid squares stay red and ask squares stay green, with brightness showing favorable quotes', () => {
+  assert.equal(pricingColor(0, 'bid'), 'hsl(0 55% 12%)');
+  assert.equal(pricingColor(100, 'bid'), 'hsl(0 55% 37%)');
+  assert.equal(pricingColor(0, 'ask'), 'hsl(165 55% 37%)');
+  assert.equal(pricingColor(100, 'ask'), 'hsl(165 55% 12%)');
+  assert.equal(pricingColor(0, 'mark'), 'hsl(165 55% 27%)');
+  assert.equal(pricingColor(50, 'mark'), 'hsl(165 0% 18%)');
+  assert.equal(pricingColor(100, 'mark'), 'hsl(38 55% 27%)');
+  for (const side of ['mark', 'bid', 'ask']) assert.equal(pricingColor(null, side), '#252525');
 });
 
 test('constant maturity interpolates total variance, refusing unbracketed horizons', () => {

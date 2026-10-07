@@ -67,7 +67,7 @@ const quoteToggle = tree => find(tree, node => node.type === 'button' && node.pr
 const markToggle = tree => find(tree, node => node.type === 'button' && node.props.children === 'Mark');
 const card = tree => find(tree, node => node.type === 'button' && node.props['aria-haspopup'] === 'dialog');
 
-test('cheap mark and expensive asks remain distinct in the headline and interactive breakdown', () => {
+test('breakdown opens with red bid and green ask squares while mark remains an optional view', () => {
   const render = mount(fixture());
   let tree = render();
   const headline = renderToStaticMarkup(card(tree));
@@ -76,27 +76,34 @@ test('cheap mark and expensive asks remain distinct in the headline and interact
   assert.ok(headline.includes('Expensive · 97/100'));
   assert.ok(headline.includes('Bid IV · sell at bid'));
   assert.ok(headline.includes('Cheap · 0/100'));
-  assert.equal(markToggle(tree).props['aria-pressed'], true);
-  let renderedCell = renderToStaticMarkup(cell(tree));
-  assert.ok(renderedCell.includes('>Mark</div>'));
-  assert.ok(renderedCell.includes(`background-color:${pricing.pricingColor(13)}`));
-  assert.ok(renderedCell.includes('IV 49.5%'));
-  assert.ok(!renderedCell.includes('IV 58.8%'));
-
-  quoteToggle(tree).props.onClick();
-  tree = render();
   assert.equal(quoteToggle(tree).props['aria-pressed'], true);
-  renderedCell = renderToStaticMarkup(cell(tree));
+  let renderedCell = renderToStaticMarkup(cell(tree));
   assert.ok(renderedCell.includes('>Bid</div>'));
   assert.ok(renderedCell.includes('>Ask</div>'));
-  assert.ok(renderedCell.includes(`background-color:${pricing.pricingColor(0)}`));
-  assert.ok(renderedCell.includes(`background-color:${pricing.pricingColor(97)}`));
+  assert.ok(renderedCell.includes(`background-color:${pricing.pricingColor(0, 'bid')}`));
+  assert.ok(renderedCell.includes(`background-color:${pricing.pricingColor(97, 'ask')}`));
+  assert.ok(renderedCell.includes('background-color:hsl(0 '), 'bid square must use the red palette');
+  assert.ok(renderedCell.includes('background-color:hsl(165 '), 'ask square must use the green palette');
   assert.ok(renderedCell.includes('IV 38.8%'));
   assert.ok(renderedCell.includes('IV 58.8%'));
   assert.ok(!renderedCell.includes('IV 49.5%'));
 
+  markToggle(tree).props.onClick();
+  tree = render();
+  assert.equal(markToggle(tree).props['aria-pressed'], true);
+  renderedCell = renderToStaticMarkup(cell(tree));
+  assert.ok(renderedCell.includes('>Mark</div>'));
+  assert.ok(renderedCell.includes(`background-color:${pricing.pricingColor(13, 'mark')}`));
+  assert.ok(renderedCell.includes('IV 49.5%'));
+  assert.ok(!renderedCell.includes('IV 38.8%'));
+  assert.ok(!renderedCell.includes('IV 58.8%'));
+
   card(tree).props.onClick();
-  assert.equal(markToggle(render()).props['aria-pressed'], true, 'opening the headline always starts on its mark basis');
+  tree = render();
+  assert.equal(quoteToggle(tree).props['aria-pressed'], true, 'reopening always restores bid and ask squares');
+  renderedCell = renderToStaticMarkup(cell(tree));
+  assert.ok(renderedCell.includes('>Bid</div>'));
+  assert.ok(renderedCell.includes('>Ask</div>'));
 });
 
 test('stale prices cannot leak through either view, summary or history tooltip', () => {
@@ -105,7 +112,8 @@ test('stale prices cannot leak through either view, summary or history tooltip',
   const render = mount(data);
   for (const view of ['mark', 'quotes']) {
     let tree = render();
-    if (view === 'quotes') { quoteToggle(tree).props.onClick(); tree = render(); }
+    (view === 'quotes' ? quoteToggle(tree) : markToggle(tree)).props.onClick();
+    tree = render();
     const headline = renderToStaticMarkup(card(tree));
     assert.ok(headline.includes('Quotes unavailable'));
     assert.ok(!headline.includes('role="meter"'));
@@ -142,7 +150,8 @@ test('contract selection still works in mark and bid/ask views', () => {
   const render = mount(data);
   for (const view of ['mark', 'quotes']) {
     let tree = render();
-    if (view === 'quotes') { quoteToggle(tree).props.onClick(); tree = render(); }
+    (view === 'quotes' ? quoteToggle(tree) : markToggle(tree)).props.onClick();
+    tree = render();
     cell(tree).props.onClick();
     tree = render();
     const details = find(tree, node => node.type === 'section' && node.props['aria-label'] === 'Selected volatility contracts');

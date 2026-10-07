@@ -15,10 +15,13 @@ export type VolatilityInstrument = {
   bid: number | null; bidAmount: number | null; bidIv: number | null;
 };
 export type PricingHistoryPoint = { at: string; from?: string; iv: number | null; percentile: number | null };
-// Every quote side uses the same cheap → typical → expensive color scale.
-export const pricingColor = (percentile: number | null) => {
+// Bid/ask colors identify the quote side; brightness highlights higher bids or
+// lower asks. The optional mark view uses a cheap → typical → expensive scale.
+export const pricingColor = (percentile: number | null, side: 'mark' | 'bid' | 'ask' = 'mark') => {
   if (percentile == null) return '#252525';
   const rank = Math.max(0, Math.min(100, percentile));
+  if (side === 'bid') return `hsl(0 55% ${12 + rank * 0.25}%)`;
+  if (side === 'ask') return `hsl(165 55% ${12 + (100 - rank) * 0.25}%)`;
   const strength = Math.abs(rank - 50) / 50;
   return `hsl(${rank <= 50 ? 165 : 38} ${strength * 55}% ${18 + strength * 9}%)`;
 };
