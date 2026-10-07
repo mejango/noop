@@ -9571,8 +9571,9 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           continue;
         }
 
-        // Cooldown check: skip if same action was executed within the last hour
-        const lastExec = db.getLastExecutedAction(rule.action);
+        // Put entries follow thesis and remaining-budget checks without a post-fill delay.
+        // Keep the existing pacing for other entry actions.
+        const lastExec = rule.action === 'buy_put' ? null : db.getLastExecutedAction(rule.action);
         if (lastExec) {
           const elapsed = Date.now() - new Date(lastExec).getTime();
           if (elapsed < 3600000) {

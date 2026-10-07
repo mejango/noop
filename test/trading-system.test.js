@@ -2853,7 +2853,7 @@ describe('Confirmation result handling paths', () => {
 // 20. Cooldown logic
 // ============================================================================
 
-describe('Entry cooldown (1 hour between same action type)', () => {
+describe('Sell-call entry cooldown (1 hour between fills)', () => {
   test('last executed 30 min ago → still in cooldown', () => {
     const lastExecuted = new Date(Date.now() - 30 * 60 * 1000).toISOString();
     const cooldownMs = 60 * 60 * 1000;
@@ -5176,10 +5176,10 @@ describe('Patient buy-put reviewer authority', () => {
 });
 
 // ============================================================================
-// 40. Fixture scenario: cooldown prevents rapid-fire entries
+// 40. Sell-call execution pacing and entry failure cooldowns
 // ============================================================================
 
-describe('Entry cooldown logic', () => {
+describe('Sell-call execution pacing and entry failure cooldowns', () => {
   const { isIocZeroFillFailure } = loadProduction(['isIocZeroFillFailure']);
   const shouldSkipForFailedEntryCooldown = (action, failure) => {
     if (!failure) return false;

@@ -16,33 +16,35 @@ const superior = 'ETH-20301114-1450-P';
 const target = 0.00625;
 const closeTo = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-12, `${actual} != ${expected}`);
 
-function fixture({ reverse = false, criteria = {}, quotes = [[inferior, 20, 1400, -0.05], [superior, 12.5, 1450, -0.05]] } = {}) {
+function fixture({ reverse = false, criteria = {}, budget = {}, resting = [], working = [], lastExecutedAt = null,
+  quotes = [[inferior, 20, 1400, -0.05], [superior, 12.5, 1450, -0.05]] } = {}) {
   const inserted = [], decisions = [], frames = [], logs = [];
-  const botData = { putBudgetForCycle: 100, putUnspentBuyLimit: 0, putNetBought: 0 };
+  const botData = { putBudgetForCycle: 100, putUnspentBuyLimit: 0, putNetBought: 0, ...budget };
   const rule = { id: 71, action: 'buy_put', rule_type: 'entry', preferred_order_type: 'post_only', budget_limit: 100,
     criteria: { option_type: 'P', delta_range: [-0.12, -0.02], dte_range: [45, 78],
       min_score: 0.001, target_score: target, ...criteria } };
   const db = {
     getActiveRulesByType: type => type === 'entry' ? [rule] : [],
-    getRecentPendingActions: () => [], getPendingActions: () => [], getLastExecutedAction: () => null,
+    getRecentPendingActions: () => working,
+    getPendingActions: status => working.filter(action => action.status === status),
+    getLastExecutedAction: () => lastExecutedAt,
     insertPendingAction: row => { inserted.push(row); return { lastInsertRowid: 123 }; },
   };
   const pure = loadProduction([
     'getBuyPutEntryPricing', 'classifyBuyPutEdge', 'computeDteFromInstrumentName', 'getTickerImpliedVol',
     'normalizeBuyPutValueSignal', 'hasExplicitBuyPutValueSignal', 'isActionableBuyPutSignal',
     'summarizeReservedEntryCapacity', 'floorOrderAmountToVenuePrecision', 'isVenueOrderAmountTradable',
-    'normalizePreferredOrderType', 'roundForAdvisory',
+    'normalizePreferredOrderType', 'roundForAdvisory', 'hasPendingOrConfirmedActionForRule',
   ], { bindings: { Date: Clock, botData, db } });
   const bindings = {
     ...pure, Date: Clock, botData, db,
     console: { log: message => logs.push(message), warn: message => logs.push(message), error: message => logs.push(message) },
     logRuleDecisionSafe: row => decisions.push(row),
-    getOpenRestingEntryOrders: () => [], fetchSubaccount: async () => null,
+    getOpenRestingEntryOrders: () => resting, fetchSubaccount: async () => null,
     reassessRestingEntryOrders: async () => ({ queuedCount: 0, blockedActions: new Set(), plans: new Map() }),
     buildLiveSellCallMarketContext: () => ({}),
     getBestCurrentBuyPutEdgeCandidate: () => null, getBestCurrentSellCallCandidate: () => null,
     buildRollingOptionValueContext: () => ({ action_pressure: { signal: 'standing_patient_bid' } }),
-    hasPendingOrConfirmedActionForRule: () => false,
     getBlockingRestingOrderForEntryCandidate: () => null,
     getRecentRejectedAction: () => null, getRecentFailedEntry: () => null,
     buildCandidateObservationRows: frame => { frames.push(frame); return []; },
@@ -125,4 +127,69 @@ test('legacy PUT composite thresholds do not suppress an otherwise valid normali
   closeTo(pending.trigger_details.planned_score, target);
   assert.equal(pending.trigger_details.candidates_evaluated, 2);
   assert.equal(f.decisions.some(row => row.reason_code === 'no_candidates'), false);
+});
+
+const recentFill = new Clock(now - 60_000).toISOString();
+
+test('a recent PUT fill permits another eligible entry sized from the remaining cycle budget', async () => {
+  const f = fixture({ lastExecutedAt: recentFill, budget: { putNetBought: 70 } });
+  const pending = await selected(f);
+  assert.equal(pending.instrument_name, superior);
+  assert.equal(pending.price, 8);
+  assert.equal(pending.amount, 3.75);
+  assert.equal(pending.amount * pending.price, 30);
+  assert.ok(pending.trigger_details.planned_score >= target);
+  assert.equal(f.decisions.some(row => row.reason_code === 'action_cooldown'), false);
+});
+
+test('recent PUT fills still leave cycle spending and outstanding reservations unavailable for new orders', async () => {
+  for (const options of [
+    { budget: { putNetBought: 100 } },
+    { budget: { putNetBought: 60 }, resting: [{ order_id: 'other-rule-order', rule_id: 72,
+      instrument_name: superior, action: 'buy_put', amount: 7, filled_amount: 2, limit_price: 8 }] },
+  ]) {
+    const f = fixture({ lastExecutedAt: recentFill, ...options });
+    assert.equal(await f.run(), 0, f.logs.join('\n'));
+    assert.equal(f.inserted.length, 0);
+    const decision = f.decisions.find(row => row.reason_code === 'put_budget_unavailable');
+    assert.ok(decision, f.logs.join('\n'));
+    assert.equal(decision.context_json.reserved, options.resting ? 40 : 0);
+  }
+});
+
+test('removing PUT post-fill pacing preserves pending and confirmed duplicate protection across rules', async () => {
+  for (const status of ['pending', 'confirmed']) {
+    for (const ruleId of [71, 72]) {
+      const f = fixture({ lastExecutedAt: recentFill,
+        working: [{ id: 55, rule_id: ruleId, action: 'buy_put', instrument_name: superior, status }] });
+      assert.equal(await f.run(), 0, f.logs.join('\n'));
+      assert.equal(f.inserted.length, 0);
+      const reason = ruleId === 71 ? 'pending_duplicate' : 'working_action_duplicate';
+      assert.ok(f.decisions.some(row => row.reason_code === reason), f.logs.join('\n'));
+    }
+  }
+});
+
+test('a partially filled resting PUT still prevents another entry after a recent fill', async () => {
+  const f = fixture({ lastExecutedAt: recentFill, budget: { putNetBought: 70 },
+    resting: [{ order_id: 'incumbent', rule_id: 71, instrument_name: superior,
+      action: 'buy_put', amount: 5, filled_amount: 2, limit_price: 8 }] });
+  assert.equal(await f.run(), 0, f.logs.join('\n'));
+  assert.equal(f.inserted.length, 0);
+  assert.ok(f.decisions.some(row => row.reason_code === 'existing_resting_reassessed'), f.logs.join('\n'));
+});
+
+test('a recent PUT fill does not bypass delta, expiry, or achievable bid-price requirements', async () => {
+  for (const [criteria, filter] of [
+    [{ delta_range: [-0.12, -0.08] }, 'deltaOut'],
+    [{ dte_range: [45, 55] }, 'dteOut'],
+    [{ min_score: 10, target_score: 10 }, 'scoreOut'],
+  ]) {
+    const f = fixture({ lastExecutedAt: recentFill, criteria });
+    assert.equal(await f.run(), 0, f.logs.join('\n'));
+    assert.equal(f.inserted.length, 0);
+    const decision = f.decisions.find(row => row.reason_code === 'no_candidates');
+    assert.ok(decision, f.logs.join('\n'));
+    assert.equal(decision.context_json.filter_stats[filter], 2);
+  }
 });

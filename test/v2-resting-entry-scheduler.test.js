@@ -253,8 +253,8 @@ test('terminal reconciliation and recent rejection do not create additional repl
   assert.match(result.plans.get('incumbent').reason, /Price ceiling rejected/);
 });
 
-function integratedFixture(replace) {
-  const f = fixture('buy_put', { replace });
+function integratedFixture(replace, action = 'buy_put') {
+  const f = fixture(action, { replace });
   f.bindings.db.getActiveRulesByType = type => type === 'entry' ? f.rules : [];
   f.bindings.db.getRecentPendingActions = () => [];
   f.bindings.db.getLastExecutedAction = () => { f.events.push('cooldown'); return new Clock(now - 300_000).toISOString(); };
@@ -275,8 +275,8 @@ function integratedFixture(replace) {
   return f;
 }
 
-test('actual entry evaluation maintains a canonical incumbent before the new-entry cooldown gate', async () => {
-  const f = integratedFixture(false);
+test('actual entry evaluation maintains a canonical call incumbent before the unchanged sell-call cooldown gate', async () => {
+  const f = integratedFixture(false, 'sell_call');
   assert.equal(await f.evaluate(), 0);
   assert.ok(f.events.indexOf('fresh-quote') >= 0);
   assert.ok(f.events.indexOf('fresh-quote') < f.events.indexOf('cooldown'));
@@ -284,7 +284,7 @@ test('actual entry evaluation maintains a canonical incumbent before the new-ent
   assert.deepEqual(f.decisions.map(row => row.reason_code), ['resting_entry_keep', 'action_cooldown']);
 });
 
-test('actual entry evaluation queues incumbent repricing despite cooldown and blocks global replacement competition', async () => {
+test('actual entry evaluation queues put incumbent repricing after a recent fill and blocks global replacement competition', async () => {
   const f = integratedFixture(true);
   assert.equal(await f.evaluate(), 1);
   assert.equal(f.inserted.length, 1);
