@@ -15,8 +15,13 @@ export type VolatilityInstrument = {
   bid: number | null; bidAmount: number | null; bidIv: number | null;
 };
 export type PricingHistoryPoint = { at: string; from?: string; iv: number | null; percentile: number | null };
-export const pricingColor = (percentile: number | null, side: 'bid' | 'ask' = 'ask') => percentile == null
-  ? '#252525' : `hsl(${side === 'bid' ? 0 : 165} 55% ${12 + (side === 'bid' ? percentile : 100 - percentile) * 0.25}%)`;
+// Every quote side uses the same cheap → typical → expensive color scale.
+export const pricingColor = (percentile: number | null) => {
+  if (percentile == null) return '#252525';
+  const rank = Math.max(0, Math.min(100, percentile));
+  const strength = Math.abs(rank - 50) / 50;
+  return `hsl(${rank <= 50 ? 165 : 38} ${strength * 55}% ${18 + strength * 9}%)`;
+};
 
 export type PricingQuote = {
   iv: number | null;
@@ -43,6 +48,35 @@ const median = (values: number[]) => {
 
 export type IvSide = 'mark' | 'bid' | 'ask';
 
+export type PricingSummary = {
+  score: number | null; label: string; qualifier: string;
+  measured: number; total: number; currentIv: number | null;
+};
+
+// Compare each side over the same core grid while requiring that side's own
+// quoted history. Exploration wings and extra maturities never change the meter.
+export function summarizePricingSide(cells: PricingCell[], side: IvSide): PricingSummary {
+  const core = cells.filter(c => SUMMARY_TENORS.includes(c.dte) && Math.abs(c.offset) <= 0.1);
+  const quote = (cell: PricingCell): PricingQuote => side === 'mark' ? cell : cell[side];
+  const measured = core.filter(c => quote(c).percentile != null);
+  const broad = measured.length >= 13 && new Set(measured.map(c => c.dte)).size >= 3
+    && new Set(measured.map(c => c.offset)).size >= 3;
+  const score = broad ? Math.round(median(measured.map(c => quote(c).percentile!))) : null;
+  const label = score == null ? 'Insufficient history / coverage' : score <= 25 ? 'Cheap' : score >= 75 ? 'Expensive' : 'Typical';
+  const cheap = measured.filter(c => quote(c).percentile! <= 25).length;
+  const expensive = measured.filter(c => quote(c).percentile! >= 75).length;
+  const qualifier = score == null ? `Need ${MIN_HISTORY_SAMPLES} hourly observations and broad quoted coverage`
+    : cheap >= measured.length * 0.7 ? 'Cheap broadly'
+    : expensive >= measured.length * 0.7 ? 'Expensive broadly'
+    : cheap > 0 && expensive > 0 ? 'Mixed across strikes and maturities' : 'Broadly similar pricing';
+  const currentIvs = core.map(c => quote(c).iv).filter((iv): iv is number => iv != null);
+  return {
+    score, label, qualifier, measured: measured.length,
+    total: SUMMARY_TENORS.length * OFFSETS.filter(offset => Math.abs(offset) <= 0.1).length,
+    currentIv: currentIvs.length ? median(currentIvs) : null,
+  };
+}
+
 // Quote-backed IV, sampled at fixed strike/spot distance. Never extrapolate
 // beyond quoted strikes or bridge missing quotes across the smile.
 export function ivAtOffset(e: SmileExpiry, offset: number, side: IvSide = 'mark'): number | null {
@@ -50,13 +84,20 @@ export function ivAtOffset(e: SmileExpiry, offset: number, side: IvSide = 'mark'
   const strike = e.spot * (1 + offset);
   const points = e.points.filter(p => Number.isFinite(p.strike) && p.strike > 0)
     .sort((a, b) => a.strike - b.strike);
-  const value = (p: typeof points[number]) => side === 'bid' ? p.bidIv : side === 'ask' ? p.askIv : p.iv;
+  // The recorder stores IVs to four decimal places (0.01 vol points). Match
+  // that precision before interpolation so an unchanged live quote ties its
+  // recorded history instead of acquiring an extreme rank from extra digits.
+  const precision = (iv: number | null) => iv == null ? null : Math.round(iv * 100) / 100;
+  const value = (p: typeof points[number]) => precision(side === 'bid' ? p.bidIv : side === 'ask' ? p.askIv : p.iv);
   const valid = (p: typeof points[number]) => {
+    // Rounding must never conceal a crossed raw market.
+    if (p.bidIv != null && p.askIv != null && p.bidIv > 0 && p.askIv > 0 && p.askIv < p.bidIv) return false;
     const iv = value(p);
     if (iv == null || !Number.isFinite(iv) || iv <= 0) return false;
-    const twoSided = p.bidIv != null && p.askIv != null && p.bidIv > 0 && p.askIv > 0;
+    const bidIv = precision(p.bidIv), askIv = precision(p.askIv), markIv = precision(p.iv);
+    const twoSided = bidIv != null && askIv != null && bidIv > 0 && askIv > 0;
     if (side === 'mark' && !twoSided) return false;
-    return !twoSided || (p.askIv! >= p.bidIv! && (p.askIv! - p.bidIv!) / p.iv <= 0.5);
+    return !twoSided || (askIv! >= bidIv! && (askIv! - bidIv!) / markIv! <= 0.5);
   };
   for (let i = 0; i < points.length; i++) {
     const p = points[i];
@@ -176,21 +217,10 @@ export function buildVolatilityPricing(current: PricingFrame, history: PricingFr
     };
   }));
   const measured = cells.filter(c => c.percentile != null);
-  // Keep the headline comparable as the exploration grid expands.
-  const summary = measured.filter(c => SUMMARY_TENORS.includes(c.dte) && Math.abs(c.offset) <= 0.1);
-  const broad = summary.length >= 13 && new Set(summary.map(c => c.dte)).size >= 3
-    && new Set(summary.map(c => c.offset)).size >= 3;
-  const score = broad ? Math.round(median(summary.map(c => c.percentile!))) : null;
-  const label = score == null ? 'Insufficient history / coverage' : score <= 25 ? 'Cheap' : score >= 75 ? 'Expensive' : 'Typical';
-  const cheap = summary.filter(c => c.percentile! <= 25).length;
-  const expensive = summary.filter(c => c.percentile! >= 75).length;
-  const qualifier = score == null ? `Need ${MIN_HISTORY_SAMPLES} hourly observations and broad quoted coverage`
-    : cheap >= summary.length * 0.7 ? 'Cheap broadly'
-    : expensive >= summary.length * 0.7 ? 'Expensive broadly'
-    : cheap > 0 && expensive > 0 ? 'Mixed across strikes and maturities' : 'Broadly similar pricing';
+  const { score, label, qualifier, currentIv } = summarizePricingSide(cells, 'mark');
   return {
     asOf: new Date(current.at).toISOString(), score, label, qualifier, spot, cells,
-    currentIv: cells.some(c => c.iv != null) ? median(cells.filter(c => c.iv != null).map(c => c.iv!)) : null,
+    currentIv,
     historyDays: frames.length ? Math.ceil((current.at - frames[0].at) / DAY) : 0, historySamples: frames.length, historyFrom: frames.length ? new Date(frames[0].at).toISOString() : null,
     historyTo: frames.length ? new Date(frames[frames.length - 1].at).toISOString() : null,
     provisional: frames.length < 7 * 24, measured: measured.length, total: cells.length,

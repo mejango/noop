@@ -9,7 +9,7 @@ new Function('module', 'exports', ts.transpileModule(
   fs.readFileSync(`${__dirname}/../dashboard/src/lib/volatility-pricing.ts`, 'utf8'),
   { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
 ).outputText)(mod, mod.exports);
-const { ivAtOffset, ivAtTenor, buildVolatilityPricing, nearestVolatilityInstruments, pricingColor, sampleHourly } = mod.exports;
+const { ivAtOffset, ivAtTenor, buildVolatilityPricing, summarizePricingSide, nearestVolatilityInstruments, pricingColor, sampleHourly } = mod.exports;
 const DAY = 86400000;
 const HOUR = 3600000;
 const now = Date.parse('2026-10-01T12:00:00Z');
@@ -23,13 +23,13 @@ function expiry(dte, iv = 50, spot = 2000) {
 const frame = (at = now, iv = 50, spot = 2000) => ({ at, expiries: [1, 3, 7, 14, 30, 45, 60, 90, 180, 365].map(d => expiry(d, iv, spot)) });
 const history = (count = 30, iv = 50) => Array.from({ length: count * 24 }, (_, i) => frame(now - (i + 1) * HOUR, iv));
 
-test('bright red highlights expensive bids; bright green highlights cheap asks', () => {
-  assert.equal(pricingColor(100, 'bid'), 'hsl(0 55% 37%)');
-  assert.equal(pricingColor(0, 'bid'), 'hsl(0 55% 12%)');
-  assert.equal(pricingColor(0, 'ask'), 'hsl(165 55% 37%)');
-  assert.equal(pricingColor(100, 'ask'), 'hsl(165 55% 12%)');
-  assert.equal(pricingColor(null, 'bid'), '#252525');
-  assert.equal(pricingColor(null, 'ask'), '#252525');
+test('mark, bid and ask share a cheap green, typical neutral, expensive amber scale', () => {
+  for (const side of ['mark', 'bid', 'ask']) {
+    assert.equal(pricingColor(0, side), 'hsl(165 55% 27%)');
+    assert.equal(pricingColor(50, side), 'hsl(165 0% 18%)');
+    assert.equal(pricingColor(100, side), 'hsl(38 55% 27%)');
+    assert.equal(pricingColor(null, side), '#252525');
+  }
 });
 
 test('constant maturity interpolates total variance, refusing unbracketed horizons', () => {
@@ -50,6 +50,12 @@ test('missing, crossed and wide quotes are not interpolated through or extrapola
   assert.equal(ivAtOffset(e, 0), null);
   e.points[4].askIv = 100;
   assert.equal(ivAtOffset(e, 0), null);
+  e.points[4].bidIv = 50.004;
+  e.points[4].askIv = 50.003;
+  for (const side of ['mark', 'bid', 'ask']) {
+    assert.equal(ivAtOffset(e, 0, side), null, 'rounding cannot hide a crossed raw market');
+    assert.equal(ivAtOffset(e, 0.025, side), null);
+  }
 });
 
 test('cheap, expensive and tied markets produce scores 0, 100 and 50', () => {
@@ -125,6 +131,84 @@ test('bid and ask priciness each use their own historical quote side', () => {
   assert.equal(cell.ask.history.at(-1).percentile, 0);
 });
 
+test('cheap marks and bids can coexist with expensive asks, with each summary traceable to its own cells', () => {
+  const past = Array.from({ length: 100 }, (_, i) => frame(now - (i + 1) * HOUR, 48 + i / 10));
+  const current = frame(now, 49.25);
+  current.expiries.forEach(e => e.points.forEach(p => { p.bidIv = 40; p.askIv = 59; }));
+  const result = buildVolatilityPricing(current, past);
+  assert.equal(result.score, 13);
+  assert.equal(result.label, 'Cheap');
+  assert.equal(result.currentIv, 49.25);
+  for (const [side, expected] of [['mark', 13], ['bid', 0], ['ask', 100]]) {
+    const summary = summarizePricingSide(result.cells, side);
+    assert.equal(summary.score, expected);
+    assert.equal(summary.measured, 25);
+    assert.equal(summary.total, 25);
+    assert.equal(summary.label, side === 'ask' ? 'Expensive' : 'Cheap');
+  }
+});
+
+test('each summary requires its own broad rated coverage but can show unrated current IV', () => {
+  const result = buildVolatilityPricing(frame(), history(2));
+  const cells = result.cells.map(c => ({ ...c,
+    ask: { ...c.ask, percentile: c.dte <= 30 ? c.ask.percentile : null },
+    bid: { ...c.bid, percentile: c.dte <= 14 ? c.bid.percentile : null },
+  }));
+  const mark = summarizePricingSide(cells, 'mark');
+  const ask = summarizePricingSide(cells, 'ask');
+  const bid = summarizePricingSide(cells, 'bid');
+  assert.equal(mark.score, 50);
+  assert.equal(mark.measured, 25);
+  assert.equal(ask.score, 50);
+  assert.equal(ask.measured, 15);
+  assert.equal(bid.score, null);
+  assert.equal(bid.measured, 10);
+  assert.equal(bid.total, 25);
+  assert.equal(bid.currentIv, 49);
+  const noHistory = buildVolatilityPricing(frame(), []);
+  for (const side of ['mark', 'bid', 'ask']) {
+    const summary = summarizePricingSide(noHistory.cells, side);
+    assert.equal(summary.score, null);
+    assert.equal(summary.measured, 0);
+    assert.equal(summary.currentIv, side === 'mark' ? 50 : side === 'bid' ? 49 : 51);
+  }
+});
+
+test('live and compact snapshots give identical ranks for an unchanged market at recorder precision', () => {
+  const smile = { exports: {} };
+  new Function('module', 'exports', ts.transpileModule(
+    fs.readFileSync(`${__dirname}/../dashboard/src/lib/vol-smile.ts`, 'utf8'),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+  ).outputText)(smile, smile.exports);
+  const { buildExpiry, fromCompact } = smile.exports;
+  const { buildSmileRows } = require('../bot/iv-smile');
+  const quotes = (at, compact) => ({ at, expiries: [2, 10, 20, 40, 80, 120, 200].map(dte => {
+    const expiry = (at + dte * DAY) / 1000;
+    const date = new Date(expiry * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+    const tickers = Object.fromEntries([1500, 1750, 2000, 2250, 2500].map(strike => {
+      const type = strike < 2000 ? 'P' : 'C';
+      const iv = 0.50001 + (strike - 2000) / 100000;
+      return [`ETH-${date}-${strike}-${type}`, {
+        I: '2003', option_pricing: { f: '2000', d: type === 'P' ? '-0.25' : '0.25',
+          i: String(iv), bi: String(iv - 0.01), ai: String(iv + 0.01) },
+      }];
+    }));
+    return compact ? fromCompact(buildSmileRows(tickers, { [date]: expiry })[0], at)
+      : buildExpiry(expiry, tickers, at);
+  }) });
+  const past = Array.from({ length: 48 }, (_, i) => quotes(now - (i + 1) * HOUR, true));
+  const live = buildVolatilityPricing(quotes(now, false), past);
+  const recorded = buildVolatilityPricing(quotes(now, true), past);
+  assert.equal(live.score, 50);
+  assert.equal(recorded.score, 50);
+  const ratings = data => data.cells.map(c => [c.iv, c.percentile, c.bid.iv, c.bid.percentile, c.ask.iv, c.ask.percentile]);
+  assert.deepEqual(ratings(live), ratings(recorded));
+  const interpolated = live.cells.find(c => c.dte === 30 && c.offset === 0.05);
+  assert.equal(interpolated.percentile, 50);
+  assert.equal(interpolated.bid.percentile, 50);
+  assert.equal(interpolated.ask.percentile, 50);
+});
+
 test('a missing ask cannot hide a valid bid or manufacture an ask percentile', () => {
   const current = frame();
   const past = history(2);
@@ -185,7 +269,22 @@ test('expanding the exploration grid preserves the headline meter comparison', (
       p.iv = 100; p.bidIv = 99; p.askIv = 101;
     }
   }));
-  assert.equal(buildVolatilityPricing(current, history(5)).score, 50);
+  const result = buildVolatilityPricing(current, history(5));
+  assert.equal(result.score, 50);
+  assert.equal(result.currentIv, 50);
+  assert.equal(result.measured, 81);
+  assert.equal(result.total, 81);
+  for (const side of ['mark', 'bid', 'ask']) {
+    const summary = summarizePricingSide(result.cells, side);
+    assert.equal(summary.score, 50);
+    assert.equal(summary.currentIv, side === 'mark' ? 50 : side === 'bid' ? 49 : 51);
+  }
+  const excludedTenors = result.cells.map(c => [1, 3, 45, 180].includes(c.dte)
+    ? { ...c, iv: 100, percentile: 100, bid: { ...c.bid, iv: 100, percentile: 100 }, ask: { ...c.ask, iv: 100, percentile: 100 } }
+    : c);
+  for (const side of ['mark', 'bid', 'ask']) {
+    assert.equal(summarizePricingSide(excludedTenors, side).score, 50);
+  }
 });
 
 function quotedExpiry(dte) {

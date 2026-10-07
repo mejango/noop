@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useLiveTimeAgo, usePolling } from '@/lib/hooks';
-import { TENORS, OFFSETS, MIN_HISTORY_SAMPLES, pricingColor, type VolatilityPricingData, type PricingQuote } from '@/lib/volatility-pricing';
+import { TENORS, OFFSETS, MIN_HISTORY_SAMPLES, pricingColor, summarizePricingSide, type VolatilityPricingData, type PricingQuote } from '@/lib/volatility-pricing';
 
 const EMPTY: VolatilityPricingData = {
   asOf: '', score: null, label: '', qualifier: '', spot: null, currentIv: null, cells: [],
@@ -12,17 +12,28 @@ const money = (v: number) => v.toLocaleString(undefined, { style: 'currency', cu
 const offsetLabel = (v: number) => v === 0 ? 'At spot' : `${v > 0 ? '+' : '−'}${Math.round(Math.abs(v) * 100)}%`;
 const date = (v: string) => new Date(v).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 
-function QuoteSide({ label, quote, unavailable }: { label: 'Bid' | 'Ask'; quote?: PricingQuote; unavailable: boolean }) {
+const scoreClass = (score: number | null) => score != null && score <= 25 ? 'text-emerald-300' : score != null && score >= 75 ? 'text-amber-400' : 'text-gray-300';
+
+function SideSummary({ label, summary, unavailable }: { label: string; summary: ReturnType<typeof summarizePricingSide>; unavailable: boolean }) {
+  const score = unavailable ? null : summary.score;
+  return <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[10px]"
+    title={unavailable ? 'Quotes unavailable' : `${summary.qualifier}; ${summary.measured}/${summary.total} core cells rated`}>
+    <span className="text-gray-400">{label}</span>
+    <span className={scoreClass(score)}>{unavailable ? 'Unavailable' : score == null ? 'Unrated' : `${summary.label} · ${score}/100`}</span>
+  </div>;
+}
+
+function QuoteSide({ label, quote, unavailable }: { label: 'Mark' | 'Bid' | 'Ask'; quote?: PricingQuote; unavailable: boolean }) {
   const percentile = unavailable ? null : quote?.percentile;
-  return <div className="px-2 py-2" style={{ backgroundColor: pricingColor(percentile ?? null, label === 'Bid' ? 'bid' : 'ask') }}>
+  return <div className="px-2 py-2" style={{ backgroundColor: pricingColor(percentile ?? null) }}>
     <div className="text-[10px] text-gray-300">{label}</div>
-    <div className="mt-1 text-gray-100">{percentile != null ? <><span className="text-lg font-medium">{Math.round(percentile)}</span><span className="text-[9px] text-gray-300"> / 100</span></> : <span className="text-xs text-gray-400">Unrated</span>}</div>
+    <div className="mt-1 text-gray-100 whitespace-nowrap">{percentile != null ? <><span className="text-lg font-medium">{Math.round(percentile)}</span><span className="text-[9px] text-gray-300"> / 100</span></> : <span className="text-xs text-gray-400">Unrated</span>}</div>
     <div className="text-[10px] text-gray-300 mt-1">IV {!unavailable && quote?.iv != null ? `${quote.iv.toFixed(1)}%` : '—'}</div>
     <div className={`flex h-1.5 mt-1 rounded-sm overflow-hidden ${(quote?.history?.length ?? 0) > 16 ? 'gap-0' : 'gap-px'}`} role="img"
-      aria-label={`${label}: ${quote?.samples ?? 0} hourly observations, oldest to newest, followed by now`}>
+      aria-label={unavailable ? `${label}: quotes unavailable` : `${label}: ${quote?.samples ?? 0} hourly observations, oldest to newest, followed by now`}>
       {(quote?.history ?? []).map((point, index, points) => <span key={point.at} className="flex-1 min-w-0"
-        style={{ backgroundColor: pricingColor(unavailable ? null : point.percentile, label === 'Bid' ? 'bid' : 'ask') }}
-        title={`${label} ${index === points.length - 1 ? 'now' : `${new Date(point.from ?? point.at).toLocaleString()}${point.from !== point.at ? ` – ${new Date(point.at).toLocaleTimeString()}` : ''}`}: ${point.iv != null ? `${point.iv.toFixed(1)}% IV` : 'No quote'}${point.percentile != null ? `, ${Math.round(point.percentile)}/100` : ''}`} />)}
+        style={{ backgroundColor: pricingColor(unavailable ? null : point.percentile) }}
+        title={unavailable ? `${label}: quotes unavailable` : `${label} ${index === points.length - 1 ? 'now' : `${new Date(point.from ?? point.at).toLocaleString()}${point.from !== point.at ? ` – ${new Date(point.at).toLocaleTimeString()}` : ''}`}: ${point.iv != null ? `${point.iv.toFixed(1)}% IV` : 'No quote'}${point.percentile != null ? `, ${Math.round(point.percentile)}/100` : ''}`} />)}
     </div>
     <div className="text-[9px] text-gray-400 mt-1">{quote?.samples ?? 0}h</div>
   </div>;
@@ -32,6 +43,7 @@ export default function VolatilityPricing() {
   const { data, error, loading, refetch } = usePolling('/api/volatility-pricing', EMPTY, 15_000, 8_000);
   const age = useLiveTimeAgo(data.asOf);
   const [open, setOpen] = useState(false);
+  const [view, setView] = useState<'mark' | 'quotes'>('mark');
   const [selected, setSelected] = useState<{ offset: number; dte: number } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
@@ -39,6 +51,8 @@ export default function VolatilityPricing() {
   const stale = !!data.asOf && Date.now() - Date.parse(data.asOf) > (data.source === 'snapshot' ? 20 : 5) * 60_000;
   const unavailable = stale || (!!error && !data.asOf);
   const score = unavailable ? null : data.score;
+  const askSummary = summarizePricingSide(data.cells, 'ask');
+  const bidSummary = summarizePricingSide(data.cells, 'bid');
   const status = unavailable ? 'Quotes unavailable' : loading && !data.asOf ? 'Loading volatility…'
     : score != null ? data.label : data.currentIv != null ? 'Mark IV' : data.historySamples < MIN_HISTORY_SAMPLES ? 'Building history' : 'Limited quote coverage';
   const historyLabel = !data.asOf && loading ? '' : data.historyDays ? `${data.historyDays} days / ${data.historySamples} hours${data.provisional ? ' (provisional)' : ''}` : 'No history yet';
@@ -60,19 +74,19 @@ export default function VolatilityPricing() {
 
   return (
     <div className="glass sm:col-span-2 overflow-hidden">
-      <button type="button" onClick={() => setOpen(true)} aria-haspopup="dialog"
+      <button type="button" onClick={() => { setView('mark'); setOpen(true); }} aria-haspopup="dialog"
         className="w-full h-full text-left p-4 flex flex-col gap-2 hover:bg-white/[0.025] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-juice-orange">
         <div className="flex items-center justify-between gap-3">
           <h3 className="text-sm font-semibold text-juice-orange">Volatility Pricing</h3>
           <span className="text-[10px] text-gray-500">View breakdown ↗</span>
         </div>
         <div className="flex items-baseline justify-between gap-3">
-          <span className={`text-lg font-medium ${score != null && score <= 25 ? 'text-emerald-300' : score != null && score >= 75 ? 'text-amber-400' : 'text-gray-300'}`}>{status}</span>
+          <span className={`text-lg font-medium ${scoreClass(score)}`}>{score != null ? `Mark IV · ${status}` : status}</span>
           <span className="text-xl tabular-nums text-gray-200">{score != null ? <>{score}<span className="text-xs text-gray-500"> / 100</span></> : !unavailable && data.currentIv != null ? `${data.currentIv.toFixed(1)}%` : '—'}</span>
         </div>
         {score != null ? <>
           <div className="relative h-2 rounded-full bg-gradient-to-r from-emerald-400/80 via-gray-600 to-amber-500/70"
-            role="meter" aria-label="Volatility pricing: low means historically cheap"
+            role="meter" aria-label="Mark IV pricing: low means historically cheap"
             aria-valuemin={0} aria-valuemax={100} aria-valuenow={score} aria-valuetext={`${status}, ${score} out of 100`}>
             <span className="absolute top-1/2 w-1 h-4 rounded bg-white shadow -translate-x-1/2 -translate-y-1/2" style={{ left: `${score}%` }} />
           </div>
@@ -80,6 +94,10 @@ export default function VolatilityPricing() {
         </> : !unavailable && data.currentIv != null ? <p className="text-xs text-gray-400">
           {data.historySamples < MIN_HISTORY_SAMPLES ? `Comparison needs ${MIN_HISTORY_SAMPLES} hourly samples.` : 'Limited quote coverage.'}
         </p> : null}
+        <div className="flex flex-wrap gap-x-5 gap-y-1 border-t border-white/5 pt-2">
+          <SideSummary label="Ask IV · buy at ask" summary={askSummary} unavailable={unavailable} />
+          <SideSummary label="Bid IV · sell at bid" summary={bidSummary} unavailable={unavailable} />
+        </div>
         <div className="text-xs text-gray-500">{unavailable ? 'Refresh to get current options quotes' : historyLabel}</div>
         {score != null && <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-400">
           <span>{data.qualifier}</span>
@@ -96,7 +114,11 @@ export default function VolatilityPricing() {
           <div className="flex justify-between items-start gap-4 mb-4">
             <div>
               <h2 id="volatility-pricing-title" className="text-lg text-juice-orange font-semibold">Volatility Pricing</h2>
-              <p className="flex gap-4 text-sm text-gray-400 mt-1"><span>{status}</span>{score != null && <span>{score} / 100</span>}</p>
+              <p className="flex gap-4 text-sm text-gray-400 mt-1"><span>{score != null ? `Mark IV · ${status}` : status}</span>{score != null && <span>{score} / 100</span>}</p>
+              <div className="flex flex-wrap gap-x-5 gap-y-1 mt-2">
+                <SideSummary label="Ask IV · buy at ask" summary={askSummary} unavailable={unavailable} />
+                <SideSummary label="Bid IV · sell at bid" summary={bidSummary} unavailable={unavailable} />
+              </div>
             </div>
             <button type="button" onClick={() => setOpen(false)} aria-label="Close volatility breakdown" className="px-3 py-1 rounded border border-gray-700 hover:bg-gray-800">✕</button>
           </div>
@@ -104,10 +126,22 @@ export default function VolatilityPricing() {
             <span>Quotes unavailable.{data.asOf ? ` Last update: ${age}.` : ''}</span>
             <button type="button" onClick={refetch} className="border border-gray-600 rounded px-3 py-1" disabled={loading}>{loading ? 'Refreshing…' : 'Retry'}</button>
           </div>}
-          <p className="text-xs text-gray-400 mb-4">Bright red = expensive bids. Bright green = cheap asks. History → now.</p>
+          <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+            <div role="group" aria-label="Volatility quote view" className="flex gap-1 rounded border border-gray-700 p-1 text-xs">
+              <button type="button" aria-pressed={view === 'mark'} onClick={() => setView('mark')}
+                className={`rounded px-3 py-1.5 ${view === 'mark' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>Mark</button>
+              <button type="button" aria-pressed={view === 'quotes'} onClick={() => setView('quotes')}
+                className={`rounded px-3 py-1.5 ${view === 'quotes' ? 'bg-gray-700 text-white' : 'text-gray-400 hover:bg-gray-800'}`}>Bid &amp; ask</button>
+            </div>
+            <p className="text-[10px] text-gray-400"><span className="text-emerald-300">0 · Historically cheap</span> → 50 · Typical → <span className="text-amber-400">100 · Historically expensive</span></p>
+          </div>
+          <p className="text-xs text-gray-400 mb-2">{view === 'mark'
+            ? 'Mark IV is a valuation reference, not the price available to buy. Ask and bid IV can rank differently.'
+            : 'Ask = buy at the quoted ask; bid = sell at the quoted bid. Each side is ranked against its own history.'}</p>
+          <p className="text-[10px] text-gray-500 mb-4">Summaries use the median across ±10% strikes at 7, 14, 30, 60 and 90 DTE. The grid includes additional strikes and maturities. History → now.</p>
           <div className="overflow-x-auto">
             <table className="w-full text-xs border-separate border-spacing-1">
-              <caption className="sr-only">Implied volatility and historical pricing percentile by strike distance and days to expiry</caption>
+              <caption className="sr-only">{view === 'mark' ? 'Mark' : 'Bid and ask'} implied volatility and historical pricing percentile by strike distance and days to expiry</caption>
               <thead><tr><th className="text-left font-normal text-gray-500 p-2">Strike / spot</th>{TENORS.map(d => <th key={d} scope="col" className="font-normal text-gray-400 p-2 whitespace-nowrap">{d} DTE</th>)}</tr></thead>
               <tbody>{OFFSETS.map(offset => <tr key={offset}>
                 <th scope="row" className="text-left font-normal p-2 whitespace-nowrap">
@@ -117,14 +151,16 @@ export default function VolatilityPricing() {
                 {TENORS.map(dte => {
                   const cell = data.cells.find(c => c.offset === offset && c.dte === dte);
                   const active = selected?.offset === offset && selected?.dte === dte;
-                  return <td key={dte} className="p-0 min-w-[156px] tabular-nums">
+                  return <td key={dte} className={`p-0 tabular-nums ${view === 'mark' ? 'min-w-[82px]' : 'min-w-[172px]'}`}>
                     <button type="button" disabled={unavailable || !cell}
                       onClick={() => { setSelected({ offset, dte }); setCopied(null); }} aria-pressed={active}
                       aria-label={`${offsetLabel(offset)}, ${dte} DTE: view contracts`}
-                      className={`grid grid-cols-2 gap-px w-full rounded overflow-hidden text-center focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:cursor-default ${active ? 'ring-2 ring-inset ring-white' : 'hover:ring-1 hover:ring-inset hover:ring-white/50'}`}
+                      className={`grid ${view === 'mark' ? 'grid-cols-1' : 'grid-cols-2'} gap-px w-full rounded overflow-hidden text-center focus-visible:outline focus-visible:outline-2 focus-visible:outline-white disabled:cursor-default ${active ? 'ring-2 ring-inset ring-white' : 'hover:ring-1 hover:ring-inset hover:ring-white/50'}`}
                       style={{ backgroundColor: '#252525' }}>
-                      <QuoteSide label="Bid" quote={cell?.bid} unavailable={unavailable} />
-                      <QuoteSide label="Ask" quote={cell?.ask} unavailable={unavailable} />
+                      {view === 'mark' ? <QuoteSide label="Mark" quote={cell} unavailable={unavailable} /> : <>
+                        <QuoteSide label="Bid" quote={cell?.bid} unavailable={unavailable} />
+                        <QuoteSide label="Ask" quote={cell?.ask} unavailable={unavailable} />
+                      </>}
                     </button>
                   </td>;
                 })}
@@ -164,7 +200,7 @@ export default function VolatilityPricing() {
             <details>
               <summary className="cursor-pointer text-gray-400">Method</summary>
               <div className="mt-2 space-y-2">
-                <p>Hourly samples, up to 30 days. Minimum {MIN_HISTORY_SAMPLES}; provisional under 7 days. Meter: mark IV, ±10%, 7–90 DTE.</p>
+                <p>Hourly samples, up to 30 days. Minimum {MIN_HISTORY_SAMPLES}; provisional under 7 days. The meter uses mark IV; ask and bid summaries use the same strikes and maturities, with their own quote history.</p>
                 <p>Strikes relative to spot. DTE = days to expiry. IV interpolated from quoted strikes and expiries.</p>
                 <p>Bid and ask each use their own history. Strips average hourly percentiles; gaps stay blank. Contracts match nearest quoted expiry, then strike.</p>
               </div>
