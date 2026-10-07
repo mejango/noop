@@ -77,14 +77,14 @@ test('card and dialog lead with independent bid and ask prices, with mark only a
   const tree = mount(fixture())();
   const headline = renderToStaticMarkup(card(tree));
   assert.deepEqual(meters(headline), [
-    { label: 'Sell at bid historical IV percentile', score: 0, status: 'Low bids, 0 out of 100' },
+    { label: 'Sell at bid historical IV percentile', score: 0, status: 'Measly, 0 out of 100' },
     { label: 'Buy at ask historical IV percentile', score: 97, status: 'Expensive, 97 out of 100' },
   ]);
   assert.ok(headline.includes('Mark reference: Cheap · 13/100 · IV 49.5%'));
   assert.ok(!headline.includes('Mark IV · Cheap'));
   const renderedBid = renderToStaticMarkup(summary(card(tree), 'bid'));
   const renderedAsk = renderToStaticMarkup(summary(card(tree), 'ask'));
-  assert.ok(renderedBid.includes('Low bids'));
+  assert.ok(renderedBid.includes('Measly'));
   assert.ok(!renderedBid.includes('Cheap'));
   assert.ok(renderedAsk.includes('Expensive'));
   const dialog = find(tree, node => node.type === 'dialog');
@@ -166,7 +166,7 @@ test('bid and ask remain independently rated when mark history is unavailable', 
   data.cells.forEach(c => { c.percentile = null; c.iv = null; });
   const headline = renderToStaticMarkup(card(mount(data)()));
   assert.deepEqual(meters(headline).map(m => [m.score, m.status]), [
-    [0, 'Low bids, 0 out of 100'], [97, 'Expensive, 97 out of 100'],
+    [0, 'Measly, 0 out of 100'], [97, 'Expensive, 97 out of 100'],
   ]);
   assert.ok(headline.includes('Mark reference: Unrated'));
 });
@@ -188,8 +188,8 @@ test('initial loading and failed quotes never show old side scores or mark conte
   }
 });
 
-test('bid summary names low, typical and high bids without a buy-side cheap label', () => {
-  for (const [score, label] of [[0, 'Low bids'], [50, 'Typical bids'], [100, 'High bids']]) {
+test('bid summary names measly, typical and lucrative bids without a buy-side cheap label', () => {
+  for (const [score, label] of [[0, 'Measly'], [50, 'Typical bids'], [100, 'Lucrative']]) {
     const data = fixture();
     data.cells.forEach(c => { c.bid.percentile = score; });
     const html = renderToStaticMarkup(summary(card(mount(data)()), 'bid'));

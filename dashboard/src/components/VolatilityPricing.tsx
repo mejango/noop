@@ -16,7 +16,7 @@ function SideSummary({ side, summary, unavailable, loading }: { side: 'bid' | 'a
   const score = unavailable || loading ? null : summary.score;
   const label = side === 'bid' ? 'Sell at bid' : 'Buy at ask';
   const status = unavailable ? 'Unavailable' : loading ? 'Loading…' : score == null ? 'Unrated'
-    : side === 'bid' ? score <= 25 ? 'Low bids' : score >= 75 ? 'High bids' : 'Typical bids' : summary.label;
+    : side === 'bid' ? score <= 25 ? 'Measly' : score >= 75 ? 'Lucrative' : 'Typical bids' : summary.label;
   return <div role="group" aria-label={`${label} pricing`} className={`min-w-0 rounded border p-3 space-y-2 ${side === 'bid' ? 'border-red-400/20 bg-red-400/[0.025]' : 'border-emerald-400/20 bg-emerald-400/[0.025]'}`}
     title={unavailable ? 'Quotes unavailable' : loading ? 'Loading quotes' : `${summary.measured}/${summary.total} core cells rated against their own history`}>
     <div className={`text-xs ${side === 'bid' ? 'text-red-300' : 'text-emerald-300'}`}>{label}</div>
@@ -30,7 +30,7 @@ function SideSummary({ side, summary, unavailable, loading }: { side: 'bid' | 'a
         style={{ background: `linear-gradient(to right, ${pricingColor(0, side)}, ${pricingColor(100, side)})` }}>
         <span className="absolute top-1/2 w-0.5 h-3 rounded bg-white -translate-x-1/2 -translate-y-1/2" style={{ left: `${score}%` }} />
       </div>
-      <div className="flex justify-between gap-2 text-[9px] text-gray-500"><span>{side === 'bid' ? 'Low bids' : 'Cheap'}</span><span>{side === 'bid' ? 'High bids' : 'Expensive'}</span></div>
+      <div className="flex justify-between gap-2 text-[9px] text-gray-500"><span>{side === 'bid' ? 'Measly' : 'Cheap'}</span><span>{side === 'bid' ? 'Lucrative' : 'Expensive'}</span></div>
     </> : <div className="text-[10px] text-gray-500">{unavailable ? 'Quotes unavailable' : loading ? 'Fetching quotes' : 'More history or coverage needed'}</div>}
   </div>;
 }
