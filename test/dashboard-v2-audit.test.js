@@ -8,6 +8,50 @@ const os = require('node:os');
 const ts = require('../dashboard/node_modules/typescript');
 const root = path.resolve(__dirname, '..');
 
+test('funding bars render negative rates below zero with valid SVG geometry', () => {
+  const source = ts.createSourceFile('page.tsx', fs.readFileSync(path.join(root, 'dashboard/src/app/page.tsx'), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let shape;
+  function visit(node) {
+    if (ts.isJsxSelfClosingElement(node) && node.tagName.getText(source) === 'Bar'
+      && node.attributes.properties.some(p => p.name?.getText(source) === 'dataKey' && p.initializer?.text === 'fundingRate')) {
+      shape = node.attributes.properties.find(p => p.name?.getText(source) === 'shape').initializer.expression;
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(shape, 'exercise the actual funding chart callback');
+  const code = ts.transpileModule(`module.exports = ${shape.getText(source)};`, {
+    compilerOptions: { jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const module = { exports: {} };
+  vm.runInNewContext(code, { module, exports: module.exports, require: name => require(`../dashboard/node_modules/${name}`) });
+  const render = module.exports;
+  for (const [rate, y, height, expectedY] of [[-0.001, 30, -12, 18], [0.001, 6, 12, 6], [0, 18, 0, 18]]) {
+    const rect = render({ x: 10, y, height, width: 2, payload: { fundingRate: rate } });
+    assert.equal(rect.props.y, expectedY);
+    assert.equal(rect.props.height, Math.abs(height));
+    assert.equal(rect.props.fill, rate < 0 ? '#f87171' : '#4ade80');
+  }
+  assert.equal(render({ payload: {} }), null, 'missing observations stay missing');
+});
+
+test('liquidity feed gaps identify a stopped feed without treating a historical window as stale', () => {
+  const { liquidityFeedGaps } = loadTs('dashboard/src/lib/liquidity-feed-status.ts');
+  const at = timestamp => Date.parse(timestamp);
+  const rows = [
+    { ts: at('2026-10-09T03:00:00Z'), uniswap_v3: 724e6, uniswap_v4: 12e6 },
+    { ts: at('2026-10-11T11:00:00Z'), uniswap_v3: 727e6 },
+  ];
+  const names = ['uniswap_v3', 'uniswap_v4'];
+  const gaps = liquidityFeedGaps(rows, names);
+  assert.equal(gaps.length, 1);
+  assert.equal(gaps[0].name, 'uniswap_v4');
+  assert.equal(gaps[0].lastSample, rows[0].ts);
+  assert.equal(liquidityFeedGaps(rows.slice(0, 1), names).length, 0);
+  assert.equal(liquidityFeedGaps(rows.slice(1), names)[0].lastSample, null);
+  assert.equal(liquidityFeedGaps([], names).length, 0);
+});
+
 function loadTs(file, overrides = {}, globals = {}) {
   const code = ts.transpileModule(fs.readFileSync(path.join(root, file), 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },

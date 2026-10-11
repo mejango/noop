@@ -6,6 +6,7 @@ import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import { DASHBOARD_RANGES } from '@/lib/dashboard-ranges';
+import { liquidityFeedGaps } from '@/lib/liquidity-feed-status';
 import { buildOptionsCashflowChart, cashflowDisplayDomain, type CashflowBucket } from '@/lib/options-cashflow-chart';
 import Card from '@/components/Card';
 import VolSmile from '@/components/VolSmile';
@@ -2001,6 +2002,7 @@ export default function OverviewPage() {
         const fallbackColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
         const getColor = (name: string, i: number) => dexColors[name] || fallbackColors[i % fallbackColors.length];
         const formatDexName = (name: string) => name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const feedGaps = liquidityFeedGaps(liquidityData, Object.keys(dexColors));
         const formatCompact = (v: number) => {
           if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
           if (v >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
@@ -2119,6 +2121,13 @@ export default function OverviewPage() {
                 ))}
               </div>
             </div>
+            {feedGaps.length > 0 && (
+              <div className="text-[10px] text-amber-400 mb-1" role="status">
+                {feedGaps.map(gap => `${formatDexName(gap.name)} feed gap · ${gap.lastSample
+                  ? `last sample ${new Date(gap.lastSample).toLocaleString()}`
+                  : 'no samples in selected range'}`).join(' | ')}
+              </div>
+            )}
             <div {...pinLiquidity.containerProps}>
             <ResponsiveContainer width="100%" height={200}>
               <ComposedChart data={chartData} margin={margins} barGap={0} barCategoryGap={0}>
@@ -2303,7 +2312,10 @@ export default function OverviewPage() {
                         const val = props.fundingRate ?? props.payload?.fundingRate;
                         if (val == null) return null;
                         const color = val >= 0 ? '#4ade80' : '#f87171';
-                        return <rect x={props.x} y={props.y} width={Math.max(props.width, 1.5)} height={props.height} fill={color} fillOpacity={0.7} rx={0.5} />;
+                        // Recharts gives bars below zero a signed height; SVG rects
+                        // require a positive height and the upper edge as y.
+                        const y = Math.min(props.y, props.y + props.height);
+                        return <rect x={props.x} y={y} width={Math.max(props.width, 1.5)} height={Math.abs(props.height)} fill={color} fillOpacity={0.7} rx={0.5} />;
                       }) as never}
                     />
                     <Tooltip {...chartTooltip} {...pinSentiment.tooltipActive} content={sentimentTooltip} />
