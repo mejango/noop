@@ -2003,6 +2003,9 @@ export default function OverviewPage() {
         const fallbackColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
         const getColor = (name: string, i: number) => dexColors[name] || fallbackColors[i % fallbackColors.length];
         const formatDexName = (name: string) => name === 'uniswap_v3' ? 'Uniswap V3 (subgraph)' : name === 'uniswap_v3_onchain' ? 'Uniswap V3 (onchain)' : name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const marketLabel = (name: string) => name === 'uniswap_v3_onchain'
+          ? 'USDC/WETH · 0.05% + 0.30% pools (combined)'
+          : name === 'uniswap_v4' ? 'ETH/USDT · 0.05% pool' : null;
         const hasOnchainV3 = liquidityData.some(row => row.uniswap_v3_onchain != null);
         const feedGaps = liquidityFeedGaps(liquidityData, [hasOnchainV3 ? 'uniswap_v3_onchain' : 'uniswap_v3', 'uniswap_v4']);
         const formatCompact = (v: number) => {
@@ -2123,6 +2126,14 @@ export default function OverviewPage() {
                 ))}
               </div>
             </div>
+            <div className="text-xs text-gray-400 mb-2 space-y-0.5">
+              <div>Ethereum mainnet · Liquidity totals for the selected pools below.</div>
+              {dexNames.filter(name => marketLabel(name)).map((name, i) => (
+                <div key={name} style={{ color: getColor(name, i) }}>
+                  {formatDexName(name)}: {marketLabel(name)}
+                </div>
+              ))}
+            </div>
             {hasOnchainV3 && <div className="text-xs text-gray-500 mb-2">V3 onchain includes accrued fees; V4 shows liquidity principal. Source baselines are separate. V3 volume uses the subgraph; V4 volume is unavailable.</div>}
             {feedGaps.length > 0 && (
               <div className="text-[10px] text-amber-400 mb-1" role="status">
@@ -2168,8 +2179,9 @@ export default function OverviewPage() {
                                 {formatDexName(name)}: ${Number(raw).toLocaleString(undefined, { maximumFractionDigits: 0 })}
                                 <span className="text-gray-500 ml-1">({pct > 0 ? '+' : ''}{pct?.toFixed(2)}%)</span>
                                 {volDelta != null && volDelta > 0 && <span className="text-gray-500 ml-1">| Vol: {formatCompact(volDelta)}</span>}
-                                {fee != null && <span className="text-gray-500 ml-1">| Fee: {formatFeeTier(fee)}</span>}
+                                {fee != null && !marketLabel(name) && <span className="text-gray-500 ml-1">| Top pool fee: {formatFeeTier(fee)}</span>}
                               </div>
+                              {marketLabel(name) && <div className="text-[10px] text-gray-400 pl-2">Ethereum · {marketLabel(name)}</div>}
                               {active != null && (
                                 <div className="text-[10px] text-gray-600 pl-2">Active liq: {Number(active).toLocaleString()}</div>
                               )}
