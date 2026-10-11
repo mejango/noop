@@ -121,8 +121,13 @@ function sanitizeOnchainRow(row) {
         pools: dex?.pools ?? null };
     }
     if (!invalid) return row;
-    if (raw.dexLiquidity.flowAnalysis?.algorithm !== 'matched_pool_definitions_v1') {
-      raw.dexLiquidity.flowAnalysis = unknownLiquidityFlow(Object.keys(dexes).filter(name => dexes[name]?.invalid));
+    const excluded = Object.keys(dexes).filter(name => dexes[name]?.invalid);
+    const previous = raw.dexLiquidity.flowAnalysis;
+    // A flow computed before a venue was quarantined remains untrusted even
+    // when it already bears the current algorithm marker.
+    if (previous?.algorithm !== 'matched_pool_definitions_v1'
+      || excluded.some(name => !previous.excludedDexes?.includes(name))) {
+      raw.dexLiquidity.flowAnalysis = unknownLiquidityFlow(excluded);
     }
     raw.dexLiquidity.dataQualityNotice = LIQUIDITY_DATA_NOTICE;
     const flow = raw.dexLiquidity.flowAnalysis;

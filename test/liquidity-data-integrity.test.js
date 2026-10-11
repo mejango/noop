@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { fetchV4OnchainLiquidity, lens } = require('../bot/v4-onchain-liquidity');
-const { calculateValidatedLiquidityFlow, dexForAdvisor, invalidDexReason } = require('../bot/liquidity-quality');
+const { calculateValidatedLiquidityFlow, dexForAdvisor, invalidDexReason, sanitizeOnchainRow } = require('../bot/liquidity-quality');
 const { repairDexLiquidity, VERSION } = require('../scripts/repair-dex-liquidity');
 
 const nowMs = Date.parse('2026-10-11T12:00:00Z');
@@ -184,4 +184,14 @@ test('V3 rejects incorrect identity and stale/wrong-chain snapshots, and fails o
   })), nowMs);
   assert.equal(flow.direction, 'unknown');
   assert.equal(flow.magnitude, null);
+});
+
+
+test('new quarantine rules invalidate a previously computed flow, including one with the current algorithm marker', () => {
+  const raw = { dexLiquidity: { dexes: { uniswap_v3: { totalLiquidity: 727e6 }, uniswap_v4: onchain },
+    flowAnalysis: { algorithm: 'matched_pool_definitions_v1', direction: 'outflow', magnitude: 0.5, confidence: 0.9, excludedDexes: [] } } };
+  const clean = sanitizeOnchainRow({ raw_data: JSON.stringify(raw), liquidity_flow_magnitude: 0.5 });
+  assert.equal(clean.liquidity_flow_direction, 'unknown');
+  assert.equal(clean.liquidity_flow_magnitude, null);
+  assert.equal(JSON.parse(clean.raw_data).dexLiquidity.dexes.uniswap_v3.totalLiquidity, undefined);
 });
