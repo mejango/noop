@@ -1,3 +1,4 @@
+const { SMILE_FEATURES, readSmileHistory, smileChangeSeries } = require('./market-evidence');
 // ─── Pearson Correlation ────────────────────────────────────────────────────
 
 function pearson(xs, ys) {
@@ -76,14 +77,14 @@ const SERIES_DEFS = [
       for (let i = 1; i < rows.length; i++) {
         const prev = rows[i - 1].avg_price;
         const curr = rows[i].avg_price;
-        returns.push({ hour: rows[i].hour, value: prev > 0 ? ((curr - prev) / prev) * 100 : null });
+        returns.push({ hour: rows[i].hour, value: prev > 0 && Date.parse(rows[i].hour) - Date.parse(rows[i - 1].hour) === 3600000 ? ((curr - prev) / prev) * 100 : null });
       }
       return returns;
     },
   },
   {
     name: 'liquidity_flow',
-    description: 'DEX liquidity signed flow (+ inflow, - outflow)',
+    description: 'Validated selected-pool signed USD TVL change; prices and swaps also affect TVL, not deposit/withdrawal flow',
     extract: (db, since) => {
       const rows = db.getOnchainHourly(since);
       return rows.map(r => ({
@@ -137,97 +138,86 @@ const SERIES_DEFS = [
   },
 ];
 
-function extractAllSeries(db, days) {
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+const SMILE_DEFS = Object.entries(SMILE_FEATURES).map(([key, description]) => ({
+  name: `${key}_change`, description: `${description}: hourly change in vol points, same expiry, no gap bridging`,
+}));
 
-  const raw = {};
-  const allHours = new Set();
-
-  for (const s of SERIES_DEFS) {
-    const data = s.extract(db, since);
-    const map = new Map();
-    for (const d of data) {
-      map.set(d.hour, d.value);
-      allHours.add(d.hour);
-    }
-    raw[s.name] = map;
+/** @returns {{ hours: string[], series: Record<string, (number|null)[]> }} */
+function alignHourly(raw, sinceMs, beforeMs) {
+  const hours = [];
+  // Completed hours only; missing hours retain null slots so lag offsets are elapsed hours.
+  for (let at = Math.ceil(sinceMs / 3600000) * 3600000; at < Math.floor(beforeMs / 3600000) * 3600000; at += 3600000) {
+    hours.push(new Date(at).toISOString());
   }
-
-  const hours = Array.from(allHours).sort();
   const series = {};
-
-  for (const s of SERIES_DEFS) {
-    const map = raw[s.name];
-    series[s.name] = hours.map(h => map.get(h) ?? null);
+  for (const [name, rows] of Object.entries(raw)) {
+    const map = new Map(rows.map(r => [new Date(Date.parse(r.hour)).toISOString(), r.value]));
+    series[name] = hours.map(h => Number.isFinite(map.get(h)) ? map.get(h) : null);
   }
-
   return { hours, series };
 }
 
-// ─── Build Correlation Analysis ─────────────────────────────────────────────
-
-function buildCorrelationAnalysis(db) {
-  const names = SERIES_DEFS.map(s => s.name);
-  const descriptions = {};
-  for (const s of SERIES_DEFS) {
-    descriptions[s.name] = s.description;
-  }
-
-  let data7d, data30d;
-  try {
-    data7d = extractAllSeries(db, 7);
-    data30d = extractAllSeries(db, 30);
-  } catch {
-    return {
-      pairs: [],
-      leading_indicators: [],
-      series_descriptions: descriptions,
-      computed_at: new Date().toISOString(),
-    };
-  }
-
-  const pairs = [];
-  const leadingIndicators = [];
-
-  for (let i = 0; i < names.length; i++) {
-    for (let j = i + 1; j < names.length; j++) {
-      const a = names[i];
-      const b = names[j];
-
-      const r7 = pearson(data7d.series[a], data7d.series[b]);
-      const r30 = pearson(data30d.series[a], data30d.series[b]);
-
-      // Skip weak correlations
-      if ((r7 == null || Math.abs(r7) < 0.3) && (r30 == null || Math.abs(r30) < 0.3)) {
-        continue;
-      }
-
-      // Lead/lag on 30d data (more data = more reliable)
-      const ll = computeLeadLag(data30d.series[a], data30d.series[b]);
-
-      pairs.push({ series_a: a, series_b: b, r_7d: r7, r_30d: r30, lead_lag: ll });
-
-      // Identify leading indicators: lagged r exceeds contemporaneous by >= 0.05
-      if (ll && Math.abs(ll.best_r) > Math.abs(ll.contemporaneous_r) + 0.05 && ll.best_offset !== 0) {
-        const leader = ll.best_offset > 0 ? a : b;
-        const follower = ll.best_offset > 0 ? b : a;
-        leadingIndicators.push({
-          leader,
-          follower,
-          offset_hours: Math.abs(ll.best_offset),
-          lagged_r: ll.best_r,
-          contemporaneous_r: ll.contemporaneous_r,
-        });
-      }
-    }
-  }
-
-  return {
-    pairs,
-    leading_indicators: leadingIndicators,
-    series_descriptions: descriptions,
-    computed_at: new Date().toISOString(),
-  };
+function extractAllSeries(db, days, nowMs = Date.now()) {
+  const sinceMs = nowMs - days * 86400000;
+  const since = new Date(sinceMs).toISOString();
+  const raw = {};
+  for (const definition of SERIES_DEFS) raw[definition.name] = definition.extract(db, since);
+  Object.assign(raw, smileChangeSeries(readSmileHistory(db, nowMs, 90)));
+  return alignHourly(raw, sinceMs, nowMs);
 }
 
-module.exports = { buildCorrelationAnalysis };
+const countPairs = (a,b) => a.reduce((n,x,i) => n + (Number.isFinite(x) && Number.isFinite(b[i]) ? 1 : 0),0);
+function sliceWindow(data, hours) {
+  return { hours: data.hours.slice(-hours), series: Object.fromEntries(Object.entries(data.series).map(([key,values]) => [key,values.slice(-hours)])) };
+}
+
+function analyzeAligned(data, descriptions, nowMs = Date.now()) {
+  const names = Object.keys(data.series), d7 = sliceWindow(data,168), d30 = sliceWindow(data,720);
+  const pairs = [], leadingIndicators = [];
+  for (let i = 0; i < names.length; i++) for (let j = i+1; j < names.length; j++) {
+    const a = names[i], b = names[j];
+    const n7=countPairs(d7.series[a],d7.series[b]), n30=countPairs(d30.series[a],d30.series[b]), n90=countPairs(data.series[a],data.series[b]);
+    const r7 = n7>=126 ? pearson(d7.series[a],d7.series[b]) : null;
+    const r30 = n30>=540 ? pearson(d30.series[a],d30.series[b]) : null;
+    const r90 = n90>=1620 ? pearson(data.series[a],data.series[b]) : null;
+    if ([r7,r30,r90].every(r => r == null || Math.abs(r)<0.3)) continue;
+    const lagData = r30 != null ? d30 : d7;
+    const ll = r30 != null || r7 != null ? computeLeadLag(lagData.series[a],lagData.series[b]) : null;
+    if (ll) {
+      ll.lookback_days = lagData === d30 ? 30 : 7;
+      const offset = ll.best_offset;
+      ll.aligned_pairs = offset >= 0 ? countPairs(lagData.series[a].slice(0,lagData.hours.length-offset), lagData.series[b].slice(offset))
+        : countPairs(lagData.series[a].slice(-offset),lagData.series[b].slice(0,lagData.hours.length+offset));
+    }
+    const mid = Math.floor(d30.hours.length/2);
+    const first = pearson(d30.series[a].slice(0,mid),d30.series[b].slice(0,mid));
+    const second = pearson(d30.series[a].slice(mid),d30.series[b].slice(mid));
+    const stability = first == null || second == null ? 'insufficient_split_history'
+      : first*second > 0 && Math.abs(first)>=0.3 && Math.abs(second)>=0.3 ? 'same_sign_in_both_halves' : 'unstable_across_halves';
+    pairs.push({ series_a:a, series_b:b, r_7d:r7, r_30d:r30, r_90d:r90,
+      n_7d:countPairs(d7.series[a],d7.series[b]), n_30d:countPairs(d30.series[a],d30.series[b]),
+      n_90d:countPairs(data.series[a],data.series[b]), lead_lag:ll,
+      stability_30d:{ status:stability, first_half_r:first, second_half_r:second } });
+    if (ll && Math.abs(ll.best_r)>Math.abs(ll.contemporaneous_r)+0.05 && ll.best_offset!==0) {
+      leadingIndicators.push({ leader:ll.best_offset>0?a:b, follower:ll.best_offset>0?b:a,
+        offset_hours:Math.abs(ll.best_offset), lagged_r:ll.best_r, contemporaneous_r:ll.contemporaneous_r,
+        aligned_pairs:ll.aligned_pairs, lookback_days:ll.lookback_days, status:'exploratory_lag_search' });
+    }
+  }
+  return { pairs, leading_indicators:leadingIndicators, series_descriptions:descriptions,
+    coverage:Object.fromEntries(names.map(name => [name,Object.fromEntries([['7d',d7],['30d',d30],['90d',data]].map(([window,d]) => [window,{ observed_hours:d.series[name].filter(Number.isFinite).length, expected_hours:window==='7d'?168:window==='30d'?720:2160 }]))])),
+    computed_at:new Date(nowMs).toISOString(),
+    notice:'Descriptive correlations with aligned-pair counts; 7d/30d/90d coefficients require at least 75% paired hourly coverage in the named window. Missing hours remain missing. Smile changes omit expiry rolls. Best option scores can change with candidate composition and are not realized P&L. Lag searches and split-half consistency are exploratory, not out-of-sample validation, causality, or authority to override EDGE/risk rules.' };
+}
+const correlationCache = new WeakMap();
+function buildCorrelationAnalysis(db, nowMs = Date.now()) {
+  const cached = correlationCache.get(db);
+  if (cached && nowMs >= cached.at && nowMs-cached.at<300000) return cached.data;
+  const descriptions = Object.fromEntries([...SERIES_DEFS,...SMILE_DEFS].map(s => [s.name,s.description]));
+  let result;
+  try { result = analyzeAligned(extractAllSeries(db,90,nowMs),descriptions,nowMs); }
+  catch { result = { pairs:[], leading_indicators:[],series_descriptions:descriptions,computed_at:new Date(nowMs).toISOString(),notice:'Correlation history unavailable.' }; }
+  correlationCache.set(db,{ at:nowMs,data:result });
+  return result;
+}
+module.exports = { buildCorrelationAnalysis, alignHourly, analyzeAligned, pearson, computeLeadLag, SMILE_DEFS };

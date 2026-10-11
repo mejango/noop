@@ -1,3 +1,6 @@
+import * as marketHistoryDb from './db';
+import { readSmileHistory, smileChangeSeries } from '../../../bot/market-evidence';
+import { alignHourly, SMILE_DEFS } from '../../../bot/correlation';
 import {
   getSpotPricesHourly,
   getOnchainHourly,
@@ -30,7 +33,7 @@ const SERIES: SeriesConfig[] = [
         const curr = rows[i].avg_price;
         returns.push({
           hour: rows[i].hour,
-          value: prev > 0 ? ((curr - prev) / prev) * 100 : null,
+          value: prev > 0 && Date.parse(rows[i].hour) - Date.parse(rows[i - 1].hour) === 3600000 ? ((curr - prev) / prev) * 100 : null,
         });
       }
       return returns;
@@ -38,7 +41,7 @@ const SERIES: SeriesConfig[] = [
   },
   {
     name: 'liquidity_flow',
-    description: 'DEX liquidity signed flow (+ inflow, - outflow)',
+    description: 'Validated selected-pool signed USD TVL change; prices and swaps also affect TVL',
     category: 'liquidity',
     extract: (since) => {
       const rows = getOnchainHourly(since);
@@ -112,7 +115,7 @@ const SERIES: SeriesConfig[] = [
 ];
 
 export function getRegisteredSeries(): SeriesConfig[] {
-  return SERIES;
+  return [...SERIES, ...SMILE_DEFS.map((s: { name: string; description: string }) => ({ ...s, category: 'options' as const, extract: () => [] }))];
 }
 
 export function registerSeries(config: SeriesConfig): void {
@@ -125,30 +128,9 @@ export interface AlignedSeries {
 }
 
 export function extractAllSeries(days: number): AlignedSeries {
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-
-  // Extract all series
-  const raw: Record<string, Map<string, number | null>> = {};
-  const allHours = new Set<string>();
-
-  for (const s of SERIES) {
-    const data = s.extract(since);
-    const map = new Map<string, number | null>();
-    for (const d of data) {
-      map.set(d.hour, d.value);
-      allHours.add(d.hour);
-    }
-    raw[s.name] = map;
-  }
-
-  // Align on sorted hourly grid
-  const hours = Array.from(allHours).sort();
-  const series: Record<string, (number | null)[]> = {};
-
-  for (const s of SERIES) {
-    const map = raw[s.name];
-    series[s.name] = hours.map((h) => map.get(h) ?? null);
-  }
-
-  return { hours, series };
+  const nowMs = Date.now(), sinceMs = nowMs - days * 86400000;
+  const since = new Date(sinceMs).toISOString();
+  const raw = Object.fromEntries(SERIES.map(s => [s.name,s.extract(since)]));
+  Object.assign(raw, smileChangeSeries(readSmileHistory(marketHistoryDb,nowMs,90)));
+  return alignHourly(raw,sinceMs,nowMs);
 }

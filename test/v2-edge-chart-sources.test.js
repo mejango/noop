@@ -33,6 +33,7 @@ function fixture(t, { putTable = true, callTable = true } = {}) {
     './strategy-config': { BOT_CONFIG: {} },
     '../../../bot/derive-config': require('../bot/derive-config'),
     '../../../bot/liquidity-quality': require('../bot/liquidity-quality'),
+    '../../../bot/market-evidence': require('../bot/market-evidence'),
     '../../../bot/economic-events': {}, '../../../bot/open-interest': {}, '../../../bot/funding-rates': {},
   };
   const module = { exports: {} };

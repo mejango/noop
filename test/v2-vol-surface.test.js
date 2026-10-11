@@ -69,9 +69,9 @@ test('surface compares live zones against their own hourly history and realized 
   const s = buildVolSurface({ current, spotRows, history, zones });
   assert.equal(s.call_zone.expiry, '2026-10-02');
   assert.equal(s.call_zone.atm_iv, 45);
-  assert.equal(s.call_zone.atm_iv_pctl, 100, 'above every sample of the drifting history');
+  assert.equal(s.call_zone.atm_iv_pctl, null, '48h cannot support a 30d percentile');
   assert.equal(s.call_zone.rr25, 5);
-  assert.equal(s.put_zone.atm_iv_pctl, 100, 'ties count as at-or-below');
+  assert.equal(s.put_zone.atm_iv_pctl, null, '48h cannot support a 30d percentile');
   assert.equal(s.term_slope, 5);
   assert.ok(s.realized_vol.rv7d > 0);
   assert.equal(s.call_iv_minus_rv7d, +(45 - s.realized_vol.rv7d).toFixed(1));
@@ -82,7 +82,7 @@ test('surface compares live zones against their own hourly history and realized 
   assert.equal(s.put_zone.atm_iv_move.d24h, 0);
 
   const text = formatVolSurfaceForAdvisor(s);
-  assert.match(text, /CALL zone 2026-10-02 \(6d\): ATM 45 \(pctl 100\) \[Δ24h \+9\.9, Δ7d n\/a\]/);
+  assert.match(text, /CALL zone 2026-10-02 \(6d\): ATM 45 \[Δ24h \+9\.9, Δ7d n\/a\]/);
   assert.match(text, /n=48/);
   assert.match(formatVolSurfaceForAdvisor(null), /unavailable/);
 });

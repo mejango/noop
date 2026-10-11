@@ -16,6 +16,7 @@ new Function('module', 'exports', 'require', js)(m, m.exports, (name) => {
   if (name.includes('economic-events')) return { getEconomicHistory: () => [] };
   if (name.includes('open-interest')) return { HOURLY_OPEN_INTEREST_SQL: '', openInterestHourBounds: () => ({}) };
   if (name.includes('funding-rates')) return { FUNDING_EXCHANGE: '', FUNDING_SYMBOL: '' };
+  if (name.includes('market-evidence')) return require('../../bot/market-evidence');
   if (name.includes('liquidity-quality')) return require('../../bot/liquidity-quality');
   return require(name);
 });

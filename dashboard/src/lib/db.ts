@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { HISTORY_SQL } from '../../../bot/market-evidence';
 import { getDeriveConfig } from '../../../bot/derive-config';
 import path from 'path';
 import { BOT_CONFIG } from './strategy-config';
@@ -1861,4 +1862,24 @@ export function getOptionsCashflow() {
       successful_orders: number; total_orders: number;
     } | undefined;
   } catch { return undefined; }
+}
+
+// Same bounded, read-only history queries used by the bot council and wiki.
+export function getSmileHistoryRows(bounds: { since: string; before: string }) {
+  return getDb().prepare(HISTORY_SQL.smile).all(bounds);
+}
+export function getLiquidityHistoryRows(bounds: { since: string; before: string }) {
+  return getDb().prepare(HISTORY_SQL.liquidity).all(bounds).map(sanitizeOnchainRow);
+}
+export function getLiquidityNear(bounds: { since: string; before: string; target: string }) {
+  return sanitizeOnchainRow(getDb().prepare(HISTORY_SQL.near).get(bounds));
+}
+export function getSpotHourlyCloses(since: string) {
+  return getDb().prepare('SELECT hour,close FROM spot_prices_hourly WHERE hour > ? AND close > 0 ORDER BY hour').all(since);
+}
+
+export function getFundingRatesHourly(since: string) {
+  return getDb().prepare(`SELECT strftime('%Y-%m-%dT%H:00:00Z',timestamp) AS hour, AVG(rate) AS avg_rate
+    FROM funding_rates WHERE timestamp > @since AND symbol = @symbol AND exchange = @exchange
+    GROUP BY hour ORDER BY hour`).all({ since, symbol: FUNDING_SYMBOL, exchange: FUNDING_EXCHANGE });
 }

@@ -4,6 +4,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const DB_PATH = process.env.NOOP_DB_PATH || path.join(DATA_DIR, 'noop.db');
 const { createHourlyRollups } = require('./hourly-rollups');
 const { FUNDING_EXCHANGE, FUNDING_SYMBOL } = require('./funding-rates');
+const { HISTORY_SQL } = require('./market-evidence');
 const { sanitizeOnchainRow } = require('./liquidity-quality');
 const { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } = require('./open-interest');
 const fs = require('fs');
@@ -1502,6 +1503,10 @@ const stmts = {
     WHERE hour > @since AND close > 0 ORDER BY hour ASC
   `),
 
+  getSmileHistoryRows: db.prepare(HISTORY_SQL.smile),
+  getLiquidityHistoryRows: db.prepare(HISTORY_SQL.liquidity),
+  getLiquidityNear: db.prepare(HISTORY_SQL.near),
+
   getLatestSmileSnapshot: db.prepare(`
     SELECT timestamp, expiry, points FROM iv_smile_snapshots
     WHERE timestamp = (SELECT MAX(timestamp) FROM iv_smile_snapshots)
@@ -2497,6 +2502,9 @@ const getVolSurfaceHistoryRows = (since) => stmts.getVolSurfaceHistoryRows.all({
 const getSpotHourlyCloses = (since) => stmts.getSpotHourlyCloses.all({ since });
 
 // Every expiry of the newest full-chain smile snapshot (one snapshot writes all rows at once).
+const getSmileHistoryRows = (bounds) => stmts.getSmileHistoryRows.all(bounds);
+const getLiquidityHistoryRows = (bounds) => stmts.getLiquidityHistoryRows.all(bounds).map(sanitizeOnchainRow);
+const getLiquidityNear = (bounds) => sanitizeOnchainRow(stmts.getLiquidityNear.get(bounds));
 const getLatestSmileSnapshot = () => stmts.getLatestSmileSnapshot.all();
 // The instrument's last recorded IV at or before `at` (vol as a decimal), or null.
 const getInstrumentIvNear = (instrument, at) => stmts.getInstrumentIvNear.get({ instrument, at }) || null;
@@ -3091,6 +3099,7 @@ module.exports = {
   insertSmileSnapshotBatch,
   getSmileSnapshotsForExpiry,
   getLatestSmileSnapshot,
+  getSmileHistoryRows, getLiquidityHistoryRows, getLiquidityNear,
   getInstrumentIvNear,
   getVolSurfaceHistoryRows,
   getSpotHourlyCloses,

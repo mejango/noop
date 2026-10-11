@@ -67,14 +67,17 @@ function pickZoneExpiry(expiries, atMs, [lo, hi]) {
     .sort((a, b) => a.dte - b.dte)[0] || null;
 }
 
-// Hourly closes ending at or before atMs, newest last.
+// Require every completed close in the named window; no current-hour lookahead.
 function closesUpTo(spotRows, atMs, hours) {
-  const out = [];
-  for (const row of spotRows) {
-    if (Date.parse(row.hour) > atMs) break;
-    out.push(row.close);
+  const end = Math.floor(atMs / 3_600_000) * 3_600_000 - 3_600_000;
+  const map = new Map(spotRows.map(r => [Date.parse(r.hour), r.close]));
+  const closes = [];
+  for (let at = end - hours * 3_600_000; at <= end; at += 3_600_000) {
+    const close = finite(map.get(at));
+    if (!(close > 0)) return [];
+    closes.push(close);
   }
-  return out.slice(-(hours + 1));
+  return closes;
 }
 
 // Per-hour history of the same measures, from bot-candidate rows sampled once an hour.
@@ -92,13 +95,13 @@ function buildSurfaceHistory(rows, spotRows, zones) {
     const atMs = Date.parse(ts);
     const zone = (type, range) => {
       const pick = pickZoneExpiry([...new Set(pts.filter(p => p.type === type).map(p => p.expiry))], atMs, range);
-      return pick ? zoneMetrics(pts.filter(p => p.expiry === pick.expiry), type) : null;
+      return pick ? { expiry: pick.expiry, ...zoneMetrics(pts.filter(p => p.expiry === pick.expiry), type) } : null;
     };
     const call = zone('C', zones.call_dte_range);
     const put = zone('P', zones.put_dte_range);
     const rv7 = realizedVol(closesUpTo(spotRows, atMs, 24 * 7));
     history.push({
-      at: atMs,
+      at: atMs, call_expiry: call?.expiry ?? null, put_expiry: put?.expiry ?? null,
       call_atm: call?.atm ?? null,
       call_wing_premium: call?.wing_premium ?? null,
       put_atm: put?.atm ?? null,
@@ -123,14 +126,23 @@ function buildVolSurface({ current, spotRows, history, zones }) {
   const put = zoneOf('P', zones.put_dte_range);
   const rv7 = realizedVol(closesUpTo(spotRows, current.atMs, 24 * 7));
   const rv30 = realizedVol(closesUpTo(spotRows, current.atMs, 24 * 30));
-  const pct = (key, value) => percentile(value, history.map(h => h[key]));
+  const completedAt = Math.floor(current.atMs / 3_600_000) * 3_600_000;
+  const windowHistory = history.filter(h => h.at >= completedAt - 30 * DAY_MS && h.at < completedAt);
+  const observedHours = new Set(windowHistory.map(h => Math.floor(h.at / 3_600_000))).size;
+  const pct = (key, value) => {
+    const valid = windowHistory.filter(h => h[key] != null);
+    return new Set(valid.map(h => Math.floor(h.at / 3_600_000))).size >= 540 ? percentile(value,valid.map(h => h[key])) : null;
+  };
   // How each measure moved: now minus the history sample nearest 24h / 7d ago. A percentile says
   // where vol sits in its month; the move says which way it is going, which the level alone hides.
   const then = (key, ageMs) => {
-    const target = current.atMs - ageMs, tolerance = Math.max(2 * 3_600_000, ageMs / 12);
+    const target = current.atMs - ageMs, tolerance = 3_600_000;
     let best = null;
     for (const h of history) {
-      if (h.at == null || h[key] == null || Math.abs(h.at - target) > tolerance) continue;
+      const sides = key.startsWith('call_') ? ['call'] : key.startsWith('put_') ? ['put'] : ['call','put'];
+      const comparable = sides.every(side => (side === 'call' ? call : put)?.expiry != null
+        && h[`${side}_expiry`] === (side === 'call' ? call : put).expiry);
+      if (!comparable || h.at == null || h.at > current.atMs || h[key] == null || Math.abs(h.at - target) > tolerance) continue;
       if (!best || Math.abs(h.at - target) < Math.abs(best.at - target)) best = h;
     }
     return best ? best[key] : null;
@@ -151,7 +163,8 @@ function buildVolSurface({ current, spotRows, history, zones }) {
     rr25: round(z.rr25),
   };
   return {
-    history_samples: history.length,
+    history_samples: windowHistory.length,
+    history_coverage: { observed_hours: observedHours, expected_hours: 720 },
     realized_vol: { rv7d: round(rv7), rv30d: round(rv30) },
     call_zone: describe(call, 'call'),
     put_zone: describe(put, 'put'),
@@ -170,8 +183,8 @@ function formatVolSurfaceForAdvisor(s) {
     ? `${label} ${z.expiry} (${z.dte}d): ATM ${f(z.atm_iv)}${p(z.atm_iv_pctl)}${m(z.atm_iv_move)} | 10Δ ${wingLabel} ${f(z.wing10_iv)} | wing premium over ATM ${f(z.wing_premium, true)}${p(z.wing_premium_pctl)}${m(z.wing_premium_move)} | 25Δ RR (call−put) ${f(z.rr25, true)}${vrp}`
     : `${label}: no expiry in window.`);
   return [
-    `IV and realized vol in annualized vol points. pctl = percentile vs hourly samples over the last 30d (n=${s.history_samples}); Δ24h/Δ7d = now minus the same zone measure that long ago (the zone's expiry can roll in between). ATM is one-sided (nearest-50Δ call for the call zone, put for the put zone) to match history.`,
-    `Realized vol (hourly closes): 7d ${f(s.realized_vol.rv7d)} | 30d ${f(s.realized_vol.rv30d)}.`,
+    `IV and realized vol in annualized vol points. pctl = percentile vs hourly samples over the last 30d (n=${s.history_samples}); percentiles require 75% valid hourly coverage and are descriptive rolling-zone comparisons, not constant-maturity estimates. Δ24h/Δ7d = now minus the same zone measure that long ago (changes require the same expiry; unavailable baselines and expiry rolls are n/a). ATM is one-sided (nearest-50Δ call for the call zone, put for the put zone) to match history.`,
+    `Realized vol (complete windows of completed hourly closes): 7d ${f(s.realized_vol.rv7d)} | 30d ${f(s.realized_vol.rv30d)}.`,
     zone('CALL zone', s.call_zone, 'call', ` | ATM IV − RV7d ${f(s.call_iv_minus_rv7d, true)}${p(s.call_iv_minus_rv7d_pctl)}${m(s.call_iv_minus_rv7d_move)}`),
     zone('PUT zone', s.put_zone, 'put', ` | ATM IV − RV30d ${f(s.put_iv_minus_rv30d, true)}`),
     `Term structure: put-zone ATM − call-zone ATM ${f(s.term_slope, true)}${p(s.term_slope_pctl)}${m(s.term_slope_move)}; negative means the front expiry is priced above the back (inverted).`,

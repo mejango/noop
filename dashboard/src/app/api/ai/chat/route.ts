@@ -1,3 +1,4 @@
+import { SMILE_FEATURES } from '../../../../../../bot/market-evidence';
 import Anthropic from '@anthropic-ai/sdk';
 import { describeStrategy } from '@/lib/strategy-config';
 import { buildMarketSnapshot } from '@/lib/snapshot';
@@ -95,7 +96,7 @@ function extractAndStoreJournal(text: string) {
           continue; // silently drop — violates position-data rule
         }
         // Extract series names referenced in the content
-        const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol', 'funding_rate', 'options_skew'];
+        const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol', 'funding_rate', 'options_skew', ...Object.keys(SMILE_FEATURES).map(key => `${key}_change`)];
         const referenced = seriesNames.filter((s) => content.toLowerCase().includes(s.replace(/_/g, ' ')) || content.includes(s));
         insertJournalEntry(entryType, content, referenced.length > 0 ? referenced : null);
       } catch {

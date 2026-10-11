@@ -140,7 +140,8 @@ const {
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
 const { buildSmileRows, SMILE_SNAPSHOT_INTERVAL_MS } = require('./bot/iv-smile');
 const { assessRichness } = require('./bot/iv-richness');
-const { buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor } = require('./bot/vol-surface');
+const { buildVolSurface, formatVolSurfaceForAdvisor } = require('./bot/vol-surface');
+const { buildMarketEvidence, formatMarketEvidence, readSmileHistory, SMILE_FEATURES } = require('./bot/market-evidence');
 let lastSmileSnapshotAt = 0;
 const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
 const { summarizeAdvisoryQuotes, candidateSpreadPct } = require('./bot/advisory-quotes');
@@ -4521,6 +4522,9 @@ const writeRawEvidencePacket = (journalEntries = []) => {
     '## Volatility Surface (computed; authoritative for IV levels, percentiles and 24h/7d moves)',
     formatVolSurfaceForAdvisor(buildStoredVolSurface()),
     '',
+    '## Shared liquidity and smile history (source validation, coverage, 30d/90d context)',
+    formatMarketEvidence(buildStoredMarketEvidence()),
+    '',
     '## Campaign Ledger (every reviewed campaign; authoritative for campaign counts and review status)',
     formatCampaignLedger(allTradeCampaigns),
     '',
@@ -5749,6 +5753,7 @@ const generateJournalEntries = async (tickSummary, botData) => {
       // The trade zones' ATM, wings, risk reversal, term slope and IV − realized, each with its 30d
       // percentile and 24h/7d move: the dashboard's smile panel, as the journal's own evidence.
       volatility_surface: formatVolSurfaceForAdvisor(buildStoredVolSurface()),
+      market_history: buildStoredMarketEvidence(),
       put_price_divergence: putPriceDivergence,
       recent_orders: recentOrders.map(o => ({
         timestamp: o.timestamp,
@@ -5952,7 +5957,7 @@ Use this wiki context to:
     // Extract journal entries
     const regex = /<journal\s+type="(observation|hypothesis|regime_note)">([\s\S]*?)<\/journal>/g;
     const metaRegex = /<hypothesis_meta>([\s\S]*?)<\/hypothesis_meta>/;
-    const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol'];
+    const seriesNames = ['spot_return', 'liquidity_flow', 'best_put_dv', 'best_call_dv', 'options_spread', 'options_depth', 'open_interest', 'implied_vol', 'funding_rate', ...Object.keys(SMILE_FEATURES).map(key => `${key}_change`)];
     let match;
     let count = 0;
     const parsedEntries = [];
@@ -6289,13 +6294,12 @@ const smileRowsToSurfaceExpiries = (rows) => rows.map(r => ({
 }));
 
 const buildVolSurfaceAt = (expiries, nowMs) => {
-  if (!db?.getVolSurfaceHistoryRows) return null;
+  if (!db?.getSmileHistoryRows) return null;
   const DAY = 86_400_000;
   const zones = { call_dte_range: CALL_EXPIRATION_RANGE, put_dte_range: PUT_EXPIRATION_RANGE };
   const spotRows = db.getSpotHourlyCloses(new Date(nowMs - 38 * DAY).toISOString());
-  if (!volSurfaceHistoryCache || nowMs - volSurfaceHistoryCache.at > 60 * 60 * 1000) {
-    const rows = db.getVolSurfaceHistoryRows(new Date(nowMs - 30 * DAY).toISOString());
-    volSurfaceHistoryCache = { at: nowMs, history: buildSurfaceHistory(rows, spotRows, zones) };
+  if (!volSurfaceHistoryCache || nowMs < volSurfaceHistoryCache.at || nowMs - volSurfaceHistoryCache.at > 60 * 60 * 1000) {
+    volSurfaceHistoryCache = { at: nowMs, history: readSmileHistory(db, nowMs, 30) };
   }
   return buildVolSurface({ current: { atMs: nowMs, expiries }, spotRows, history: volSurfaceHistoryCache.history, zones });
 };
@@ -6308,6 +6312,11 @@ const buildAdvisoryVolSurface = ({ tickerMap, instruments, nowMs }) => {
 
 // The same surface for the journal and wiki, which run without live tickers: the newest stored
 // full-chain smile (written every 15 min), dated to when it was captured. Null if it is stale.
+const buildStoredMarketEvidence = (nowMs = Date.now()) => {
+  try { return buildMarketEvidence(db, nowMs); }
+  catch (e) { console.log('Market history unavailable:', e.message); return null; }
+};
+
 const buildStoredVolSurface = () => {
   try {
     const rows = db?.getLatestSmileSnapshot?.() || [];
@@ -7024,6 +7033,7 @@ const generateMandelbrotRegimeContext = async ({
   sentiment,
   wikiSignals,
   volSurface = null,
+  marketEvidence = null,
 }) => {
   if (!process.env.OPENAI_API_KEY) return null;
 
@@ -7081,6 +7091,9 @@ ${JSON.stringify(Object.fromEntries(Object.entries(summarizeSentimentWindowsForL
 
 === VOLATILITY SURFACE (bot's call and put expiries; percentiles vs 30d) ===
 ${formatVolSurfaceForAdvisor(volSurface)}
+
+=== SHARED LIQUIDITY AND SMILE HISTORY ===
+${formatMarketEvidence(marketEvidence)}
 
 === BROAD QUOTE SNAPSHOT (all recorded tenors, not the entry candidate pool) ===
 ${JSON.stringify(summarizeMarketQualitySnapshotForLLM(sentiment?.latest?.marketQuality || []), null, 2)}
@@ -12253,6 +12266,7 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
     }
   }
 
+  const marketEvidence = buildStoredMarketEvidence(nowMs);
   let volSurface = null;
   try {
     volSurface = buildAdvisoryVolSurface({ tickerMap, instruments, nowMs });
@@ -12524,6 +12538,7 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
       sentiment,
       wikiSignals,
       volSurface,
+      marketEvidence,
     });
     if (mandelbrotContext) {
       console.log(`📋 Mandelbrot regime: ${mandelbrotContext.regime} @ ${(Number(mandelbrotContext.confidence || 0) * 100).toFixed(0)}% confidence`);
@@ -12699,6 +12714,9 @@ ${summarizeSentimentForAdvisor(sentiment?.windows || {}, sentiment?.latest?.mark
 
 === VOLATILITY SURFACE (PRIMARY EVIDENCE: IS VOL CHEAP OR RICH WHERE WE TRADE) ===
 ${formatVolSurfaceForAdvisor(volSurface)}
+
+=== SHARED LIQUIDITY AND SMILE HISTORY ===
+${formatMarketEvidence(marketEvidence)}
 
 === ROLLING OPTION VALUE CONTEXT (PRIMARY ENTRY VALUE EVIDENCE) ===
 ${formatRollingOptionValueContext(rollingOptionValueContext)}
@@ -12975,6 +12993,9 @@ ${formatRollingOptionValueContext(rollingOptionValueContext)}
 ## Volatility Surface
 ${formatVolSurfaceForAdvisor(volSurface)}
 
+=== SHARED LIQUIDITY AND SMILE HISTORY ===
+${formatMarketEvidence(marketEvidence)}
+
 ## Required Standing Rulebook Coverage
 ${formatRulebookRequirements(rulebookRequirements)}
 
@@ -13009,6 +13030,9 @@ ${formatRollingOptionValueContext(rollingOptionValueContext)}
 
 === VOLATILITY SURFACE ===
 ${formatVolSurfaceForAdvisor(volSurface)}
+
+=== SHARED LIQUIDITY AND SMILE HISTORY ===
+${formatMarketEvidence(marketEvidence)}
 
 === REQUIRED STANDING RULEBOOK COVERAGE ===
 ${formatRulebookRequirements(rulebookRequirements)}
@@ -13102,6 +13126,9 @@ ${formatRollingOptionValueContext(rollingOptionValueContext)}
 
 === VOLATILITY SURFACE ===
 ${formatVolSurfaceForAdvisor(volSurface)}
+
+=== SHARED LIQUIDITY AND SMILE HISTORY ===
+${formatMarketEvidence(marketEvidence)}
 
 === ACCOUNT HEALTH ===
 ${JSON.stringify(accountHealth, null, 2)}
@@ -13258,12 +13285,12 @@ Return the full repaired agenda JSON.`,
   });
 
   return { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion, mandelbrotContext,
-    rollingOptionValueContext, volSurface, persistedAgenda, spotPrice };
+    rollingOptionValueContext, volSurface, marketEvidence, persistedAgenda, spotPrice };
 };
 
 const publishTradingAdvisoryDraft = (draft, { inputSnapshot, checkedSnapshot, attempt }) => {
   const { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion, mandelbrotContext,
-    rollingOptionValueContext, volSurface = null, persistedAgenda, spotPrice } = draft;
+    rollingOptionValueContext, volSurface = null, marketEvidence = null, persistedAgenda, spotPrice } = draft;
   const publication = {
     input_as_of: inputSnapshot.marketTimestamp,
     quote_state_checked_at: checkedSnapshot.marketTimestamp,
@@ -13280,7 +13307,7 @@ const publishTradingAdvisoryDraft = (draft, { inputSnapshot, checkedSnapshot, at
   if (secondOpinion) journalEntries.push({ entry_type: 'advisory_taleb', content: JSON.stringify(secondOpinion, null, 2) });
   if (mandelbrotContext) journalEntries.push({ entry_type: 'mandelbrot_archive', content: JSON.stringify(mandelbrotContext, null, 2) });
   journalEntries.push({ entry_type: 'advisory_context', content: JSON.stringify({
-    advisory_id: advisoryId, rolling_option_value_context: rollingOptionValueContext, volatility_surface: volSurface, publication,
+    advisory_id: advisoryId, rolling_option_value_context: rollingOptionValueContext, volatility_surface: volSurface, market_history: marketEvidence, publication,
   }, null, 2) });
   if (!db?.publishAdvisory) throw new Error('Advisory publication storage unavailable');
   db.publishAdvisory(advisoryId, allRules, journalEntries);

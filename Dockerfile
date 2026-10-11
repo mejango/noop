@@ -6,7 +6,7 @@ WORKDIR /dashboard
 COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci
 COPY dashboard/ ./
-COPY bot/config.json bot/strategy-facts.json bot/economic-events.js bot/open-interest.js bot/funding-rates.js bot/derive-config.js bot/liquidity-quality.js /bot/
+COPY bot/config.json bot/strategy-facts.json bot/economic-events.js bot/open-interest.js bot/funding-rates.js bot/derive-config.js bot/liquidity-quality.js bot/market-evidence.js bot/vol-surface.js bot/correlation.js /bot/
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV BOT_CONFIG_PATH=/bot/config.json
 RUN npm run build

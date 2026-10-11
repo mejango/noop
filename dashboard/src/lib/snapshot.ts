@@ -1,3 +1,5 @@
+import * as marketHistoryDb from './db';
+import { buildMarketEvidence } from '../../../bot/market-evidence';
 import {
   getStats,
   getBotBudget,
@@ -158,6 +160,7 @@ async function _buildUncached() {
       })(),
     },
 
+    market_history: buildMarketEvidence(marketHistoryDb),
     onchain_metrics: {
       data_quality_notice: LIQUIDITY_DATA_NOTICE,
       _description: 'liquidity_flow_direction: inflow|outflow|neutral, magnitude/confidence 0-1.',
