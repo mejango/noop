@@ -106,6 +106,7 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const { fetchV4OnchainLiquidity } = require('./bot/v4-onchain-liquidity');
+const { fetchV3OnchainLiquidity, attachV3SubgraphActivity } = require('./bot/v3-onchain-liquidity');
 const { invalidDexReason, calculateValidatedLiquidityFlow, dexForAdvisor, LIQUIDITY_DATA_NOTICE } = require('./bot/liquidity-quality');
 const { getDeriveConfig, orderNonce, fetchInstruments } = require('./bot/derive-config');
 const DERIVE_CONFIG = getDeriveConfig();
@@ -996,89 +997,24 @@ const analyzeDEXLiquidity = async (spotPrice) => {
     };
     const historicalData = loadHistoricalLiquidity();
 
-    // Uniswap V3 analysis - specific pools only
+    // V3 reserves come from the two canonical pool contracts at one block.
+    // Indexed swap activity is optional and cannot replace a failed reserve read.
     try {
-      const uniswapQuery = {
-        query: `
-                  query {
-                    pools(where: {id_in: [
-                      "0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640",
-                      "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8"
-                    ]}) {
-                      id
-                      totalValueLockedUSD
-                      volumeUSD
-                      feeTier
-                      liquidity
-                      txCount
-                      totalValueLockedToken0
-                      totalValueLockedToken1
-                      token0 {
-                        symbol
-                        id
-                      }
-                      token1 {
-                        symbol
-                        id
-                      }
-                    }
-                  }
-        `
-      };
-      
-      const response = await axios.post(DEX_APIS.UNISWAP_V3, uniswapQuery, { timeout: 15000 });
-      assertGraphQLSuccess(response);
-      if (response.data?.data?.pools && Array.isArray(response.data.data.pools)) {
-        // For Uniswap V3, calculate both TVL and in-range liquidity
-        const poolCount = response.data.data.pools.length;
-        if (poolCount === 0) {
-          console.log('⚠️ No V3 pools found with provided IDs - they may not be indexed in the subgraph');
-        }
-        // Calculate TVL in USD terms (consistent across all DEXes)
-        const totalTVLUSD = response.data.data.pools.reduce((sum, pool) => {
-          const tvlUsd = parseFloat(pool.totalValueLockedUSD);
-          return isNaN(tvlUsd) ? sum : sum + tvlUsd;
-        }, 0);
-        
-        const totalVolume = response.data.data.pools.reduce((sum, pool) => {
-          const v = parseFloat(pool.volumeUSD);
-          return isNaN(v) ? sum : sum + v;
-        }, 0);
-        const totalTxCount = response.data.data.pools.reduce((sum, pool) => {
-          const t = parseInt(pool.txCount);
-          return isNaN(t) ? sum : sum + t;
-        }, 0);
-
-        liquidityData.dexes.uniswap_v3 = {
-          pools: response.data.data.pools.length,
-          totalLiquidity: totalTVLUSD, // TVL in USD terms (consistent)
-          totalVolume,
-          totalTxCount,
-          poolDetails: response.data.data.pools.map(pool => {
-            const tvlUsd = parseFloat(pool.totalValueLockedUSD);
-
-            return {
-              id: pool.id,
-              liquidity: tvlUsd, // Store in USD terms (consistent)
-              liquidityUSD: tvlUsd, // Keep USD for reference
-              volumeUSD: parseFloat(pool.volumeUSD) || 0,
-              feeTier: parseInt(pool.feeTier) || 0,
-              activeLiquidity: pool.liquidity || '0',
-              txCount: parseInt(pool.txCount) || 0,
-              tvlToken0: parseFloat(pool.totalValueLockedToken0) || 0,
-              tvlToken1: parseFloat(pool.totalValueLockedToken1) || 0,
-              token0: pool.token0,
-              token1: pool.token1
-            };
-          })
-        };
+      let sample = await fetchV3OnchainLiquidity(spotPrice);
+      try {
+        const response = await axios.post(DEX_APIS.UNISWAP_V3, { query: `query {
+          pools(where: {id_in: ["0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640", "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8"]}) {
+            id volumeUSD txCount
+          }
+        }` }, { timeout: 15000 });
+        assertGraphQLSuccess(response);
+        sample = attachV3SubgraphActivity(sample, response.data?.data?.pools);
+      } catch {
+        sample.volumeUnavailableReason = 'V3 indexed swap activity unavailable';
       }
+      liquidityData.dexes.uniswap_v3 = sample;
     } catch (error) {
-      console.log('⚠️ Uniswap V3 liquidity analysis failed:', error.message);
-      if (error.response) {
-        console.log('⚠️ V3 API Response:', error.response.status, error.response.data);
-      }
-      liquidityData.dexes.uniswap_v3 = { error: error.message };
+      liquidityData.dexes.uniswap_v3 = { error: error.message, source: 'ethereum_pool_token_balances', tvlDefinition: 'pool_token_balances_v1' };
     }
 
     // Read v4 liquidity principal directly from the canonical Ethereum pool.

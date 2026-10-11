@@ -5,7 +5,7 @@ const Database = require('better-sqlite3');
 const crypto = require('node:crypto');
 const { sanitizeOnchainRow, calculateValidatedLiquidityFlow, unknownLiquidityFlow, LIQUIDITY_DATA_NOTICE } = require('../bot/liquidity-quality');
 const { createHourlyRollups } = require('../bot/hourly-rollups');
-const VERSION = 'v4-onchain-principal-2026-10-11-v1';
+const VERSION = 'dex-onchain-2026-10-11-v2';
 
 function nearest(samples, target) {
   let lo = 0, hi = samples.length;
@@ -17,20 +17,25 @@ function nearest(samples, target) {
   return [samples[lo - 1], samples[lo]].filter(Boolean).sort((a, b) => Math.abs(a.ms - target) - Math.abs(b.ms - target))[0];
 }
 
-function repairV4Liquidity(db, { apply = false, batchSize = 100 } = {}) {
+function repairDexLiquidity(db, { apply = false, batchSize = 100 } = {}) {
   const maxId = db.prepare('SELECT MAX(id) AS id FROM onchain_data').get().id || 0;
   const samples = [];
-  const stats = { version: VERSION, apply, rows: 0, legacyV4: 0, negativeBalances: 0, repairedRows: 0, repairedTicks: 0, rebuiltHours: 0 };
+  const stats = { version: VERSION, apply, rows: 0, legacyV3: 0, legacyV4: 0, negativeBalances: 0, repairedRows: 0, repairedTicks: 0, rebuiltHours: 0 };
   let firstAffected = null, lastAffected = null;
   for (const row of db.prepare('SELECT id,timestamp,raw_data FROM onchain_data WHERE id <= ? ORDER BY timestamp,id').iterate(maxId)) {
     let raw;
     try { raw = JSON.parse(row.raw_data); } catch { continue; }
     if (!raw?.dexLiquidity?.dexes) continue;
     stats.rows++;
+    const v3 = raw.dexLiquidity.dexes.uniswap_v3;
+    const legacyV3 = v3 && v3.tvlDefinition !== 'pool_token_balances_v1';
+    if (legacyV3) stats.legacyV3++;
     const v4 = raw.dexLiquidity.dexes.uniswap_v4;
     if (v4 && v4.tvlDefinition !== 'core_liquidity_principal_v1') {
       stats.legacyV4++;
       if (v4.poolDetails?.some(pool => Number(pool.tvlToken0) < 0 || Number(pool.tvlToken1) < 0)) stats.negativeBalances++;
+    }
+    if (legacyV3 || (v4 && v4.tvlDefinition !== 'core_liquidity_principal_v1')) {
       firstAffected = !firstAffected || row.timestamp < firstAffected ? row.timestamp : firstAffected;
       lastAffected = !lastAffected || row.timestamp > lastAffected ? row.timestamp : lastAffected;
     }
@@ -106,7 +111,7 @@ function repairV4Liquidity(db, { apply = false, batchSize = 100 } = {}) {
         const parent = summary.onchain?.liquidity_flow ? summary.onchain : summary;
         if (!parent.liquidity_flow || summary.liquidityRepairVersion === VERSION) continue;
         preserve('bot_ticks', row);
-        parent.liquidity_flow = unknownLiquidityFlow(['legacy_v4_tvl']);
+        parent.liquidity_flow = unknownLiquidityFlow(['legacy_dex_tvl']);
         summary.liquidity_data_quality_notice = LIQUIDITY_DATA_NOTICE;
         summary.liquidityRepairVersion = VERSION;
         updateTick.run(JSON.stringify(summary), row.id);
@@ -137,7 +142,7 @@ function repairV4Liquidity(db, { apply = false, batchSize = 100 } = {}) {
   const rollups = createHourlyRollups(db);
   // Rebuild only onchain hours, not the unrelated, much larger options tables.
   // Include leftover legacy rollup hours even if their raw data is absent.
-  for (const row of db.prepare("SELECT DISTINCT hour FROM onchain_hourly WHERE dex='uniswap_v4'").all()) hours.add(row.hour);
+  for (const row of db.prepare("SELECT DISTINCT hour FROM onchain_hourly WHERE dex IN ('uniswap_v3','uniswap_v4')").all()) hours.add(row.hour);
   for (const hour of hours) {
     rollups.refreshOnchainHour(hour);
     stats.rebuiltHours++;
@@ -157,9 +162,9 @@ function main(args = process.argv.slice(2)) {
   if (index < 0 || !args[index + 1]) throw new Error('Use --db /explicit/path/noop.db [--apply]; default is a read-only audit');
   const apply = args.includes('--apply');
   const db = new Database(args[index + 1], { readonly: !apply, fileMustExist: true, timeout: 5000 });
-  try { console.log(JSON.stringify(repairV4Liquidity(db, { apply }), null, 2)); } finally { db.close(); }
+  try { console.log(JSON.stringify(repairDexLiquidity(db, { apply }), null, 2)); } finally { db.close(); }
 }
 if (require.main === module) {
   try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
-module.exports = { repairV4Liquidity, VERSION };
+module.exports = { repairDexLiquidity, VERSION };

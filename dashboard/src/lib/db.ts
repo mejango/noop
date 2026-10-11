@@ -5,7 +5,7 @@ import { BOT_CONFIG } from './strategy-config';
 import { getEconomicHistory as readEconomicHistory } from '../../../bot/economic-events';
 import { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } from '../../../bot/open-interest';
 import { FUNDING_EXCHANGE, FUNDING_SYMBOL } from '../../../bot/funding-rates';
-import { invalidDexReason, sanitizeOnchainRow } from '../../../bot/liquidity-quality';
+import { invalidDexReason, sanitizeOnchainRow, liquidityChartSeries } from '../../../bot/liquidity-quality';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
@@ -1045,12 +1045,13 @@ export function getLiquidityOverTime(since: string) {
       const dexes = data?.dexLiquidity?.dexes;
       if (dexes) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        for (const [name, dex] of Object.entries(dexes) as [string, any][]) {
+        for (const [dexName, dex] of Object.entries(dexes) as [string, any][]) {
+          const name = liquidityChartSeries(dexName, dex);
           if (isTemporaryV4AggregateSample(name, dex)) continue;
           // A stale sample is the previous value replayed. Emitting it draws a flat
           // line through an outage and dumps the whole gap's volume into one bar when
           // the feed returns; leaving a hole makes the gap visible instead.
-          if (invalidDexReason(name, dex)) continue;
+          if (invalidDexReason(dexName, dex)) continue;
           if (!dex.error && dex.totalLiquidity && !isNaN(dex.totalLiquidity)) {
             entry[name] = dex.totalLiquidity;
           }

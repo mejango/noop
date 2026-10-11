@@ -11,7 +11,7 @@
  */
 // 2: best_put_dv / best_call_dv restricted to the entry DTE windows, so the
 // dashboard can read this table for long ranges instead of scanning raw quotes.
-const { invalidDexReason } = require('./liquidity-quality');
+const { invalidDexReason, liquidityChartSeries } = require('./liquidity-quality');
 const ALGORITHM_VERSION = 2;
 const HOUR_MS = 60 * 60 * 1000;
 const RAW_TABLES = {
@@ -170,12 +170,13 @@ function createHourlyRollups(db) {
         if (invalidReason && !(invalidReason === 'invalid_tvl' && (dex.totalLiquidity == null || Number(dex.totalLiquidity) === 0))) continue;
         // Preserve the historical repair exclusion for multi-pool v4 responses.
         if (name === 'uniswap_v4' && finiteNumber(dex.pools) > 1) continue;
-        const aggregate = dexHours.get(name) || { sum: 0, count: 0 };
+        const series = liquidityChartSeries(name, dex);
+        const aggregate = dexHours.get(series) || { sum: 0, count: 0 };
         const magnitude = finiteNumber(row.liquidity_flow_magnitude);
         if (magnitude != null) { aggregate.sum += magnitude; aggregate.count++; }
         aggregate.latest = { tvl: finiteNumber(dex.totalLiquidity), volume: finiteNumber(dex.totalVolume),
           tx_count: finiteNumber(dex.totalTxCount), direction: row.liquidity_flow_direction ?? null };
-        dexHours.set(name, aggregate);
+        dexHours.set(series, aggregate);
       }
     }
     deleteHour.onchain_hourly.run(bounds.hour);

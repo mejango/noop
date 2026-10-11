@@ -1996,13 +1996,15 @@ export default function OverviewPage() {
       {/* DEX Liquidity (TVL) */}
       {filteredLiquidity.length > 0 && (() => {
         const dexColors: Record<string, string> = {
-          uniswap_v3: '#ff007a', // Uniswap pink
+          uniswap_v3: '#a85579', // Legacy subgraph series
+          uniswap_v3_onchain: '#ff007a', // Actual pool balances
           uniswap_v4: '#fc72ff', // Uniswap V4 purple-pink
         };
         const fallbackColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
         const getColor = (name: string, i: number) => dexColors[name] || fallbackColors[i % fallbackColors.length];
-        const formatDexName = (name: string) => name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        const feedGaps = liquidityFeedGaps(liquidityData, Object.keys(dexColors));
+        const formatDexName = (name: string) => name === 'uniswap_v3' ? 'Uniswap V3 (subgraph)' : name === 'uniswap_v3_onchain' ? 'Uniswap V3 (onchain)' : name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        const hasOnchainV3 = liquidityData.some(row => row.uniswap_v3_onchain != null);
+        const feedGaps = liquidityFeedGaps(liquidityData, [hasOnchainV3 ? 'uniswap_v3_onchain' : 'uniswap_v3', 'uniswap_v4']);
         const formatCompact = (v: number) => {
           if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
           if (v >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
@@ -2121,6 +2123,7 @@ export default function OverviewPage() {
                 ))}
               </div>
             </div>
+            {hasOnchainV3 && <div className="text-xs text-gray-500 mb-2">V3 onchain includes accrued fees; V4 shows liquidity principal. Source baselines are separate. V3 volume uses the subgraph; V4 volume is unavailable.</div>}
             {feedGaps.length > 0 && (
               <div className="text-[10px] text-amber-400 mb-1" role="status">
                 {feedGaps.map(gap => `${formatDexName(gap.name)} feed gap · ${gap.lastSample

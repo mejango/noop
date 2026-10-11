@@ -23,7 +23,7 @@ const { getLiquidityOverTime } = m.exports;
 
 const dex = (v3, v4, stale) => JSON.stringify({
   dexLiquidity: { dexes: {
-    uniswap_v3: { pools: 2, totalLiquidity: v3, totalVolume: v3 * 10 },
+    uniswap_v3: { pools: 2, tvlDefinition: 'pool_token_balances_v1', totalLiquidity: v3, totalVolume: v3 * 10 },
     uniswap_v4: { pools: 1, tvlDefinition: 'core_liquidity_principal_v1', totalLiquidity: v4, totalVolume: v4 * 10, ...(stale ? { stale: true, staleReason: 'subgraph_unavailable' } : {}) },
   } },
 });
@@ -41,7 +41,7 @@ assert.strictEqual(series[1].uniswap_v4, undefined, 'replayed sample must not be
 assert.strictEqual(series[2].uniswap_v4, undefined, 'replayed sample must not be forward-filled either');
 assert.strictEqual(series[3].uniswap_v4, 12.4e6, 'recovery is served');
 // V3 stayed live throughout and must be untouched.
-assert.deepStrictEqual(series.map((r) => r.uniswap_v3), [740e6, 742e6, 745e6, 750e6]);
+assert.deepStrictEqual(series.map((r) => r.uniswap_v3_onchain), [740e6, 742e6, 745e6, 750e6]);
 // No volume on the stale rows, so the chart cannot dump the whole outage into one bar.
 assert.strictEqual(series[1].uniswap_v4_vol, undefined);
 assert.strictEqual(series[2].uniswap_v4_vol, undefined);

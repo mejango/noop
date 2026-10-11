@@ -1,6 +1,6 @@
 'use strict';
 
-const LIQUIDITY_DATA_NOTICE = 'Legacy Uniswap v4 subgraph TVL is quarantined as unverified; recorded negative token balances prove accounting corruption in the old feed. New v4 readings are onchain core liquidity principal, excluding uncollected fees and donations. Do not interpret a source change or missing history as liquidity withdrawal. USD values use the observed ETH spot price and USDT at $1; TVL changes also reflect token prices. Prior journal/wiki conclusions based on legacy v4 TVL require reassessment.';
+const LIQUIDITY_DATA_NOTICE = 'Legacy Uniswap v3 and v4 subgraph TVL is quarantined as unverified; V4 recorded negative token balances, and V3 materially disagreed with direct balances and GeckoTerminal. New v4 readings are onchain core liquidity principal, excluding uncollected fees and donations. Do not interpret a source change or missing history as liquidity withdrawal. V3 readings use actual pool token balances, including accrued fees and donations; legacy V3 subgraph history has a separate definition. USD values use the observed ETH spot price and USDT/USDC at $1; TVL changes also reflect token prices. Prior journal/wiki conclusions based on legacy v3/v4 TVL require reassessment.';
 
 function invalidDexReason(name, dex) {
   if (!dex || typeof dex !== 'object') return 'missing_sample';
@@ -14,9 +14,14 @@ function invalidDexReason(name, dex) {
       }
     }
   }
+  if (name === 'uniswap_v3' && dex.tvlDefinition !== 'pool_token_balances_v1') return 'unverified_legacy_v3_tvl';
   if (name === 'uniswap_v4' && dex.tvlDefinition !== 'core_liquidity_principal_v1') return 'unverified_legacy_v4_tvl';
   if (dex.totalLiquidity == null || !Number.isFinite(Number(dex.totalLiquidity)) || Number(dex.totalLiquidity) <= 0) return 'invalid_tvl';
   return null;
+}
+
+function liquidityChartSeries(name, dex) {
+  return name === 'uniswap_v3' && dex?.tvlDefinition === 'pool_token_balances_v1' ? 'uniswap_v3_onchain' : name;
 }
 
 function liquidityDefinition(dex) {
@@ -49,7 +54,7 @@ function calculateValidatedLiquidityFlow(currentData, historicalData, nowMs = Da
       if (!Number.isFinite(time) || time >= nowMs) return best;
       return !best || Math.abs(time - target) < Math.abs(Date.parse(best.timestamp) - target) ? sample : best;
     }, null);
-    const comparable = historical && Math.abs(Date.parse(historical.timestamp) - target) <= 3600000
+    const comparable = historical && Math.abs(Date.parse(historical.timestamp) - target) <= 15 * 60000
       ? validNames.filter(dex => !invalidDexReason(dex, historical.dexes?.[dex])
         && liquidityDefinition(current[dex]) === liquidityDefinition(historical.dexes[dex]))
       : [];
@@ -85,6 +90,8 @@ function dexForAdvisor(name, dex) {
     total_liquidity: reason ? null : Number(dex.totalLiquidity),
     total_volume_usd: reason ? null : dex.totalVolume ?? null,
     total_tx_count: reason ? null : dex.totalTxCount ?? null,
+    volume_source: dex?.volumeSource || (dex?.totalVolume != null ? 'uniswap_subgraph' : null),
+    volume_unavailable_reason: dex?.volumeUnavailableReason ?? null,
     source: dex?.source || 'uniswap_subgraph', tvl_definition: liquidityDefinition(dex),
     source_block: dex?.sourceBlock ?? null, source_timestamp: dex?.sourceTimestamp ?? null,
     usd_valuation: dex?.usdValuation ?? null, pool_count: pools.length || dex?.pools || null,
@@ -94,7 +101,7 @@ function dexForAdvisor(name, dex) {
       token0_amount: reason ? null : pool.tvlToken0 ?? null,
       token1_amount: reason ? null : pool.tvlToken1 ?? null,
       active_liquidity: reason ? null : pool.activeLiquidity ?? null,
-      fee_tier_bps: pool.feeTier ?? null,
+      fee_tier_bps: pool.feeTier == null ? null : Number(pool.feeTier) / 100,
     } : null,
   };
 }
@@ -124,4 +131,4 @@ function sanitizeOnchainRow(row) {
   } catch { return row; }
 }
 
-module.exports = { invalidDexReason, liquidityDefinition, unknownLiquidityFlow, calculateValidatedLiquidityFlow, dexForAdvisor, sanitizeOnchainRow, LIQUIDITY_DATA_NOTICE };
+module.exports = { liquidityChartSeries, invalidDexReason, liquidityDefinition, unknownLiquidityFlow, calculateValidatedLiquidityFlow, dexForAdvisor, sanitizeOnchainRow, LIQUIDITY_DATA_NOTICE };
