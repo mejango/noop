@@ -130,7 +130,8 @@ export interface AlignedSeries {
 export function extractAllSeries(days: number): AlignedSeries {
   const nowMs = Date.now(), sinceMs = nowMs - days * 86400000;
   const since = new Date(sinceMs).toISOString();
-  const raw = Object.fromEntries(SERIES.map(s => [s.name,s.extract(since)]));
+  const raw: Record<string, { hour: string; value: number | null }[]> = marketHistoryDb.getCorrelationHistory({ since:new Date(Math.floor(sinceMs/3600000)*3600000).toISOString(), before:new Date(Math.floor(nowMs/3600000)*3600000).toISOString() });
+  for (const s of SERIES) if (!(s.name in raw)) raw[s.name]=s.extract(since);
   Object.assign(raw, smileChangeSeries(readSmileHistory(marketHistoryDb,nowMs,90)));
   return alignHourly(raw,sinceMs,nowMs);
 }

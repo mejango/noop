@@ -64,6 +64,7 @@ function fixture(t) {
     '../../../bot/derive-config': require('../bot/derive-config'),
     '../../../bot/liquidity-quality': require('../bot/liquidity-quality'),
     '../../../bot/market-evidence': require('../bot/market-evidence'),
+    '../../../bot/correlation': require('../bot/correlation'),
     '../../../bot/economic-events': {}, '../../../bot/open-interest': {}, '../../../bot/funding-rates': {},
   });
   let next = 0;

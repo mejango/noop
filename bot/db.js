@@ -5,6 +5,7 @@ const DB_PATH = process.env.NOOP_DB_PATH || path.join(DATA_DIR, 'noop.db');
 const { createHourlyRollups } = require('./hourly-rollups');
 const { FUNDING_EXCHANGE, FUNDING_SYMBOL } = require('./funding-rates');
 const { HISTORY_SQL } = require('./market-evidence');
+const { readCorrelationHistory } = require('./correlation');
 const { sanitizeOnchainRow } = require('./liquidity-quality');
 const { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } = require('./open-interest');
 const fs = require('fs');
@@ -2502,6 +2503,7 @@ const getVolSurfaceHistoryRows = (since) => stmts.getVolSurfaceHistoryRows.all({
 const getSpotHourlyCloses = (since) => stmts.getSpotHourlyCloses.all({ since });
 
 // Every expiry of the newest full-chain smile snapshot (one snapshot writes all rows at once).
+const getCorrelationHistory = (bounds) => readCorrelationHistory(db,bounds);
 const getSmileHistoryRows = (bounds) => stmts.getSmileHistoryRows.all(bounds);
 const getLiquidityHistoryRows = (bounds) => stmts.getLiquidityHistoryRows.all(bounds).map(sanitizeOnchainRow);
 const getLiquidityNear = (bounds) => sanitizeOnchainRow(stmts.getLiquidityNear.get(bounds));
@@ -3099,7 +3101,7 @@ module.exports = {
   insertSmileSnapshotBatch,
   getSmileSnapshotsForExpiry,
   getLatestSmileSnapshot,
-  getSmileHistoryRows, getLiquidityHistoryRows, getLiquidityNear,
+  getSmileHistoryRows, getLiquidityHistoryRows, getLiquidityNear, getCorrelationHistory,
   getInstrumentIvNear,
   getVolSurfaceHistoryRows,
   getSpotHourlyCloses,

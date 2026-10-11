@@ -1,3 +1,4 @@
+const { FUNDING_EXCHANGE, FUNDING_SYMBOL } = require('./funding-rates');
 const { SMILE_FEATURES, readSmileHistory, smileChangeSeries } = require('./market-evidence');
 // ─── Pearson Correlation ────────────────────────────────────────────────────
 
@@ -157,11 +158,37 @@ function alignHourly(raw, sinceMs, beforeMs) {
   return { hours, series };
 }
 
+// Read existing, validated hourly rollups once; never rescan millions of raw
+// option observations on an advisor/dashboard request. Completed-hour bounds
+// also prevent the current rollup from leaking unfinished observations.
+function readCorrelationHistory(database, { since, before }) {
+  const bounds = { since, before };
+  const spots = database.prepare('SELECT hour,avg_price FROM spot_prices_hourly WHERE hour >= @since AND hour < @before ORDER BY hour').all(bounds);
+  const options = database.prepare('SELECT * FROM options_hourly WHERE hour >= @since AND hour < @before ORDER BY hour').all(bounds);
+  const liquidity = database.prepare(`SELECT hour, AVG(CASE WHEN direction='outflow' THEN -avg_magnitude
+    WHEN direction='inflow' THEN avg_magnitude WHEN direction IN ('stable','neutral') AND avg_magnitude IS NOT NULL THEN 0 END) AS value
+    FROM onchain_hourly WHERE hour >= @since AND hour < @before AND dex IN ('uniswap_v3_onchain','uniswap_v4')
+    GROUP BY hour ORDER BY hour`).all(bounds);
+  const funding = database.prepare(`SELECT hour,avg_rate FROM funding_rates_hourly
+    WHERE hour >= @since AND hour < @before AND exchange=@exchange AND symbol=@symbol ORDER BY hour`)
+    .all({ ...bounds, exchange:FUNDING_EXCHANGE, symbol:FUNDING_SYMBOL });
+  const raw = {
+    spot_return:spots.slice(1).map((r,i) => ({ hour:r.hour,value:spots[i].avg_price>0 && Date.parse(r.hour)-Date.parse(spots[i].hour)===3600000
+      ? (r.avg_price/spots[i].avg_price-1)*100 : null })),
+    liquidity_flow:liquidity,
+    funding_rate:funding.map(r => ({hour:r.hour,value:r.avg_rate==null?null:r.avg_rate*100})),
+  };
+  for (const [name,column] of Object.entries({ best_put_dv:'best_put_dv',best_call_dv:'best_call_dv',options_spread:'avg_spread',options_depth:'avg_depth',implied_vol:'avg_iv',open_interest:'total_oi' })) {
+    raw[name]=options.map(r => ({hour:r.hour,value:r[column]}));
+  }
+  return raw;
+}
+
 function extractAllSeries(db, days, nowMs = Date.now()) {
   const sinceMs = nowMs - days * 86400000;
   const since = new Date(sinceMs).toISOString();
-  const raw = {};
-  for (const definition of SERIES_DEFS) raw[definition.name] = definition.extract(db, since);
+  const raw = db.getCorrelationHistory ? db.getCorrelationHistory({ since:new Date(Math.floor(sinceMs/3600000)*3600000).toISOString(), before:new Date(Math.floor(nowMs/3600000)*3600000).toISOString() }) : {};
+  for (const definition of SERIES_DEFS) if (!(definition.name in raw)) raw[definition.name] = definition.extract(db,since);
   Object.assign(raw, smileChangeSeries(readSmileHistory(db, nowMs, 90)));
   return alignHourly(raw, sinceMs, nowMs);
 }
@@ -207,7 +234,7 @@ function analyzeAligned(data, descriptions, nowMs = Date.now()) {
   return { pairs, leading_indicators:leadingIndicators, series_descriptions:descriptions,
     coverage:Object.fromEntries(names.map(name => [name,Object.fromEntries([['7d',d7],['30d',d30],['90d',data]].map(([window,d]) => [window,{ observed_hours:d.series[name].filter(Number.isFinite).length, expected_hours:window==='7d'?168:window==='30d'?720:2160 }]))])),
     computed_at:new Date(nowMs).toISOString(),
-    notice:'Descriptive correlations with aligned-pair counts; 7d/30d/90d coefficients require at least 75% paired hourly coverage in the named window. Missing hours remain missing. Smile changes omit expiry rolls. Best option scores can change with candidate composition and are not realized P&L. Lag searches and split-half consistency are exploratory, not out-of-sample validation, causality, or authority to override EDGE/risk rules.' };
+    notice:'Descriptive correlations with aligned-pair counts; 7d/30d/90d coefficients require at least 75% paired hourly coverage in the named window. Missing hours remain missing. Smile changes omit expiry rolls. Best option scores are executable candidate RAW values inside the entry DTE windows; they can change with candidate composition and are not realized P&L. Lag searches and split-half consistency are exploratory, not out-of-sample validation, causality, or authority to override EDGE/risk rules.' };
 }
 const correlationCache = new WeakMap();
 function buildCorrelationAnalysis(db, nowMs = Date.now()) {
@@ -220,4 +247,4 @@ function buildCorrelationAnalysis(db, nowMs = Date.now()) {
   correlationCache.set(db,{ at:nowMs,data:result });
   return result;
 }
-module.exports = { buildCorrelationAnalysis, alignHourly, analyzeAligned, pearson, computeLeadLag, SMILE_DEFS };
+module.exports = { readCorrelationHistory, buildCorrelationAnalysis, alignHourly, analyzeAligned, pearson, computeLeadLag, SMILE_DEFS };

@@ -1,3 +1,4 @@
+import { readCorrelationHistory } from '../../../bot/correlation';
 import Database from 'better-sqlite3';
 import { HISTORY_SQL } from '../../../bot/market-evidence';
 import { getDeriveConfig } from '../../../bot/derive-config';
@@ -1882,4 +1883,8 @@ export function getFundingRatesHourly(since: string) {
   return getDb().prepare(`SELECT strftime('%Y-%m-%dT%H:00:00Z',timestamp) AS hour, AVG(rate) AS avg_rate
     FROM funding_rates WHERE timestamp > @since AND symbol = @symbol AND exchange = @exchange
     GROUP BY hour ORDER BY hour`).all({ since, symbol: FUNDING_SYMBOL, exchange: FUNDING_EXCHANGE });
+}
+
+export function getCorrelationHistory(bounds: { since: string; before: string }) {
+  return readCorrelationHistory(getDb(),bounds);
 }

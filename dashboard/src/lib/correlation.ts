@@ -1,5 +1,5 @@
-import { analyzeAligned } from '../../../bot/correlation';
-import { extractAllSeries, getRegisteredSeries } from './series-registry';
+import { buildCorrelationAnalysis as sharedCorrelationAnalysis } from '../../../bot/correlation';
+import * as marketHistoryDb from './db';
 
 // ─── Cache ──────────────────────────────────────────────────────────────────
 
@@ -52,7 +52,5 @@ export function buildCorrelationAnalysis(): CorrelationSnapshot {
 }
 
 function _buildCorrelationUncached(): CorrelationSnapshot {
-  const descriptions = Object.fromEntries(getRegisteredSeries().map(s => [s.name,s.description]));
-  try { return analyzeAligned(extractAllSeries(90), descriptions); }
-  catch { return { pairs: [], leading_indicators: [], series_descriptions: descriptions, computed_at: new Date().toISOString() }; }
+  return sharedCorrelationAnalysis(marketHistoryDb);
 }

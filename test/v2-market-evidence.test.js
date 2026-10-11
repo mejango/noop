@@ -136,3 +136,28 @@ test('a short history cannot masquerade as a 30d or 90d correlation window', () 
   assert.equal(result.pairs[0].lead_lag.lookback_days,7);
   assert.equal(result.pairs[0].n_90d,336);
 });
+
+test('correlations read completed hourly rollups without needing raw option tables', () => {
+  const { readCorrelationHistory }=require('../bot/correlation');
+  const { FUNDING_EXCHANGE,FUNDING_SYMBOL }=require('../bot/funding-rates');
+  const db=new Database(':memory:');
+  try {
+    db.exec(`CREATE TABLE spot_prices_hourly(hour TEXT,avg_price REAL);
+      CREATE TABLE options_hourly(hour TEXT,best_put_dv REAL,best_call_dv REAL,avg_spread REAL,avg_depth REAL,avg_iv REAL,total_oi REAL);
+      CREATE TABLE onchain_hourly(hour TEXT,dex TEXT,avg_magnitude REAL,direction TEXT);
+      CREATE TABLE funding_rates_hourly(hour TEXT,exchange TEXT,symbol TEXT,avg_rate REAL);`);
+    const end=Math.floor(NOW/H)*H;
+    for (const [hour,price] of [[end-3*H,100],[end-2*H,110],[end,999]]) db.prepare('INSERT INTO spot_prices_hourly VALUES (?,?)').run(iso(hour),price);
+    db.prepare('INSERT INTO options_hourly VALUES (?,?,?,?,?,?,?)').run(iso(end-2*H),55,66,.01,3,.4,1000);
+    db.prepare('INSERT INTO onchain_hourly VALUES (?,?,?,?)').run(iso(end-2*H),'uniswap_v3_onchain',.05,'outflow');
+    db.prepare('INSERT INTO onchain_hourly VALUES (?,?,?,?)').run(iso(end-2*H),'uniswap_v3',.9,'inflow');
+    db.prepare('INSERT INTO funding_rates_hourly VALUES (?,?,?,?)').run(iso(end-2*H),FUNDING_EXCHANGE,FUNDING_SYMBOL,-.0001);
+    const raw=readCorrelationHistory(db,{since:iso(end-4*H),before:iso(end)});
+    assert.equal(raw.spot_return.length,1,'current hour is excluded');
+    assert.ok(Math.abs(raw.spot_return[0].value-10)<1e-9);
+    assert.equal(raw.best_put_dv[0].value,55);
+    assert.equal(raw.open_interest[0].value,1000);
+    assert.equal(raw.liquidity_flow[0].value,-.05,'legacy v3 rollups are excluded');
+    assert.equal(raw.funding_rate[0].value,-.01);
+  } finally { db.close(); }
+});

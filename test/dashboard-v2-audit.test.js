@@ -62,6 +62,7 @@ function loadTs(file, overrides = {}, globals = {}) {
     require(name) {
       if (Object.hasOwn(overrides, name)) return overrides[name];
       if (name === '../../../bot/derive-config') return require('../bot/derive-config');
+      if (name === '../../../bot/correlation') return require('../bot/correlation');
       if (name === '../../../bot/market-evidence') return require('../bot/market-evidence');
       if (name === '../../../bot/liquidity-quality') return require('../bot/liquidity-quality');
       return require(name);
