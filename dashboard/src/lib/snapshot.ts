@@ -21,6 +21,7 @@ import { getPositions, getCollaterals } from './lyra';
 import fs from 'fs';
 import path from 'path';
 import { resolveWikiDir } from './wiki';
+import { dexForAdvisor, LIQUIDITY_DATA_NOTICE } from '../../../bot/liquidity-quality';
 
 const WIKI_DIR = resolveWikiDir();
 
@@ -158,6 +159,7 @@ async function _buildUncached() {
     },
 
     onchain_metrics: {
+      data_quality_notice: LIQUIDITY_DATA_NOTICE,
       _description: 'liquidity_flow_direction: inflow|outflow|neutral, magnitude/confidence 0-1.',
       data_points: onchain.length,
       latest: onchain.length > 0 ? onchain[0] : null,
@@ -169,27 +171,7 @@ async function _buildUncached() {
           const dexes = raw?.dexLiquidity?.dexes;
           if (!dexes) return null;
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return Object.entries(dexes).map(([name, dex]: [string, any]) => {
-            const pools = dex.poolDetails ?? dex.pools ?? [];
-            const topPool = pools[0] ?? null;
-            return {
-              dex: name,
-              stale: dex.stale === true ? { replayed_sample: true, reason: dex.staleReason ?? null } : null,
-              total_liquidity: dex.totalLiquidity ?? null,
-              total_volume_usd: dex.totalVolume ?? null,
-              total_tx_count: dex.totalTxCount ?? null,
-              pool_count: pools.length || null,
-              top_pool: topPool ? {
-                pair: topPool.token0?.symbol && topPool.token1?.symbol
-                  ? `${topPool.token0.symbol}/${topPool.token1.symbol}`
-                  : topPool.pair || topPool.name || null,
-                liquidity: topPool.liquidity ?? topPool.liquidityUSD ?? topPool.totalLiquidity ?? null,
-                volume_usd: topPool.volumeUSD ?? null,
-                fee_tier_bps: topPool.feeTier ?? null,
-                active_liquidity: topPool.activeLiquidity ?? null,
-              } : null,
-            };
-          });
+          return Object.entries(dexes).map(([name, dex]: [string, any]) => dexForAdvisor(name, dex));
         } catch { return null; }
       })(),
     },

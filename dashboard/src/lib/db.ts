@@ -5,6 +5,7 @@ import { BOT_CONFIG } from './strategy-config';
 import { getEconomicHistory as readEconomicHistory } from '../../../bot/economic-events';
 import { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } from '../../../bot/open-interest';
 import { FUNDING_EXCHANGE, FUNDING_SYMBOL } from '../../../bot/funding-rates';
+import { invalidDexReason, sanitizeOnchainRow } from '../../../bot/liquidity-quality';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
@@ -193,7 +194,7 @@ function prepareAll(d: Database.Database) {
 
     getOnchainData: d.prepare(`
       SELECT timestamp, spot_price, liquidity_flow_direction, liquidity_flow_magnitude,
-        liquidity_flow_confidence
+        liquidity_flow_confidence, raw_data
       FROM onchain_data
       WHERE timestamp > ?
       ORDER BY timestamp DESC
@@ -1049,7 +1050,7 @@ export function getLiquidityOverTime(since: string) {
           // A stale sample is the previous value replayed. Emitting it draws a flat
           // line through an outage and dumps the whole gap's volume into one bar when
           // the feed returns; leaving a hole makes the gap visible instead.
-          if (dex.stale) continue;
+          if (invalidDexReason(name, dex)) continue;
           if (!dex.error && dex.totalLiquidity && !isNaN(dex.totalLiquidity)) {
             entry[name] = dex.totalLiquidity;
           }
@@ -1112,7 +1113,12 @@ export function getRecentTicks(limit = 50) {
 }
 
 export function getOnchainData(since: string) {
-  return getStmts().getOnchainData.all(since);
+  return getStmts().getOnchainData.all(since).map(row => {
+    const clean = sanitizeOnchainRow(row);
+    const { raw_data, ...metrics } = clean;
+    void raw_data;
+    return metrics;
+  });
 }
 
 export function getSignals(since: string, limit = 50) {
@@ -1129,11 +1135,11 @@ export function getAvgCallPremium7d() {
 }
 
 export function getLatestOnchainRawData(since: string) {
-  return getStmts().getLatestOnchainRawData.get(since) as { raw_data: string } | undefined;
+  return sanitizeOnchainRow(getStmts().getLatestOnchainRawData.get(since)) as { raw_data: string } | undefined;
 }
 
 export function getOnchainWithRawData(since: string, limit = 5) {
-  return getStmts().getOnchainWithRawData.all(since, limit) as { timestamp: string; raw_data: string; [key: string]: unknown }[];
+  return getStmts().getOnchainWithRawData.all(since, limit).map(sanitizeOnchainRow) as { timestamp: string; raw_data: string; [key: string]: unknown }[];
 }
 
 export function getMarketQualitySummary(since: string) {

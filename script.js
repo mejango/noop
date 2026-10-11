@@ -105,6 +105,8 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const { fetchV4OnchainLiquidity } = require('./bot/v4-onchain-liquidity');
+const { invalidDexReason, calculateValidatedLiquidityFlow, dexForAdvisor, LIQUIDITY_DATA_NOTICE } = require('./bot/liquidity-quality');
 const { getDeriveConfig, orderNonce, fetchInstruments } = require('./bot/derive-config');
 const DERIVE_CONFIG = getDeriveConfig();
 const { getInstrumentPriceStep, roundToStep, getStepDecimals, normalizePriceToStep, normalizeOrderPriceForVenue, avoidRoundNumberRestingPrice, computePostOnlyRetryPrice } = require('./bot/order-pricing');
@@ -969,7 +971,7 @@ const noteDexSampleOutcome = (dexName, isStale) => {
 const findLastValidDexSample = (historicalData, dexName) => {
   for (const entry of historicalData || []) {
     const dex = entry?.dexes?.[dexName];
-    if (!dex || dex.error || isTemporaryV4AggregateSample(dexName, dex)) continue;
+    if (invalidDexReason(dexName, dex) || isTemporaryV4AggregateSample(dexName, dex)) continue;
     const totalLiquidity = Number(dex.totalLiquidity);
     if (Number.isFinite(totalLiquidity) && totalLiquidity > 0) {
       return {
@@ -983,166 +985,7 @@ const findLastValidDexSample = (historicalData, dexName) => {
 };
 
 // Calculate liquidity flow direction
-const calculateLiquidityFlow = (currentData, historicalData) => {
-  if (!historicalData || historicalData.length < 2) {
-    return { 
-      direction: 'unknown', 
-      magnitude: 0, 
-      confidence: 0,
-      timeframes: {
-        hourly: { direction: 'unknown', change: 0 },
-        daily: { direction: 'unknown', change: 0 },
-        weekly: { direction: 'unknown', change: 0 }
-      }
-    };
-  }
-  
-  const isComparableDex = (dexName, dex) => {
-    if (isTemporaryV4AggregateSample(dexName, dex)) return false;
-    // A replayed sample is last week's number wearing today's timestamp; it is not evidence of flow.
-    if (dex?.error || dex?.stale) return false;
-    const totalLiquidity = Number(dex?.totalLiquidity);
-    return Number.isFinite(totalLiquidity) && totalLiquidity > 0;
-  };
-
-  const currentDexEntries = Object.entries(currentData.dexes || {});
-  const currentDexNames = new Set(
-    currentDexEntries
-      .filter(([dexName, dex]) => isComparableDex(dexName, dex))
-      .map(([dexName]) => dexName)
-  );
-  // A tracked venue dropped for being errored or stale means partial coverage, so say so.
-  const excludedDexNames = currentDexEntries
-    .filter(([dexName, dex]) => !currentDexNames.has(dexName) && !isTemporaryV4AggregateSample(dexName, dex))
-    .map(([dexName]) => dexName);
-
-  // Calculate total liquidity for each time period using the current valid DEX set.
-  const calculateTotalLiquidity = (data) => {
-    let total = 0;
-    let hasValidData = false;
-    let hasFailedDexes = false;
-    if (data.dexes) {
-      Object.entries(data.dexes).forEach(([dexName, dex]) => {
-        if (!currentDexNames.has(dexName)) return;
-        if (isTemporaryV4AggregateSample(dexName, dex)) return;
-        // Skip DEXes that failed to load or are replaying a stale sample
-        if (dex.error || dex.stale) {
-          hasFailedDexes = true;
-          return;
-        }
-        if (dex.totalLiquidity && !isNaN(dex.totalLiquidity)) {
-          total += dex.totalLiquidity;
-          hasValidData = true;
-        }
-      });
-    }
-    // Return null if no valid data was found (all DEXes failed)
-    // Also mark as unreliable if any major DEX failed (incomplete data)
-    return hasValidData ? { total, hasFailedDexes } : null;
-  };
-  
-  const currentTotalResult = calculateTotalLiquidity(currentData);
-  if (currentTotalResult === null || currentTotalResult.total === 0) {
-    return { 
-      direction: 'unknown', 
-      magnitude: 0, 
-      confidence: 0,
-      timeframes: {
-        hourly: { direction: 'unknown', change: 0 },
-        daily: { direction: 'unknown', change: 0 },
-        weekly: { direction: 'unknown', change: 0 }
-      },
-      dataReliability: currentTotalResult === null ? 'unreliable' : 'reliable'
-    };
-  }
-  
-  const currentTotal = currentTotalResult.total;
-  const hasFailedDexes = currentTotalResult.hasFailedDexes || excludedDexNames.length > 0;
-  
-  // Get data from different timeframes
-  const oneHourAgo = Date.now() - (60 * 60 * 1000);
-  const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
-  const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-  
-  // Find closest entries for each timeframe
-  const findClosestEntry = (targetTime) => {
-    return historicalData.reduce((closest, entry) => {
-      const entryTime = new Date(entry.timestamp).getTime();
-      const closestTime = closest ? new Date(closest.timestamp).getTime() : Infinity;
-      const targetDiff = Math.abs(entryTime - targetTime);
-      const closestDiff = Math.abs(closestTime - targetTime);
-      return targetDiff < closestDiff ? entry : closest;
-    }, null);
-  };
-  
-  const hourlyEntry = findClosestEntry(oneHourAgo);
-  const dailyEntry = findClosestEntry(oneDayAgo);
-  const weeklyEntry = findClosestEntry(oneWeekAgo);
-  
-  // Calculate changes for each timeframe
-  const calculateChange = (current, historical) => {
-    if (!historical || historical === 0) return 0;
-    return (current - historical) / historical;
-  };
-  
-  const hourlyChange = hourlyEntry ? calculateChange(currentTotal, calculateTotalLiquidity(hourlyEntry)?.total || 0) : 0;
-  const dailyChange = dailyEntry ? calculateChange(currentTotal, calculateTotalLiquidity(dailyEntry)?.total || 0) : 0;
-  const weeklyChange = weeklyEntry ? calculateChange(currentTotal, calculateTotalLiquidity(weeklyEntry)?.total || 0) : 0;
-  
-  // Determine overall direction based on weighted analysis
-  // Weekly trends get highest weight, then daily, then hourly
-  const weeklyWeight = 0.5;
-  const dailyWeight = 0.3;
-  const hourlyWeight = 0.2;
-  
-  const weightedChange = (weeklyChange * weeklyWeight) + (dailyChange * dailyWeight) + (hourlyChange * hourlyWeight);
-  
-  let direction = 'stable';
-  let magnitude = Math.abs(weightedChange);
-  let confidence = 0.5;
-  
-  if (weightedChange > 0.01) {
-    direction = 'inflow';
-    confidence = Math.min(0.95, 0.5 + Math.abs(weightedChange) * 20);
-  } else if (weightedChange < -0.01) {
-    direction = 'outflow';
-    confidence = Math.min(0.95, 0.5 + Math.abs(weightedChange) * 20);
-  }
-  
-  // Determine timeframe-specific directions
-  const getDirection = (change) => {
-    if (change > 0.005) return 'inflow';
-    if (change < -0.005) return 'outflow';
-    return 'stable';
-  };
-  
-  return {
-    direction,
-    magnitude,
-    confidence,
-    weightedChange,
-    currentTotal,
-    excludedDexes: excludedDexNames,
-    dataReliability: hasFailedDexes ? 'unreliable' : 'reliable',
-    timeframes: {
-      hourly: { 
-        direction: getDirection(hourlyChange), 
-        change: hourlyChange,
-        total: hourlyEntry ? (calculateTotalLiquidity(hourlyEntry)?.total || 0) : 0
-      },
-      daily: { 
-        direction: getDirection(dailyChange), 
-        change: dailyChange,
-        total: dailyEntry ? (calculateTotalLiquidity(dailyEntry)?.total || 0) : 0
-      },
-      weekly: { 
-        direction: getDirection(weeklyChange), 
-        change: weeklyChange,
-        total: weeklyEntry ? (calculateTotalLiquidity(weeklyEntry)?.total || 0) : 0
-      }
-    }
-  };
-};
+const calculateLiquidityFlow = (currentData, historicalData) => calculateValidatedLiquidityFlow(currentData, historicalData);
 
 const analyzeDEXLiquidity = async (spotPrice) => {
   try {
@@ -1238,91 +1081,16 @@ const analyzeDEXLiquidity = async (spotPrice) => {
       liquidityData.dexes.uniswap_v3 = { error: error.message };
     }
 
-    // Uniswap V4 analysis - specific pools only
+    // Read v4 liquidity principal directly from the canonical Ethereum pool.
+    // Cumulative trading volume is unavailable here and must not be fabricated.
     try {
-      const uniswapV4Query = {
-        query: `
-                  query {
-                    pools(where: {id_in: [
-                      "0x72331fcb696b0151904c03584b66dc8365bc63f8a144d89a773384e3a579ca73"
-                    ]}) {
-                      id
-                      totalValueLockedUSD
-                      volumeUSD
-                      feeTier
-                      liquidity
-                      txCount
-                      totalValueLockedToken0
-                      totalValueLockedToken1
-                      token0 {
-                        symbol
-                        id
-                      }
-                      token1 {
-                        symbol
-                        id
-                      }
-                    }
-                  }
-        `
-      };
-      
-      const response = await axios.post(DEX_APIS.UNISWAP_V4, uniswapV4Query, { timeout: 10000 });
-      assertGraphQLSuccess(response);
-      if (response.data?.data?.pools && Array.isArray(response.data.data.pools)) {
-        // For Uniswap V4, use USD TVL directly (consistent with V3)
-        const totalTVLUSD = response.data.data.pools.reduce((sum, pool) => {
-          const tvlUsd = parseFloat(pool.totalValueLockedUSD);
-          return isNaN(tvlUsd) ? sum : sum + tvlUsd;
-        }, 0);
-        
-        const totalVolumeV4 = response.data.data.pools.reduce((sum, pool) => {
-          const v = parseFloat(pool.volumeUSD);
-          return isNaN(v) ? sum : sum + v;
-        }, 0);
-        const totalTxCountV4 = response.data.data.pools.reduce((sum, pool) => {
-          const t = parseInt(pool.txCount);
-          return isNaN(t) ? sum : sum + t;
-        }, 0);
-
-        noteDexSampleOutcome('uniswap_v4', false);
-        liquidityData.dexes.uniswap_v4 = {
-          pools: response.data.data.pools.length,
-          totalLiquidity: totalTVLUSD, // TVL in USD terms (consistent with V3)
-          totalVolume: totalVolumeV4,
-          totalTxCount: totalTxCountV4,
-          poolDetails: response.data.data.pools.map(pool => {
-            const tvlUsd = parseFloat(pool.totalValueLockedUSD);
-
-            return {
-              id: pool.id,
-              liquidity: tvlUsd, // Store in USD terms (consistent)
-              liquidityUSD: tvlUsd, // Keep USD for reference
-              volumeUSD: parseFloat(pool.volumeUSD) || 0,
-              feeTier: parseInt(pool.feeTier) || 0,
-              activeLiquidity: pool.liquidity || '0',
-              txCount: parseInt(pool.txCount) || 0,
-              tvlToken0: parseFloat(pool.totalValueLockedToken0) || 0,
-              tvlToken1: parseFloat(pool.totalValueLockedToken1) || 0,
-              token0: pool.token0,
-              token1: pool.token1
-            };
-          })
-        };
-      }
+      liquidityData.dexes.uniswap_v4 = await fetchV4OnchainLiquidity(spotPrice);
+      noteDexSampleOutcome('uniswap_v4', false);
     } catch (error) {
-      const fallback = findLastValidDexSample(historicalData, 'uniswap_v4');
-      if (fallback) {
-        noteDexSampleOutcome('uniswap_v4', true);
-        liquidityData.dexes.uniswap_v4 = fallback;
-      } else {
-        console.log('⚠️ Uniswap V4 liquidity analysis failed:', error.message);
-        if (error.response) {
-          console.log('⚠️ V4 API Response:', error.response.status, error.response.data);
-        }
-        liquidityData.dexes.uniswap_v4 = { error: error.message };
-      }
+      noteDexSampleOutcome('uniswap_v4', true);
+      liquidityData.dexes.uniswap_v4 = { error: error.message, source: 'ethereum_reserves_lens', tvlDefinition: 'core_liquidity_principal_v1' };
     }
+    liquidityData.dataQualityNotice = LIQUIDITY_DATA_NOTICE;
 
     // Calculate liquidity flow direction
     const flowAnalysis = calculateLiquidityFlow(liquidityData, historicalData);
@@ -6014,6 +5782,7 @@ const generateJournalEntries = async (tickSummary, botData) => {
         try { return { timestamp: t.timestamp, ...withoutMomentumLabels(JSON.parse(t.summary)) }; } catch { return t; }
       }),
       onchain_24h: sampledOnchain,
+      liquidity_data_quality_notice: LIQUIDITY_DATA_NOTICE,
       prices_7d: sampledPrices.map(p => ({
         timestamp: p.timestamp,
         price: p.price,
@@ -6037,15 +5806,7 @@ const generateJournalEntries = async (tickSummary, botData) => {
           const raw = JSON.parse(recentOnchain[0].raw_data);
           const dexes = raw?.dexLiquidity?.dexes;
           if (!dexes) return null;
-          return Object.entries(dexes).map(([name, dex]) => ({
-            dex: name,
-            total_liquidity: dex.totalLiquidity ?? null,
-            pool_count: dex.pools?.length ?? null,
-            top_pool: dex.pools?.[0] ? {
-              pair: dex.pools[0].pair || dex.pools[0].name || null,
-              liquidity: dex.pools[0].liquidity ?? dex.pools[0].totalLiquidity ?? null,
-            } : null,
-          }));
+          return Object.entries(dexes).map(([name, dex]) => dexForAdvisor(name, dex));
         } catch { return null; }
       })(),
       cross_correlations: correlations,
@@ -14035,7 +13796,7 @@ const runBot = async () => {
           let totalPools = 0;
 
           Object.entries(onchainAnalysis.dexLiquidity.dexes).forEach(([dexName, dexData]) => {
-            if (dexData.totalLiquidity && !dexData.error) {
+            if (!invalidDexReason(dexName, dexData)) {
               totalLiquidity += dexData.totalLiquidity || 0;
               totalPools += dexData.pools || 0;
             }

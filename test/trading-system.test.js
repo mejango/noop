@@ -7131,7 +7131,7 @@ describe('stale DEX liquidity samples', () => {
   );
   const at = (hoursAgo, v3, v4) => ({
     timestamp: new Date(Date.now() - hoursAgo * 3600000).toISOString(),
-    dexes: { uniswap_v3: { pools: 2, totalLiquidity: v3 }, uniswap_v4: { pools: 1, totalLiquidity: v4 } },
+    dexes: { uniswap_v3: { pools: 2, totalLiquidity: v3 }, uniswap_v4: { pools: 1, tvlDefinition: 'core_liquidity_principal_v1', totalLiquidity: v4 } },
   });
 
   test('a replayed V4 sample is excluded from the flow total', () => {
@@ -7150,7 +7150,7 @@ describe('stale DEX liquidity samples', () => {
 
   test('a live V4 sample still counts', () => {
     const history = [at(168, 700e6, 20e6), at(24, 720e6, 20e6), at(1, 740e6, 20e6)];
-    const live = { dexes: { uniswap_v3: { pools: 2, totalLiquidity: 750e6 }, uniswap_v4: { pools: 1, totalLiquidity: 12.4e6 } } };
+    const live = { dexes: { uniswap_v3: { pools: 2, totalLiquidity: 750e6 }, uniswap_v4: { pools: 1, tvlDefinition: 'core_liquidity_principal_v1', totalLiquidity: 12.4e6 } } };
     const flow = calculateLiquidityFlow(live, history);
     assert.strictEqual(flow.currentTotal, 762.4e6);
     assert.strictEqual(flow.dataReliability, 'reliable');

@@ -16,6 +16,7 @@ new Function('module', 'exports', 'require', js)(m, m.exports, (name) => {
   if (name.includes('economic-events')) return { getEconomicHistory: () => [] };
   if (name.includes('open-interest')) return { HOURLY_OPEN_INTEREST_SQL: '', openInterestHourBounds: () => ({}) };
   if (name.includes('funding-rates')) return { FUNDING_EXCHANGE: '', FUNDING_SYMBOL: '' };
+  if (name.includes('liquidity-quality')) return require('../../bot/liquidity-quality');
   return require(name);
 });
 const { getLiquidityOverTime } = m.exports;
@@ -23,7 +24,7 @@ const { getLiquidityOverTime } = m.exports;
 const dex = (v3, v4, stale) => JSON.stringify({
   dexLiquidity: { dexes: {
     uniswap_v3: { pools: 2, totalLiquidity: v3, totalVolume: v3 * 10 },
-    uniswap_v4: { pools: 1, totalLiquidity: v4, totalVolume: v4 * 10, ...(stale ? { stale: true, staleReason: 'subgraph_unavailable' } : {}) },
+    uniswap_v4: { pools: 1, tvlDefinition: 'core_liquidity_principal_v1', totalLiquidity: v4, totalVolume: v4 * 10, ...(stale ? { stale: true, staleReason: 'subgraph_unavailable' } : {}) },
   } },
 });
 

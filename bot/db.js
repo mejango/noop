@@ -4,6 +4,7 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const DB_PATH = process.env.NOOP_DB_PATH || path.join(DATA_DIR, 'noop.db');
 const { createHourlyRollups } = require('./hourly-rollups');
 const { FUNDING_EXCHANGE, FUNDING_SYMBOL } = require('./funding-rates');
+const { sanitizeOnchainRow } = require('./liquidity-quality');
 const { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } = require('./open-interest');
 const fs = require('fs');
 const {
@@ -1995,7 +1996,7 @@ const insertSignal = (signalType, details, actedOn = false) => {
 // Read helpers
 const getRecentSpotPrices = (since) => stmts.getRecentSpotPrices.all({ since });
 const getRecentSignals = (since, limit = 50) => stmts.getRecentSignals.all({ since, limit });
-const getRecentOnchain = (since) => stmts.getRecentOnchain.all({ since });
+const getRecentOnchain = (since) => stmts.getRecentOnchain.all({ since }).map(sanitizeOnchainRow);
 const getRecentOptionsSnapshots = (since) => stmts.getRecentOptionsSnapshots.all({ since });
 const getStats = () => stmts.getStats.get();
 const insertTick = (timestamp, summary) => {
