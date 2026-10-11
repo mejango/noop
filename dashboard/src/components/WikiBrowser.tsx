@@ -544,7 +544,7 @@ export default function WikiBrowser() {
                     <summary className="cursor-pointer transition-colors hover:text-gray-300">{pageDetail.history.length} previous version{pageDetail.history.length === 1 ? '' : 's'}</summary>
                     <div className="mt-2 space-y-1">
                       {pageDetail.history.map((version) => (
-                        <p key={`${version.timestamp}-${version.size}`} className="text-gray-600">{new Date(version.timestamp).toLocaleString()} · {version.size} bytes</p>
+                        <p key={`${version.timestamp}-${version.size}`} className="text-gray-600">{new Date(version.timestamp).toLocaleString()}, {version.size} bytes</p>
                       ))}
                     </div>
                   </details>
@@ -608,9 +608,7 @@ export default function WikiBrowser() {
                     </div>
                     <p className="mt-2 line-clamp-4 text-xs leading-relaxed text-gray-200">{page.summary}</p>
                     <div className="mt-2 flex items-center gap-2 text-[9px] text-gray-600">
-                      <span>{page.evidenceCount} evidence</span>
-                      <span>·</span>
-                      <span>{formatRelative(page.lastEvidenceAt || page.lastModified)}</span>
+                      <span>{page.evidenceCount} evidence, {formatRelative(page.lastEvidenceAt || page.lastModified)}</span>
                     </div>
                   </button>
                 ))}
@@ -631,7 +629,7 @@ export default function WikiBrowser() {
                       <StatusPill status={page.status} />
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-[11px] text-gray-300">{page.title}</p>
-                        <p className="truncate text-[9px] text-gray-600">{page.escalationReason ? `${page.escalationReason} · ` : ''}{page.issues[0] || 'Page file is missing'}</p>
+                        <p className="truncate text-[9px] text-gray-600">{page.escalationReason ? `${page.escalationReason}, ` : ''}{page.issues[0] || 'Page file is missing'}</p>
                       </div>
                       <span className="text-[9px] text-gray-600">{formatRelative(page.lastModified)}</span>
                     </button>
@@ -646,7 +644,7 @@ export default function WikiBrowser() {
                 <div className="space-y-1">
                   {recentChanges.map((page) => (
                     <button key={page.path} onClick={() => loadPage(page.path)} className="block w-full border-l border-white/10 py-1 pl-3 text-left hover:border-juice-orange/50">
-                      <p className="text-[10px] text-gray-300">{page.title} <span className="text-gray-600">· {formatRelative(page.lastModified)}</span></p>
+                      <p className="text-[10px] text-gray-300">{page.title}<span className="text-gray-600">, {formatRelative(page.lastModified)}</span></p>
                       <p className="mt-0.5 line-clamp-2 text-[10px] text-gray-500">{page.changeSummary}</p>
                     </button>
                   ))}

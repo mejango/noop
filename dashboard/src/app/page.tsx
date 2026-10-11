@@ -1782,18 +1782,18 @@ export default function OverviewPage() {
                             return (
                               <div key={trade.trade_id}>
                                 <div className="text-xs font-medium" style={{ color: markerStyle.color }}>
-                                  {markerStyle.label} · {trade.instrument_name}
-                                  {trade.is_bot ? ' · bot' : ' · manual'}
+                                  {markerStyle.label}, {trade.instrument_name}
+                                  {trade.is_bot ? ', bot' : ', manual'}
                                 </div>
                                 <div className="text-xs text-gray-500">
                                   Fill {formatUSD(trade.trade_price)} for {trade.trade_amount.toFixed(3)} @ spot {formatUSD(trade.index_price)}
                                 </div>
                                 <div className="text-xs text-gray-500">
                                   {trade.strike != null && `Strike ${formatUSD(trade.strike)}`}
-                                  {trade.expiryLabel && ` · Exp ${formatExpiryLabel(trade.expiryDate, trade.expiryLabel)}`}
-                                  {strikeGap != null && ` · gap ${strikeGap >= 0 ? '+' : ''}${formatUSD(strikeGap)}`}
-                                  {trade.openAmount !== 0 && ` · open ${trade.openAmount > 0 ? '+' : ''}${trade.openAmount.toFixed(3)}`}
-                                  {trade.currentUnrealizedPnl != null && ` · UPnL ${trade.currentUnrealizedPnl >= 0 ? '+' : ''}${formatUSD(trade.currentUnrealizedPnl)}`}
+                                  {trade.expiryLabel && `, Exp ${formatExpiryLabel(trade.expiryDate, trade.expiryLabel)}`}
+                                  {strikeGap != null && `, gap ${strikeGap >= 0 ? '+' : ''}${formatUSD(strikeGap)}`}
+                                  {trade.openAmount !== 0 && `, open ${trade.openAmount > 0 ? '+' : ''}${trade.openAmount.toFixed(3)}`}
+                                  {trade.currentUnrealizedPnl != null && `, UPnL ${trade.currentUnrealizedPnl >= 0 ? '+' : ''}${formatUSD(trade.currentUnrealizedPnl)}`}
                                 </div>
                               </div>
                             );
@@ -2004,8 +2004,8 @@ export default function OverviewPage() {
         const getColor = (name: string, i: number) => dexColors[name] || fallbackColors[i % fallbackColors.length];
         const formatDexName = (name: string) => name === 'uniswap_v3' ? 'Uniswap V3 (subgraph)' : name === 'uniswap_v3_onchain' ? 'Uniswap V3 (onchain)' : name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         const marketLabel = (name: string) => name === 'uniswap_v3_onchain'
-          ? 'USDC/WETH · 0.05% + 0.30% pools (combined)'
-          : name === 'uniswap_v4' ? 'ETH/USDT · 0.05% pool' : null;
+          ? 'USDC/WETH, 0.05% + 0.30% pools (combined)'
+          : name === 'uniswap_v4' ? 'ETH/USDT, 0.05% pool' : null;
         const hasOnchainV3 = liquidityData.some(row => row.uniswap_v3_onchain != null);
         const feedGaps = liquidityFeedGaps(liquidityData, [hasOnchainV3 ? 'uniswap_v3_onchain' : 'uniswap_v3', 'uniswap_v4']);
         const formatCompact = (v: number) => {
@@ -2127,7 +2127,7 @@ export default function OverviewPage() {
               </div>
             </div>
             <div className="text-xs text-gray-400 mb-2 space-y-0.5">
-              <div>Ethereum mainnet · Liquidity totals for the selected pools below.</div>
+              <div>Ethereum mainnet, Liquidity totals for the selected pools below.</div>
               {dexNames.filter(name => marketLabel(name)).map((name, i) => (
                 <div key={name} style={{ color: getColor(name, i) }}>
                   {formatDexName(name)}: {marketLabel(name)}
@@ -2137,7 +2137,7 @@ export default function OverviewPage() {
             {hasOnchainV3 && <div className="text-xs text-gray-500 mb-2">V3 onchain includes accrued fees; V4 shows liquidity principal. Source baselines are separate. V3 volume uses the subgraph; V4 volume is unavailable.</div>}
             {feedGaps.length > 0 && (
               <div className="text-[10px] text-amber-400 mb-1" role="status">
-                {feedGaps.map(gap => `${formatDexName(gap.name)} feed gap · ${gap.lastSample
+                {feedGaps.map(gap => `${formatDexName(gap.name)} feed gap, ${gap.lastSample
                   ? `last sample ${new Date(gap.lastSample).toLocaleString()}`
                   : 'no samples in selected range'}`).join(' | ')}
               </div>
@@ -2181,7 +2181,7 @@ export default function OverviewPage() {
                                 {volDelta != null && volDelta > 0 && <span className="text-gray-500 ml-1">| Vol: {formatCompact(volDelta)}</span>}
                                 {fee != null && !marketLabel(name) && <span className="text-gray-500 ml-1">| Top pool fee: {formatFeeTier(fee)}</span>}
                               </div>
-                              {marketLabel(name) && <div className="text-[10px] text-gray-400 pl-2">Ethereum · {marketLabel(name)}</div>}
+                              {marketLabel(name) && <div className="text-[10px] text-gray-400 pl-2">Ethereum, {marketLabel(name)}</div>}
                               {active != null && (
                                 <div className="text-[10px] text-gray-600 pl-2">Active liq: {Number(active).toLocaleString()}</div>
                               )}

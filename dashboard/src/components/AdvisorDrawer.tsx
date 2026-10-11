@@ -787,7 +787,7 @@ function TradeLessonCard({ lesson, legacyBootstrapFailed = false }: { lesson: Tr
           <div className="mt-2 space-y-2">
             {lesson.revisions.slice(1, 6).map((revision) => (
               <div key={revision.revision} className="border-l border-white/10 pl-2">
-                <p className="text-[9px] text-gray-600">v{revision.revision} · {timeAgo(revision.created_at)}{revision.change_summary ? ` · ${revision.change_summary}` : ''}</p>
+                <p className="text-[9px] text-gray-600">v{revision.revision}, {timeAgo(revision.created_at)}{revision.change_summary ? `, ${revision.change_summary}` : ''}</p>
                 <p className="text-[10px] text-gray-500 leading-relaxed mt-0.5 line-clamp-2">{revision.lesson}</p>
               </div>
             ))}
@@ -813,7 +813,7 @@ function TradeCampaignCard({ campaign }: { campaign: TradeReviewCampaign }) {
           <h3 className="text-[13px] text-white truncate">{campaign.instrument_name}</h3>
           <p className="text-[10px] text-gray-500 mt-0.5">
             {campaign.action_family === 'short_call_campaign' ? 'short call' : campaign.action_family === 'long_put_campaign' ? 'tail put' : 'campaign'}
-            {' · '}closed {timeAgo(campaign.closed_at)}
+            {', '}closed {timeAgo(campaign.closed_at)}
           </p>
         </div>
         <span className={`shrink-0 text-[9px] px-1.5 py-0.5 border ${status.color}`}>{status.label}</span>
@@ -861,7 +861,7 @@ function TradeCampaignCard({ campaign }: { campaign: TradeReviewCampaign }) {
 
       {review.facts.quality_flags.length > 0 && (
         <div className="border border-amber-500/15 bg-amber-500/[0.04] px-2 py-1.5 text-[9px] text-amber-300/80">
-          Evidence caution: {review.facts.quality_flags.join(' · ')}
+          Evidence caution: {review.facts.quality_flags.join(', ')}
         </div>
       )}
 
@@ -1447,7 +1447,7 @@ export default function AdvisorDrawer() {
                         <p className="text-[10px] text-gray-500 uppercase tracking-wider">Signal Priors</p>
                         {signalAnalytics && (
                           <span className="text-[10px] text-gray-600 shrink-0">
-                            {signalAnalytics.meta.windowDays}d · min n={signalAnalytics.meta.minSamples}
+                            {signalAnalytics.meta.windowDays}d, min n={signalAnalytics.meta.minSamples}
                           </span>
                         )}
                       </div>
@@ -1467,8 +1467,8 @@ export default function AdvisorDrawer() {
                                 <div className="flex-1 min-w-0">
                                   <p className="text-xs text-gray-200">{prior.label}</p>
                                   <p className="text-[10px] text-gray-600 mt-0.5">
-                                    {prior.target} · {prior.samples} events
-                                    {prior.lastFired ? ` · last ${timeAgo(prior.lastFired)}` : ''}
+                                    {prior.target}, {prior.samples} events
+                                    {prior.lastFired ? `, last ${timeAgo(prior.lastFired)}` : ''}
                                   </p>
                                 </div>
                                 {prior.activeNow && (
@@ -1612,7 +1612,7 @@ export default function AdvisorDrawer() {
               <div className="flex items-center">
                 <div>
                   <p className="text-[10px] text-gray-500 uppercase tracking-wider">Learning system</p>
-                  <p className="text-[10px] text-gray-700 mt-0.5">playbook · evidence · review queue</p>
+                  <p className="text-[10px] text-gray-700 mt-0.5">playbook, evidence, review queue</p>
                 </div>
                 <button
                   onClick={fetchLearning}
@@ -1751,7 +1751,7 @@ export default function AdvisorDrawer() {
                 <section className="space-y-2">
                   <div className="flex items-center">
                     <p className="text-[10px] text-gray-500 uppercase tracking-wider">Reviewed campaigns</p>
-                    <span className="text-[9px] text-gray-600 ml-auto">1d · 3d · 7d horizons</span>
+                    <span className="text-[9px] text-gray-600 ml-auto">1d, 3d, 7d horizons</span>
                   </div>
                   {filteredLearningCampaigns.map((campaign) => <TradeCampaignCard key={campaign.id} campaign={campaign} />)}
                   {!learningLoading && filteredLearningCampaigns.length === 0 && (
@@ -1772,7 +1772,7 @@ export default function AdvisorDrawer() {
                         <div className="min-w-0">
                           <p className="text-[13px] text-white truncate">{campaign.instrument_name}</p>
                           <p className="text-[10px] text-gray-500 mt-0.5">
-                            {campaign.action_family === 'short_call_campaign' ? 'short call' : 'tail put'} · closed {timeAgo(campaign.closed_at)} · {campaign.order_ids.length} fills
+                            {campaign.action_family === 'short_call_campaign' ? 'short call' : 'tail put'}, closed {timeAgo(campaign.closed_at)}, {campaign.order_ids.length} fills
                           </p>
                         </div>
                         <div className="text-right shrink-0">

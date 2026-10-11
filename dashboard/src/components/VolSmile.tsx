@@ -136,7 +136,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
     const d = new Date(e.expiry * 1000);
     return {
       ...e,
-      label: `${Math.round(e.dte)}d · ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`,
+      label: `${Math.round(e.dte)}d, ${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`,
       stats: expiryStats(e.points),
       inCall: !!data.zones && inRange(e.dte, data.zones.call.dte),
       inPut: !!data.zones && inRange(e.dte, data.zones.put.dte),
@@ -250,14 +250,14 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
       <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }} className="text-xs space-y-0.5">
         <div className="flex items-center gap-1.5 text-gray-200">
           <span className="w-2 h-2 rounded-full" style={{ background: p.color }} />
-          {p.label} · {p.strike} {p.type === 'P' ? 'put' : 'call'}
+          {p.label}, {p.strike} {p.type === 'P' ? 'put' : 'call'}
         </div>
         <div className="text-gray-300 tabular-nums">
           IV {p.iv.toFixed(1)}%
           {p.iv24 != null && <span className={p.iv - p.iv24 >= 0 ? 'text-emerald-400' : 'text-red-400'}> ({fmtSigned(p.iv - p.iv24)} {refLabel})</span>}
         </div>
-        <div className="text-gray-500 tabular-nums">bid {fmtPct(p.bidIv)} · ask {fmtPct(p.askIv)}</div>
-        <div className="text-gray-500 tabular-nums">Δ {p.delta.toFixed(3)} · OI {p.oi.toFixed(1)}</div>
+        <div className="text-gray-500 tabular-nums">bid {fmtPct(p.bidIv)}, ask {fmtPct(p.askIv)}</div>
+        <div className="text-gray-500 tabular-nums">Δ {p.delta.toFixed(3)}, OI {p.oi.toFixed(1)}</div>
         {p.held != null && <div className="text-gray-200">You hold {p.held > 0 ? '+' : ''}{p.held} ({p.held < 0 ? 'short' : 'long'})</div>}
       </div>
     );
@@ -271,8 +271,8 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
           Volatility Smile
           <span className="text-gray-600">
             {frame
-              ? `· replay · ${fmtTime(frame.t)}`
-              : `· live Derive chain${data.asOf ? ` · ${new Date(data.asOf).toLocaleTimeString()}` : ''}`}
+              ? `, replay, ${fmtTime(frame.t)}`
+              : `, live Derive chain${data.asOf ? `, ${new Date(data.asOf).toLocaleTimeString()}` : ''}`}
           </span>
         </div>
         <div className="flex flex-wrap gap-1 text-[10px]">
@@ -305,7 +305,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
             {RANGES.map(r => <button key={r} className={chip(range === r)} onClick={() => setRange(r)}>{r}</button>)}
             {frame && spot != null && refSpot != null && (
               <span className="ml-auto text-gray-400 tabular-nums">
-                frame {frameIdx + 1}/{frames!.length} · spot ${spot.toFixed(0)}
+                frame {frameIdx + 1}/{frames!.length}, spot ${spot.toFixed(0)}
                 <span className={spot >= refSpot ? 'text-emerald-400' : 'text-red-400'}> ({fmtSigned((spot / refSpot - 1) * 100)}% vs start)</span>
               </span>
             )}
@@ -349,21 +349,21 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
 
       {/* Headline: what the bot trades, right now */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-1.5 mb-2">
-        <Stat label={`ATM IV · ${callRow.label}`} value={fmtPct(cs.atm)} sub={`${putRow.label}: ${fmtPct(ps.atm)}`} />
+        <Stat label={`ATM IV, ${callRow.label}`} value={fmtPct(cs.atm)} sub={`${putRow.label}: ${fmtPct(ps.atm)}`} />
         <Stat
-          label={`10Δ call IV · sell zone ${callRow.label}`}
+          label={`10Δ call IV, sell zone ${callRow.label}`}
           value={fmtPct(cs.call10)}
-          sub={`${fmtSigned(cs.call10 != null && cs.atm != null ? cs.call10 - cs.atm : null)} vs ATM${callPrev != null && cs.call10 != null ? ` · ${fmtSigned(cs.call10 - callPrev)} ${refLabel}` : ''}`}
+          sub={`${fmtSigned(cs.call10 != null && cs.atm != null ? cs.call10 - cs.atm : null)} vs ATM${callPrev != null && cs.call10 != null ? `, ${fmtSigned(cs.call10 - callPrev)} ${refLabel}` : ''}`}
           tone={cs.call10 != null && cs.atm != null && cs.call10 > cs.atm ? 'good' : undefined}
         />
         <Stat
-          label={`10Δ put IV · buy zone ${putRow.label}`}
+          label={`10Δ put IV, buy zone ${putRow.label}`}
           value={fmtPct(ps.put10)}
-          sub={`${fmtSigned(ps.put10 != null && ps.atm != null ? ps.put10 - ps.atm : null)} vs ATM${putPrev != null && ps.put10 != null ? ` · ${fmtSigned(ps.put10 - putPrev)} ${refLabel}` : ''}`}
+          sub={`${fmtSigned(ps.put10 != null && ps.atm != null ? ps.put10 - ps.atm : null)} vs ATM${putPrev != null && ps.put10 != null ? `, ${fmtSigned(ps.put10 - putPrev)} ${refLabel}` : ''}`}
           tone={ps.put10 != null && ps.atm != null && ps.put10 - ps.atm < 3 ? 'good' : undefined}
         />
         <Stat
-          label={`25Δ risk reversal · ${callRow.label}`}
+          label={`25Δ risk reversal, ${callRow.label}`}
           value={fmtSigned(cs.rr25)}
           sub={cs.rr25 == null ? undefined : cs.rr25 > 0 ? 'calls richer than puts' : 'puts richer than calls'}
           tone={cs.rr25 != null && cs.rr25 > 0 ? 'good' : undefined}
@@ -400,7 +400,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
               </span>
             )}
             {heldPts.length > 0 && <span className="text-gray-600">◯ your positions</span>}
-            {quotedOnly && <span className="text-gray-600">│ bid–ask IV in bot zones · two-sided quotes only</span>}
+            {quotedOnly && <span className="text-gray-600">│ bid–ask IV in bot zones, two-sided quotes only</span>}
             <span className="text-gray-600">dot size = open interest</span>
           </div>
           <ResponsiveContainer width="100%" height={260}>
@@ -431,7 +431,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
               )}
               <ReferenceLine x={axis === 'usd' ? spot ?? 0 : 0} stroke={axis === 'delta' ? '#555' : '#999'} strokeDasharray="4 4"
                 label={{
-                  value: axis === 'delta' ? '← puts · calls →' : `← puts · spot${spot != null ? ` $${spot.toFixed(0)}` : ''} · calls →`,
+                  value: axis === 'delta' ? '← puts, calls →' : `← puts, spot${spot != null ? ` $${spot.toFixed(0)}` : ''}, calls →`,
                   position: 'insideTop', fill: '#888', fontSize: 10,
                 }} />
               {showHistory && series.map(s => s.past.length > 1 && (
@@ -525,7 +525,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
                         return (
                           <div style={{ ...chartTooltip.contentStyle, padding: '6px 10px' }} className="text-xs tabular-nums">
                             <div className="text-gray-300">{rows.find(r => r.expiry === t.expiry)?.label}</div>
-                            <div className="text-gray-400">ATM {fmtPct(t.atm)} · {skewMetric.short} {fmtSigned(t.skew)}</div>
+                            <div className="text-gray-400">ATM {fmtPct(t.atm)}, {skewMetric.short} {fmtSigned(t.skew)}</div>
                             <div className="text-gray-600">click to {colorOf(t.expiry) ? 'hide' : 'show'} on smile</div>
                           </div>
                         );

@@ -68,7 +68,7 @@ export default function VolatilityPricing() {
   const askSummary = summarizePricingSide(data.cells, 'ask');
   const bidSummary = summarizePricingSide(data.cells, 'bid');
   const markReference = unavailable ? 'Mark reference unavailable' : initialLoading ? null
-    : `Mark reference: ${score != null ? `${data.label} · ${score}/100` : 'Unrated'}${data.currentIv != null ? ` · IV ${data.currentIv.toFixed(1)}%` : ''}`;
+    : `Mark reference: ${score != null ? `${data.label}, ${score}/100` : 'Unrated'}${data.currentIv != null ? `, IV ${data.currentIv.toFixed(1)}%` : ''}`;
   const historyLabel = !data.asOf && loading ? '' : data.historyDays ? `${data.historyDays} days / ${data.historySamples} hours${data.provisional ? ' (provisional)' : ''}` : 'No history yet';
   const selectedCell = selected ? data.cells.find(c => c.offset === selected.offset && c.dte === selected.dte) : null;
 
@@ -134,7 +134,7 @@ export default function VolatilityPricing() {
             </div>
             {view === 'quotes'
               ? <p className="text-[10px] text-gray-400"><span className="text-red-300">Bright red = historically expensive bids.</span> <span className="text-emerald-300">Bright green = historically cheap asks.</span></p>
-              : <p className="text-[10px] text-gray-400"><span className="text-emerald-300">0 · Historically cheap</span> → 50 · Typical → <span className="text-amber-400">100 · Historically expensive</span></p>}
+              : <p className="text-[10px] text-gray-400"><span className="text-emerald-300">0: Historically cheap</span> → 50: Typical → <span className="text-amber-400">100: Historically expensive</span></p>}
           </div>
           <p className="text-xs text-gray-400 mb-2">{view === 'mark'
             ? 'Mark IV is a valuation reference, not the price available to buy. Ask and bid IV can rank differently.'

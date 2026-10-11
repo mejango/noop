@@ -321,7 +321,7 @@ export default function PnlReportPage() {
               </label>
               <div className="text-sm text-zinc-600 self-end pb-2">
                 {report.meta.snapshotCount} snapshots
-                {' · '}
+                {', '}
                 {report.meta.orderCount} recorded cashflow events
               </div>
             </div>
@@ -571,7 +571,7 @@ export default function PnlReportPage() {
                     <tr key={row.id} className="border-b border-amber-100">
                       <td className="py-2 pr-3">{new Date(row.timestamp).toLocaleString()}</td>
                       <td className="py-2 pr-3">{row.instrument_name}</td>
-                      <td className="py-2 pr-3">Estimate · spot {formatUSD(row.spot_price)}</td>
+                      <td className="py-2 pr-3">Estimate, spot {formatUSD(row.spot_price)}</td>
                       <td className="py-2 text-right tabular-nums">{fmtSignedUsd(row.cashflow)}</td>
                     </tr>
                   ))}
