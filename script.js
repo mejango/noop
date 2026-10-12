@@ -106,7 +106,8 @@ const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
 const { fetchV4OnchainLiquidity } = require('./bot/v4-onchain-liquidity');
-const { fetchV3OnchainLiquidity, attachV3SubgraphActivity } = require('./bot/v3-onchain-liquidity');
+const { fetchV3OnchainLiquidity } = require('./bot/v3-onchain-liquidity');
+const { refreshDexVolume, volumeSummary } = require('./bot/dex-volume');
 const { invalidDexReason, calculateValidatedLiquidityFlow, dexForAdvisor, LIQUIDITY_DATA_NOTICE } = require('./bot/liquidity-quality');
 const { getDeriveConfig, orderNonce, fetchInstruments } = require('./bot/derive-config');
 const DERIVE_CONFIG = getDeriveConfig();
@@ -999,33 +1000,30 @@ const analyzeDEXLiquidity = async (spotPrice) => {
     const historicalData = loadHistoricalLiquidity();
 
     // V3 reserves come from the two canonical pool contracts at one block.
-    // Indexed swap activity is optional and cannot replace a failed reserve read.
+    // Trading volume is stored separately as completed hourly GeckoTerminal candles.
     try {
-      let sample = await fetchV3OnchainLiquidity(spotPrice);
-      try {
-        const response = await axios.post(DEX_APIS.UNISWAP_V3, { query: `query {
-          pools(where: {id_in: ["0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640", "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8"]}) {
-            id volumeUSD txCount
-          }
-        }` }, { timeout: 15000 });
-        assertGraphQLSuccess(response);
-        sample = attachV3SubgraphActivity(sample, response.data?.data?.pools);
-      } catch {
-        sample.volumeUnavailableReason = 'V3 indexed swap activity unavailable';
-      }
-      liquidityData.dexes.uniswap_v3 = sample;
+      liquidityData.dexes.uniswap_v3 = await fetchV3OnchainLiquidity(spotPrice);
     } catch (error) {
       liquidityData.dexes.uniswap_v3 = { error: error.message, source: 'ethereum_pool_token_balances', tvlDefinition: 'pool_token_balances_v1' };
     }
 
     // Read v4 liquidity principal directly from the canonical Ethereum pool.
-    // Cumulative trading volume is unavailable here and must not be fabricated.
+    // Trading volume is collected independently of the reserve read.
     try {
       liquidityData.dexes.uniswap_v4 = await fetchV4OnchainLiquidity(spotPrice);
       noteDexSampleOutcome('uniswap_v4', false);
     } catch (error) {
       noteDexSampleOutcome('uniswap_v4', true);
       liquidityData.dexes.uniswap_v4 = { error: error.message, source: 'ethereum_reserves_lens', tvlDefinition: 'core_liquidity_principal_v1' };
+    }
+    // Refresh asynchronously so provider latency never holds up the trading cycle.
+    // Each completed-hour candle is upserted independently of liquidity availability.
+    refreshDexVolume(db).then(results => {
+      for (const result of results || []) if (result.status !== 'ok') console.log('DEX volume unavailable:', result.pool, result.reason);
+    }).catch(error => console.log('DEX volume refresh failed:', error.message));
+    const volumes = volumeSummary(db);
+    for (const [name, series] of [['uniswap_v3','uniswap_v3_onchain'],['uniswap_v4','uniswap_v4']]) {
+      Object.assign(liquidityData.dexes[name], volumes[series]);
     }
     liquidityData.dataQualityNotice = LIQUIDITY_DATA_NOTICE;
 

@@ -302,6 +302,7 @@ interface ChartData {
   buyPutEdge: OptionEdgePoint[];
   sellCallEdge: OptionEdgePoint[];
   liquidity: LiquidityPoint[];
+  liquidityVolume?: LiquidityPoint[];
   bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
   optionsCoverage?: {
@@ -1147,7 +1148,7 @@ export default function OverviewPage() {
   const { liquidityData, dexNames } = useMemo(() => {
     const nameSet = new Set<string>();
     // Suffixes that are metadata, not primary DEX TVL series
-    const metaSuffixes = ['_vol', '_txCount', '_active', '_fee'];
+    const metaSuffixes = ['_vol', '_volDelta', '_volHours', '_txCount', '_active', '_fee'];
     const data = chart.liquidity.map(l => {
       const flat: Record<string, number> = { ts: new Date(l.timestamp as string).getTime() };
       for (const [key, val] of Object.entries(l)) {
@@ -1161,21 +1162,21 @@ export default function OverviewPage() {
       return flat;
     }).filter(d => Object.keys(d).length > 1);
 
-    // Compute per-DEX volume deltas between consecutive data points
-    const names = Array.from(nameSet);
-    for (let i = 1; i < data.length; i++) {
-      for (const name of names) {
-        const currVol = data[i][`${name}_vol`];
-        const prevVol = data[i - 1][`${name}_vol`];
-        if (currVol != null && prevVol != null) {
-          const delta = currVol - prevVol;
-          data[i][`${name}_volDelta`] = delta > 0 ? delta : 0;
+    // Candle volume is already an interval total, independent of TVL history.
+    const byTime = new Map(data.map(row => [row.ts,row]));
+    for (const candle of chart.liquidityVolume || []) {
+      const ts = Date.parse(candle.timestamp as string);
+      const row = byTime.get(ts) || { ts };
+      for (const [key,value] of Object.entries(candle)) {
+        if ((key.endsWith('_volDelta') || key.endsWith('_volHours')) && typeof value === 'number') {
+          row[key]=value;
+          if (key.endsWith('_volDelta')) nameSet.add(key.slice(0,-'_volDelta'.length));
         }
       }
+      byTime.set(ts,row);
     }
-
-    return { liquidityData: data, dexNames: Array.from(nameSet).sort() };
-  }, [chart.liquidity]);
+    return { liquidityData:Array.from(byTime.values()).sort((a,b)=>a.ts-b.ts), dexNames:Array.from(nameSet).sort() };
+  }, [chart.liquidity, chart.liquidityVolume]);
 
   // Heatmap data: split by option type, calculate % OTM and normalize premium
   const { callHeatmap, putHeatmap } = useMemo(() => {
@@ -2025,7 +2026,7 @@ export default function OverviewPage() {
         for (const name of dexNames) {
           const first = filteredLiquidity.find(d => d[name] != null);
           baselines[name] = first ? first[name] : 1;
-          if (filteredLiquidity.some(d => d[`${name}_vol`] != null)) volDexes.push(name);
+          if (filteredLiquidity.some(d => d[`${name}_volDelta`] != null)) volDexes.push(name);
         }
         const hasVolume = volDexes.length > 0;
         const normalizedData = filteredLiquidity.map(d => {
@@ -2036,7 +2037,7 @@ export default function OverviewPage() {
               out[name] = d[name]; // keep raw for tooltip
             }
             // Pass through metadata fields for tooltip and volume bars
-            for (const suffix of ['_vol', '_volDelta', '_active', '_fee', '_txCount']) {
+            for (const suffix of ['_vol', '_volDelta', '_volHours', '_active', '_fee', '_txCount']) {
               if (d[`${name}${suffix}`] != null) out[`${name}${suffix}`] = d[`${name}${suffix}`];
             }
           }
@@ -2061,18 +2062,17 @@ export default function OverviewPage() {
 
             const entry: Record<string, number> = { ts: bStart + bucketWidth / 2 };
             // TVL + metadata: take last value in bucket (step-after semantics)
-            const last = points[points.length - 1];
-            for (const [k, v] of Object.entries(last)) {
-              if (k !== 'ts' && !k.endsWith('_volDelta')) entry[k] = v;
+            for (const point of points) for (const [k,v] of Object.entries(point)) {
+              if (k !== 'ts' && !k.endsWith('_volDelta') && !k.endsWith('_volHours')) entry[k]=v;
             }
             // Volume deltas: sum within bucket
             for (const name of dexNames) {
-              let sum = 0;
+              let sum = 0, observedHours = 0;
               for (const p of points) {
                 const vd = p[`${name}_volDelta`];
-                if (vd != null && vd > 0) sum += vd;
+                if (vd != null) { sum+=vd; observedHours+=p[`${name}_volHours`]??1; }
               }
-              if (sum > 0) entry[`${name}_volDelta`] = sum;
+              if (observedHours) { entry[`${name}_volDelta`]=sum;entry[`${name}_volHours`]=observedHours; }
             }
             buckets.push(entry);
           }
@@ -2086,7 +2086,7 @@ export default function OverviewPage() {
             if (maxVol > 0) {
               for (const b of buckets) {
                 const v = b[`${name}_volDelta`];
-                b[`${name}_volNorm`] = v != null ? v / maxVol : 0;
+                if (v != null) b[`${name}_volNorm`]=v/maxVol;
               }
             }
           }
@@ -2102,7 +2102,7 @@ export default function OverviewPage() {
             if (maxVol > 0) {
               for (const d of normalizedData) {
                 const v = d[`${name}_volDelta`];
-                d[`${name}_volNorm`] = v != null ? v / maxVol : 0;
+                if (v != null) d[`${name}_volNorm`]=v/maxVol;
               }
             }
           }
@@ -2113,7 +2113,7 @@ export default function OverviewPage() {
           <Card>
             <div className="flex flex-wrap items-center justify-between gap-1 mb-1">
               <span className="text-xs font-medium text-gray-400">DEX Liquidity (TVL)</span>
-              <div className="flex gap-3 text-xs text-gray-500">
+              <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-500">
                 {dexNames.map((name, i) => (
                   <span key={name} className="flex items-center gap-1">
                     <span className="w-3 h-0.5 inline-block" style={{ background: getColor(name, i) }} /> {formatDexName(name)}
@@ -2121,7 +2121,7 @@ export default function OverviewPage() {
                 ))}
                 {hasVolume && volDexes.map((name, i) => (
                   <span key={`${name}_vol`} className="flex items-center gap-1">
-                    <span className="w-2 h-2 inline-block rounded-sm" style={{ background: getColor(name, i), opacity: 0.8 }} /> {formatDexName(name)} Vol
+                    <span className="w-2 h-2 inline-block rounded-sm" style={{ background: getColor(name, i), opacity: 0.8 }} /> {formatDexName(name).replace(' (onchain)', '')} Vol (GeckoTerminal)
                   </span>
                 ))}
               </div>
@@ -2134,7 +2134,7 @@ export default function OverviewPage() {
                 </div>
               ))}
             </div>
-            {hasOnchainV3 && <div className="text-xs text-gray-500 mb-2">V3 onchain includes accrued fees; V4 shows liquidity principal. Source baselines are separate. V3 volume uses the subgraph; V4 volume is unavailable.</div>}
+            {hasOnchainV3 && <div className="text-xs text-gray-500 mb-2">V3 onchain includes accrued fees; V4 shows liquidity principal. Source baselines are separate. V3 and V4 bars sum available completed hourly USD volume from GeckoTerminal, plotted at hour end. Missing hours are omitted. Bar heights are scaled separately for each series.</div>}
             {feedGaps.length > 0 && (
               <div className="text-[10px] text-amber-400 mb-1" role="status">
                 {feedGaps.map(gap => `${formatDexName(gap.name)} feed gap, ${gap.lastSample
@@ -2169,16 +2169,16 @@ export default function OverviewPage() {
                         {dexNames.map((name, i) => {
                           const raw = row[name];
                           const pct = row[`${name}_pct`];
-                          if (raw == null) return null;
                           const volDelta = row[`${name}_volDelta`];
+                          if (raw == null && volDelta == null) return null;
                           const fee = row[`${name}_fee`];
                           const active = row[`${name}_active`];
                           return (
                             <div key={name} className="mb-0.5">
                               <div className="text-xs" style={{ color: getColor(name, i) }}>
-                                {formatDexName(name)}: ${Number(raw).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                                <span className="text-gray-500 ml-1">({pct > 0 ? '+' : ''}{pct?.toFixed(2)}%)</span>
-                                {volDelta != null && volDelta > 0 && <span className="text-gray-500 ml-1">| Vol: {formatCompact(volDelta)}</span>}
+                                {raw != null ? formatDexName(name) : formatDexName(name).replace(' (onchain)', '')}{raw != null && <>: ${Number(raw).toLocaleString(undefined, { maximumFractionDigits: 0 })}</>}
+                                {pct != null && <span className="text-gray-500 ml-1">({pct > 0 ? '+' : ''}{pct.toFixed(2)}%)</span>}
+                                {volDelta != null && <span className="text-gray-500 ml-1">| Vol: {formatCompact(volDelta)} ({row[`${name}_volHours`]} completed h, GeckoTerminal)</span>}
                                 {fee != null && !marketLabel(name) && <span className="text-gray-500 ml-1">| Top pool fee: {formatFeeTier(fee)}</span>}
                               </div>
                               {marketLabel(name) && <div className="text-[10px] text-gray-400 pl-2">Ethereum, {marketLabel(name)}</div>}

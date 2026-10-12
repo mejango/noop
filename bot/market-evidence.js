@@ -4,6 +4,7 @@
 const { zoneMetrics, riskReversal25, pickZoneExpiry, realizedVol, percentile } = require('./vol-surface');
 const { invalidDexReason, dexForAdvisor, LIQUIDITY_DATA_NOTICE } = require('./liquidity-quality');
 const zones = require('./strategy-facts.json');
+const { volumeSummary } = require('./dex-volume');
 const HOUR = 3600000;
 const WINDOWS = { '1h': 1, '24h': 24, '7d': 168, '30d': 720, '90d': 2160 };
 const SMILE_FEATURES = {
@@ -197,9 +198,20 @@ function buildMarketEvidence(db, nowMs = Date.now()) {
   const correlations = require('./correlation').buildCorrelationAnalysis(db,nowMs);
   const outcomes = new Set(['spot_return','best_put_dv','best_call_dv']);
   const relevant = correlations.pairs.filter(p => (p.series_a.endsWith('_change') || p.series_b.endsWith('_change') || p.series_a === 'liquidity_flow' || p.series_b === 'liquidity_flow') && (outcomes.has(p.series_a) || outcomes.has(p.series_b)));
+  const liquidity = summarizeLiquidity(rows,nowMs);
+  if (db.getDexVolumeHistory) {
+    const volumes=volumeSummary(db,nowMs);
+    for (const dex of liquidity.dexes) {
+      const volume=volumes[dex.dex==='uniswap_v3' ? 'uniswap_v3_onchain' : dex.dex];
+      if (volume) Object.assign(dex,{volume_source:volume.volumeSource,volume_24h_usd:volume.volume24hUSD,
+        volume_window_start:volume.volumeWindowStart,volume_window_end:volume.volumeWindowEnd,
+        volume_observed_hours:volume.volumeObservedHours,volume_expected_hours:volume.volumeExpectedHours,
+        volume_unavailable_reason:volume.volumeUnavailableReason});
+    }
+  }
   return { schema: 'market_history_v1',
     correlations: { pairs: relevant.slice(0,24), notice: correlations.notice, coverage: correlations.coverage }, computed_at: iso(nowMs),
-    liquidity: summarizeLiquidity(rows,nowMs), smile: summarizeSmile(readSmileHistory(db,nowMs),nowMs),
+    liquidity, smile: summarizeSmile(readSmileHistory(db,nowMs),nowMs),
     interpretation: '7d describes recent conditions; 30d/90d can support slower patterns only with sufficient coverage. Missing history is unknown. These are descriptive observations, not causal evidence or permission to override EDGE, budgets or risk limits.' };
 }
 function formatMarketEvidence(e) {

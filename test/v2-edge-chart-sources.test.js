@@ -35,6 +35,7 @@ function fixture(t, { putTable = true, callTable = true } = {}) {
     '../../../bot/liquidity-quality': require('../bot/liquidity-quality'),
     '../../../bot/market-evidence': require('../bot/market-evidence'),
     '../../../bot/correlation': require('../bot/correlation'),
+    '../../../bot/dex-volume': require('../bot/dex-volume'),
     '../../../bot/economic-events': {}, '../../../bot/open-interest': {}, '../../../bot/funding-rates': {},
   };
   const module = { exports: {} };

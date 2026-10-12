@@ -80,7 +80,7 @@ test('card and dialog lead with independent bid and ask prices, with mark only a
     { label: 'Sell at bid historical IV percentile', score: 0, status: 'Measly, 0 out of 100' },
     { label: 'Buy at ask historical IV percentile', score: 97, status: 'Expensive, 97 out of 100' },
   ]);
-  assert.ok(headline.includes('Mark reference: Cheap · 13/100 · IV 49.5%'));
+  assert.ok(headline.includes('Mark reference: Cheap, 13/100, IV 49.5%'));
   assert.ok(!headline.includes('Mark IV · Cheap'));
   const renderedBid = renderToStaticMarkup(summary(card(tree), 'bid'));
   const renderedAsk = renderToStaticMarkup(summary(card(tree), 'ask'));
@@ -155,7 +155,7 @@ test('insufficient ask coverage is unrated while the mark remains rated', () => 
   assert.ok(renderedAsk.includes('Unrated'));
   assert.deepEqual(meters(renderedAsk), []);
   assert.deepEqual(meters(renderToStaticMarkup(card(tree))).map(m => m.score), [0]);
-  assert.ok(renderToStaticMarkup(card(tree)).includes('Mark reference: Cheap · 13/100'));
+  assert.ok(renderToStaticMarkup(card(tree)).includes('Mark reference: Cheap, 13/100'));
 });
 
 test('bid and ask remain independently rated when mark history is unavailable', () => {

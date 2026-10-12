@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
-  getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getBestScores, getOptionsHeatmap,
+  getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getLiquidityVolumeOverTime, getBestScores, getOptionsHeatmap,
   getFundingRates, getFundingRatesHourlySeries, getOISnapshots, getOISnapshotsBucketed,
   getOptionsCoverage, getSpotPricesHourly_rollup, getBestOptionsHourly_rollup, getLiquidityHourly_rollup,
   getSpotPricesBucketed, getBestOptionsBucketed, getBuyPutEdgeOverTime, getSellCallEdgeOverTime,
@@ -181,6 +181,7 @@ function getChartResponse(request: NextRequest) {
           (tailSince) => getLiquidityOverTime(tailSince) as TimestampedRow[],
         )
       : getLiquidityOverTime(since);
+    const liquidityVolume = getLiquidityVolumeOverTime(since);
     const buyPutEdge = getBuyPutEdgeOverTime(since, bucketMs);
     const sellCallEdge = getSellCallEdgeOverTime(since, bucketMs);
     const optionsHeatmap = getOptionsHeatmap(since, limits.heatmap, heatmapBucketMs);
@@ -240,7 +241,7 @@ function getChartResponse(request: NextRequest) {
         ['expiry_count'],
       );
       return NextResponse.json({
-        prices: dsPrices, options: dsOptions, liquidity: dsLiquidity,
+        prices: dsPrices, options: dsOptions, liquidity: dsLiquidity, liquidityVolume,
         buyPutEdge: dsBuyPutEdge, sellCallEdge: dsSellCallEdge,
         bestScores, optionsHeatmap,
         sentiment: { fundingRates: dsFunding, optionsSkew: dsSkew, aggregateOI: dsOI, oiSnapshots: dsOISnapshots },
@@ -254,7 +255,7 @@ function getChartResponse(request: NextRequest) {
     }
 
     return NextResponse.json({
-      prices, options, liquidity, buyPutEdge, sellCallEdge, bestScores, optionsHeatmap, sentiment,
+      prices, options, liquidity, liquidityVolume, buyPutEdge, sellCallEdge, bestScores, optionsHeatmap, sentiment,
       optionsCoverage: {
         ...optionsCoverage,
         requestedSince: since,

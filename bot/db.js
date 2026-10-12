@@ -5,6 +5,7 @@ const DB_PATH = process.env.NOOP_DB_PATH || path.join(DATA_DIR, 'noop.db');
 const { createHourlyRollups } = require('./hourly-rollups');
 const { FUNDING_EXCHANGE, FUNDING_SYMBOL } = require('./funding-rates');
 const { HISTORY_SQL } = require('./market-evidence');
+const { createVolumeStore } = require('./dex-volume');
 const { readCorrelationHistory } = require('./correlation');
 const { sanitizeOnchainRow } = require('./liquidity-quality');
 const { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } = require('./open-interest');
@@ -3027,7 +3028,10 @@ const migrateFromJson = (jsonPath) => {
 // Graceful close
 const close = () => db.close();
 
+const dexVolumeStore = createVolumeStore(db);
+
 module.exports = {
+  ...dexVolumeStore,
   db,
   insertSpotPrice,
   insertOptionsSnapshotBatch,

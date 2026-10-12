@@ -1,3 +1,4 @@
+import { readVolumeRows, aggregateVolume } from '../../../bot/dex-volume';
 import { readCorrelationHistory } from '../../../bot/correlation';
 import Database from 'better-sqlite3';
 import { HISTORY_SQL } from '../../../bot/market-evidence';
@@ -1057,9 +1058,6 @@ export function getLiquidityOverTime(since: string) {
           if (!dex.error && dex.totalLiquidity && !isNaN(dex.totalLiquidity)) {
             entry[name] = dex.totalLiquidity;
           }
-          if (dex.totalVolume != null && !isNaN(dex.totalVolume)) {
-            entry[`${name}_vol`] = dex.totalVolume;
-          }
           if (dex.totalTxCount != null && !isNaN(dex.totalTxCount)) {
             entry[`${name}_txCount`] = dex.totalTxCount;
           }
@@ -1255,7 +1253,6 @@ export function getLiquidityHourly_rollup(since: string) {
     }
     const entry = byHour.get(row.timestamp)!;
     if (row.tvl != null && !isNaN(row.tvl)) entry[row.dex] = row.tvl;
-    if (row.volume != null && !isNaN(row.volume)) entry[`${row.dex}_vol`] = row.volume;
     if (row.tx_count != null && !isNaN(row.tx_count)) entry[`${row.dex}_txCount`] = row.tx_count;
   }
 
@@ -1887,4 +1884,13 @@ export function getFundingRatesHourly(since: string) {
 
 export function getCorrelationHistory(bounds: { since: string; before: string }) {
   return readCorrelationHistory(getDb(),bounds);
+}
+
+export function getDexVolumeHistory(since: string, before?: string) {
+  return readVolumeRows(getDb(),since,before);
+}
+export function getLiquidityVolumeOverTime(since: string) {
+  const start=Date.parse(since);
+  return aggregateVolume(getDexVolumeHistory(Number.isFinite(start) ? new Date(start-3600000).toISOString() : since))
+    .filter(row=>Date.parse(row.timestamp as string)>=start);
 }

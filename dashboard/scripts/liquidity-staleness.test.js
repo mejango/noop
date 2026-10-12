@@ -16,6 +16,7 @@ new Function('module', 'exports', 'require', js)(m, m.exports, (name) => {
   if (name.includes('economic-events')) return { getEconomicHistory: () => [] };
   if (name.includes('open-interest')) return { HOURLY_OPEN_INTEREST_SQL: '', openInterestHourBounds: () => ({}) };
   if (name.includes('funding-rates')) return { FUNDING_EXCHANGE: '', FUNDING_SYMBOL: '' };
+  if (name.includes('dex-volume')) return require('../../bot/dex-volume');
   if (name.includes('correlation')) return require('../../bot/correlation');
   if (name.includes('market-evidence')) return require('../../bot/market-evidence');
   if (name.includes('liquidity-quality')) return require('../../bot/liquidity-quality');
