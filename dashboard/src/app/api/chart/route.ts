@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import {
-  getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getLiquidityVolumeOverTime, getBestScores, getOptionsHeatmap,
+  getSpotPrices, getBestOptionsOverTime, getLiquidityOverTime, getLiquidityVolumeOverTime, getOptionsHeatmap,
   getFundingRates, getFundingRatesHourlySeries, getOISnapshots, getOISnapshotsBucketed,
   getOptionsCoverage, getSpotPricesHourly_rollup, getBestOptionsHourly_rollup, getLiquidityHourly_rollup,
   getSpotPricesBucketed, getBestOptionsBucketed, getBuyPutEdgeOverTime, getSellCallEdgeOverTime,
@@ -17,7 +17,6 @@ const BUCKET_MS: Record<string, number> = {
   '6h':   0,
   '24h':  0,
   '3d':   15 * 60 * 1000,        // 15 min
-  '6.2d': 30 * 60 * 1000,        // 30 min
   '7d':   30 * 60 * 1000,        // 30 min
   '14d':  60 * 60 * 1000,        // 1 hour
   '30d':  2 * 60 * 60 * 1000,    // 2 hours
@@ -32,7 +31,6 @@ const HEATMAP_BUCKET_MS: Record<string, number> = {
   '6h':   15 * 60 * 1000,        // 15 min
   '24h':  30 * 60 * 1000,        // 30 min
   '3d':   60 * 60 * 1000,        // 1 hour
-  '6.2d': 2 * 60 * 60 * 1000,    // 2 hours
   '7d':   2 * 60 * 60 * 1000,    // 2 hours
   '14d':  4 * 60 * 60 * 1000,    // 4 hours
   '30d':  6 * 60 * 60 * 1000,    // 6 hours
@@ -148,7 +146,6 @@ function getChartResponse(request: NextRequest) {
     const range = request.nextUrl.searchParams.get('range') || '14d';
     const ms = dashboardRangeMs(range, '14d');
     const since = new Date(Date.now() - ms).toISOString();
-    const bestScores = getBestScores();
     const bucketMs = BUCKET_MS[range] || 0;
     const heatmapBucketMs = HEATMAP_BUCKET_MS[range] || bucketMs;
     const optionsCoverage = getOptionsCoverage(since);
@@ -243,7 +240,7 @@ function getChartResponse(request: NextRequest) {
       return NextResponse.json({
         prices: dsPrices, options: dsOptions, liquidity: dsLiquidity, liquidityVolume,
         buyPutEdge: dsBuyPutEdge, sellCallEdge: dsSellCallEdge,
-        bestScores, optionsHeatmap,
+        optionsHeatmap,
         sentiment: { fundingRates: dsFunding, optionsSkew: dsSkew, aggregateOI: dsOI, oiSnapshots: dsOISnapshots },
         optionsCoverage: {
           ...optionsCoverage,
@@ -255,7 +252,7 @@ function getChartResponse(request: NextRequest) {
     }
 
     return NextResponse.json({
-      prices, options, liquidity, liquidityVolume, buyPutEdge, sellCallEdge, bestScores, optionsHeatmap, sentiment,
+      prices, options, liquidity, liquidityVolume, buyPutEdge, sellCallEdge, optionsHeatmap, sentiment,
       optionsCoverage: {
         ...optionsCoverage,
         requestedSince: since,

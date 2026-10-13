@@ -1,10 +1,11 @@
 'use strict';
 
 // Volatility-surface evidence for the advisors: where IV sits in the two expiries the bot trades,
-// against realized vol and against its own last 30 days. Pure functions; callers supply the data.
+// against realized vol and against all of its own recorded history. Pure functions; callers supply the data.
 
 const HOURS_PER_YEAR = 24 * 365; // ETH trades around the clock
 const MIN_PERCENTILE_SAMPLES = 24;
+const MIN_HISTORY_HOURS = 24 * 7; // a percentile needs at least a week of distinct hourly samples
 const DAY_MS = 86_400_000;
 
 const finite = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -102,6 +103,7 @@ function buildSurfaceHistory(rows, spotRows, zones) {
     const rv7 = realizedVol(closesUpTo(spotRows, atMs, 24 * 7));
     history.push({
       at: atMs, call_expiry: call?.expiry ?? null, put_expiry: put?.expiry ?? null,
+      call_wing10: call?.wing10 ?? null, put_wing10: put?.wing10 ?? null,
       call_atm: call?.atm ?? null,
       call_wing_premium: call?.wing_premium ?? null,
       put_atm: put?.atm ?? null,
@@ -127,11 +129,16 @@ function buildVolSurface({ current, spotRows, history, zones }) {
   const rv7 = realizedVol(closesUpTo(spotRows, current.atMs, 24 * 7));
   const rv30 = realizedVol(closesUpTo(spotRows, current.atMs, 24 * 30));
   const completedAt = Math.floor(current.atMs / 3_600_000) * 3_600_000;
-  const windowHistory = history.filter(h => h.at >= completedAt - 30 * DAY_MS && h.at < completedAt);
-  const observedHours = new Set(windowHistory.map(h => Math.floor(h.at / 3_600_000))).size;
+  const priorHistory = history.filter(h => h.at < completedAt);
+  // Each measure is ranked against every recorded hour that has it, so measures with longer
+  // records (10Δ wings, from bot candidates) reach further back than ATM-based ones.
+  const span = {};
   const pct = (key, value) => {
-    const valid = windowHistory.filter(h => h[key] != null);
-    return new Set(valid.map(h => Math.floor(h.at / 3_600_000))).size >= 540 ? percentile(value,valid.map(h => h[key])) : null;
+    const valid = priorHistory.filter(h => h[key] != null);
+    const hours = new Set(valid.map(h => Math.floor(h.at / 3_600_000))).size;
+    const first = valid.reduce((min, h) => Math.min(min, h.at), Infinity);
+    span[key] = { hours, since: valid.length ? new Date(first).toISOString().slice(0, 10) : null };
+    return hours >= MIN_HISTORY_HOURS ? percentile(value, valid.map(h => h[key])) : null;
   };
   // How each measure moved: now minus the history sample nearest 24h / 7d ago. A percentile says
   // where vol sits in its month; the move says which way it is going, which the level alone hides.
@@ -157,14 +164,12 @@ function buildVolSurface({ current, spotRows, history, zones }) {
     expiry: new Date(z.expiry * 1000).toISOString().slice(0, 10),
     dte: round(z.dte, 1),
     atm_iv: round(z.atm), atm_iv_pctl: pct(`${prefix}_atm`, z.atm), atm_iv_move: move(`${prefix}_atm`, z.atm),
-    wing10_iv: round(z.wing10),
+    wing10_iv: round(z.wing10), wing10_iv_pctl: pct(`${prefix}_wing10`, z.wing10), wing10_iv_move: move(`${prefix}_wing10`, z.wing10),
     wing_premium: round(z.wing_premium), wing_premium_pctl: pct(`${prefix}_wing_premium`, z.wing_premium),
     wing_premium_move: move(`${prefix}_wing_premium`, z.wing_premium),
     rr25: round(z.rr25),
   };
-  return {
-    history_samples: windowHistory.length,
-    history_coverage: { observed_hours: observedHours, expected_hours: 720 },
+  const result = {
     realized_vol: { rv7d: round(rv7), rv30d: round(rv30) },
     call_zone: describe(call, 'call'),
     put_zone: describe(put, 'put'),
@@ -172,23 +177,28 @@ function buildVolSurface({ current, spotRows, history, zones }) {
     put_iv_minus_rv30d: round(put?.atm != null && rv30 != null ? put.atm - rv30 : null),
     term_slope: round(termSlope), term_slope_pctl: pct('term_slope', termSlope), term_slope_move: move('term_slope', termSlope),
   };
+  return { ...result, history_span: span };
 }
 
 function formatVolSurfaceForAdvisor(s) {
   if (!s || (!s.call_zone && !s.put_zone)) return 'Volatility surface unavailable (no quotes in the call or put DTE window).';
   const f = (v, signed = false) => (v == null ? 'n/a' : `${signed && v > 0 ? '+' : ''}${v}`);
-  const p = (v) => (v == null ? '' : ` (pctl ${v})`);
+  const span = s.history_span || {};
+  const p = (v, key) => {
+    if (v != null) return ` (pctl ${v} of ${span[key]?.hours ?? '?'}h since ${span[key]?.since ?? '?'})`;
+    return span[key]?.hours ? ` (pctl n/a: ${span[key].hours}h recorded, needs ${MIN_HISTORY_HOURS})` : '';
+  };
   const m = (mv) => (mv && (mv.d24h != null || mv.d7d != null) ? ` [Δ24h ${f(mv.d24h, true)}, Δ7d ${f(mv.d7d, true)}]` : '');
-  const zone = (label, z, wingLabel, vrp) => (z
-    ? `${label} ${z.expiry} (${z.dte}d): ATM ${f(z.atm_iv)}${p(z.atm_iv_pctl)}${m(z.atm_iv_move)} | 10Δ ${wingLabel} ${f(z.wing10_iv)} | wing premium over ATM ${f(z.wing_premium, true)}${p(z.wing_premium_pctl)}${m(z.wing_premium_move)} | 25Δ RR (call−put) ${f(z.rr25, true)}${vrp}`
+  const zone = (label, z, prefix, wingLabel, vrp) => (z
+    ? `${label} ${z.expiry} (${z.dte}d): 10Δ ${wingLabel} IV ${f(z.wing10_iv)}${p(z.wing10_iv_pctl, `${prefix}_wing10`)}${m(z.wing10_iv_move)} | ATM ${f(z.atm_iv)}${p(z.atm_iv_pctl, `${prefix}_atm`)}${m(z.atm_iv_move)} | wing premium over ATM ${f(z.wing_premium, true)}${p(z.wing_premium_pctl, `${prefix}_wing_premium`)}${m(z.wing_premium_move)} | 25Δ RR (call−put) ${f(z.rr25, true)}${vrp}`
     : `${label}: no expiry in window.`);
   return [
-    `IV and realized vol in annualized vol points. pctl = percentile vs hourly samples over the last 30d (n=${s.history_samples}); percentiles require 75% valid hourly coverage and are descriptive rolling-zone comparisons, not constant-maturity estimates. Δ24h/Δ7d = now minus the same zone measure that long ago (changes require the same expiry; unavailable baselines and expiry rolls are n/a). ATM is one-sided (nearest-50Δ call for the call zone, put for the put zone) to match history.`,
+    `IV and realized vol in annualized vol points. pctl = share of ALL recorded hourly samples of the same measure at or below now (span and start date shown per measure; 10Δ wings reach back further than ATM measures). This is the answer to how cheap or expensive volatility is versus everything observed. Percentiles are rolling-zone comparisons, not constant-maturity estimates. Δ24h/Δ7d = now minus the same zone measure that long ago (changes require the same expiry; unavailable baselines and expiry rolls are n/a). ATM is one-sided (nearest-50Δ call for the call zone, put for the put zone) to match history.`,
     `Realized vol (complete windows of completed hourly closes): 7d ${f(s.realized_vol.rv7d)} | 30d ${f(s.realized_vol.rv30d)}.`,
-    zone('CALL zone', s.call_zone, 'call', ` | ATM IV − RV7d ${f(s.call_iv_minus_rv7d, true)}${p(s.call_iv_minus_rv7d_pctl)}${m(s.call_iv_minus_rv7d_move)}`),
-    zone('PUT zone', s.put_zone, 'put', ` | ATM IV − RV30d ${f(s.put_iv_minus_rv30d, true)}`),
-    `Term structure: put-zone ATM − call-zone ATM ${f(s.term_slope, true)}${p(s.term_slope_pctl)}${m(s.term_slope_move)}; negative means the front expiry is priced above the back (inverted).`,
-    'Definitions, not rules: a high call wing premium and positive IV − RV mean calls are paid above realized movement; a low put-zone ATM or wing-premium percentile means protection is cheap relative to its own month.',
+    zone('CALL zone', s.call_zone, 'call', 'call', ` | ATM IV − RV7d ${f(s.call_iv_minus_rv7d, true)}${p(s.call_iv_minus_rv7d_pctl, 'call_vrp')}${m(s.call_iv_minus_rv7d_move)}`),
+    zone('PUT zone', s.put_zone, 'put', 'put', ` | ATM IV − RV30d ${f(s.put_iv_minus_rv30d, true)}`),
+    `Term structure: put-zone ATM − call-zone ATM ${f(s.term_slope, true)}${p(s.term_slope_pctl, 'term_slope')}${m(s.term_slope_move)}; negative means the front expiry is priced above the back (inverted).`,
+    'Definitions, not rules: a high call-zone 10Δ IV percentile, high wing premium and positive IV − RV mean calls are paid above realized movement; a low put-zone 10Δ IV or ATM percentile means protection is cheap versus all recorded history.',
   ].join('\n');
 }
 

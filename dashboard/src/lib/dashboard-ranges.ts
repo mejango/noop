@@ -6,7 +6,6 @@ export const DASHBOARD_RANGES = [
   '6h',
   '24h',
   '3d',
-  '6.2d',
   '7d',
   '14d',
   '30d',
@@ -21,7 +20,6 @@ export const DASHBOARD_RANGE_MS = {
   '6h': 6 * HOUR_MS,
   '24h': DAY_MS,
   '3d': 3 * DAY_MS,
-  '6.2d': 6.2 * DAY_MS,
   '7d': 7 * DAY_MS,
   '14d': 14 * DAY_MS,
   '30d': 30 * DAY_MS,
@@ -30,6 +28,7 @@ export const DASHBOARD_RANGE_MS = {
 } satisfies Record<DashboardRange, number>;
 
 const RANGE_ALIASES: Record<string, DashboardRange> = {
+  '6.2d': '7d', // retired range; old links land on the nearest one
   '1y': '365d',
   all: '365d',
 };

@@ -3,7 +3,6 @@ import { buildMarketEvidence } from '../../../bot/market-evidence';
 import {
   getStats,
   getBotBudget,
-  getBestScores,
   getRecentTicks,
   getOnchainData,
   getSignals,
@@ -56,7 +55,6 @@ async function _buildUncached() {
 
   const stats = (getStats() as Record<string, unknown>) || {};
   const budget = getBotBudget();
-  const bestScores = getBestScores();
   const onchain = getOnchainData(since24h) as Record<string, unknown>[];
   const latestRawRow = getLatestOnchainRawData(since24h);
   const signals = getSignals(since7d, 30) as Record<string, unknown>[];
@@ -123,11 +121,6 @@ async function _buildUncached() {
 
     options_market: {
       _description: 'market_quality covers instruments within 0.02-0.12 abs delta.',
-      best_put_score: bestScores.bestPutScore,
-      best_call_score: bestScores.bestCallScore,
-      window_days: bestScores.windowDays,
-      best_put_detail: bestScores.bestPutDetail,
-      best_call_detail: bestScores.bestCallDetail,
       distribution: (() => {
         try { return getOptionsDistribution(since24h); } catch { return []; }
       })(),

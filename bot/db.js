@@ -850,35 +850,7 @@ const stmts = {
       SELECT id, timestamp, summary FROM bot_ticks ORDER BY timestamp DESC LIMIT @limit
   `),
 
-  getBestScoresAgg: db.prepare(`
-    SELECT
-      MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
-        AND delta <= -0.02 AND delta >= -0.12
-        AND expiry IS NOT NULL
-        AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
-        THEN ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) END) as best_put_score,
-      MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
-        AND delta >= 0.04 AND delta <= 0.12
-        AND expiry IS NOT NULL
-        AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN 5 AND 12
-        THEN bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) END) as best_call_score
-    FROM options_snapshots
-    WHERE timestamp > @since
-  `),
 
-  getBestPutDetail: db.prepare(`
-    SELECT instrument_name, delta, ask_price, strike, expiry,
-      ask_delta_value as raw_score,
-      ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) as edge_score
-    FROM options_snapshots
-    WHERE timestamp > @since
-      AND (option_type = 'P' OR instrument_name LIKE '%-P')
-      AND delta <= -0.02 AND delta >= -0.12
-      AND expiry IS NOT NULL
-      AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN ${BUY_PUT_EDGE_MIN_DTE} AND ${BUY_PUT_EDGE_MAX_DTE}
-      AND abs((ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT})) - @score) < 0.000000000001
-    LIMIT 1
-  `),
 
   getBuyPutScoreSamples: db.prepare(`
     SELECT
@@ -899,31 +871,6 @@ const stmts = {
     ORDER BY timestamp ASC
   `),
 
-  getBestBuyPutScoreDetail: db.prepare(`
-    SELECT
-      timestamp,
-      instrument_name,
-      delta,
-      ask_price,
-      strike,
-      expiry,
-      ask_delta_value as raw_score,
-      ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) as score,
-      ((expiry - strftime('%s', timestamp)) / 86400.0) as dte
-    FROM options_snapshots
-    WHERE timestamp > @since
-      AND timestamp < @before
-      AND (option_type = 'P' OR instrument_name LIKE '%-P')
-      AND delta <= @max_delta
-      AND delta >= @min_delta
-      AND ask_price > 0
-      AND ask_delta_value > 0
-      AND expiry IS NOT NULL
-      AND ((expiry - strftime('%s', timestamp)) / 86400.0) >= @min_dte
-      AND ((expiry - strftime('%s', timestamp)) / 86400.0) <= @max_dte
-    ORDER BY score DESC
-    LIMIT 1
-  `),
 
   getSellCallScoreSamples: db.prepare(`
     SELECT
@@ -944,45 +891,7 @@ const stmts = {
     ORDER BY timestamp ASC
   `),
 
-  getBestSellCallScoreDetail: db.prepare(`
-    SELECT
-      timestamp,
-      instrument_name,
-      delta,
-      bid_price,
-      strike,
-      expiry,
-      bid_delta_value as raw_score,
-      bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) as score,
-      ((expiry - strftime('%s', timestamp)) / 86400.0) as dte
-    FROM options_snapshots
-    WHERE timestamp > @since
-      AND timestamp < @before
-      AND (option_type = 'C' OR instrument_name LIKE '%-C')
-      AND delta >= @min_delta
-      AND delta <= @max_delta
-      AND bid_price > 0
-      AND bid_delta_value > 0
-      AND expiry IS NOT NULL
-      AND ((expiry - strftime('%s', timestamp)) / 86400.0) >= @min_dte
-      AND ((expiry - strftime('%s', timestamp)) / 86400.0) <= @max_dte
-    ORDER BY score DESC
-    LIMIT 1
-  `),
 
-  getBestCallDetail: db.prepare(`
-    SELECT instrument_name, delta, bid_price, strike, expiry,
-      bid_delta_value as raw_score,
-      bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) as edge_score
-    FROM options_snapshots
-    WHERE timestamp > @since
-      AND (option_type = 'C' OR instrument_name LIKE '%-C')
-      AND delta >= 0.04 AND delta <= 0.12
-      AND expiry IS NOT NULL
-      AND ((expiry - strftime('%s', timestamp)) / 86400.0) BETWEEN 5 AND 12
-      AND abs((bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT})) - @score) < 0.000001
-    LIMIT 1
-  `),
 
   // AI journal
   insertJournalEntry: db.prepare(`
@@ -1492,7 +1401,7 @@ const stmts = {
   getVolSurfaceHistoryRows: db.prepare(`
     WITH picks AS (
       SELECT MIN(timestamp) AS ts FROM options_snapshots
-      WHERE timestamp > @since AND implied_vol > 0
+      WHERE timestamp > @since AND timestamp < @before AND implied_vol > 0
       GROUP BY substr(timestamp, 1, 13)
     )
     SELECT o.timestamp, o.expiry, o.option_type, o.delta, o.implied_vol
@@ -1508,6 +1417,8 @@ const stmts = {
   getSmileHistoryRows: db.prepare(HISTORY_SQL.smile),
   getLiquidityHistoryRows: db.prepare(HISTORY_SQL.liquidity),
   getLiquidityNear: db.prepare(HISTORY_SQL.near),
+
+  getSmileHistoryStart: db.prepare(`SELECT MIN(timestamp) AS ts FROM iv_smile_snapshots`),
 
   getLatestSmileSnapshot: db.prepare(`
     SELECT timestamp, expiry, points FROM iv_smile_snapshots
@@ -2010,37 +1921,6 @@ const insertTick = (timestamp, summary) => {
   stmts.insertTick.run({ timestamp, summary: typeof summary === 'string' ? summary : JSON.stringify(summary) });
 };
 const getRecentTicks = (limit = 50) => stmts.getRecentTicks.all({ limit });
-const getBestScores = (windowDays = 7) => {
-  const since = new Date(Date.now() - windowDays * 86400000).toISOString();
-  const row = stmts.getBestScoresAgg.get({ since }) || {};
-  const bestPutDetail = row.best_put_score != null
-    ? stmts.getBestPutDetail.get({ since, score: row.best_put_score })
-    : null;
-  const bestCallDetail = row.best_call_score != null
-    ? stmts.getBestCallDetail.get({ since, score: row.best_call_score })
-    : null;
-  return {
-    bestPutScore: row.best_put_score || 0,
-    bestCallScore: row.best_call_score || 0,
-    windowDays,
-    bestPutDetail: bestPutDetail ? {
-      delta: bestPutDetail.delta,
-      price: bestPutDetail.ask_price,
-      strike: bestPutDetail.strike,
-      expiry: bestPutDetail.expiry,
-      instrument: bestPutDetail.instrument_name,
-      raw_score: bestPutDetail.raw_score,
-      edge_score: bestPutDetail.edge_score,
-    } : null,
-    bestCallDetail: bestCallDetail ? {
-      delta: bestCallDetail.delta,
-      price: bestCallDetail.bid_price,
-      strike: bestCallDetail.strike,
-      expiry: bestCallDetail.expiry,
-      instrument: bestCallDetail.instrument_name,
-    } : null,
-  };
-};
 const getBuyPutScoreSamples = ({
   since,
   before,
@@ -2056,21 +1936,6 @@ const getBuyPutScoreSamples = ({
   min_dte: minDte,
   max_dte: maxDte,
 });
-const getBestBuyPutScoreDetail = ({
-  since,
-  before,
-  minDelta = -0.12,
-  maxDelta = -0.02,
-  minDte = BUY_PUT_EDGE_MIN_DTE,
-  maxDte = BUY_PUT_EDGE_MAX_DTE,
-}) => stmts.getBestBuyPutScoreDetail.get({
-  since,
-  before,
-  min_delta: minDelta,
-  max_delta: maxDelta,
-  min_dte: minDte,
-  max_dte: maxDte,
-}) || null;
 
 const getSellCallScoreSamples = ({
   since,
@@ -2087,21 +1952,6 @@ const getSellCallScoreSamples = ({
   min_dte: minDte,
   max_dte: maxDte,
 });
-const getBestSellCallScoreDetail = ({
-  since,
-  before,
-  minDelta = 0.04,
-  maxDelta = 0.12,
-  minDte = 5,
-  maxDte = 12,
-}) => stmts.getBestSellCallScoreDetail.get({
-  since,
-  before,
-  min_delta: minDelta,
-  max_delta: maxDelta,
-  min_dte: minDte,
-  max_dte: maxDte,
-}) || null;
 
 const getOptionsDistribution = (since) => stmts.getOptionsDistribution.all({ since });
 
@@ -2500,7 +2350,8 @@ const getAvgCallPremium7d = () => {
   return stmts.getAvgCallPremium7d.get({ since });
 };
 
-const getVolSurfaceHistoryRows = (since) => stmts.getVolSurfaceHistoryRows.all({ since });
+const getVolSurfaceHistoryRows = ({ since, before }) => stmts.getVolSurfaceHistoryRows.all({ since, before });
+const getSmileHistoryStart = () => stmts.getSmileHistoryStart.get()?.ts || null;
 const getSpotHourlyCloses = (since) => stmts.getSpotHourlyCloses.all({ since });
 
 // Every expiry of the newest full-chain smile snapshot (one snapshot writes all rows at once).
@@ -3055,11 +2906,8 @@ module.exports = {
   getImpliedVolHourly,
   insertTick,
   getRecentTicks,
-  getBestScores,
   getBuyPutScoreSamples,
-  getBestBuyPutScoreDetail,
   getSellCallScoreSamples,
-  getBestSellCallScoreDetail,
   insertOrder,
   getRecentOrders,
   getOrdersInRange,
@@ -3108,6 +2956,7 @@ module.exports = {
   getSmileHistoryRows, getLiquidityHistoryRows, getLiquidityNear, getCorrelationHistory,
   getInstrumentIvNear,
   getVolSurfaceHistoryRows,
+  getSmileHistoryStart,
   getSpotHourlyCloses,
   insertFundingRates,
   getFundingRates,

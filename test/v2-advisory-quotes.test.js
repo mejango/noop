@@ -154,16 +154,14 @@ function rolling(tickerMap) {
 test('actual rolling context preserves unavailable PUT/CALL scores and every relative comparison as null', () => {
   const { context, prompt } = rolling({ [putName]: quote(-0.06), [callName]: quote(0.06) });
   for (const side of [context.put_value_context, context.call_value_context]) {
-    for (const field of ['current_score', 'current_vs_prior_best_pct', 'percentile_vs_prior_window', 'trend_1h_pct', 'trend_6h_pct', 'trend_24h_pct', 'current_detail', 'is_strict_fresh_best']) {
+    for (const field of ['current_score', 'trend_1h_pct', 'trend_6h_pct', 'trend_24h_pct', 'current_detail']) {
       assert.equal(side[field], null, field);
     }
     assert.equal(side.samples, 1);
     assert.equal(side.availability.status, 'quotes_unavailable');
   }
-  assert.equal(context.spot_repricing_lag_context.current_vs_prior_best_pct, null);
   assert.equal(context.spot_repricing_lag_context.is_detected, null);
-  assert.equal(context.recent_relative_value_context.current_vs_rolling_best_pct, null);
-  assert.equal(context.recent_relative_value_context.is_detected, null);
+  assert.equal(context.recent_relative_value_context, undefined);
   assert.equal(context.action_pressure.signal, null);
   assert.equal(context.action_pressure.target_score, null);
   assert.equal(context.action_pressure.requires_buy_put_decision, false);
@@ -171,7 +169,7 @@ test('actual rolling context preserves unavailable PUT/CALL scores and every rel
   assert.match(prompt, /Current CALL EDGE: unavailable/);
   assert.match(prompt, /DTE\/delta eligible=1; positive ask=0/);
   assert.doesNotMatch(prompt, /Current PUT EDGE: 0/);
-  assert.match(prompt, /strict_fresh_best=unavailable/);
+  assert.doesNotMatch(prompt, /fresh_best|prior best|EDGE percentile/);
 });
 
 test('actual rolling context retains one-sided entry scores but leaves spreads unavailable', () => {
@@ -205,20 +203,28 @@ test('actual rolling context compares CALL value only against history at similar
   assert.ok(Math.abs(calls[0].maxDte - Math.min(12, dte + 1.5)) < 0.1, `maxDte ${calls[0].maxDte} for dte ${dte}`);
 });
 
-test('actual rolling context gates CALL/PUT value on IV richness vs each strike\'s own history', () => {
+test('actual rolling context reports CALL/PUT IV richness vs each strike\'s own history', () => {
   const callExpiry = Date.UTC(2026, 8, 25, 8) / 1000;
   const putExpiry = Date.UTC(2026, 10, 27, 8) / 1000;
-  // 30 snapshots where the call's bid IV ranged 50-59% and the put's ask IV 70-79%.
-  const history = (expiry, point) => Array.from({ length: 30 }, (_, i) => ({ expiry, points: JSON.stringify([point(i)]) }));
+  // 30 in-range snapshots where the call's bid IV ranged 50-59% and the put's ask IV 70-79%, plus
+  // 30 from before each expiry entered the strategy DTE range (call ~30 DTE, put ~83 DTE) at 90% IV.
+  // Those would flip both verdicts if they counted; maturity-mismatched samples must be ignored.
+  // The stub honors since/before like the SQL does, so this checks the bounds production asks for.
+  const history = (expiry, point, ageMs = 0) => Array.from({ length: 30 }, (_, i) => ({
+    expiry, timestamp: new Date(nowMs - ageMs - (i + 1) * 900000).toISOString(), points: JSON.stringify([point(i)]),
+  }));
   const smile = {
-    [callExpiry]: history(callExpiry, (i) => [2800, 1, 0.06, 0.55, 0.50 + i / 300, 0.6, 0]),
-    [putExpiry]: history(putExpiry, (i) => [1600, 0, -0.06, 0.75, 0.7, 0.70 + i / 300, 0]),
+    [callExpiry]: [...history(callExpiry, (i) => [2800, 1, 0.06, 0.55, 0.50 + i / 300, 0.6, 0]),
+      ...history(callExpiry, () => [2800, 1, 0.06, 0.9, 0.9, 0.9, 0], 20 * 86400000)],
+    [putExpiry]: [...history(putExpiry, (i) => [1600, 0, -0.06, 0.75, 0.7, 0.70 + i / 300, 0]),
+      ...history(putExpiry, () => [1600, 0, -0.06, 0.9, 0.9, 0.9, 0], 10 * 86400000)],
   };
   const api = loadProduction(['buildRollingOptionValueContext', 'formatRollingOptionValueContext'], {
     bindings: {
       summarizeAdvisoryQuotes, candidateSpreadPct, ...require('../bot/option-market-quality'),
       ...require('../bot/iv-richness'), Date: FixedDate,
-      db: { getSmileSnapshotsForExpiry: ({ expiry }) => smile[expiry] || [] },
+      db: { getSmileSnapshotsForExpiry: ({ expiry, since, before }) => (smile[expiry] || [])
+        .filter((row) => row.timestamp > since && row.timestamp < before) },
     },
   });
   const withIv = (q, iv) => ({ ...q, option_pricing: { ...q.option_pricing, ...iv } });
@@ -231,14 +237,14 @@ test('actual rolling context gates CALL/PUT value on IV richness vs each strike\
     currentTickTimestamp: new Date(nowMs).toISOString(), spotPrice: 2367.70,
   });
   const call = context.call_value_context.iv_richness;
-  assert.equal(call.qualified, 1);
-  assert.equal(call.best_qualified.instrument, callName);
-  assert.equal(call.best_qualified.value_percentile, 100);
+  assert.equal(call.top_by_edge[0].instrument, callName);
+  assert.equal(call.top_by_edge[0].value_percentile, 100);
   const put = context.put_value_context.iv_richness;
   assert.equal(put.measured, 1);
-  assert.equal(put.qualified, 0);
-  assert.equal(put.best_qualified, null);
+  // Ask IV 74% is at or below 18 of the 30 in-range samples (70-79.7%): mid-range, reported as such.
+  assert.equal(put.top_by_edge[0].value_percentile, 60);
   const prompt = api.formatRollingOptionValueContext(context);
-  assert.match(prompt, /CALL IV richness vs own strike history .*best qualifying by EDGE: ETH-20260925-2800-C value_pctl=100/);
-  assert.match(prompt, /PUT IV richness vs own strike history .*best qualifying by EDGE: none/);
+  assert.match(prompt, /CALL IV richness vs own strike history .*highest EDGE: ETH-20260925-2800-C value_pctl=100/);
+  assert.match(prompt, /PUT IV richness vs own strike history .*highest EDGE: \S+ value_pctl=60/);
+  assert.doesNotMatch(prompt, /qualif/);
 });

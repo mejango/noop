@@ -111,14 +111,6 @@ interface OptionDetail {
   raw_score?: number | null;
 }
 
-interface BestScores {
-  bestPutScore: number;
-  bestCallScore: number;
-  windowDays: number;
-  bestPutDetail: OptionDetail | null;
-  bestCallDetail: OptionDetail | null;
-}
-
 interface HeatmapSnapshot {
   timestamp: string;
   option_type: string;
@@ -247,14 +239,12 @@ interface TickData {
     liquidity_flow: { direction: string; magnitude: number; confidence: number } | null;
   };
   instruments: { total: number; put_candidates: number; call_candidates: number };
-  historical: { total_data_points: number; filtered_data_points: number; best_put_score: number; best_call_score: number };
+  historical: { total_data_points: number; filtered_data_points: number };
   strategy: { put_valid: number; call_valid: number };
   current_best_put: number;
   current_best_call: number;
   best_put_detail: OptionDetail | null;
   best_call_detail: OptionDetail | null;
-  historical_best_put_detail: OptionDetail | null;
-  historical_best_call_detail: OptionDetail | null;
   next_check_minutes: number;
 }
 
@@ -303,7 +293,6 @@ interface ChartData {
   sellCallEdge: OptionEdgePoint[];
   liquidity: LiquidityPoint[];
   liquidityVolume?: LiquidityPoint[];
-  bestScores: BestScores;
   optionsHeatmap: HeatmapSnapshot[];
   optionsCoverage?: {
     firstTimestamp: string | null;
@@ -436,7 +425,6 @@ const emptyChart: ChartData = {
   buyPutEdge: [],
   sellCallEdge: [],
   liquidity: [],
-  bestScores: { bestPutScore: 0, bestCallScore: 0, windowDays: 7, bestPutDetail: null, bestCallDetail: null },
   optionsHeatmap: [],
   optionsCoverage: {
     firstTimestamp: null,
@@ -519,7 +507,6 @@ function spotBandPctForRange(range: string): number {
     case '6h': return 0.08;
     case '24h': return 0.12;
     case '3d': return 0.18;
-    case '6.2d':
     case '7d': return 0.25;
     case '14d': return 0.35;
     case '30d': return 0.45;
@@ -738,7 +725,6 @@ function getScatterTimeBucketMs(range: string): number {
     case '6h': return 15 * 60 * 1000;
     case '24h': return 30 * 60 * 1000;
     case '3d': return 60 * 60 * 1000;
-    case '6.2d':
     case '7d': return 2 * 60 * 60 * 1000;
     case '14d': return 6 * 60 * 60 * 1000;
     case '30d': return 12 * 60 * 60 * 1000;
@@ -754,7 +740,6 @@ function getScatterPointBudget(range: string): number {
     case '6h': return 260;
     case '24h': return 320;
     case '3d': return 360;
-    case '6.2d':
     case '7d': return 380;
     case '14d': return 520;
     case '30d': return 240;
@@ -863,23 +848,6 @@ export default function OverviewPage() {
     if (ticks.length === 0) return null;
     try { return JSON.parse(ticks[0].summary); } catch { return null; }
   }, [ticks]);
-
-  const displayedBestScores = useMemo(() => {
-    const currentPut = Number(latestTick?.current_best_put ?? 0);
-    const currentCall = Number(latestTick?.current_best_call ?? 0);
-    const bestPutScore = Math.max(Number(chart.bestScores.bestPutScore ?? 0), currentPut);
-    const bestCallScore = Math.max(Number(chart.bestScores.bestCallScore ?? 0), currentCall);
-    return {
-      bestPutScore,
-      bestCallScore,
-      bestPutDetail: bestPutScore === currentPut && latestTick?.best_put_detail
-        ? latestTick.best_put_detail
-        : chart.bestScores.bestPutDetail,
-      bestCallDetail: bestCallScore === currentCall && latestTick?.best_call_detail
-        ? latestTick.best_call_detail
-        : chart.bestScores.bestCallDetail,
-    };
-  }, [chart.bestScores, latestTick]);
 
   const optionsCoverageLabel = useMemo(() => {
     const coverage = chart.optionsCoverage;
@@ -1537,26 +1505,10 @@ export default function OverviewPage() {
           </div>
         </Card>
 
-        <Card title="Options Value" subtitle={`Best (${chart.bestScores.windowDays}d) / Current`} className="flex flex-col overflow-visible">
+        <Card title="Options Value" subtitle="Current best by EDGE" className="flex flex-col overflow-visible">
           <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">PUT EDGE</span>
-              <span className="relative group/pb">
-                <span className="text-red-400 font-medium cursor-help">{Number(displayedBestScores.bestPutScore) > 0 ? Number(displayedBestScores.bestPutScore).toFixed(6) : '--'}</span>
-                {displayedBestScores.bestPutDetail && (
-                  <div className="absolute left-0 bottom-full mb-1 hidden group-hover/pb:block z-20 pointer-events-none">
-                    <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                      <div className="text-gray-400 mb-1">Best PUT ({chart.bestScores.windowDays}d)</div>
-                      <div>Delta: <span className="text-white">{displayedBestScores.bestPutDetail.delta != null ? Number(displayedBestScores.bestPutDetail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">${displayedBestScores.bestPutDetail.price != null ? Number(displayedBestScores.bestPutDetail.price).toFixed(6) : 'N/A'}</span></div>
-                      <div>Strike: <span className="text-white">{displayedBestScores.bestPutDetail.strike != null ? `$${Number(displayedBestScores.bestPutDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                      <div>DTE: <span className="text-white">{dteDays(displayedBestScores.bestPutDetail.expiry) ?? 'N/A'}</span></div>
-                      {displayedBestScores.bestPutDetail.instrument && <div className="text-gray-400 mt-1">{displayedBestScores.bestPutDetail.instrument}</div>}
-                    </div>
-                  </div>
-                )}
-              </span>
-              <span className="text-gray-600">/</span>
               <span className="relative group/pc">
                 <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : !latestTick ? 'Loading…' : 'NO ELIGIBLE'}</span>
                 {latestTick?.best_put_detail && (
@@ -1575,22 +1527,6 @@ export default function OverviewPage() {
             </div>
             <div className="flex items-center gap-3">
               <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
-              <span className="relative group/cb">
-                <span className="text-cyan-400 font-medium cursor-help">{Number(displayedBestScores.bestCallScore) > 0 ? Number(displayedBestScores.bestCallScore).toFixed(2) : '--'}</span>
-                {displayedBestScores.bestCallDetail && (
-                  <div className="absolute left-0 bottom-full mb-1 hidden group-hover/cb:block z-20 pointer-events-none">
-                    <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                      <div className="text-gray-400 mb-1">Best CALL ({chart.bestScores.windowDays}d)</div>
-                      <div>Delta: <span className="text-white">{displayedBestScores.bestCallDetail.delta != null ? Number(displayedBestScores.bestCallDetail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">${displayedBestScores.bestCallDetail.price != null ? Number(displayedBestScores.bestCallDetail.price).toFixed(6) : 'N/A'}</span></div>
-                      <div>Strike: <span className="text-white">{displayedBestScores.bestCallDetail.strike != null ? `$${Number(displayedBestScores.bestCallDetail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                      <div>DTE: <span className="text-white">{dteDays(displayedBestScores.bestCallDetail.expiry) ?? 'N/A'}</span></div>
-                      {displayedBestScores.bestCallDetail.instrument && <div className="text-gray-400 mt-1">{displayedBestScores.bestCallDetail.instrument}</div>}
-                    </div>
-                  </div>
-                )}
-              </span>
-              <span className="text-gray-600">/</span>
               <span className="relative group/cc">
                 <span className="text-cyan-400 cursor-help">{Number(latestTick?.current_best_call ?? 0) > 0 ? Number(latestTick!.current_best_call).toFixed(2) : '--'}</span>
                 {latestTick?.best_call_detail && (
@@ -1746,8 +1682,6 @@ export default function OverviewPage() {
                   const fmtCall = bestCall != null && Number(bestCall) > 0 ? Number(bestCall).toFixed(2) : 'N/A';
                   const fmtPutEdge = putEdge != null && Number(putEdge) > 0 ? Number(putEdge).toFixed(6) : 'N/A';
                   const fmtCallEdge = callEdge != null && Number(callEdge) > 0 ? Number(callEdge).toFixed(2) : 'N/A';
-                  const { windowDays } = chart.bestScores;
-                  const { bestPutScore, bestCallScore } = displayedBestScores;
                   const pd = row.bestPutDetail;
                   const cd = row.bestCallDetail;
                   return pinPrice.wrap(
@@ -1769,12 +1703,6 @@ export default function OverviewPage() {
                           Strike ${Number(cd.strike).toFixed(0)} | Delta {Number(cd.delta).toFixed(3)} | DTE {cd.dte ?? 'N/A'}
                         </div>
                       )}
-                      <div className="border-t border-white/10 mt-1.5 pt-1.5 text-xs text-gray-500">
-                        Best scores ({windowDays}d window):
-                        <span style={{ color: chartColors.red }}> P {Number(bestPutScore).toFixed(6)}</span>
-                        {' / '}
-                        <span style={{ color: chartColors.secondary }}>C {Number(bestCallScore).toFixed(2)}</span>
-                      </div>
                       {tradePayloads.length > 0 && (
                         <div className="border-t border-white/10 mt-1.5 pt-1.5 space-y-1">
                           {tradePayloads.slice(0, 3).map((trade: EnrichedTrade) => {
@@ -1806,14 +1734,6 @@ export default function OverviewPage() {
                 }}
               />
               <Legend content={() => null} />
-
-              {/* Best historical PUT/CALL score reference lines (6.2d window) */}
-              {displayedBestScores.bestPutScore > 0 && (
-                <ReferenceLine yAxisId="putVal" y={displayedBestScores.bestPutScore} stroke={chartColors.red} strokeDasharray="4 4" strokeOpacity={0.5} ifOverflow="extendDomain" />
-              )}
-              {displayedBestScores.bestCallScore > 0 && (
-                <ReferenceLine yAxisId="callVal" y={displayedBestScores.bestCallScore} stroke={chartColors.secondary} strokeDasharray="4 4" strokeOpacity={0.5} ifOverflow="extendDomain" />
-              )}
 
               {/* ETH price line */}
               <Line yAxisId="price" type="monotone" dataKey="price" hide={hiddenLines.has('price')} stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls isAnimationActive={false} />
@@ -3010,8 +2930,8 @@ export default function OverviewPage() {
               <tr className="text-xs text-gray-500 border-b border-white/5">
                 <th className="text-left py-2 px-3 font-medium">Time</th>
                 <th className="text-right py-2 px-3 font-medium">Price</th>
-                <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.red }}>PUT EDGE Now / Best</th>
-                <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.secondary }}>CALL Now / Best</th>
+                <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.red }}>PUT EDGE Now</th>
+                <th className="text-right py-2 px-3 font-medium" style={{ color: chartColors.secondary }}>CALL EDGE Now</th>
                 <th className="text-right py-2 px-3 font-medium">Instruments</th>
                 <th className="text-right py-2 px-3 font-medium">Valid</th>
                 <th className="text-right py-2 px-3 font-medium">Flow</th>
@@ -3050,22 +2970,6 @@ export default function OverviewPage() {
                           </div>
                         )}
                       </span>
-                      <span className="text-gray-600"> / </span>
-                      <span className="relative inline-block group/pb">
-                        <span className="text-gray-500 cursor-help">{Number(d.historical?.best_put_score) > 0 ? Number(d.historical.best_put_score).toFixed(6) : '--'}</span>
-                        {(d.historical_best_put_detail || chart.bestScores.bestPutDetail) && (
-                          <div className="absolute right-0 top-full mt-1 hidden group-hover/pb:block z-20 pointer-events-none">
-                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                              <div className="text-gray-400 mb-1">Best PUT ({chart.bestScores.windowDays}d)</div>
-                              <div>Delta: <span className="text-white">{Number((d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.delta).toFixed(4)}</span></div>
-                              <div>Price: <span className="text-white">${Number((d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.price).toFixed(6)}</span></div>
-                              <div>Strike: <span className="text-white">${Number((d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.strike).toFixed(0)}</span></div>
-                              <div>DTE: <span className="text-white">{dteDays((d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.expiry) ?? 'N/A'}</span></div>
-                              {(d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.instrument && <div className="text-gray-400 mt-1">{(d.historical_best_put_detail || chart.bestScores.bestPutDetail)!.instrument}</div>}
-                            </div>
-                          </div>
-                        )}
-                      </span>
                     </td>
                     <td className="py-1.5 px-3 text-right tabular-nums text-xs">
                       <span className="relative inline-block group/cn">
@@ -3079,22 +2983,6 @@ export default function OverviewPage() {
                               <div>Strike: <span className="text-white">${Number(d.best_call_detail.strike).toFixed(0)}</span></div>
                               <div>DTE: <span className="text-white">{dteDays(d.best_call_detail.expiry) ?? 'N/A'}</span></div>
                               {d.best_call_detail.instrument && <div className="text-gray-400 mt-1">{d.best_call_detail.instrument}</div>}
-                            </div>
-                          </div>
-                        )}
-                      </span>
-                      <span className="text-gray-600"> / </span>
-                      <span className="relative inline-block group/cb">
-                        <span className="text-gray-500 cursor-help">{Number(d.historical?.best_call_score) > 0 ? Number(d.historical.best_call_score).toFixed(2) : '--'}</span>
-                        {(d.historical_best_call_detail || chart.bestScores.bestCallDetail) && (
-                          <div className="absolute right-0 top-full mt-1 hidden group-hover/cb:block z-20 pointer-events-none">
-                            <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                              <div className="text-gray-400 mb-1">Best CALL ({chart.bestScores.windowDays}d)</div>
-                              <div>Delta: <span className="text-white">{Number((d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.delta).toFixed(4)}</span></div>
-                              <div>Price: <span className="text-white">${Number((d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.price).toFixed(6)}</span></div>
-                              <div>Strike: <span className="text-white">${Number((d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.strike).toFixed(0)}</span></div>
-                              <div>DTE: <span className="text-white">{dteDays((d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.expiry) ?? 'N/A'}</span></div>
-                              {(d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.instrument && <div className="text-gray-400 mt-1">{(d.historical_best_call_detail || chart.bestScores.bestCallDetail)!.instrument}</div>}
                             </div>
                           </div>
                         )}

@@ -70,6 +70,7 @@ function buildSmileHistory(rows, spotRows, beforeMs = Date.now()) {
     const rv30 = realizedVol(completedCloses(spotMap, at, 720));
     history.push({ at, hour: iso(Math.floor(at / HOUR) * HOUR),
       call_expiry: call?.expiry ?? null, put_expiry: put?.expiry ?? null,
+      call_wing10: call?.wing10 ?? null, put_wing10: put?.wing10 ?? null,
       call_atm: call?.atm ?? null, put_atm: put?.atm ?? null,
       call_wing_premium: call?.wing_premium ?? null, put_wing_premium: put?.wing_premium ?? null,
       call_rr25: call?.rr25 ?? null, put_rr25: put?.rr25 ?? null,

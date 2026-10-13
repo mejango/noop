@@ -82,7 +82,73 @@ test('surface compares live zones against their own hourly history and realized 
   assert.equal(s.put_zone.atm_iv_move.d24h, 0);
 
   const text = formatVolSurfaceForAdvisor(s);
-  assert.match(text, /CALL zone 2026-10-02 \(6d\): ATM 45 \[Δ24h \+9\.9, Δ7d n\/a\]/);
-  assert.match(text, /n=48/);
+  assert.match(text, /CALL zone 2026-10-02 \(6d\): 10Δ call IV 52\.5 \(pctl n\/a: 48h recorded, needs 168\) \[Δ24h \+11\.4, Δ7d n\/a\] \| ATM 45 \(pctl n\/a: 48h recorded, needs 168\) \[Δ24h \+9\.9, Δ7d n\/a\]/);
   assert.match(formatVolSurfaceForAdvisor(null), /unavailable/);
+});
+
+test('percentiles rank against all recorded history, and wings reach further back than ATM', () => {
+  // 15 days of history (the put expiry stays inside the 45-78 DTE zone) with put 10Δ IV stepping
+  // 60 → 74 a day at a time; only the last 8 days also carry an ATM quote, as smiles do.
+  const rows = [];
+  for (let h = 15 * 24; h >= 1; h--) {
+    const ts = new Date(NOW - h * HOUR).toISOString();
+    const wing = 60 + Math.floor((15 * 24 - h) / 24);
+    rows.push({ timestamp: ts, expiry: putExpiry, option_type: 'P', delta: -0.12, implied_vol: (wing - 2) / 100 });
+    rows.push({ timestamp: ts, expiry: putExpiry, option_type: 'P', delta: -0.08, implied_vol: (wing + 2) / 100 });
+    if (h <= 8 * 24) rows.push({ timestamp: ts, expiry: putExpiry, option_type: 'P', delta: -0.47, implied_vol: 0.5 });
+  }
+  const history = buildSurfaceHistory(rows, [], zones);
+  const current = { atMs: NOW, expiries: [{ expiry: putExpiry, points: [
+    { type: 'P', delta: -0.47, iv: 50 }, { type: 'P', delta: -0.12, iv: 63 }, { type: 'P', delta: -0.08, iv: 67 },
+  ] }] };
+  const s = buildVolSurface({ current, spotRows: [], history, zones });
+  // 65 is at or above the first 6 days (60..65) of 15.
+  assert.equal(s.put_zone.wing10_iv, 65);
+  assert.equal(s.put_zone.wing10_iv_pctl, 40);
+  assert.equal(s.history_span.put_wing10.hours, 15 * 24);
+  assert.equal(s.history_span.put_atm.hours, 8 * 24);
+  assert.equal(s.put_zone.atm_iv_pctl, 100, 'flat ATM history: everything at or below');
+  assert.match(formatVolSurfaceForAdvisor(s), /10Δ put IV 65 \(pctl 40 of 360h since 2026-09-11\)/);
+});
+
+test('production surface history loads the full record once, then appends only new completed hours', () => {
+  const { loadProduction } = require('./helpers/load-production');
+  const { buildSmileHistory } = require('../bot/market-evidence');
+  const start = Date.parse('2026-09-26T00:00:00Z');
+  const expiry = (start + 70 * DAY) / 1000;
+  const smiles = [];
+  for (let at = start; at <= Date.parse('2026-10-01T11:45:00Z'); at += 15 * 60000) {
+    smiles.push({ timestamp: new Date(at).toISOString(), expiry, points: JSON.stringify([[1600, 0, -0.08, 0.7], [1500, 0, -0.12, 0.66]]) });
+  }
+  const smileQueries = [];
+  let candidateLoads = 0;
+  let now = Date.parse('2026-10-01T10:30:00Z');
+  const { readAllSurfaceHistory } = loadProduction(['readAllSurfaceHistory'], { bindings: {
+    Date: class extends Date { static now() { return now; } },
+    buildSurfaceHistory, buildSmileHistory,
+    db: {
+      getSmileHistoryStart: () => new Date(start).toISOString(),
+      getVolSurfaceHistoryRows: () => { candidateLoads++; return []; },
+      getSpotHourlyCloses: () => [],
+      getSmileHistoryRows: ({ since, before }) => {
+        smileQueries.push({ since, before });
+        // Same pick as HISTORY_SQL.smile: the last snapshot of each hour in range.
+        const inRange = smiles.filter(r => r.timestamp >= since && r.timestamp <= before);
+        const last = new Map(inRange.map(r => [r.timestamp.slice(0, 13), r.timestamp]));
+        return inRange.filter(r => last.get(r.timestamp.slice(0, 13)) === r.timestamp);
+      },
+    },
+  } });
+
+  const first = readAllSurfaceHistory();
+  assert.equal(first.length, 5 * 24 + 10, 'every completed hour from 09-26 00:00 through 10-01 09:00');
+  assert.ok(first.every(h => h.put_wing10 != null));
+  assert.equal(readAllSurfaceHistory(), first, 'same hour: no query, same rows');
+  assert.equal(smileQueries.length, 1);
+
+  now = Date.parse('2026-10-01T11:05:00Z');
+  const second = readAllSurfaceHistory();
+  assert.equal(second.length, first.length + 1);
+  assert.deepEqual(smileQueries[1], { since: '2026-10-01T10:00:00.000Z', before: '2026-10-01T10:59:59.999Z' });
+  assert.equal(candidateLoads, 1, 'pre-smile candidate history loads once');
 });

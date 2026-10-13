@@ -141,8 +141,8 @@ const {
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
 const { buildSmileRows, SMILE_SNAPSHOT_INTERVAL_MS } = require('./bot/iv-smile');
 const { assessRichness } = require('./bot/iv-richness');
-const { buildVolSurface, formatVolSurfaceForAdvisor } = require('./bot/vol-surface');
-const { buildMarketEvidence, formatMarketEvidence, readSmileHistory, SMILE_FEATURES } = require('./bot/market-evidence');
+const { buildVolSurface, buildSurfaceHistory, formatVolSurfaceForAdvisor } = require('./bot/vol-surface');
+const { buildMarketEvidence, formatMarketEvidence, buildSmileHistory, SMILE_FEATURES } = require('./bot/market-evidence');
 let lastSmileSnapshotAt = 0;
 const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
 const { summarizeAdvisoryQuotes, candidateSpreadPct } = require('./bot/advisory-quotes');
@@ -381,21 +381,13 @@ const PERIOD = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 const PUT_EXPIRATION_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
 const PUT_DELTA_RANGE = STRATEGY_FACTS.put_delta_range; // Negative delta for puts
 const BUY_PUT_ADVISORY_DTE_RANGE = [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE];
-const ADVISORY_OPTION_VALUE_WINDOW_DAYS = 6.2;
+const EDGE_TREND_HISTORY_HOURS = 26; // covers the 24h trend with slack
 const SELL_CALL_VALUE_DTE_BAND_DAYS = 1.5;
-const BUY_PUT_URGENT_SCORE_NUDGE = 1.005;
-const BUY_PUT_PATIENT_SCORE_NUDGE = 1.02;
 const BUY_PUT_REPRICING_LAG_SCORE_NUDGE = 0.999;
 const BUY_PUT_REPRICING_LAG_LOOKBACK_MINUTES = 20;
 const BUY_PUT_REPRICING_LAG_SCORE_LOOKBACK_HOURS = 1;
 const BUY_PUT_REPRICING_LAG_MIN_SCORE_TREND_PCT = 6;
 const BUY_PUT_REPRICING_LAG_MIN_SPOT_DROP_PCT = -0.35;
-const BUY_PUT_REPRICING_LAG_NEAR_BEST_PCT = 90;
-const BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS = 6;
-const BUY_PUT_RECENT_VALUE_MIN_SAMPLES = 4;
-const BUY_PUT_RECENT_VALUE_MIN_TREND_PCT = 8;
-const BUY_PUT_RECENT_VALUE_MIN_PERCENTILE = 80;
-const BUY_PUT_RECENT_VALUE_MIN_ROLLING_BEST_PCT = 70;
 const BUY_PUT_EDGE_SHOCKS = [0.30, 0.40, 0.50];
 const PUT_ROLL_DTE_THRESHOLD = STRATEGY_FACTS.put_roll_dte_threshold;
 const PUT_MONETIZATION_PROFIT_THRESHOLD = STRATEGY_FACTS.put_monetization_profit_threshold_pct;
@@ -1936,33 +1928,6 @@ const computeScoreTrendPct = (samples, currentScore, hours) => {
   return avg > 0 ? roundForAdvisory(((currentScore - avg) / avg) * 100, 2) : null;
 };
 
-const summarizeRecentScoreWindow = (samples, currentScore, hours) => {
-  if (!(currentScore > 0) || !Array.isArray(samples) || samples.length === 0) {
-    return { hours, samples: 0 };
-  }
-  const cutoff = Date.now() - hours * 60 * 60 * 1000;
-  const scores = samples
-    .filter((row) => new Date(row.timestamp).getTime() >= cutoff)
-    .map((row) => Number(row.score))
-    .filter((score) => score > 0)
-    .sort((a, b) => a - b);
-  if (scores.length === 0) return { hours, samples: 0 };
-
-  const avg = scores.reduce((sum, score) => sum + score, 0) / scores.length;
-  const best = scores[scores.length - 1];
-  const percentile = (scores.filter((score) => score <= currentScore).length / scores.length) * 100;
-
-  return {
-    hours,
-    samples: scores.length,
-    avg_score: roundForAdvisory(avg, 6),
-    best_score: roundForAdvisory(best, 6),
-    percentile: roundForAdvisory(percentile, 1),
-    current_vs_avg_pct: avg > 0 ? roundForAdvisory(((currentScore - avg) / avg) * 100, 2) : null,
-    current_vs_recent_best_pct: best > 0 ? roundForAdvisory((currentScore / best) * 100, 2) : null,
-  };
-};
-
 const computeSpotMovePct = (recentSpotPrices = [], lookbackMinutes = 20) => {
   const rows = Array.isArray(recentSpotPrices)
     ? recentSpotPrices
@@ -1988,90 +1953,37 @@ const computeSpotMovePct = (recentSpotPrices = [], lookbackMinutes = 20) => {
 
 const buildPutRepricingLagContext = ({
   currentScore,
-  priorBestScore,
   scoreTrendPct,
   spotMovePct,
   spotAction,
 }) => {
-  const currentVsPriorBestPct = priorBestScore > 0 ? (currentScore / priorBestScore) * 100 : null;
+  // Mechanical because the lag closes in minutes and advisors run every few hours. Whether put
+  // vol is cheap enough to buy at all is the advisor's call, expressed in the rule's conditions.
   const scoreJump = Number(scoreTrendPct) >= BUY_PUT_REPRICING_LAG_MIN_SCORE_TREND_PCT;
-  const nearRollingBest = Number(currentVsPriorBestPct) >= BUY_PUT_REPRICING_LAG_NEAR_BEST_PCT;
   const spotDropped = Number(spotMovePct) <= BUY_PUT_REPRICING_LAG_MIN_SPOT_DROP_PCT;
   const downwardSpot = spotAction?.state === 'downward';
-  const detected = Boolean(currentScore > 0 && (
-    (scoreJump && (spotDropped || downwardSpot))
-    || (nearRollingBest && spotDropped)
-  ));
+  const detected = Boolean(currentScore > 0 && scoreJump && (spotDropped || downwardSpot));
 
   return {
     is_detected: detected,
     score_trend_1h_pct: roundForAdvisory(scoreTrendPct, 2),
     spot_move_20m_pct: roundForAdvisory(spotMovePct, 2),
-    current_vs_prior_best_pct: roundForAdvisory(currentVsPriorBestPct, 2),
     thresholds: {
       min_score_trend_1h_pct: BUY_PUT_REPRICING_LAG_MIN_SCORE_TREND_PCT,
       min_spot_move_20m_pct: BUY_PUT_REPRICING_LAG_MIN_SPOT_DROP_PCT,
-      near_best_pct: BUY_PUT_REPRICING_LAG_NEAR_BEST_PCT,
     },
     reason: detected
-      ? 'Put score jumped or is near the rolling best while spot is dropping, consistent with option ask lagging the new spot.'
+      ? 'Put score jumped while spot is dropping, consistent with option ask lagging the new spot.'
       : 'No short-term spot/put repricing lag detected.',
   };
 };
 
-const buildRecentRelativePutValueContext = ({
-  currentScore,
-  priorSamples,
-  priorBestScore,
-  spotAction,
-}) => {
-  const recentWindow = summarizeRecentScoreWindow(
-    priorSamples,
-    currentScore,
-    BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS
-  );
-  const currentVsRollingBestPct = priorBestScore > 0 ? (currentScore / priorBestScore) * 100 : null;
-  const enoughSamples = Number(recentWindow.samples) >= BUY_PUT_RECENT_VALUE_MIN_SAMPLES;
-  const strongRecentPercentile = Number(recentWindow.percentile) >= BUY_PUT_RECENT_VALUE_MIN_PERCENTILE;
-  const strongRecentTrend = Number(recentWindow.current_vs_avg_pct) >= BUY_PUT_RECENT_VALUE_MIN_TREND_PCT;
-  const notGloballyCheapOnly = currentVsRollingBestPct == null
-    || currentVsRollingBestPct >= BUY_PUT_RECENT_VALUE_MIN_ROLLING_BEST_PCT;
-  const compatibleSpot = ['downward', 'stable'].includes(spotAction?.state);
-  const detected = Boolean(
-    currentScore > 0
-    && enoughSamples
-    && strongRecentPercentile
-    && strongRecentTrend
-    && notGloballyCheapOnly
-    && compatibleSpot
-  );
-
-  return {
-    is_detected: detected,
-    lookback_hours: BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS,
-    samples: recentWindow.samples || 0,
-    percentile: recentWindow.percentile ?? null,
-    current_vs_recent_avg_pct: recentWindow.current_vs_avg_pct ?? null,
-    current_vs_recent_best_pct: recentWindow.current_vs_recent_best_pct ?? null,
-    current_vs_rolling_best_pct: roundForAdvisory(currentVsRollingBestPct, 2),
-    thresholds: {
-      min_samples: BUY_PUT_RECENT_VALUE_MIN_SAMPLES,
-      min_trend_pct: BUY_PUT_RECENT_VALUE_MIN_TREND_PCT,
-      min_percentile: BUY_PUT_RECENT_VALUE_MIN_PERCENTILE,
-      min_rolling_best_pct: BUY_PUT_RECENT_VALUE_MIN_ROLLING_BEST_PCT,
-    },
-    reason: detected
-      ? 'Current buy-put score is materially better than the recent local window while still respectable versus the rolling-window best.'
-      : 'No recent-relative buy-put value signal detected.',
-  };
-};
-
 const isActionableBuyPutSignal = (signal) => (
-  signal === 'strict_fresh_best'
-  || signal === 'spot_drop_option_repricing_lag'
-  || signal === 'recent_relative_value'
+  signal === 'spot_drop_option_repricing_lag'
 );
 
+// ponytail: strict_fresh_best and recent_relative_value are retired (never emitted) but still
+// parse, so saved rules that name them stay valid and simply never match.
 const BUY_PUT_VALUE_SIGNALS = new Set([
   'strict_fresh_best',
   'spot_drop_option_repricing_lag',
@@ -2120,7 +2032,8 @@ const buildRollingOptionValueContext = ({
     putDeltaRange: PUT_DELTA_RANGE, putDteRange: BUY_PUT_ADVISORY_DTE_RANGE,
     callDeltaRange: CALL_DELTA_RANGE, callDteRange: CALL_EXPIRATION_RANGE,
   });
-  const since = new Date(nowMs - ADVISORY_OPTION_VALUE_WINDOW_DAYS * 86400000).toISOString();
+  // EDGE is dollar-denominated, so it only feeds short trends; vol cheapness comes from IV percentiles.
+  const since = new Date(nowMs - EDGE_TREND_HISTORY_HOURS * 3600000).toISOString();
   let marketOiDelta24hPct = null;
   if (db && typeof db.getOpenInterestHourly === 'function') {
     try {
@@ -2148,25 +2061,13 @@ const buildRollingOptionValueContext = ({
       Math.min(CALL_EXPIRATION_RANGE[1], currentCall.dte + SELL_CALL_VALUE_DTE_BAND_DAYS)]
     : CALL_EXPIRATION_RANGE;
   let priorSamples = [];
-  let priorBestDetail = null;
   let priorCallSamples = [];
-  let priorCallBestDetail = null;
   let recentSpotPrices = [];
 
   if (db) {
     try {
       if (typeof db.getBuyPutScoreSamples === 'function') {
         priorSamples = db.getBuyPutScoreSamples({
-          since,
-          before,
-          minDelta: PUT_DELTA_RANGE[0],
-          maxDelta: PUT_DELTA_RANGE[1],
-          minDte: BUY_PUT_ADVISORY_DTE_RANGE[0],
-          maxDte: BUY_PUT_ADVISORY_DTE_RANGE[1],
-        });
-      }
-      if (typeof db.getBestBuyPutScoreDetail === 'function') {
-        priorBestDetail = db.getBestBuyPutScoreDetail({
           since,
           before,
           minDelta: PUT_DELTA_RANGE[0],
@@ -2185,16 +2086,6 @@ const buildRollingOptionValueContext = ({
           maxDte: callDteBand[1],
         });
       }
-      if (typeof db.getBestSellCallScoreDetail === 'function') {
-        priorCallBestDetail = db.getBestSellCallScoreDetail({
-          since,
-          before,
-          minDelta: CALL_DELTA_RANGE[0],
-          maxDelta: CALL_DELTA_RANGE[1],
-          minDte: callDteBand[0],
-          maxDte: callDteBand[1],
-        });
-      }
       if (typeof db.getRecentSpotPrices === 'function') {
         recentSpotPrices = db.getRecentSpotPrices(new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString());
       }
@@ -2204,38 +2095,30 @@ const buildRollingOptionValueContext = ({
   }
 
   // Per-strike IV vs that strike's own history: the rollover-proof answer to "is now good value".
+  // All of the strike's recorded life, but only while its expiry sat inside the strategy DTE range,
+  // so the comparison is at a similar maturity rather than term structure.
   let callRichness = null;
   let putRichness = null;
   if (db && typeof db.getSmileSnapshotsForExpiry === 'function') {
     try {
       const { calls, puts } = listRichnessCandidates(tickerMap, nowMs);
-      const smileRowsFor = (candidates) => [...new Set(candidates.map((c) => c.expiry))]
-        .flatMap((expiry) => db.getSmileSnapshotsForExpiry({ expiry, since, before }));
-      callRichness = assessRichness(calls, smileRowsFor(calls), 'bid');
-      putRichness = assessRichness(puts, smileRowsFor(puts), 'ask');
+      const smileRowsFor = (candidates, [minDte, maxDte]) => [...new Set(candidates.map((c) => c.expiry))]
+        .flatMap((expiry) => db.getSmileSnapshotsForExpiry({
+          expiry,
+          since: new Date(expiry * 1000 - maxDte * 86400000).toISOString(),
+          before: new Date(Math.min(Date.parse(before), expiry * 1000 - minDte * 86400000)).toISOString(),
+        }));
+      callRichness = assessRichness(calls, smileRowsFor(calls, CALL_EXPIRATION_RANGE), 'bid');
+      putRichness = assessRichness(puts, smileRowsFor(puts, BUY_PUT_ADVISORY_DTE_RANGE), 'ask');
     } catch (e) {
       console.log(`📋 Advisory context: IV richness query failed: ${e.message}`);
     }
   }
 
   const priorScores = priorSamples.map((row) => Number(row.score)).filter((score) => score > 0);
-  const priorBestScore = priorScores.length > 0 ? Math.max(...priorScores) : null;
   const currentScore = currentPutEdge ? finiteOrNull(currentPutEdge.edge_score) : null;
-  const currentVsPriorBestPct = currentScore != null && priorBestScore > 0 ? (currentScore / priorBestScore) * 100 : null;
-  const percentile = currentScore > 0 && priorScores.length > 0
-    ? (priorScores.filter((score) => score <= currentScore).length / priorScores.length) * 100
-    : null;
-  const freshBest = currentScore == null ? null : currentScore > 0 && priorBestScore > 0 && currentScore > priorBestScore;
   const priorCallScores = priorCallSamples.map((row) => Number(row.score)).filter((score) => score > 0);
-  const priorCallBestScore = priorCallScores.length > 0 ? Math.max(...priorCallScores) : null;
   const currentCallScore = currentCall ? finiteOrNull(currentCall.selection_score) : null;
-  const currentCallVsPriorBestPct = currentCallScore != null && priorCallBestScore > 0
-    ? (currentCallScore / priorCallBestScore) * 100
-    : null;
-  const callPercentile = currentCallScore > 0 && priorCallScores.length > 0
-    ? (priorCallScores.filter((score) => score <= currentCallScore).length / priorCallScores.length) * 100
-    : null;
-  const callFreshBest = currentCallScore == null ? null : currentCallScore > 0 && priorCallBestScore > 0 && currentCallScore > priorCallBestScore;
   const callTrend1hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 1);
   const callTrend6hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 6);
   const callTrend24hPct = computeScoreTrendPct(priorCallSamples, currentCallScore, 24);
@@ -2259,63 +2142,29 @@ const buildRollingOptionValueContext = ({
   const spotMove20mPct = computeSpotMovePct(recentSpotPrices, BUY_PUT_REPRICING_LAG_LOOKBACK_MINUTES);
   const repricingLag = buildPutRepricingLagContext({
     currentScore,
-    priorBestScore,
     scoreTrendPct: scoreTrend1hPct,
     spotMovePct: spotMove20mPct,
-    spotAction,
-  });
-  const recentRelativeValue = buildRecentRelativePutValueContext({
-    currentScore,
-    priorSamples,
-    priorBestScore,
     spotAction,
   });
   if (currentScore == null) {
     Object.assign(repricingLag, {
       is_detected: null,
-      current_vs_prior_best_pct: null,
       score_trend_1h_pct: null,
       reason: `PUT value comparison unavailable: ${quoteSummary.put.reason}`,
     });
-    Object.assign(recentRelativeValue, {
-      is_detected: null,
-      samples: null,
-      percentile: null,
-      current_vs_recent_avg_pct: null,
-      current_vs_recent_best_pct: null,
-      current_vs_rolling_best_pct: null,
-      reason: `PUT value comparison unavailable: ${quoteSummary.put.reason}`,
-    });
   }
-  const repricingLagSignal = Boolean(!freshBest && repricingLag.is_detected);
-  const recentRelativeValueSignal = Boolean(!freshBest && !repricingLagSignal && recentRelativeValue.is_detected);
-  const actionSignal = freshBest
-    ? 'strict_fresh_best'
-    : repricingLagSignal
-      ? 'spot_drop_option_repricing_lag'
-      : recentRelativeValueSignal
-        ? 'recent_relative_value'
-        : null;
+  const repricingLagSignal = Boolean(repricingLag.is_detected);
+  const actionSignal = repricingLagSignal ? 'spot_drop_option_repricing_lag' : null;
   const requiresDecision = Boolean(actionSignal && budgetAvailable && blockingBuyPutActions === 0);
-  const scoreNudge = repricingLagSignal
-    ? BUY_PUT_REPRICING_LAG_SCORE_NUDGE
-    : spotAction.state === 'downward'
-      ? BUY_PUT_URGENT_SCORE_NUDGE
-      : BUY_PUT_PATIENT_SCORE_NUDGE;
-  const targetScore = currentScore > 0 ? currentScore * scoreNudge : null;
+  // Only spot-lag proposes a price: the lag closes before an advisory could set one. Otherwise the
+  // advisor's own target_score is the price, chosen from the live ask, EDGE trends and vol surface.
+  const targetScore = repricingLagSignal && currentScore > 0 ? currentScore * BUY_PUT_REPRICING_LAG_SCORE_NUDGE : null;
   const suggestedLimitPrice = currentPut && targetScore > 0
     ? floorOptionPriceCents(getBuyPutPriceForEdgeScore(Math.abs(currentPut.delta), targetScore, currentPut.dte))
     : null;
-  const executionStyle = currentScore == null ? 'unavailable' : repricingLagSignal
-    ? 'spot_lag_near_live_limit'
-    : spotAction.state === 'downward'
-    ? 'less_patient_limit'
-    : spotAction.state === 'stable'
-      ? 'patient_limit'
-      : 'explain_no_buy_unless_other_facts_override';
+  const executionStyle = currentScore == null ? 'unavailable' : repricingLagSignal ? 'spot_lag_near_live_limit' : null;
 
   return {
-    window_days: ADVISORY_OPTION_VALUE_WINDOW_DAYS,
     quote_availability: quoteSummary,
     buy_put_filters: {
       delta_range: PUT_DELTA_RANGE,
@@ -2335,10 +2184,6 @@ const buildRollingOptionValueContext = ({
       availability: quoteSummary.put,
       comparison_basis: 'maximum_eligible_put_edge_per_observation',
       current_score: roundForAdvisory(currentScore, 6),
-      prior_window_best_score: roundForAdvisory(priorBestScore, 6),
-      current_vs_prior_best_pct: roundForAdvisory(currentVsPriorBestPct, 2),
-      percentile_vs_prior_window: roundForAdvisory(percentile, 1),
-      is_strict_fresh_best: freshBest,
       iv_richness: putRichness,
       trend_1h_pct: scoreTrend1hPct,
       trend_6h_pct: computeScoreTrendPct(priorSamples, currentScore, 6),
@@ -2385,26 +2230,11 @@ const buildRollingOptionValueContext = ({
         selection_metric: 'put_edge_v1',
         reason: currentPut.research.reason,
       } : null,
-      prior_window_best_detail: priorBestDetail ? {
-        timestamp: priorBestDetail.timestamp,
-        instrument: priorBestDetail.instrument_name,
-        delta: roundForAdvisory(Number(priorBestDetail.delta), 4),
-        ask_price: roundForAdvisory(Number(priorBestDetail.ask_price), 4),
-        strike: Number(priorBestDetail.strike),
-        expiry: Number(priorBestDetail.expiry),
-        dte: roundForAdvisory(Number(priorBestDetail.dte), 1),
-        raw_score: roundForAdvisory(Number(priorBestDetail.raw_score), 6),
-        put_edge_score: roundForAdvisory(Number(priorBestDetail.score), 6),
-      } : null,
       samples: priorScores.length,
     },
     call_value_context: {
       availability: quoteSummary.call,
       current_score: roundForAdvisory(currentCallScore, 2),
-      prior_window_best_score: roundForAdvisory(priorCallBestScore, 2),
-      current_vs_prior_best_pct: roundForAdvisory(currentCallVsPriorBestPct, 2),
-      percentile_vs_prior_window: roundForAdvisory(callPercentile, 1),
-      is_strict_fresh_best: callFreshBest,
       comparison_dte_band: callDteBand.map((dte) => roundForAdvisory(dte, 1)),
       iv_richness: callRichness,
       trend_1h_pct: callTrend1hPct,
@@ -2456,19 +2286,9 @@ const buildRollingOptionValueContext = ({
         expiry: currentCall.expiry,
         dte: roundForAdvisory(currentCall.dte, 1),
       } : null,
-      prior_window_best_detail: priorCallBestDetail ? {
-        timestamp: priorCallBestDetail.timestamp,
-        instrument: priorCallBestDetail.instrument_name,
-        delta: roundForAdvisory(Number(priorCallBestDetail.delta), 4),
-        bid_price: roundForAdvisory(Number(priorCallBestDetail.bid_price), 4),
-        strike: Number(priorCallBestDetail.strike),
-        expiry: Number(priorCallBestDetail.expiry),
-        dte: roundForAdvisory(Number(priorCallBestDetail.dte), 1),
-      } : null,
       samples: priorCallScores.length,
     },
     spot_repricing_lag_context: repricingLag,
-    recent_relative_value_context: recentRelativeValue,
     put_budget_context: {
       remaining: roundForAdvisory(Number(putBudgetRemaining), 2),
       budget_available: budgetAvailable,
@@ -2482,19 +2302,14 @@ const buildRollingOptionValueContext = ({
     action_pressure: {
       signal: actionSignal,
       requires_buy_put_decision: requiresDecision,
-      supports_buy_put_review: Boolean(requiresDecision && (repricingLagSignal || ['downward', 'stable'].includes(spotAction.state))),
       execution_style: executionStyle,
       target_score: roundForAdvisory(targetScore, 6),
       suggested_instrument: currentPut?.instrument || null,
       suggested_limit_price: roundForAdvisory(suggestedLimitPrice, 4),
-      score_nudge_pct: currentScore == null ? null : roundForAdvisory((scoreNudge - 1) * 100, 2),
+      score_nudge_pct: targetScore == null ? null : roundForAdvisory((BUY_PUT_REPRICING_LAG_SCORE_NUDGE - 1) * 100, 2),
       explanation: currentScore == null ? `PUT value review unavailable: ${quoteSummary.put.reason}` : requiresDecision
-        ? actionSignal === 'spot_drop_option_repricing_lag'
-          ? 'Current buy-put value score is locally spiking while spot is dropping, indicating a possible option-repricing lag before asks reset. This requires explicit review, not automatic execution.'
-          : actionSignal === 'recent_relative_value'
-            ? 'Current buy-put value score is materially good versus the recent local window, even though it is not a strict rolling-window best. This requires explicit review, not automatic execution.'
-            : 'Current buy-put value score is strictly better than the prior rolling-window best while budget remains and no buy_put is pending or confirmed. This requires explicit review, not automatic execution.'
-        : 'No fresh-best, spot-lag, or recent-relative buy_put review required.',
+        ? 'Current buy-put value score is locally spiking while spot is dropping, indicating a possible option-repricing lag before asks reset. This requires explicit review, not automatic execution.'
+        : 'No spot-lag buy_put review required.',
     },
   };
 };
@@ -2502,9 +2317,9 @@ const buildRollingOptionValueContext = ({
 const formatIvRichness = (label, sense, r) => {
   if (!r) return `${label} IV richness vs own strike history: unavailable.`;
   const fmt = (c) => `${c.instrument} value_pctl=${c.value_percentile} (IV ${c.current_iv_pct}%, ${c.iv_vs_median_pts >= 0 ? '+' : ''}${c.iv_vs_median_pts} pts vs its median, ${c.samples} samples, EDGE=${roundForAdvisory(c.edge_score, 4)})`;
-  return `${label} IV richness vs own strike history (value_pctl = share of the strike's ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d samples with ${sense} now; needs ${r.min_samples}+ samples): `
-    + `${r.measured}/${r.candidates} candidates measured, ${r.qualified} at value_pctl>=${r.qualify_percentile}; `
-    + `best qualifying by EDGE: ${r.best_qualified ? fmt(r.best_qualified) : 'none'}; richest: ${r.richest ? fmt(r.richest) : 'none'}.`;
+  return `${label} IV richness vs own strike history (value_pctl = share of all the strike's recorded samples, taken while its expiry was inside the strategy DTE range, with ${sense} now; needs ${r.min_samples}+ samples): `
+    + `${r.measured}/${r.candidates} candidates measured; highest EDGE: ${r.top_by_edge?.length ? r.top_by_edge.map(fmt).join('; ') : 'none'}; `
+    + `best value: ${r.richest ? fmt(r.richest) : 'none'}.`;
 };
 
 const formatRollingOptionValueContext = (context) => {
@@ -2515,13 +2330,10 @@ const formatRollingOptionValueContext = (context) => {
   const action = context.action_pressure || {};
   const spotAction = context.spot_price_action || {};
   const lag = context.spot_repricing_lag_context || {};
-  const recent = context.recent_relative_value_context || {};
   const detail = put.current_detail;
   const selectedPut = put.selected_candidate_detail;
-  const prior = put.prior_window_best_detail;
   const putResearch = put.research_context || {};
   const callDetail = call.current_detail;
-  const callPrior = call.prior_window_best_detail;
   const callResearch = call.research_context || {};
   const callMarket = call.market_context || {};
   const availability = context.quote_availability || {};
@@ -2532,8 +2344,6 @@ const formatRollingOptionValueContext = (context) => {
     formatAvailability('PUT', put.availability),
     `Buy-put filters: delta ${JSON.stringify(context.buy_put_filters?.delta_range)}; DTE ${JSON.stringify(context.buy_put_filters?.dte_range)}; raw_score=${context.buy_put_filters?.raw_score}; edge_score=${context.buy_put_filters?.edge_score}.`,
     `Current PUT EDGE: ${put.current_score ?? 'unavailable'}${detail ? ` (raw=${detail.raw_score ?? 'n/a'}, ${detail.instrument}, delta=${detail.delta}, ask=$${detail.ask_price}, two-sided spread/mark=${detail.spread_pct ?? 'n/a'}%, DTE=${detail.dte}, quote=${detail.quote_received_at || 'unknown'})` : ''}.`,
-    `Prior ${context.window_days}d best PUT EDGE: ${put.prior_window_best_score ?? 'n/a'}${prior ? ` (raw=${prior.raw_score ?? 'n/a'}, ${prior.instrument} at ${prior.timestamp})` : ''}.`,
-    `Current PUT vs prior best: ${put.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${put.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${formatDetection(put.is_strict_fresh_best)}; samples=${put.samples}.`,
     formatIvRichness('PUT', 'ask IV at or below', put.iv_richness),
     `PUT score trend: 1h=${put.trend_1h_pct ?? 'n/a'}%, 6h=${put.trend_6h_pct ?? 'n/a'}%, 24h=${put.trend_24h_pct ?? 'n/a'}%.`,
     `PUT EDGE selector: instrument=${selectedPut?.instrument || 'n/a'}; live-ask PUT EDGE=${selectedPut?.put_edge_score ?? 'n/a'}; selection_score=${putResearch.selection_score ?? 'n/a'}; formula=${putResearch.reason || 'n/a'}.`,
@@ -2541,17 +2351,14 @@ const formatRollingOptionValueContext = (context) => {
     `Sell-call filters: delta ${JSON.stringify(context.sell_call_filters?.delta_range)}; DTE ${JSON.stringify(context.sell_call_filters?.dte_range)}; raw_score=${context.sell_call_filters?.raw_score}; edge_score=${context.sell_call_filters?.edge_score}.`,
     formatAvailability('CALL', call.availability),
     `Current CALL EDGE: ${call.current_score ?? 'unavailable'}${callDetail ? ` (raw=${callDetail.raw_score ?? 'n/a'}, ${callDetail.instrument}, delta=${callDetail.delta}, bid=$${callDetail.bid_price}, two-sided spread/mark=${callDetail.spread_pct ?? 'n/a'}%, DTE=${callDetail.dte}, quote=${callDetail.quote_received_at || 'unknown'})` : ''}.`,
-    `Prior ${context.window_days}d best CALL EDGE at DTE ${JSON.stringify(call.comparison_dte_band)}: ${call.prior_window_best_score ?? 'n/a'}${callPrior ? ` (${callPrior.instrument} at ${callPrior.timestamp})` : ''}.`,
-    `Current CALL vs prior best: ${call.current_vs_prior_best_pct ?? 'n/a'}%; percentile=${call.percentile_vs_prior_window ?? 'n/a'}; strict_fresh_best=${formatDetection(call.is_strict_fresh_best)}; samples=${call.samples ?? 0}.`,
     formatIvRichness('CALL', 'bid IV at or above', call.iv_richness),
     `CALL score trend: 1h=${call.trend_1h_pct ?? 'n/a'}%, 6h=${call.trend_6h_pct ?? 'n/a'}%, 24h=${call.trend_24h_pct ?? 'n/a'}%.`,
     `CALL market context (not part of CALL EDGE): avg_spread=${callMarket.market_avg_spread_pct ?? 'n/a'}%; best_put_score=${callMarket.market_best_put_score ?? 'n/a'}; matched-expiry/delta skew=${callMarket.put_call_iv_skew_pct ?? 'n/a'}% (${callMarket.put_call_iv_skew_matched_pairs ?? 0} matched puts); oi_24h=${callMarket.market_oi_delta_24h_pct ?? 'n/a'}%; pc_oi=${callMarket.market_pc_oi ?? 'n/a'}.`,
     `CALL EDGE normalization: edge_score=${callResearch.selection_score ?? 'n/a'}; raw_score=${callResearch.edge_components?.raw_score ?? 'n/a'}; DTE=${callResearch.edge_components?.dte ?? 'n/a'}; factor=${callResearch.edge_components?.normalization_factor ?? 'n/a'}; formula=${callResearch.reason || 'n/a'}.`,
-    `Spot-lag repricing check: detected=${formatDetection(lag.is_detected)}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%; spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%; near_best=${lag.current_vs_prior_best_pct ?? 'n/a'}%; reason=${lag.reason || 'n/a'}.`,
-    `Recent-relative value check: detected=${formatDetection(recent.is_detected)}; lookback=${recent.lookback_hours ?? 'n/a'}h; samples=${recent.samples ?? 'n/a'}; percentile=${recent.percentile ?? 'n/a'}; vs_recent_avg=${recent.current_vs_recent_avg_pct ?? 'n/a'}%; vs_rolling_best=${recent.current_vs_rolling_best_pct ?? 'n/a'}%; reason=${recent.reason || 'n/a'}.`,
+    `Spot-lag repricing check: detected=${formatDetection(lag.is_detected)}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%; spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%; reason=${lag.reason || 'n/a'}.`,
     `Put budget: remaining=$${budget.remaining ?? 'n/a'}; active_buy_put_rules=${budget.active_buy_put_rules ?? 0}; blocking_buy_put_actions=${budget.blocking_buy_put_actions ?? 0}; working_buy_put_actions=${budget.working_buy_put_actions ?? 0}; resting_buy_put_orders=${budget.resting_buy_put_orders ?? 0}.`,
     `Spot price action: ${spotAction.state || 'unknown'}${spotAction.slope_pct_6h != null ? ` (${spotAction.slope_pct_6h}% over recent 6h)` : ''}; reason=${spotAction.reason || 'n/a'}.`,
-    `Buy-put review: signal=${action.signal || 'none'}; requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; supports_buy_put_review=${action.supports_buy_put_review ? 'yes' : 'no'}; execution_style=${action.execution_style || 'n/a'}; target_score=${action.target_score ?? 'n/a'}; suggested_instrument=${action.suggested_instrument || 'n/a'}; suggested_limit_price=$${action.suggested_limit_price ?? 'n/a'}; score_nudge=${action.score_nudge_pct ?? 'n/a'}%.`,
+    `Buy-put review: signal=${action.signal || 'none'}; requires_buy_put_decision=${action.requires_buy_put_decision ? 'yes' : 'no'}; top_edge_instrument=${action.suggested_instrument || 'n/a'}${action.target_score != null ? `; spot-lag target_score=${action.target_score}; spot-lag limit_price=$${action.suggested_limit_price ?? 'n/a'}` : ''}.`,
   ].join('\n');
 };
 
@@ -5748,8 +5555,8 @@ const generateJournalEntries = async (tickSummary, botData) => {
         } catch { return null; }
       })(),
       cross_correlations: correlations,
-      // The trade zones' ATM, wings, risk reversal, term slope and IV − realized, each with its 30d
-      // percentile and 24h/7d move: the dashboard's smile panel, as the journal's own evidence.
+      // The trade zones' ATM, wings, risk reversal, term slope and IV − realized, each with its
+      // all-history percentile and 24h/7d move: the dashboard's smile panel, as the journal's own evidence.
       volatility_surface: formatVolSurfaceForAdvisor(buildStoredVolSurface()),
       market_history: buildStoredMarketEvidence(),
       put_price_divergence: putPriceDivergence,
@@ -6283,23 +6090,79 @@ const formatSignedPct = (value, digits = 1) => {
   return `${value > 0 ? '+' : ''}${Number(value).toFixed(digits)}%`;
 };
 
-// 30d percentile history is ~720 hourly samples; rebuilding it once an hour is plenty.
-let volSurfaceHistoryCache = null;
 const smileRowsToSurfaceExpiries = (rows) => rows.map(r => ({
   expiry: r.expiry,
   points: (typeof r.points === 'string' ? JSON.parse(r.points) : r.points)
     .map(([, isCall, delta, iv]) => ({ type: isCall ? 'C' : 'P', delta, iv: iv * 100 })),
 }));
 
+// All recorded vol history: bot-candidate IVs (options_snapshots, from 2026-02-26) up to the first
+// full-chain smile, then the smiles (from 2026-09-26). Candidates only cover the strategy delta
+// ranges, so they supply 10Δ wings but no ATM; both sources store mark IV.
+// History is append-only, so it is kept in memory: the full record loads once per process, then
+// each new completed hour is appended. Cost per hour stays flat however long the record gets
+// (about 9k small rows a year). The current hour is never stored; its pick can still change.
+const surfaceHistory = { rows: null, loadedUntil: 0 };
+const readAllSurfaceHistory = () => {
+  const HOUR = 3_600_000, DAY = 86_400_000;
+  const iso = (ms) => new Date(ms).toISOString();
+  const hourStart = Math.floor(Date.now() / HOUR) * HOUR;
+  if (surfaceHistory.rows && surfaceHistory.loadedUntil >= hourStart) return surfaceHistory.rows;
+  if (!surfaceHistory.rows) {
+    const zones = { call_dte_range: CALL_EXPIRATION_RANGE, put_dte_range: PUT_EXPIRATION_RANGE };
+    const smileStartMs = Date.parse(db.getSmileHistoryStart?.() || '') || hourStart;
+    surfaceHistory.rows = db.getVolSurfaceHistoryRows
+      ? buildSurfaceHistory(db.getVolSurfaceHistoryRows({ since: iso(0), before: iso(smileStartMs) }),
+        db.getSpotHourlyCloses(iso(0)), zones)
+      : [];
+    surfaceHistory.loadedUntil = smileStartMs;
+  }
+  const since = surfaceHistory.loadedUntil;
+  const added = buildSmileHistory(
+    db.getSmileHistoryRows({ since: iso(since), before: iso(hourStart - 1) }),
+    db.getSpotHourlyCloses(iso(since - 31 * DAY)), hourStart - 1);
+  surfaceHistory.rows = surfaceHistory.rows.concat(added);
+  surfaceHistory.loadedUntil = hourStart;
+  return surfaceHistory.rows;
+};
+
 const buildVolSurfaceAt = (expiries, nowMs) => {
   if (!db?.getSmileHistoryRows) return null;
   const DAY = 86_400_000;
   const zones = { call_dte_range: CALL_EXPIRATION_RANGE, put_dte_range: PUT_EXPIRATION_RANGE };
   const spotRows = db.getSpotHourlyCloses(new Date(nowMs - 38 * DAY).toISOString());
-  if (!volSurfaceHistoryCache || nowMs < volSurfaceHistoryCache.at || nowMs - volSurfaceHistoryCache.at > 60 * 60 * 1000) {
-    volSurfaceHistoryCache = { at: nowMs, history: readSmileHistory(db, nowMs, 30) };
+  return buildVolSurface({ current: { atMs: nowMs, expiries }, spotRows, history: readAllSurfaceHistory(), zones });
+};
+
+// Live surface from tickers alone (the rule executor has no instrument list); expiries parse from names.
+// One build per ticker snapshot: every rule check in a tick shares it.
+const tickerVolSurfaces = new WeakMap();
+const buildTickerVolSurface = (tickerMap, nowMs) => {
+  if (tickerMap && tickerVolSurfaces.has(tickerMap)) return tickerVolSurfaces.get(tickerMap);
+  const expiryByDate = {};
+  for (const name of Object.keys(tickerMap || {})) {
+    const parsed = parseAdvisoryOptionInstrument(name);
+    if (parsed) expiryByDate[name.split('-')[1]] = Math.floor(parsed.expiry.getTime() / 1000);
   }
-  return buildVolSurface({ current: { atMs: nowMs, expiries }, spotRows, history: volSurfaceHistoryCache.history, zones });
+  const surface = buildVolSurfaceAt(smileRowsToSurfaceExpiries(buildSmileRows(tickerMap, expiryByDate)), nowMs);
+  if (tickerMap) tickerVolSurfaces.set(tickerMap, surface);
+  return surface;
+};
+
+// Values an entry rule's market_conditions may test. Vol percentiles rank the trade zone's 10Δ IV
+// against all recorded history; the advisor picks any threshold. Unavailable history leaves the
+// field null, which fails the condition, so a vol-gated rule waits rather than trading blind.
+const RULE_MARKET_FIELDS = new Set(['spot_price', 'put_10d_iv_pctl', 'call_10d_iv_pctl']);
+const getRuleMarketValues = (conditions, spotPrice, tickerMap) => {
+  const values = { spot_price: spotPrice };
+  if (!(conditions || []).some((c) => c?.field === 'put_10d_iv_pctl' || c?.field === 'call_10d_iv_pctl')) return values;
+  let surface = null;
+  try { surface = buildTickerVolSurface(tickerMap, Date.now()); } catch (e) {
+    console.log(`📋 Rule market values: volatility surface unavailable: ${e.message}`);
+  }
+  values.put_10d_iv_pctl = surface?.put_zone?.wing10_iv_pctl ?? null;
+  values.call_10d_iv_pctl = surface?.call_zone?.wing10_iv_pctl ?? null;
+  return values;
 };
 
 const buildAdvisoryVolSurface = ({ tickerMap, instruments, nowMs }) => {
@@ -7670,6 +7533,9 @@ const validateAdvisorRuleContract = (rule, context = {}) => {
     if (Object.prototype.hasOwnProperty.call(criteria, 'max_cost')) return { valid: false, reason: 'buy_put must use budget_limit/min_score/target_score, not max_cost' };
     if (!isKnownBuyPutValueSignal(rawValueSignal)) return { valid: false, reason: `unknown buy_put value_signal: ${rawValueSignal}` };
     if (!(Number(criteria.min_score) > 0)) return { valid: false, reason: 'buy_put requires min_score as a value gate' };
+    if ((Array.isArray(criteria.market_conditions) ? criteria.market_conditions : []).some((condition) => !RULE_MARKET_FIELDS.has(condition?.field))) {
+      return { valid: false, reason: `buy_put market_conditions may only use ${[...RULE_MARKET_FIELDS].join(', ')}` };
+    }
     return { valid: true };
   }
 
@@ -7680,7 +7546,7 @@ const validateAdvisorRuleContract = (rule, context = {}) => {
     if (!(Number(criteria.min_score) > 0)) return { valid: false, reason: 'sell_call requires min_score as the DTE-normalized CALL EDGE gate' };
     if (!(Number(criteria.min_bid) > 0)) return { valid: false, reason: 'sell_call requires min_bid as the liquidity/premium floor' };
     const marketConditions = Array.isArray(criteria.market_conditions) ? criteria.market_conditions : [];
-    if (marketConditions.some((condition) => condition?.field !== 'spot_price')) return { valid: false, reason: 'sell_call market_conditions may only use spot_price as supporting context' };
+    if (marketConditions.some((condition) => !RULE_MARKET_FIELDS.has(condition?.field))) return { valid: false, reason: `sell_call market_conditions may only use ${[...RULE_MARKET_FIELDS].join(', ')}` };
     return { valid: true };
   }
 
@@ -8232,7 +8098,7 @@ const validateRestingSellCallEntryOrder = ({
     const hasMarketConditions = Array.isArray(marketConditions)
       ? marketConditions.length > 0
       : Boolean(marketConditions);
-    if (hasMarketConditions && !evaluateConditions(marketConditions, 'all', { spot_price: spotPrice })) {
+    if (hasMarketConditions && !evaluateConditions(marketConditions, 'all', getRuleMarketValues(marketConditions, spotPrice, tickerMap))) {
       reasons.push(`rule ${rule.id}: market_conditions no longer satisfied`);
       continue;
     }
@@ -8365,7 +8231,7 @@ const validateRestingBuyPutEntryOrder = ({
     const hasMarketConditions = Array.isArray(marketConditions)
       ? marketConditions.length > 0
       : Boolean(marketConditions);
-    if (hasMarketConditions && !evaluateConditions(marketConditions, 'all', { spot_price: spotPrice })) {
+    if (hasMarketConditions && !evaluateConditions(marketConditions, 'all', getRuleMarketValues(marketConditions, spotPrice, tickerMap))) {
       reasons.push(`rule ${rule.id}: market_conditions no longer satisfied`);
       continue;
     }
@@ -9429,7 +9295,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           ? marketConditions.length > 0
           : Boolean(marketConditions);
         if (hasMarketConditions) {
-          const marketValues = { spot_price: spotPrice };
+          const marketValues = getRuleMarketValues(marketConditions, spotPrice, tickerMap);
           if (!evaluateConditions(marketConditions, 'all', marketValues)) {
             logDecision(rule, {
               decision_status: 'skipped',
@@ -10080,7 +9946,6 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
               : null,
             required_value_signal: rule.action === 'buy_put' ? valueSignal || null : null,
             spot_repricing_lag: rule.action === 'buy_put' ? buyPutContext?.spot_repricing_lag_context || null : null,
-            recent_relative_value: rule.action === 'buy_put' ? buyPutContext?.recent_relative_value_context || null : null,
             preferred_order_type: currentBuyPutSignal === 'spot_drop_option_repricing_lag' ? 'ioc' : normalizePreferredOrderType(rule.action, rule.preferred_order_type),
           },
         });
@@ -10520,7 +10385,12 @@ const getMomentumEvidenceDisciplinePrompt = () => [
   'EVIDENCE PRIORITY: This is an options bang-for-buck strategy, not a price-direction strategy.',
   '- Primary evidence: executable bid/ask, spread/depth, IV/skew, DTE, delta, moneyness, OI, funding, candidate score, position PnL, hedge role, and account margin impact.',
   '- Path context comes from the raw 30-day hourly spot path, not from momentum labels. Do not create, preserve, or justify a rule mainly because spot has been rising or falling; direction must be confirmed by option pricing, liquidity, skew, OI, funding, or position-specific risk.',
-  '- Value timing: CALL/PUT EDGE ranks which contract, but it cannot say on its own that now is good value. Raw scores drift with theta and jump when the DTE window rolls to a new expiry. Time entries with IV RICHNESS VS OWN STRIKE HISTORY: a fresh best or high percentile whose candidate sits well below the value_pctl bar is a rollover or decay artifact, not value. Prefer qualifying candidates, ranked by EDGE, and set min_score near that candidate rather than above a rollover jump. With too few richness samples, fall back to the DTE-banded CALL comparison.',
+  '- Value timing: CALL/PUT EDGE ranks which contract, but it cannot say on its own that now is good value. Raw scores drift with theta and jump when the DTE window rolls to a new expiry. A rising EDGE on a candidate with a low value_pctl (cheap or rich only versus its own strike history at similar maturity) is likely a rollover or decay artifact, not value. Weigh EDGE and value_pctl together, judge how much each matters from what you see, and set min_score near the candidate you choose rather than above a rollover jump.',
+  'VOLATILITY TRADING: This strategy is a volatility trade: buy put volatility when it is cheap and sell call volatility when it is rich. EDGE already does this within one moment (a lower-IV put has a cheaper ask and a higher PUT EDGE; a richer call has a higher bid and a higher CALL EDGE). The judgment across time is yours.',
+  '- Evidence: the VOLATILITY SURFACE ranks each trade zone\'s IV against all recorded history, showing each measure\'s span and start date. IV RICHNESS VS OWN STRIKE HISTORY ranks each candidate against its own strike, using only samples from when its expiry was inside the strategy DTE range.',
+  '- Read it with care: EDGE is dollar-denominated and moves with the ETH price level, so never compare it across weeks. A percentile with a short span or a recent start date is weaker evidence than one covering months. Zone percentiles roll across expiries and are not constant-maturity. 10Δ wing IV and ATM IV can disagree; say which you rely on and why.',
+  '- What our history taught: in a September 2026 backtest, sell-call gates relative to recent highs, or to IV minus realized vol, loosened in quiet weeks just before breakouts and lost money, while a fixed premium floor held up. Low realized vol does not make call premium rich. For puts, no timing rule reliably beat steady buying, so treat cheap put vol as a reason to buy more or bid more readily, not as a reason to wait indefinitely while the book is under-hedged.',
+  '- Acting on it: entry rules may add market_conditions on put_10d_iv_pctl or call_10d_iv_pctl (0-100: share of all recorded hours with the zone\'s 10Δ IV at or below now; null while history is too short, and a null value fails the condition). Choose any threshold from the evidence in front of you and state why. Prefer no vol condition over one you cannot justify; the rule persists until the next advisory, so an over-tight condition silently blocks trading for hours.',
 ].join('\n');
 
 const getBuyPutEntryPriceDisciplinePrompt = () => [
@@ -10532,21 +10402,19 @@ const getBuyPutEntryPriceDisciplinePrompt = () => [
 ].join('\n');
 
 const getFreshBestBuyPutDisciplinePrompt = () => [
-  'FRESH-BEST BUY-PUT DISCIPLINE:',
-  `- The ROLLING OPTION VALUE CONTEXT compares the live buy-put score against the prior ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d window using buy-put DTE discipline (${BUY_PUT_ADVISORY_DTE_RANGE[0]}-${BUY_PUT_ADVISORY_DTE_RANGE[1]} DTE). A strict fresh best means the highest observed DTE-normalized delta per premium dollar in that window.`,
+  'BUY-PUT VALUE DISCIPLINE:',
+  `- The ROLLING OPTION VALUE CONTEXT reports the live buy-put score and its short-term trends under buy-put DTE discipline (${BUY_PUT_ADVISORY_DTE_RANGE[0]}-${BUY_PUT_ADVISORY_DTE_RANGE[1]} DTE). EDGE is dollar-denominated, so it is not compared against long history; whether protection is cheap comes from the put-zone 10Δ IV percentile versus all recorded history. Beating a past EDGE maximum is not a buy signal (backtests found no timing edge from fresh bests on any window).`,
   `- PUT EDGE is the only ranking score: (abs(delta) / ask) * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}. Normalize each eligible candidate before ranking; higher PUT EDGE wins. It measures DTE-normalized delta per premium dollar, not literal crash payoff.`,
   '- Do not treat higher delta as a standalone buy-put advantage. Keep the approved delta/DTE ranges and rank eligible puts directly by PUT EDGE.',
-  '- Spread, IV/skew, OI, and 30/40/50% drawdown payoff scenarios are descriptive diagnostics. Do not apply another multiplier, reorder candidates, or create a standalone veto from them. Keep concrete live-quote, price, size, budget, margin, and active-rule checks.',
+  '- Spread, single-contract IV/skew, OI, and 30/40/50% drawdown payoff scenarios are descriptive diagnostics. Do not apply another multiplier, reorder candidates, or create a standalone veto from them. Keep concrete live-quote, price, size, budget, margin, and active-rule checks. Your judgment of how cheap put vol is overall belongs in a put_10d_iv_pctl market_condition (see VOLATILITY TRADING), not in a ranking change.',
   '- Legacy min_edge_score on saved buy_put rules is ignored; do not emit it or use it as a ranking, confirmation, or execution gate.',
-  '- The spot-lag repricing check catches a different cheap-convexity window: spot has dropped and the put score has locally jumped or moved near the rolling best before asks fully recalibrate.',
-  `- The recent-relative value check catches a local value window versus the last ${BUY_PUT_RECENT_VALUE_LOOKBACK_HOURS}h, but it is weaker than a ${ADVISORY_OPTION_VALUE_WINDOW_DAYS}d fresh best because the local window may simply be less bad. Use stricter min_score/target_score, budget discipline, and a concrete reason it is true value rather than locally expensive insurance.`,
+  '- The spot-lag repricing check catches a different cheap-convexity window: spot has dropped and the put score has locally jumped before asks fully recalibrate.',
+  '- Local improvements in PUT EDGE over hours (see the 1h/6h/24h trends) are yours to judge against the volatility surface; a resting bid at target_score already catches asks that fall to it between advisories.',
   '- If requires_buy_put_decision=yes, explicitly evaluate whether to emit a buy_put rule or explain why patience/no-buy is still the better stance. This is a value signal, not an instruction to override discipline.',
-  '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch strict_fresh_best, spot_drop_option_repricing_lag, recent_relative_value, or a patient maker bid at the rule price without waiting for a new advisory. Signal absence means quote patiently at the score-derived price; it does not mean no possible bid. Use min_score and target_score to keep this wildcard disciplined.',
+  '- Standing buy_put watchers may use criteria.value_signal="any_actionable_buy_put" to let the executor catch spot_drop_option_repricing_lag or a patient maker bid at the rule price without waiting for a new advisory. Signal absence means quote patiently at the score-derived price; it does not mean no possible bid. Use min_score and target_score to keep this wildcard disciplined.',
   '- If value_signal is present, still include option_type, delta_range, dte_range, budget_limit, and min_score/target_score bounds so the watcher respects the approved universe, price and spend constraints.',
   '- If signal=spot_drop_option_repricing_lag, the edge may vanish quickly; prefer ioc or gtc with the supplied near-live target_score instead of a deeply patient post_only bid.',
-  '- If signal=recent_relative_value, prefer post_only or gtc with the supplied target_score unless other facts show urgency.',
-  '- If you choose buy_put and spot price action is downward, use less_patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "gtc" or "post_only".',
-  '- If you choose buy_put and spot price action is stable, use patient_limit pricing: set criteria.target_score to the supplied target_score and prefer "post_only" or "gtc".',
+  '- Outside spot-lag, no target_score is supplied: choose it yourself from the live ask, EDGE trends, IV richness and the volatility surface, and say why. A higher target_score is a cheaper, more patient bid that fills less often; a lower one fills sooner at a higher price.',
   `- target_score means a maximum bid of abs(delta) * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT} / target_score. The executor uses this cap and the live book to compute a tick-aligned price. It may rest below the ask; for spot-lag repricing it may be near the ask.`,
 ].join('\n');
 
@@ -10554,11 +10422,11 @@ const getStandingRulebookDisciplinePrompt = () => [
   'STANDING RULEBOOK DISCIPLINE:',
   '- The advisory output is a standing rulebook for tick-by-tick execution, not only a list of trades that should execute at the current tick.',
   '- Every REQUIRED STANDING RULEBOOK COVERAGE item must have a corresponding rule in the final agenda. If the favorable condition is not true now, encode the condition that would make it favorable later.',
-  '- buy_put rules define a price/score where insurance is worth buying while put budget remains. Rank directly by PUT EDGE and use min_score/target_score as the hard price contract. Do not emit min_edge_score for buy_put; legacy values on saved rules are ignored. Spread, IV/skew, OI, and shock scenarios do not add another ranking or veto.',
+  '- buy_put rules define a price/score where insurance is worth buying while put budget remains. Rank directly by PUT EDGE and use min_score/target_score as the hard price contract. Do not emit min_edge_score for buy_put; legacy values on saved rules are ignored. Spread, single-contract IV/skew, OI, and shock scenarios do not add another ranking or veto; an overall view on put vol goes in a put_10d_iv_pctl market_condition.',
   `- sell_call rules must include min_score for CALL EDGE, where CALL EDGE = (bid / abs(delta)) * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}. This light correction reduces the mechanical Sunday jump when the available expiry range rolls forward.`,
   '- min_bid is the executable premium/liquidity floor. min_score is compared with CALL EDGE; do not emit min_edge_score for sell_call.',
   '- If the sell_call thesis is patience or margin is near its cap, encode that stance through a stricter min_score/min_bid, lower priority, or narrower delta/DTE range. The written reasoning and JSON trigger must not contradict each other.',
-  '- sell_call market_conditions may only use spot_price as optional supporting context. Express other selectivity through min_score, min_bid, delta_range, dte_range, priority, and reasoning.',
+  '- sell_call market_conditions may use spot_price as optional supporting context and call_10d_iv_pctl when you judge call vol rich or thin versus history (see VOLATILITY TRADING). Express other selectivity through min_score, min_bid, delta_range, dte_range, priority, and reasoning.',
   '- Do not use broad spot_price floors as a proxy for sell_call recovery, stability, or good premium. After a sharp drop, spot can remain above a floor while call selling is still unattractive.',
   `- sell_call rules must stay inside the normal call sale universe: ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE and ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]} delta.`,
   `- sell_put rules must declare put_exit_intent. Use "roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long puts; roll_protection may close the aging instrument fully because the replacement protection is already on. Use "monetize_tail_win" only when executable unrealized_pnl_pct > ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. For monetization, never sell all downside protection at once or dump into sparse crash bids.`,
@@ -12638,9 +12506,9 @@ Given market data, produce a JSON trading agenda with:
         "max_strike_pct": 0.80,
         "min_score": 0.004,
         "target_score": 0.0042,
-        "value_signal": "strict_fresh_best" | "spot_drop_option_repricing_lag" | "recent_relative_value" | "any_actionable_buy_put",
+        "value_signal": "spot_drop_option_repricing_lag" | "any_actionable_buy_put",
         "min_bid": 2.00,
-        "market_conditions": [{"field": "spot_price", "op": "lt"|"gt"|"gte"|"lte", "value": 2000}]
+        "market_conditions": [{"field": "spot_price" | "put_10d_iv_pctl" | "call_10d_iv_pctl", "op": "lt"|"gt"|"gte"|"lte", "value": <number>}]
       },
       "budget_limit": <max USD to spend on this rule>,
       "priority": "high" | "medium" | "low",
@@ -12675,7 +12543,7 @@ Given market data, produce a JSON trading agenda with:
 CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, min_bid, market_conditions. Do not emit min_edge_score. Exit criteria uses typed intents plus conditions. sell_put criteria must include put_exit_intent. buyback_call criteria must include buyback_intent.
 
 Rules:
-- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_bid (for sell_call), market_conditions. For sell_call, include min_score as the CALL EDGE gate and min_bid as the executable premium floor. For buy_put, rank directly by PUT EDGE and use min_score/target_score for price discipline. Do not emit min_edge_score for either action; legacy min_edge_score on saved buy_put rules is ignored. Do not add spread/IV/skew/OI/shock-payoff gates. For sell_call, market_conditions may only contain spot_price conditions; translate other selectivity into min_score, min_bid, priority, delta_range, or dte_range instead.
+- Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_bid (for sell_call), market_conditions. For sell_call, include min_score as the CALL EDGE gate and min_bid as the executable premium floor. For buy_put, rank directly by PUT EDGE and use min_score/target_score for price discipline. Do not emit min_edge_score for either action; legacy min_edge_score on saved buy_put rules is ignored. Do not add spread/single-contract IV/skew/OI/shock-payoff gates. market_conditions fields are spot_price, put_10d_iv_pctl and call_10d_iv_pctl only; translate other selectivity into min_score, min_bid, priority, delta_range, or dte_range instead.
 - Exit criteria MUST include: conditions (array of {field, op, value}) and condition_logic ("any" or "all"). Fields: dte, delta, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte. Do not use mark_price as a strategy trigger. For sell_put, include put_exit_intent. For monetize_tail_win, also include min_exit_price or limit_price. For buyback_call, include buyback_intent; set allow_below_profit_floor true only for threat_management.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: roll_protection sell_put and threat_management buyback_call should use preferred_order_type "ioc". Patient monetize_tail_win sell_put and profit_capture buyback_call may use "gtc" or "post_only" as synthetic reduce-only resting exits, with limit_price/min_exit_price/max_buyback_price carrying the price discipline.
 - For buy_put: set option_type "P", negative delta_range (e.g. [-0.12, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. Raw score is abs(delta)/ask. PUT EDGE = raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}; normalize every eligible candidate before ranking directly by PUT EDGE. It measures DTE-normalized delta per premium dollar, not literal crash payoff. Keep 30/40/50% drawdown payoff scenarios as descriptive intrinsic-value/premium illustrations, excluding fees; do not use spread, IV/skew, OI, or shock scenarios as another ranking multiplier or standalone veto. DTE DISCIPLINE: buy puts at 45-78 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 78].
@@ -13941,7 +13809,6 @@ const runBot = async () => {
         const bestCurrentCall = [...displayCallCandidates].sort((a, b) => (b?.details?.callEdgeScore || 0) - (a?.details?.callEdgeScore || 0))[0] || null;
         const bestPutSummary = summarizeBestCandidate(bestCurrentPut, 'put');
         const bestCallSummary = summarizeBestCandidate(bestCurrentCall, 'call');
-        const historicalBestScores = typeof db.getBestScores === 'function' ? db.getBestScores(7) : null;
 
         tickSummary = {
           price: spotPrice,
@@ -13958,8 +13825,6 @@ const runBot = async () => {
           historical: {
             total_data_points: enrichedPutCandidates.length + enrichedCallCandidates.length,
             filtered_data_points: displayPutCandidates.length + displayCallCandidates.length,
-            best_put_score: historicalBestScores?.bestPutScore ?? 0,
-            best_call_score: historicalBestScores?.bestCallScore ?? 0,
           },
           strategy: {
             mode: 'llm_driven',
@@ -13969,8 +13834,6 @@ const runBot = async () => {
           current_best_call: bestCallSummary?.score ?? 0,
           best_put_detail: bestPutSummary?.detail ?? null,
           best_call_detail: bestCallSummary?.detail ?? null,
-          historical_best_put_detail: historicalBestScores?.bestPutDetail ?? null,
-          historical_best_call_detail: historicalBestScores?.bestCallDetail ?? null,
           next_check_minutes: checkInterval / (1000 * 60),
         };
         db.insertTick(tickTimestamp, JSON.stringify(tickSummary));

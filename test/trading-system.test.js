@@ -237,64 +237,22 @@ const buildBuyPutFreshBestPressure = ({
 }) => {
   const REPRICING_LAG_MIN_SCORE_TREND_PCT = 6;
   const REPRICING_LAG_MIN_SPOT_DROP_PCT = -0.35;
-  const REPRICING_LAG_NEAR_BEST_PCT = 90;
-  const RECENT_VALUE_MIN_TREND_PCT = 8;
-  const RECENT_VALUE_MIN_PERCENTILE = 80;
-  const RECENT_VALUE_MIN_ROLLING_BEST_PCT = 70;
-  const priorBest = Math.max(...priorScores);
-  const currentVsPriorBestPct = priorBest > 0 ? (currentScore / priorBest) * 100 : null;
-  const freshBest = currentScore > priorBest;
-  const priorAvg = priorScores.reduce((sum, score) => sum + score, 0) / priorScores.length;
-  const recentPercentile = priorScores.filter((score) => score <= currentScore).length / priorScores.length * 100;
-  const recentTrendPct = priorAvg > 0 ? ((currentScore - priorAvg) / priorAvg) * 100 : null;
   const repricingLagDetected = Boolean(
-    !freshBest
-    && currentScore > 0
-    && (
-      (
-        Number(scoreTrend1hPct) >= REPRICING_LAG_MIN_SCORE_TREND_PCT
-        && (Number(spotMove20mPct) <= REPRICING_LAG_MIN_SPOT_DROP_PCT || spotState === 'downward')
-      )
-      || (
-        Number(currentVsPriorBestPct) >= REPRICING_LAG_NEAR_BEST_PCT
-        && Number(spotMove20mPct) <= REPRICING_LAG_MIN_SPOT_DROP_PCT
-      )
-    )
+    currentScore > 0
+    && Number(scoreTrend1hPct) >= REPRICING_LAG_MIN_SCORE_TREND_PCT
+    && (Number(spotMove20mPct) <= REPRICING_LAG_MIN_SPOT_DROP_PCT || spotState === 'downward')
   );
-  const recentRelativeValueDetected = Boolean(
-    !freshBest
-    && !repricingLagDetected
-    && currentScore > 0
-    && ['downward', 'stable'].includes(spotState)
-    && priorScores.length >= 4
-    && Number(recentTrendPct) >= RECENT_VALUE_MIN_TREND_PCT
-    && Number(recentPercentile) >= RECENT_VALUE_MIN_PERCENTILE
-    && Number(currentVsPriorBestPct) >= RECENT_VALUE_MIN_ROLLING_BEST_PCT
-  );
-  const actionSignal = freshBest
-    ? 'strict_fresh_best'
-    : repricingLagDetected
-      ? 'spot_drop_option_repricing_lag'
-      : recentRelativeValueDetected
-        ? 'recent_relative_value'
-        : null;
+  const actionSignal = repricingLagDetected ? 'spot_drop_option_repricing_lag' : null;
   const requiresDecision = Boolean(actionSignal && budgetRemaining > 1 && !hasWorkingBuyPut);
-  const scoreNudge = repricingLagDetected ? 0.999 : spotState === 'downward' ? 1.005 : 1.02;
-  const targetScore = currentScore * scoreNudge;
+  // Only spot-lag proposes a price; otherwise the advisor's own target_score is the price.
+  const targetScore = repricingLagDetected ? currentScore * 0.999 : null;
   return {
-    priorBest,
-    freshBest,
     repricingLagDetected,
-    recentRelativeValueDetected,
     actionSignal,
-    currentVsPriorBestPct,
-    recentPercentile,
-    recentTrendPct,
     requiresDecision,
-    supportsBuyPutReview: requiresDecision && (repricingLagDetected || ['downward', 'stable'].includes(spotState)),
-    executionStyle: repricingLagDetected ? 'spot_lag_near_live_limit' : spotState === 'downward' ? 'less_patient_limit' : spotState === 'stable' ? 'patient_limit' : 'explain_no_buy_unless_other_facts_override',
+    executionStyle: repricingLagDetected ? 'spot_lag_near_live_limit' : null,
     targetScore,
-    suggestedLimitPrice: floorOptionPriceCents(Math.abs(delta) / targetScore),
+    suggestedLimitPrice: targetScore ? floorOptionPriceCents(Math.abs(delta) / targetScore) : null,
   };
 };
 
@@ -610,8 +568,8 @@ describe('evaluateConditions', () => {
 // 2b. Fresh-best buy-put advisory review
 // ============================================================================
 
-describe('Fresh-best buy-put advisory review', () => {
-  test('strict fresh best + downward spot action provides less patient target', () => {
+describe('Buy-put advisory value review', () => {
+  test('a new rolling-window high alone does not trigger review or suggest a price', () => {
     const result = buildBuyPutFreshBestPressure({
       currentScore: 0.0045,
       priorScores: [0.0041, 0.00449],
@@ -621,15 +579,14 @@ describe('Fresh-best buy-put advisory review', () => {
       delta: -0.09,
     });
 
-    assert.strictEqual(result.freshBest, true);
-    assert.strictEqual(result.requiresDecision, true);
-    assert.strictEqual(result.supportsBuyPutReview, true);
-    assert.strictEqual(result.executionStyle, 'less_patient_limit');
-    assert.ok(Math.abs(result.targetScore - 0.0045225) < 0.0000001);
-    assert.strictEqual(result.suggestedLimitPrice, 19.9);
+    assert.strictEqual(result.actionSignal, null);
+    assert.strictEqual(result.requiresDecision, false);
+    assert.strictEqual(result.executionStyle, null);
+    assert.strictEqual(result.targetScore, null);
+    assert.strictEqual(result.suggestedLimitPrice, null);
   });
 
-  test('equal to prior best does not trigger fresh-best pressure', () => {
+  test('matching the prior window high does not trigger review', () => {
     const result = buildBuyPutFreshBestPressure({
       currentScore: 0.0045,
       priorScores: [0.0042, 0.0045],
@@ -639,12 +596,10 @@ describe('Fresh-best buy-put advisory review', () => {
       delta: -0.09,
     });
 
-    assert.strictEqual(result.freshBest, false);
     assert.strictEqual(result.requiresDecision, false);
-    assert.strictEqual(result.supportsBuyPutReview, false);
   });
 
-  test('stable spot action uses patient target', () => {
+  test('stable spot without spot-lag leaves pricing to the advisor', () => {
     const result = buildBuyPutFreshBestPressure({
       currentScore: 0.0045,
       priorScores: [0.0042, 0.0044],
@@ -654,13 +609,11 @@ describe('Fresh-best buy-put advisory review', () => {
       delta: -0.09,
     });
 
-    assert.strictEqual(result.requiresDecision, true);
-    assert.strictEqual(result.executionStyle, 'patient_limit');
-    assert.ok(Math.abs(result.targetScore - 0.00459) < 0.0000001);
-    assert.strictEqual(result.suggestedLimitPrice, 19.6);
+    assert.strictEqual(result.executionStyle, null);
+    assert.strictEqual(result.targetScore, null);
   });
 
-  test('spot-drop repricing lag can trigger below the rolling best', () => {
+  test('spot-drop repricing lag can trigger below the window high', () => {
     const result = buildBuyPutFreshBestPressure({
       currentScore: 0.004708,
       priorScores: [0.0042, 0.004965],
@@ -672,7 +625,6 @@ describe('Fresh-best buy-put advisory review', () => {
       spotMove20mPct: -0.8,
     });
 
-    assert.strictEqual(result.freshBest, false);
     assert.strictEqual(result.repricingLagDetected, true);
     assert.strictEqual(result.actionSignal, 'spot_drop_option_repricing_lag');
     assert.strictEqual(result.requiresDecision, true);
@@ -680,22 +632,21 @@ describe('Fresh-best buy-put advisory review', () => {
     assert.ok(Math.abs(result.targetScore - 0.004703292) < 0.0000001);
   });
 
-  test('recent-relative value can trigger below the 6.2d rolling best', () => {
-    const result = buildBuyPutFreshBestPressure({
+  test('a local EDGE improvement alone no longer triggers review (retired recent-relative signal)', () => {
+    const args = {
       currentScore: 0.0043,
       priorScores: [0.0034, 0.0035, 0.0036, 0.0038, 0.0052],
       budgetRemaining: 100,
       hasWorkingBuyPut: false,
       spotState: 'stable',
       delta: -0.095,
-    });
+    };
+    const result = buildBuyPutFreshBestPressure(args);
 
-    assert.strictEqual(result.freshBest, false);
     assert.strictEqual(result.repricingLagDetected, false);
-    assert.strictEqual(result.recentRelativeValueDetected, true);
-    assert.strictEqual(result.actionSignal, 'recent_relative_value');
-    assert.strictEqual(result.requiresDecision, true);
-    assert.strictEqual(result.executionStyle, 'patient_limit');
+    assert.strictEqual(result.actionSignal, null);
+    assert.strictEqual(result.requiresDecision, false);
+    assert.strictEqual(result.executionStyle, null);
   });
 
   test('standing value_signal watcher can quote patient buy-put bids without active signal', () => {
@@ -799,17 +750,35 @@ describe('Standing rulebook coverage requirements', () => {
     assert.ok(requirement.instruction.includes('Do not chase higher delta by itself'));
   });
 
-  test('advisor prompt forbids non-spot sell-call market conditions', () => {
-    assert.ok(SCRIPT_SOURCE.includes('sell_call market_conditions may only use spot_price'));
-    assert.ok(SCRIPT_SOURCE.includes('For sell_call, market_conditions may only contain spot_price conditions'));
-    assert.ok(SCRIPT_SOURCE.includes('Express other selectivity through min_score, min_bid'));
+  test('entry market_conditions accept spot and zone vol percentiles only, and unknown vol fails closed', () => {
+    const { validateAdvisorRuleContract, getRuleMarketValues } = loadProduction(
+      ['validateAdvisorRuleContract', 'getRuleMarketValues'],
+      { bindings: { buildTickerVolSurface: () => ({ put_zone: { wing10_iv_pctl: 22 }, call_zone: null }), console } });
+    const sellCall = (field) => ({ rule_type: 'entry', action: 'sell_call', criteria: {
+      option_type: 'C', delta_range: [0.05, 0.1], dte_range: [5, 12], min_score: 65, min_bid: 4,
+      market_conditions: [{ field, op: 'gte', value: 60 }] } });
+    assert.strictEqual(validateAdvisorRuleContract(sellCall('call_10d_iv_pctl')).valid, true);
+    assert.strictEqual(validateAdvisorRuleContract(sellCall('spot_price')).valid, true);
+    assert.strictEqual(validateAdvisorRuleContract(sellCall('iv')).valid, false);
+    const buyPut = { rule_type: 'entry', action: 'buy_put', criteria: {
+      option_type: 'P', delta_range: [-0.1, -0.05], dte_range: [50, 70], min_score: 0.004,
+      market_conditions: [{ field: 'skew', op: 'lt', value: 1 }] } };
+    assert.strictEqual(validateAdvisorRuleContract(buyPut).valid, false);
+
+    const putCond = [{ field: 'put_10d_iv_pctl', op: 'lte', value: 30 }];
+    assert.deepStrictEqual(getRuleMarketValues(putCond, 2500, {}), { spot_price: 2500, put_10d_iv_pctl: 22, call_10d_iv_pctl: null });
+    assert.strictEqual(evaluateConditions(putCond, 'all', getRuleMarketValues(putCond, 2500, {})), true);
+    const callCond = [{ field: 'call_10d_iv_pctl', op: 'gte', value: 60 }];
+    assert.strictEqual(evaluateConditions(callCond, 'all', getRuleMarketValues(callCond, 2500, {})), false, 'no call history: condition fails');
+    assert.deepStrictEqual(getRuleMarketValues([{ field: 'spot_price', op: 'lt', value: 1 }], 2500, {}), { spot_price: 2500 }, 'no surface built for spot-only rules');
   });
 
   test('advisor prompt defines rolling CALL EDGE with the DTE formula', () => {
     assert.ok(SCRIPT_SOURCE.includes('getSellCallScoreSamples'));
     assert.ok(SCRIPT_SOURCE.includes('call_value_context'));
     assert.ok(SCRIPT_SOURCE.includes('Current CALL EDGE:'));
-    assert.ok(SCRIPT_SOURCE.includes('Prior ${context.window_days}d best CALL EDGE'));
+    assert.ok(!SCRIPT_SOURCE.includes('d best CALL EDGE'));
+    assert.ok(!SCRIPT_SOURCE.includes('context.window_days'));
     assert.ok(SCRIPT_SOURCE.includes('CALL EDGE normalization:'));
     assert.ok(SCRIPT_SOURCE.includes('CALL EDGE = raw_score * (${SELL_CALL_EDGE_REFERENCE_DTE} / DTE)^${SELL_CALL_EDGE_DTE_EXPONENT}'));
   });
@@ -6939,7 +6908,7 @@ describe('Dashboard range loading UX', () => {
   const lyraSource = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'src', 'lib', 'lyra.ts'), 'utf8');
 
   test('every chart endpoint uses the canonical duration for every dashboard range', () => {
-    const expectedRanges = ['1h', '6h', '24h', '3d', '6.2d', '7d', '14d', '30d', '90d', '365d'];
+    const expectedRanges = ['1h', '6h', '24h', '3d', '7d', '14d', '30d', '90d', '365d'];
     for (const range of expectedRanges) {
       assert.ok(dashboardRangesSource.includes(`'${range}'`), `missing dashboard range ${range}`);
     }

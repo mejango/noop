@@ -91,7 +91,7 @@ class FixedDate extends Date {
   constructor(...args) { super(...(args.length ? args : [nowMs])); }
   static now() { return nowMs; }
 }
-function productionContext(samples = []) {
+function productionContext(samples = [], extraDb = {}) {
   const sharedFactsPath = path.join(__dirname, '..', 'bot', 'strategy-facts.js');
   const context = vm.createContext({
     ...putScore,
@@ -103,9 +103,9 @@ function productionContext(samples = []) {
     computeMatchedPutCallSkew,
     Date: FixedDate,
     console,
-    db: { getBuyPutScoreSamples: () => samples },
+    db: { getBuyPutScoreSamples: () => samples, ...extraDb },
   });
-  const constants = source.match(/^const (?:PUT_DELTA_RANGE|BUY_PUT_[A-Z0-9_]+|ADVISORY_OPTION_VALUE_WINDOW_DAYS|CALL_EXPIRATION_RANGE|CALL_DELTA_RANGE|SELL_CALL_FALLBACK_MIN_SCORE) = [^;\n]+;/gm) || [];
+  const constants = source.match(/^const (?:PUT_DELTA_RANGE|BUY_PUT_[A-Z0-9_]+|EDGE_TREND_HISTORY_HOURS|CALL_EXPIRATION_RANGE|CALL_DELTA_RANGE|SELL_CALL_FALLBACK_MIN_SCORE) = [^;\n]+;/gm) || [];
   vm.runInContext([
     ...constants,
     between('const roundForAdvisory =', '// Load private key'),
@@ -175,15 +175,18 @@ test('production rolling comparison and suggested order use the same maximum PUT
     assert.equal(result.put_value_context.current_detail.instrument, maximum);
     assert.equal(result.put_value_context.selected_candidate_detail.instrument, maximum);
     assert.equal(result.put_value_context.selected_candidate_detail.put_edge_score, 0.0075);
-    assert.equal(result.put_value_context.current_vs_prior_best_pct, 125);
-    assert.equal(result.put_value_context.is_strict_fresh_best, true);
+    assert.equal(result.put_value_context.is_strict_fresh_best, undefined);
     assert.equal(result.put_value_context.trend_1h_pct, 25);
     assert.equal(result.action_pressure.suggested_instrument, maximum);
-    assert.equal(result.action_pressure.signal, 'strict_fresh_best');
-    assert.ok(result.action_pressure.suggested_limit_price < 8);
+    // A new window high is no longer a review signal by itself.
+    assert.equal(result.action_pressure.signal, null);
+    // Outside spot-lag the advisor sets the price; no nudged target is suggested.
+    assert.equal(result.action_pressure.target_score, null);
+    assert.equal(result.action_pressure.suggested_limit_price, null);
     const prompt = api.formatRollingOptionValueContext(result);
     assert.equal(prompt.includes('PUT composite selector:'), false);
-    assert.ok(prompt.includes(`suggested_instrument=${maximum}`));
+    assert.ok(prompt.includes(`top_edge_instrument=${maximum}`));
+    assert.equal(prompt.includes('spot-lag target_score'), false);
   }
 });
 
@@ -247,4 +250,23 @@ test('PUT selection preserves fractional EDGE precision without adding a second 
     assert.equal(result.selection_score, score);
     assert.ok(result.selection_score > 0 && result.selection_score < 0.01);
   }
+});
+
+test('spot-lag review needs the EDGE jump; a spot drop alone, at any vol level, does not fire it', () => {
+  const spots = [
+    { timestamp: new Date(nowMs - 30 * 60000).toISOString(), price: 2500 },
+    { timestamp: new Date(nowMs - 1000).toISOString(), price: 2475 },
+  ];
+  const tickerMap = { [nameAt(60, 1650, 'P')]: ticker(8, 7.9) };
+  const run = (priorScore) => productionContext(
+    [{ timestamp: new Date(nowMs - 3600000).toISOString(), score: priorScore }],
+    { getRecentSpotPrices: () => spots },
+  ).buildRollingOptionValueContext({
+    tickerMap, putBudgetRemaining: 100, currentTickTimestamp: new Date(nowMs).toISOString(), spotPrice: 2475,
+  });
+  assert.equal(run(0.0075).action_pressure.signal, null, 'flat EDGE');
+  const lag = run(0.0065).action_pressure;
+  assert.equal(lag.signal, 'spot_drop_option_repricing_lag', 'EDGE +15% in an hour while spot fell');
+  assert.ok(lag.target_score > 0 && lag.suggested_limit_price > 0, 'spot-lag still proposes a near-live price');
+  assert.equal(lag.execution_style, 'spot_lag_near_live_limit');
 });

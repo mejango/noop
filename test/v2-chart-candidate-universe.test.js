@@ -208,7 +208,7 @@ test('90d, 365d and all chart responses use the hourly rollup and filter only th
   const route = loadTs('dashboard/src/app/api/chart/route.ts', {
     'next/server': { NextResponse: { json: (body, options) => ({ status: options?.status ?? 200, body }) } },
     '@/lib/db': { ...f.api,
-      getBestScores: () => ({}), getOptionsCoverage: () => ({}),
+      getOptionsCoverage: () => ({}),
       getSpotPrices: empty, getSpotPricesBucketed: empty, getSpotPricesHourly_rollup: empty,
       getLiquidityOverTime: empty, getLiquidityHourly_rollup: empty,
       getFundingRates: empty, getFundingRatesHourlySeries: empty,

@@ -114,7 +114,7 @@ test('chart API preserves hourly totals in long ranges independently of liquidit
   const ts=require('../dashboard/node_modules/typescript');
   const values=[{timestamp:iso(END-2*HOUR),uniswap_v3_onchain_volDelta:10,uniswap_v4_volDelta:5},
     {timestamp:iso(END-HOUR),uniswap_v3_onchain_volDelta:20,uniswap_v4_volDelta:0}];
-  const db=new Proxy({getLiquidityVolumeOverTime:()=>values,getBestScores:()=>({}),getOptionsCoverage:()=>({})},
+  const db=new Proxy({getLiquidityVolumeOverTime:()=>values,getOptionsCoverage:()=>({})},
     {get:(target,key)=>key in target?target[key]:()=>[]});
   const dependencies={
     'next/server':{NextResponse:{json:body=>({body})}},'@/lib/db':db,

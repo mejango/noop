@@ -18,7 +18,6 @@ const DB_PATH = path.join(DATA_DIR, 'noop.db');
 const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
 const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
 const PERIOD_MS = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
-const MEASUREMENT_WINDOW_DAYS = 6.2;
 // Dashboard image is built independently from the bot image; the production
 // parity test keeps these values aligned with bot/call-score.js.
 const SELL_CALL_EDGE_REFERENCE_DTE = 8.5;
@@ -156,38 +155,6 @@ function prepareAll(d: Database.Database) {
       FROM onchain_data
       WHERE timestamp > ?
       ORDER BY timestamp ASC
-    `),
-
-    getBestScoresAgg: d.prepare(`
-      SELECT
-        MAX(CASE WHEN ${optionEntryPredicate('P')}
-          THEN ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) END) as best_put_score,
-        MAX(CASE WHEN ${optionEntryPredicate('C')}
-          THEN bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) END) as best_call_score
-      FROM options_snapshots
-      WHERE timestamp > ?
-    `),
-
-    getBestPutDetail: d.prepare(`
-      SELECT instrument_name, delta, ask_price, strike, expiry,
-        ask_delta_value as raw_score,
-        ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT}) as edge_score
-      FROM options_snapshots
-      WHERE timestamp > ?
-        AND ${optionEntryPredicate('P')}
-        AND abs((ask_delta_value * pow(((expiry - strftime('%s', timestamp)) / 86400.0) / ${BUY_PUT_EDGE_REFERENCE_DTE}, ${BUY_PUT_EDGE_DTE_EXPONENT})) - ?) < 0.000000000001
-      LIMIT 1
-    `),
-
-    getBestCallDetail: d.prepare(`
-      SELECT instrument_name, delta, bid_price, strike, expiry,
-        bid_delta_value as raw_score,
-        bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT}) as edge_score
-      FROM options_snapshots
-      WHERE timestamp > ?
-        AND ${optionEntryPredicate('C')}
-        AND abs((bid_delta_value * pow(${SELL_CALL_EDGE_REFERENCE_DTE} / ((expiry - strftime('%s', timestamp)) / 86400.0), ${SELL_CALL_EDGE_DTE_EXPONENT})) - ?) < 0.000001
-      LIMIT 1
     `),
 
     getRecentTicks: d.prepare(`
@@ -1078,35 +1045,6 @@ export function getLiquidityOverTime(since: string) {
     Object.keys(r).length > 1 &&
     (!Number.isFinite(sinceMs) || Date.parse(r.timestamp as string) >= sinceMs)
   );
-}
-
-export function getBestScores() {
-  const s = getStmts();
-  const since = new Date(Date.now() - MEASUREMENT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
-  const row = s.getBestScoresAgg.get(since) as { best_put_score: number | null; best_call_score: number | null } | undefined;
-
-  const bestPutDetail = s.getBestPutDetail.get(since, row?.best_put_score ?? 0) as { instrument_name: string; delta: number; ask_price: number; strike: number; expiry: number } | undefined;
-  const bestCallDetail = s.getBestCallDetail.get(since, row?.best_call_score ?? 0) as { instrument_name: string; delta: number; bid_price: number; strike: number; expiry: number } | undefined;
-
-  return {
-    bestPutScore: row?.best_put_score ?? 0,
-    bestCallScore: row?.best_call_score ?? 0,
-    windowDays: MEASUREMENT_WINDOW_DAYS,
-    bestPutDetail: bestPutDetail ? {
-      delta: bestPutDetail.delta,
-      price: bestPutDetail.ask_price,
-      strike: bestPutDetail.strike,
-      expiry: bestPutDetail.expiry,
-      instrument: bestPutDetail.instrument_name,
-    } : null,
-    bestCallDetail: bestCallDetail ? {
-      delta: bestCallDetail.delta,
-      price: bestCallDetail.bid_price,
-      strike: bestCallDetail.strike,
-      expiry: bestCallDetail.expiry,
-      instrument: bestCallDetail.instrument_name,
-    } : null,
-  };
 }
 
 export function getRecentTicks(limit = 50) {
