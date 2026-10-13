@@ -1486,65 +1486,67 @@ export default function OverviewPage() {
 
   return (
     <div className="space-y-6">
-      {/* Left: Range + Best Options | Right: Volatility pricing */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
-        <Card title="Price Range" subtitle="High / Low" className="flex flex-col">
-          <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 whitespace-nowrap">3d</span>
-              <span className="text-emerald-400">{statsDataUrl ? formatUSD(stats.three_day_high) : '—'}</span>
-              <span className="text-gray-600">/</span>
-              <span className="text-red-400">{statsDataUrl ? formatUSD(stats.three_day_low) : '—'}</span>
+      {/* Left: Range stacked over Best Options, together matching the height of Volatility pricing */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 md:gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 lg:grid-rows-2 gap-3 md:gap-4">
+          <Card title="Price Range" subtitle="High / Low" className="flex flex-col">
+            <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-500 whitespace-nowrap">3d</span>
+                <span className="text-emerald-400">{statsDataUrl ? formatUSD(stats.three_day_high) : '—'}</span>
+                <span className="text-gray-600">/</span>
+                <span className="text-red-400">{statsDataUrl ? formatUSD(stats.three_day_low) : '—'}</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-500 whitespace-nowrap">7d</span>
+                <span className="text-emerald-400">{statsDataUrl ? formatUSD(stats.seven_day_high) : '—'}</span>
+                <span className="text-gray-600">/</span>
+                <span className="text-red-400">{statsDataUrl ? formatUSD(stats.seven_day_low) : '—'}</span>
+              </div>
             </div>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 whitespace-nowrap">7d</span>
-              <span className="text-emerald-400">{statsDataUrl ? formatUSD(stats.seven_day_high) : '—'}</span>
-              <span className="text-gray-600">/</span>
-              <span className="text-red-400">{statsDataUrl ? formatUSD(stats.seven_day_low) : '—'}</span>
-            </div>
-          </div>
-        </Card>
+          </Card>
 
-        <Card title="Options Value" subtitle="Current best by EDGE" className="flex flex-col overflow-visible">
-          <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 whitespace-nowrap">PUT EDGE</span>
-              <span className="relative group/pc">
-                <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : !latestTick ? 'Loading…' : 'NO ELIGIBLE'}</span>
-                {latestTick?.best_put_detail && (
-                  <div className="absolute left-0 bottom-full mb-1 hidden group-hover/pc:block z-20 pointer-events-none">
-                    <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                      <div className="text-gray-400 mb-1">Current best PUT</div>
-                      <div>Delta: <span className="text-white">{latestTick.best_put_detail.delta != null ? Number(latestTick.best_put_detail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">${latestTick.best_put_detail.price != null ? Number(latestTick.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
-                      <div>Strike: <span className="text-white">{latestTick.best_put_detail.strike != null ? `$${Number(latestTick.best_put_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                      <div>DTE: <span className="text-white">{dteDays(latestTick.best_put_detail.expiry) ?? 'N/A'}</span></div>
-                      {latestTick.best_put_detail.instrument && <div className="text-gray-400 mt-1">{latestTick.best_put_detail.instrument}</div>}
+          <Card title="Options Value" subtitle="Current best by EDGE" className="flex flex-col overflow-visible">
+            <div className="flex-1 flex flex-col justify-center gap-2 text-sm">
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-500 whitespace-nowrap">PUT EDGE</span>
+                <span className="relative group/pc">
+                  <span className="text-red-400 cursor-help">{Number(latestTick?.current_best_put ?? 0) > 0 ? Number(latestTick!.current_best_put).toFixed(6) : !latestTick ? 'Loading…' : 'NO ELIGIBLE'}</span>
+                  {latestTick?.best_put_detail && (
+                    <div className="absolute left-0 bottom-full mb-1 hidden group-hover/pc:block z-20 pointer-events-none">
+                      <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                        <div className="text-gray-400 mb-1">Current best PUT</div>
+                        <div>Delta: <span className="text-white">{latestTick.best_put_detail.delta != null ? Number(latestTick.best_put_detail.delta).toFixed(4) : 'N/A'}</span></div>
+                        <div>Price: <span className="text-white">${latestTick.best_put_detail.price != null ? Number(latestTick.best_put_detail.price).toFixed(6) : 'N/A'}</span></div>
+                        <div>Strike: <span className="text-white">{latestTick.best_put_detail.strike != null ? `$${Number(latestTick.best_put_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                        <div>DTE: <span className="text-white">{dteDays(latestTick.best_put_detail.expiry) ?? 'N/A'}</span></div>
+                        {latestTick.best_put_detail.instrument && <div className="text-gray-400 mt-1">{latestTick.best_put_detail.instrument}</div>}
+                      </div>
                     </div>
-                  </div>
-                )}
-              </span>
-            </div>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
-              <span className="relative group/cc">
-                <span className="text-cyan-400 cursor-help">{Number(latestTick?.current_best_call ?? 0) > 0 ? Number(latestTick!.current_best_call).toFixed(2) : '--'}</span>
-                {latestTick?.best_call_detail && (
-                  <div className="absolute left-0 bottom-full mb-1 hidden group-hover/cc:block z-20 pointer-events-none">
-                    <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
-                      <div className="text-gray-400 mb-1">Current best CALL</div>
-                      <div>Delta: <span className="text-white">{latestTick.best_call_detail.delta != null ? Number(latestTick.best_call_detail.delta).toFixed(4) : 'N/A'}</span></div>
-                      <div>Price: <span className="text-white">${latestTick.best_call_detail.price != null ? Number(latestTick.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
-                      <div>Strike: <span className="text-white">{latestTick.best_call_detail.strike != null ? `$${Number(latestTick.best_call_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
-                      <div>DTE: <span className="text-white">{dteDays(latestTick.best_call_detail.expiry) ?? 'N/A'}</span></div>
-                      {latestTick.best_call_detail.instrument && <div className="text-gray-400 mt-1">{latestTick.best_call_detail.instrument}</div>}
+                  )}
+                </span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-gray-500 whitespace-nowrap">CALL</span>
+                <span className="relative group/cc">
+                  <span className="text-cyan-400 cursor-help">{Number(latestTick?.current_best_call ?? 0) > 0 ? Number(latestTick!.current_best_call).toFixed(2) : '--'}</span>
+                  {latestTick?.best_call_detail && (
+                    <div className="absolute left-0 bottom-full mb-1 hidden group-hover/cc:block z-20 pointer-events-none">
+                      <div className="bg-[#1a1a1a] border border-white/15 rounded-lg px-3 py-2 text-xs whitespace-nowrap shadow-lg">
+                        <div className="text-gray-400 mb-1">Current best CALL</div>
+                        <div>Delta: <span className="text-white">{latestTick.best_call_detail.delta != null ? Number(latestTick.best_call_detail.delta).toFixed(4) : 'N/A'}</span></div>
+                        <div>Price: <span className="text-white">${latestTick.best_call_detail.price != null ? Number(latestTick.best_call_detail.price).toFixed(6) : 'N/A'}</span></div>
+                        <div>Strike: <span className="text-white">{latestTick.best_call_detail.strike != null ? `$${Number(latestTick.best_call_detail.strike).toFixed(0)}` : 'N/A'}</span></div>
+                        <div>DTE: <span className="text-white">{dteDays(latestTick.best_call_detail.expiry) ?? 'N/A'}</span></div>
+                        {latestTick.best_call_detail.instrument && <div className="text-gray-400 mt-1">{latestTick.best_call_detail.instrument}</div>}
+                      </div>
                     </div>
-                  </div>
-                )}
-              </span>
+                  )}
+                </span>
+              </div>
             </div>
-          </div>
-        </Card>
+          </Card>
+        </div>
 
         <VolatilityPricing />
       </div>

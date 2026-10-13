@@ -87,7 +87,7 @@ export default function VolatilityPricing() {
   }
 
   return (
-    <div className="glass sm:col-span-2 overflow-hidden">
+    <div className="glass overflow-hidden">
       <button type="button" onClick={() => { setView('quotes'); setOpen(true); }} aria-haspopup="dialog"
         className="w-full h-full text-left p-4 flex flex-col gap-2 hover:bg-white/[0.025] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-juice-orange">
         <div className="flex items-center justify-between gap-3">
