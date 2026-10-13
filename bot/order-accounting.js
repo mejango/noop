@@ -207,9 +207,9 @@ function accountRestingObservation({ db, botData, tracked, live }) {
       if (status !== saved.status || Math.abs(deltaAmount) > 1e-9 || Math.abs(deltaValue) > 1e-7) {
         throw new Error('Conflicting terminal order evidence; reconciliation required');
       }
-      return { resting: false, deltaAmount: 0, deltaValue: 0, status, filledAmount: state.filled, filledValue: totalValue };
+      return { resting: false, statusChanged: false, deltaAmount: 0, deltaValue: 0, status, filledAmount: state.filled, filledValue: totalValue };
     }
-    if (state.resting && deltaAmount <= 1e-9) return { resting: true, deltaAmount: 0, deltaValue: 0,
+    if (state.resting && deltaAmount <= 1e-9) return { resting: true, statusChanged: false, deltaAmount: 0, deltaValue: 0,
       status, filledAmount: state.filled, filledValue: totalValue };
     if (saved.action === 'buy_put') botData.putNetBought += Math.max(0, deltaValue);
     db.saveBotState(botData);
@@ -227,7 +227,7 @@ function accountRestingObservation({ db, botData, tracked, live }) {
       intended_amount: saved.amount, filled_amount: Math.max(0, deltaAmount),
       fill_price: deltaAmount > 1e-9 ? deltaValue / deltaAmount : null,
       total_value: Math.max(0, deltaValue), spot_price: null, raw_response: live });
-    return { resting: state.resting, deltaAmount: Math.max(0, deltaAmount), deltaValue: Math.max(0, deltaValue),
+    return { resting: state.resting, statusChanged: status !== saved.status, deltaAmount: Math.max(0, deltaAmount), deltaValue: Math.max(0, deltaValue),
       status, filledAmount: state.filled, filledValue: totalValue };
   });
   Object.assign(tracked, { status: result.status, filled_amount: result.filledAmount, filled_value: result.filledValue });

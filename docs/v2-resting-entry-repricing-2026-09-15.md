@@ -76,3 +76,49 @@ and both reviewers.
 No schema migration or historical repair is required. New replacement metadata
 uses the existing pending-action tracking fields. Rollback is a code revert;
 the normal order reconciler remains authoritative for live orders and fills.
+
+## October 6 follow-up: cancellation recovery and quote churn
+
+Live evidence showed replacement actions being marked canceled when the venue
+had acknowledged cancellation but could not immediately return terminal order
+status. New-entry selection then repeatedly chose a put under a 30-minute
+failure cooldown, leaving no resting bid.
+
+Replacement requests now stay pending through uncertain or still-open order
+status. The existing trigger metadata records cancellation intent before the
+request and acknowledgement afterward, preserving the original quantity, fill
+baseline and put notional authority across process restarts. A recovered request
+without an acknowledgement retries cancellation only; an acknowledged request
+waits for terminal proof. Venue reconciliation does not consume reviewer retry
+allowances. After terminal reconciliation, fresh planning, reviewer/preflight
+approval, price, budget, margin and duplicate-entry checks still govern submission.
+Late fills reduce both remaining quantity and put spending authority. Hard
+ineligibility retires the replacement intent so another instrument can qualify.
+Risk-reducing exits take priority over entries in the bounded confirmation queue,
+so two waiting replacements cannot occupy both slots ahead of an exit.
+
+Candidate cooldowns apply before ranking. Exact local buy-put final-price/EDGE
+validation failures can be recalculated on the next observation instead of
+blocking that instrument for 30 minutes. Persistent failures, reviewer backoffs
+and all final execution constraints remain enforced.
+
+Discretionary repricing requires an order age of at least 120 seconds and a
+price change of at least the greater of two venue ticks or 1% of its current
+price. These are initial operational defaults, not a profitability claim. An
+existing order must still satisfy current price/EDGE and budget constraints;
+hard violations, required budget reductions, route changes, crossed quotes and
+terminal recovery bypass the hold. Missing creation timestamps bypass only the
+age test. Pure quantity changes retain the existing behavior.
+
+Cancellation alerts distinguish request acknowledgement from terminal
+confirmation and include the reason and next step. Accounting emits terminal
+transitions once; notification context is in memory and falls back to the venue
+reason after restart. The order and replacement state remain durable.
+
+Validation: `npm test` passes, including production-function selection, planner,
+notification and accounting regressions. Seven recovery tests exercise the real
+SQLite schema across close/reopen and cover unknown/still-open cancellation,
+restart before acknowledgement, exact late-fill deductions, single submission,
+fresh final margin rejection, rule ineligibility and exit priority. Syntax and
+whitespace checks pass. This follow-up is a local code change; it has not been
+deployed and does not repair previously canceled replacement records.

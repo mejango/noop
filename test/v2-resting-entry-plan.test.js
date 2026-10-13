@@ -209,3 +209,137 @@ test('a proven terminal cancellation can replan only its remaining entry authori
     assert.equal(buildRestingEntryPlan(input).decision, 'unresolved');
   }
 });
+
+for (const action of ['buy_put', 'sell_call']) {
+  test(`${action}: optional improvements preserve the incumbent for two minutes, then reprice`, () => {
+    const input = fixture(action);
+    input.order.creation_timestamp = nowMs - 119_999;
+    if (action === 'buy_put') input.ticker.option_pricing.d = -0.055;
+    else input.ticker.b = 9;
+    const held = buildRestingEntryPlan(input);
+    assert.equal(held.decision, 'keep', held.reason);
+    assert.match(held.reason, /minimum resting period/);
+    assert.equal(held.desiredOrder.limit_price, input.order.limit_price);
+    assert.equal(held.desiredOrder.amount, input.order.amount);
+    assert.equal(compareRestingEntryOrder(input.order, held.desiredOrder).decision, 'keep');
+
+    input.nowMs++;
+    const repriced = buildRestingEntryPlan(input);
+    assert.equal(repriced.decision, 'replace', repriced.reason);
+  });
+}
+
+test('one-tick changes preserve a valid bid and its size even when another order owns the BBO', () => {
+  const input = fixture();
+  input.order.limit_price = 9.8;
+  input.ticker.b = 9.7;
+  const result = buildRestingEntryPlan(input);
+  assert.equal(result.decision, 'keep', result.reason);
+  assert.match(result.reason, /two venue ticks/);
+  assert.deepEqual(result.deferredDifferences, ['price', 'amount']);
+  assert.equal(result.desiredOrder.limit_price, 9.8);
+  assert.equal(result.desiredOrder.amount, 2.5);
+
+  input.order.limit_price = 9.7;
+  input.ticker.b = 9.6;
+  assert.equal(buildRestingEntryPlan(input).decision, 'replace', 'Exactly two ticks permit an aged replacement');
+});
+
+test('higher-priced bids require at least a one-percent discretionary change', () => {
+  const input = fixture();
+  input.rule.criteria.min_score = 0.001;
+  input.order.limit_price = 34.5;
+  input.ticker.b = 34.4;
+  input.ticker.a = 50;
+  input.ticker.option_pricing.d = -0.0348;
+  const held = buildRestingEntryPlan(input);
+  assert.equal(held.decision, 'keep', held.reason);
+  assert.equal(held.desiredOrder.limit_price, 34.5);
+  assert.equal(held.desiredOrder.amount, 2.5);
+
+  input.ticker.option_pricing.d = -0.0349;
+  const repriced = buildRestingEntryPlan(input);
+  assert.equal(repriced.decision, 'replace', repriced.reason);
+  assert.equal(repriced.desiredOrder.limit_price, 34.9);
+});
+
+test('a fresh bid exceeding its current edge ceiling is revised immediately even by one tick', () => {
+  const input = fixture();
+  input.order.creation_timestamp = nowMs;
+  input.ticker.option_pricing.d = -0.04945;
+  const result = buildRestingEntryPlan(input);
+  assert.equal(result.decision, 'replace', result.reason);
+  assert.equal(result.desiredOrder.limit_price, 9.8);
+});
+
+test('tolerance never retains a bid above the explicitly supplied price bound', () => {
+  const input = fixture();
+  input.order.creation_timestamp = nowMs;
+  input.pricing = { limitPrice: 9.8, requiredScore: 0.005 };
+  const result = buildRestingEntryPlan(input);
+  assert.equal(result.decision, 'replace', result.reason);
+  assert.equal(result.desiredOrder.limit_price, 9.8);
+});
+
+test('required budget downsizing bypasses tolerance even when a simultaneous price increase is optional', () => {
+  for (const constraint of ['cycle', 'reservation', 'rule']) {
+    const input = fixture();
+    input.order.creation_timestamp = nowMs;
+    input.ticker.option_pricing.d = -0.055;
+    if (constraint === 'cycle') input.putBudgetRemaining = 20;
+    if (constraint === 'reservation') { input.putBudgetRemaining = 30; input.otherPutReserved = 10; }
+    if (constraint === 'rule') input.rule.budget_limit = 20;
+    const result = buildRestingEntryPlan(input);
+    assert.equal(result.decision, 'replace', `${constraint}: ${result.reason}`);
+    assert.ok(result.desiredOrder.amount * result.desiredOrder.limit_price <= 20);
+  }
+});
+
+test('crossed quotes, route changes and unsafe intent bypass discretionary resting holds', () => {
+  const crossed = fixture('sell_call');
+  crossed.order.creation_timestamp = nowMs;
+  crossed.ticker.b = 10.1;
+  assert.equal(buildRestingEntryPlan(crossed).decision, 'replace');
+
+  const route = fixture();
+  route.order.creation_timestamp = nowMs;
+  route.ticker.option_pricing.d = -0.055;
+  route.rule.preferred_order_type = 'gtc';
+  assert.equal(buildRestingEntryPlan(route).decision, 'replace');
+
+  const unsafe = fixture();
+  unsafe.order.creation_timestamp = nowMs;
+  unsafe.ticker.option_pricing.d = -0.2;
+  assert.equal(buildRestingEntryPlan(unsafe).decision, 'invalid');
+});
+
+test('late fills remain consumed when discretionary repricing preserves the current order', () => {
+  const input = fixture();
+  input.order.creation_timestamp = nowMs;
+  input.order.filled_amount = 0.5;
+  input.ticker.option_pricing.d = -0.055;
+  const result = buildRestingEntryPlan(input);
+  assert.equal(result.decision, 'keep', result.reason);
+  assert.equal(result.desiredOrder.amount, 2);
+  assert.equal(result.approvedNotional, 19.8);
+});
+
+test('a just-cancelled order bypasses both discretionary holds and replans its unfilled remainder', () => {
+  const input = fixture();
+  input.order.creation_timestamp = nowMs;
+  input.order.status = 'cancelled';
+  input.order.limit_price = 9.8;
+  input.ticker.b = 9.7;
+  const result = buildRestingEntryPlan(input);
+  assert.equal(result.decision, 'replace', result.reason);
+  assert.equal(result.desiredOrder.limit_price, 9.9);
+});
+
+test('unreliable creation timestamps do not indefinitely hold meaningful replacements', () => {
+  for (const timestamp of [undefined, '', 'unavailable', nowMs + 60_000]) {
+    const input = fixture();
+    input.order.creation_timestamp = timestamp;
+    input.ticker.option_pricing.d = -0.055;
+    assert.equal(buildRestingEntryPlan(input).decision, 'replace');
+  }
+});

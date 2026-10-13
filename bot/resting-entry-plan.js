@@ -8,6 +8,9 @@ const { getInstrumentPriceStep, normalizeOrderPriceForVenue, avoidRoundNumberRes
   computePostOnlyRetryPrice } = require('./order-pricing');
 
 const EPS = 1e-9;
+// Preserve queue position for small, discretionary changes. Existing risk and
+// price constraints must still be met before either tolerance can apply.
+const RESTING_ENTRY_REPRICE_POLICY = Object.freeze({ minRestingMs: 120_000, minPriceChangeTicks: 2, minPriceChangePct: 0.01 });
 const finite = value => (typeof value === 'number' || typeof value === 'string' && value.trim() !== '')
   && Number.isFinite(Number(value));
 const positive = value => finite(value) && Number(value) > 0;
@@ -78,6 +81,35 @@ function compareRestingEntryOrder(existing, desired) {
   if (Math.abs(Number(existing.limit_price) - desired.limit_price) > EPS) differences.push('price');
   if (Math.abs(oldAmount - desired.amount) > EPS) differences.push('amount');
   return { decision: differences.length ? 'replace' : 'keep', differences };
+}
+
+function discretionaryRepriceHoldReason({ order, desiredOrder, comparison, instrument, ticker,
+  priceBound, pricing, putBudgetRemaining, otherPutReserved, rule, nowMs }) {
+  if (comparison.decision !== 'replace' || !comparison.differences.includes('price')
+    || comparison.differences.some(field => !['price', 'amount'].includes(field))) return null;
+  const oldPrice = Number(order.limit_price);
+  const oldNotional = remaining(order) * oldPrice;
+  if (rule.action === 'buy_put') {
+    const maxPrice = Math.min(priceBound, positive(pricing?.limitPrice) ? Number(pricing.limitPrice) : Infinity);
+    const available = Number(putBudgetRemaining) - Number(otherPutReserved);
+    const ruleBudget = positive(rule.budget_limit) ? Number(rule.budget_limit) : Infinity;
+    if (oldPrice > maxPrice + EPS || oldNotional > available + EPS || oldNotional > ruleBudget + EPS) return null;
+  } else if (oldPrice + EPS < priceBound) return null;
+  const opposite = rule.action === 'buy_put' ? ticker.a : ticker.b;
+  if (!positive(opposite) || (rule.action === 'buy_put' ? oldPrice >= Number(opposite) : oldPrice <= Number(opposite))) return null;
+  // A reliable venue creation time survives fresh snapshots and process restarts.
+  // Missing or future timestamps skip only the age hold, never the price test.
+  const createdAt = positive(order.creation_timestamp) ? Number(order.creation_timestamp) : null;
+  const ageMs = createdAt != null && createdAt <= nowMs ? nowMs - createdAt : null;
+  if (ageMs != null && ageMs < RESTING_ENTRY_REPRICE_POLICY.minRestingMs) {
+    return 'Valid resting entry retained during the 120-second minimum resting period';
+  }
+  const minPriceChange = Math.max(getInstrumentPriceStep(instrument, oldPrice) * RESTING_ENTRY_REPRICE_POLICY.minPriceChangeTicks,
+    oldPrice * RESTING_ENTRY_REPRICE_POLICY.minPriceChangePct);
+  if (Math.abs(desiredOrder.limit_price - oldPrice) + EPS < minPriceChange) {
+    return 'Valid resting entry retained: price change is below two venue ticks or 1% of the resting price';
+  }
+  return null;
 }
 
 function buildRestingEntryPlan({ order, rule, instrument, ticker, spotPrice, putBudgetRemaining,
@@ -153,10 +185,18 @@ function buildRestingEntryPlan({ order, rule, instrument, ticker, spotPrice, put
   const comparison = terminalRemainder
     ? { decision: 'replace', differences: ['order_status'] }
     : compareRestingEntryOrder(order, desiredOrder);
+  const holdReason = discretionaryRepriceHoldReason({ order, desiredOrder, comparison, instrument, ticker,
+    priceBound, pricing, putBudgetRemaining, otherPutReserved, rule, nowMs });
+  if (holdReason) {
+    return { decision: 'keep', differences: [], deferredDifferences: comparison.differences, reason: holdReason,
+      desiredOrder: { ...desiredOrder, limit_price: Number(order.limit_price), amount: oldRemaining },
+      ruleId: rule.id, remainingAmount: oldRemaining, approvedNotional: originalRemainingNotional,
+      requiredScore, priceBound };
+  }
   return { ...comparison, reason: comparison.decision === 'keep' ? 'Existing entry already matches the desired venue terms'
     : comparison.decision === 'unresolved' ? 'Existing entry terms cannot be compared reliably' : 'Current entry economics require revised venue terms',
     desiredOrder, ruleId: rule.id, remainingAmount: oldRemaining, approvedNotional: originalRemainingNotional,
     requiredScore, priceBound };
 }
 
-module.exports = { normalizeDesiredEntryOrder, compareRestingEntryOrder, buildRestingEntryPlan };
+module.exports = { normalizeDesiredEntryOrder, compareRestingEntryOrder, buildRestingEntryPlan, RESTING_ENTRY_REPRICE_POLICY };

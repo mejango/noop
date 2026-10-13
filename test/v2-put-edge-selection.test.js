@@ -16,7 +16,8 @@ const superior = 'ETH-20301114-1450-P';
 const target = 0.00625;
 const closeTo = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-12, `${actual} != ${expected}`);
 
-function fixture({ reverse = false, criteria = {}, budget = {}, resting = [], working = [], lastExecutedAt = null,
+function fixture({ reverse = false, criteria = {}, failures = {}, rejections = {},
+  budget = {}, resting = [], working = [], lastExecutedAt = null,
   quotes = [[inferior, 20, 1400, -0.05], [superior, 12.5, 1450, -0.05]] } = {}) {
   const inserted = [], decisions = [], frames = [], logs = [];
   const botData = { putBudgetForCycle: 100, putUnspentBuyLimit: 0, putNetBought: 0, ...budget };
@@ -28,6 +29,8 @@ function fixture({ reverse = false, criteria = {}, budget = {}, resting = [], wo
     getRecentPendingActions: () => working,
     getPendingActions: status => working.filter(action => action.status === status),
     getLastExecutedAction: () => lastExecutedAt,
+    getLastFailedAction: (action, name) => failures[name] || null,
+    getLastRejectedAction: (action, name) => rejections[name] || null,
     insertPendingAction: row => { inserted.push(row); return { lastInsertRowid: 123 }; },
   };
   const pure = loadProduction([
@@ -35,6 +38,7 @@ function fixture({ reverse = false, criteria = {}, budget = {}, resting = [], wo
     'normalizeBuyPutValueSignal', 'hasExplicitBuyPutValueSignal', 'isActionableBuyPutSignal',
     'summarizeReservedEntryCapacity', 'floorOrderAmountToVenuePrecision', 'isVenueOrderAmountTradable',
     'normalizePreferredOrderType', 'roundForAdvisory', 'hasPendingOrConfirmedActionForRule',
+    'getRecentRejectedAction', 'getRecentFailedEntry', 'isIocZeroFillFailure',
   ], { bindings: { Date: Clock, botData, db } });
   const bindings = {
     ...pure, Date: Clock, botData, db,
@@ -46,7 +50,6 @@ function fixture({ reverse = false, criteria = {}, budget = {}, resting = [], wo
     getBestCurrentBuyPutEdgeCandidate: () => null, getBestCurrentSellCallCandidate: () => null,
     buildRollingOptionValueContext: () => ({ action_pressure: { signal: 'standing_patient_bid' } }),
     getBlockingRestingOrderForEntryCandidate: () => null,
-    getRecentRejectedAction: () => null, getRecentFailedEntry: () => null,
     buildCandidateObservationRows: frame => { frames.push(frame); return []; },
     recordCandidateObservationsSafe: () => {},
   };
@@ -127,6 +130,83 @@ test('legacy PUT composite thresholds do not suppress an otherwise valid normali
   closeTo(pending.trigger_details.planned_score, target);
   assert.equal(pending.trigger_details.candidates_evaluated, 2);
   assert.equal(f.decisions.some(row => row.reason_code === 'no_candidates'), false);
+});
+
+const recentFailure = (reason, ageMs = 60_000) => ({
+  triggered_at: new Clock(now - ageMs).toISOString(), execution_result: reason,
+});
+
+test('local fresh PUT EDGE/cap failures can be repriced on the next tick without instrument cooldown', async () => {
+  for (const reason of [
+    'Final order rejected (put_price_failed): Final put bid violates approved cap or fresh PUT EDGE',
+    'Final put bid violates approved cap or fresh PUT EDGE',
+  ]) {
+    const f = fixture({ failures: { [superior]: recentFailure(reason) } });
+    assert.equal(f.pure.getRecentFailedEntry('buy_put', superior), null);
+    const pending = await selected(f);
+    assert.equal(pending.instrument_name, superior);
+    assert.equal(pending.price, 8);
+    assert.ok(pending.trigger_details.planned_score >= target);
+    assert.ok(pending.amount * pending.price <= 100);
+  }
+});
+
+test('persistent failure and reviewer rejection cooldowns are filtered before PUT EDGE ranking', async () => {
+  for (const block of ['failure', 'rejection']) {
+    for (const reverse of [false, true]) {
+      const options = block === 'failure'
+        ? { failures: { [superior]: recentFailure('Order placement failed: venue unavailable') } }
+        : { rejections: { [superior]: { ...recentFailure(null), confirmation_reasoning: 'Risk review rejected' } } };
+      const f = fixture({ reverse, ...options });
+      const pending = await selected(f);
+      assert.equal(pending.instrument_name, inferior);
+      assert.equal(pending.trigger_details.candidates_evaluated, 1);
+      const selectedDecision = f.decisions.find(row => row.reason_code === 'candidate_selected');
+      const blocked = selectedDecision.context_json.candidate_cooldowns;
+      assert.equal(blocked.length, 1);
+      assert.equal(blocked[0].instrument_name, superior);
+      assert.equal(blocked[0].reason_code, block === 'failure' ? 'recent_failed_entry' : 'recent_rejection');
+      assert.ok(blocked[0].remaining_ms > 0);
+    }
+  }
+});
+
+test('all candidates cooling down leaves no pending order and records each blocking reason', async () => {
+  const f = fixture({ failures: { [superior]: recentFailure('Order status unknown; reservation retained') },
+    rejections: { [inferior]: { ...recentFailure(null), confirmation_reasoning: 'Risk review rejected' } } });
+  assert.equal(await f.run(), 0, f.logs.join('\n'));
+  assert.equal(f.inserted.length, 0);
+  const decision = f.decisions.find(row => row.reason_code === 'all_candidates_cooling_down');
+  assert.ok(decision, f.logs.join('\n'));
+  assert.equal(decision.context_json.candidate_cooldowns.length, 2);
+  assert.equal(decision.context_json.filter_stats.recent_failed_entry, 1);
+  assert.equal(decision.context_json.filter_stats.recent_rejection, 1);
+});
+
+test('zero-fill and post-only price movement retain retry eligibility; persistent failures expire after 30 minutes', async () => {
+  for (const failure of [
+    recentFailure('Zero fill (IOC) — no liquidity at $8'),
+    recentFailure('post_only rejected: would cross book at $8'),
+    recentFailure('Order placement failed: venue unavailable', 30 * 60_000),
+  ]) {
+    const f = fixture({ failures: { [superior]: failure } });
+    assert.equal((await selected(f)).instrument_name, superior);
+  }
+});
+
+test('fresh-price retry exception is restricted to buy_put local price validation failures', () => {
+  for (const reason of [
+    'Final order rejected (entry_budget_exceeded): Put budget unavailable',
+    'Final order rejected (stale_quote): Quote unavailable',
+    'Order status unknown; Final put bid violates approved cap or fresh PUT EDGE',
+    'Order placement failed',
+  ]) {
+    const f = fixture({ failures: { [superior]: recentFailure(reason) } });
+    assert.equal(f.pure.getRecentFailedEntry('buy_put', superior)?.reason, reason);
+  }
+  const priceFailure = 'Final put bid violates approved cap or fresh PUT EDGE';
+  const f = fixture({ failures: { [superior]: recentFailure(priceFailure) } });
+  assert.equal(f.pure.getRecentFailedEntry('sell_call', superior)?.reason, priceFailure);
 });
 
 const recentFill = new Clock(now - 60_000).toISOString();

@@ -311,6 +311,8 @@ const formatOrderLifecycleNotification = ({
   orderType = null,
   orderId = null,
   status = null,
+  reason = null,
+  nextStep = null,
 }) => {
   const labels = ORDER_NOTIFICATION_LABELS[action] || {
     order: String(action || 'ORDER').replace(/_/g, ' ').toUpperCase(),
@@ -321,6 +323,7 @@ const formatOrderLifecycleNotification = ({
     posted: { emoji: '📨', title: 'ORDER POSTED' },
     executed: { emoji: '✅', title: 'ORDER EXECUTED' },
     partial_fill: { emoji: '🟡', title: 'ORDER PARTIALLY EXECUTED' },
+    cancellation_requested: { emoji: '⏳', title: 'CANCELLATION REQUEST ACKNOWLEDGED' },
     cancelled: { emoji: '🗑️', title: 'ORDER CANCELLED' },
     expired: { emoji: '⌛', title: 'ORDER EXPIRED' },
   }[stage] || { emoji: '📋', title: 'ORDER UPDATE' };
@@ -339,12 +342,39 @@ const formatOrderLifecycleNotification = ({
   }
   if (orderType) lines.push(`Type: ${String(orderType).replace(/_/g, ' ').toUpperCase()}`);
   if (status) lines.push(`Status: ${String(status).replace(/_/g, ' ')}`);
+  if (reason) lines.push(`Reason: ${reason}`);
+  if (nextStep) lines.push(`Next: ${nextStep}`);
   if (orderId) lines.push(`Order: ${orderId}`);
   return lines.join('\n');
 };
 
+// Notification context is advisory only: reservations and terminal receipts are
+// owned by durable order accounting. A restart falls back to the venue reason.
+const orderCancellationNotificationContext = new Map();
+
 const notifyOrderLifecycle = (details) => {
-  sendTelegram(formatOrderLifecycleNotification(details));
+  const cancellation = orderCancellationNotificationContext.get(details.orderId);
+  if (details.stage === 'cancellation_requested') {
+    if (cancellation) return; // Retrying the request must not repeat the alert.
+    if (details.orderId) orderCancellationNotificationContext.set(details.orderId, {
+      reason: details.reason, nextStep: details.nextStep,
+    });
+    return sendTelegram(formatOrderLifecycleNotification({ ...details,
+      status: 'awaiting terminal confirmation',
+      nextStep: `Await terminal confirmation; reserved capacity stays held.${details.nextStep ? ` Then: ${details.nextStep}` : ''}`,
+    }));
+  }
+  const terminal = ['cancelled', 'expired', 'filled'].includes(details.status)
+    || ['cancelled', 'expired'].includes(details.stage);
+  if (terminal && details.orderId) orderCancellationNotificationContext.delete(details.orderId);
+  const isCancellation = ['cancelled', 'expired'].includes(details.status)
+    || ['cancelled', 'expired'].includes(details.stage);
+  return sendTelegram(formatOrderLifecycleNotification({ ...details,
+    ...(isCancellation ? {
+      reason: cancellation?.reason || details.reason || 'Venue confirmed the terminal order status; cancellation reason unavailable.',
+      nextStep: cancellation?.nextStep || details.nextStep || 'Re-evaluate eligible orders against current rules and available capacity.',
+    } : {}),
+  }));
 };
 
 // ETH contract addresses for analysis
@@ -2777,7 +2807,7 @@ const fetchOrderStatus = async (orderId) => {
 };
 
 // Cancel a specific order on Derive
-const cancelOrder = async (orderId, instrumentName) => {
+const cancelOrder = async (orderId, instrumentName, notification = null) => {
   if (DERIVE_CONFIG.maintenance) throw new Error('Derive maintenance: order cancellation disabled');
   try {
     const wallet = createWallet();
@@ -2799,8 +2829,12 @@ const cancelOrder = async (orderId, instrumentName) => {
       console.error(`❌ cancelOrder ${orderId}: ${stringifyApiError(response.data.error)}`);
       return null;
     }
-    console.log(`🗑️ Cancelled order ${orderId} (${instrumentName})`);
-    return response.data?.result;
+    const result = response.data?.result;
+    if (result) {
+      console.log(`⏳ Cancellation acknowledged for ${orderId} (${instrumentName}); awaiting terminal confirmation`);
+      if (notification) notifyOrderLifecycle({ ...notification, stage: 'cancellation_requested', orderId, instrumentName });
+    }
+    return result;
   } catch (error) {
     const errBody = error.response?.data;
     const bodyStr = errBody ? stringifyApiError(errBody).slice(0, 300) : 'no body';
@@ -8733,7 +8767,7 @@ const reassessRestingEntryOrders = async ({ entryRules, instruments, tickerMap, 
       }
       if (plan.decision === 'keep') {
         record(plan);
-        console.log(`📋 Keep resting ${order.action} ${order.instrument_name}: fresh venue terms aligned @ $${plan.desiredOrder.limit_price} x ${plan.desiredOrder.amount}`);
+        console.log(`📋 Keep resting ${order.action} ${order.instrument_name}: ${plan.reason} @ $${plan.desiredOrder.limit_price} x ${plan.desiredOrder.amount}`);
         continue;
       }
       result.blockedActions.add(order.action);
@@ -9468,16 +9502,34 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
           }
         }
 
+        // Cooldowns belong to candidate eligibility. Checking only the winner
+        // lets one blocked instrument starve every other valid entry.
+        const candidateCooldowns = [];
+        candidates = candidates.filter((candidate) => {
+          const recentRejection = getRecentRejectedAction(rule.action, candidate.name);
+          const recentFailure = recentRejection ? null : getRecentFailedEntry(rule.action, candidate.name);
+          const failureBlocks = recentFailure && !isIocZeroFillFailure(recentFailure);
+          if (!recentRejection && !failureBlocks) return true;
+          const reasonCode = recentRejection ? 'recent_rejection' : 'recent_failed_entry';
+          const failure = recentRejection || recentFailure;
+          candidateCooldowns.push({ instrument_name: candidate.name, reason_code: reasonCode,
+            reason: failure.reason || 'Recent entry failure backoff',
+            elapsed_ms: failure.elapsed, remaining_ms: failure.remaining ?? null });
+          filterStats[reasonCode] = (filterStats[reasonCode] || 0) + 1;
+          console.log(`📋 Candidate skip: ${rule.action} ${candidate.name}: ${reasonCode} (${failure.reason || 'entry backoff'})`);
+          return false;
+        });
+
         if (candidates.length === 0) {
           const filtered = Object.entries(filterStats).filter(([k, v]) => k !== 'total' && v > 0).map(([k, v]) => `${k}=${v}`).join(', ');
           console.log(`📋 Rule ${rule.id} (${rule.action}): 0 candidates from ${filterStats.total} tickers — filtered by: ${filtered || 'no tickers'}`);
           logDecision(rule, {
             decision_status: 'skipped',
-            reason_code: 'no_candidates',
+            reason_code: candidateCooldowns.length ? 'all_candidates_cooling_down' : 'no_candidates',
             reason: `0 candidates from ${filterStats.total} tickers; filtered by ${filtered || 'no tickers'}`,
             candidates_evaluated: 0,
             criteria_json: criteria,
-            context_json: { filter_stats: filterStats },
+            context_json: { filter_stats: filterStats, candidate_cooldowns: candidateCooldowns },
           });
           if (optionType || dteRange) {
             const expirySummary = new Map();
@@ -9558,6 +9610,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
         }
         const candidateTelemetryContext = {
           filter_stats: filterStats,
+          candidate_cooldowns: candidateCooldowns,
           selection_metric: rule.action === 'buy_put' ? 'put_edge_v1' : 'call_edge_v1',
           selection_price_basis: rule.action === 'buy_put' ? 'live_ask' : 'live_bid',
           blocked_by_resting_order: blockedByRestingOrder,
@@ -9781,7 +9834,11 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             const lag = buyPutContext.spot_repricing_lag_context || {};
             const signal = currentBuyPutSignal || (valueSignal === 'any_actionable_buy_put' ? 'standing_patient_bid' : 'unknown');
             console.log(`📋 Replace resting ${rule.action}: cancel ${sameActionResting.order_id} ${sameActionResting.instrument_name} @ $${Number(sameActionResting.limit_price).toFixed(4)} -> ${best.name} @ $${price.toFixed(4)} (${signal}; score_1h=${lag.score_trend_1h_pct ?? 'n/a'}%, spot_20m=${lag.spot_move_20m_pct ?? 'n/a'}%)`);
-            const cancelled = await cancelOrder(sameActionResting.order_id, sameActionResting.instrument_name);
+            const cancelled = await cancelOrder(sameActionResting.order_id, sameActionResting.instrument_name, {
+              action: rule.action, amount: sameActionResting.amount, price: sameActionResting.limit_price,
+              reason: `Switching entry candidate to ${best.name} at $${price}`,
+              nextStep: 'Re-evaluate eligible candidates after reconciling the old order and any fills.',
+            });
             if (!cancelled) {
               console.log(`📋 Keep resting ${rule.action} ${sameActionResting.instrument_name}: cancel failed, re-evaluate next tick`);
               const reason = `Resting ${rule.action} replacement cancel failed`;
@@ -9842,60 +9899,6 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             blocking_price: blockingRestingOrder.limit_price || null,
           });
           continue;
-        }
-
-        const recentRejection = getRecentRejectedAction(rule.action, best.name);
-        if (recentRejection) {
-          console.log(`📋 Skip ${rule.action} ${best.name}: rejected recently, backing off ${formatCooldownMinutes(recentRejection.remaining)} (${recentRejection.reason || 'recent rejection'})`);
-          const reason = recentRejection.reason || 'Recent rejection backoff';
-          logDecision(rule, {
-            decision_status: 'skipped',
-            reason_code: 'recent_rejection',
-            reason,
-            candidates_evaluated: candidates.length,
-            selected_instrument: best.name,
-            raw_score: best.score,
-            selection_score: best.selectionScore,
-            price,
-            amount: qty,
-            criteria_json: criteria,
-            context_json: { ...candidateTelemetryContext, rejection_remaining_ms: recentRejection.remaining },
-          });
-          recordCandidateFrame('skipped', reason, null, {
-            price,
-            amount: qty,
-            rejection_remaining_ms: recentRejection.remaining,
-          });
-          continue;
-        }
-
-        const recentFailedEntry = getRecentFailedEntry(rule.action, best.name);
-        if (recentFailedEntry) {
-          if (isIocZeroFillFailure(recentFailedEntry)) {
-            console.log(`📋 Retry ${rule.action} ${best.name}: recent IOC zero fill is not a cooldown blocker (${recentFailedEntry.reason || 'zero fill'})`);
-          } else {
-            console.log(`📋 Skip ${rule.action} ${best.name}: failed recently, cooling down (${recentFailedEntry.reason || 'recent execution failure'})`);
-            const reason = recentFailedEntry.reason || 'Recent execution failure cooldown';
-            logDecision(rule, {
-              decision_status: 'skipped',
-              reason_code: 'recent_failed_entry',
-              reason,
-              candidates_evaluated: candidates.length,
-              selected_instrument: best.name,
-              raw_score: best.score,
-              selection_score: best.selectionScore,
-              price,
-              amount: qty,
-              criteria_json: criteria,
-              context_json: { ...candidateTelemetryContext, failed_elapsed_ms: recentFailedEntry.elapsed },
-            });
-            recordCandidateFrame('skipped', reason, null, {
-              price,
-              amount: qty,
-              failed_elapsed_ms: recentFailedEntry.elapsed,
-            });
-            continue;
-          }
         }
 
         const pendingResult = db.insertPendingAction({
@@ -10110,11 +10113,15 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
       throw new Error('Terminal order in open-order snapshot; refresh required');
     }
     const result = require('./bot/order-accounting').accountRestingObservation({ db, botData, tracked, live });
-    if (result.deltaAmount > 0 || !result.resting) notifyOrderLifecycle({
-      stage: result.resting ? 'partial_fill' : live.filled_amount > 0 ? 'executed' : 'cancelled',
+    const filledSummary = live.order_status === 'filled' && result.deltaAmount === 0;
+    const notificationAmount = filledSummary ? result.filledAmount : result.deltaAmount;
+    const notificationValue = filledSummary ? result.filledValue : result.deltaValue;
+    if (result.deltaAmount > 0 || result.statusChanged) notifyOrderLifecycle({
+      stage: result.resting ? 'partial_fill' : result.deltaAmount > 0 || filledSummary ? 'executed' : live.order_status === 'expired' ? 'expired' : 'cancelled',
       action: tracked.action, instrumentName: tracked.instrument_name, amount: tracked.amount,
-      filledAmount: result.deltaAmount, price: result.deltaAmount > 0 ? result.deltaValue / result.deltaAmount : tracked.limit_price,
-      totalValue: result.deltaValue, orderId: tracked.order_id, status: live.order_status });
+      filledAmount: notificationAmount, price: notificationAmount > 0 ? notificationValue / notificationAmount : tracked.limit_price,
+      totalValue: notificationValue, orderId: tracked.order_id, status: live.order_status,
+      reason: live.cancel_reason ? `Venue: ${live.cancel_reason}` : null });
   }
   trackedResting = trackedResting.filter(order => order.status === 'open');
 
@@ -10216,7 +10223,11 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
       const reason = invalidRestingEntryReason || invalidRestingExitReason
         || (isStale ? `stale (${ageHours.toFixed(1)}h old)` : 'orphaned (no matching active rule)');
       console.log(`🗑️ Cancelling ${order.instrument_name} order ${order.order_id}: ${reason}`);
-      const result = await cancelOrder(order.order_id, order.instrument_name);
+      const result = await cancelOrder(order.order_id, order.instrument_name, {
+        action: inferredAction, amount: order.amount, price: order.limit_price, reason,
+        nextStep: isOrphaned ? 'Wait for a matching active rule before placing another order.'
+          : 'Re-evaluate eligible orders against current rules and available capacity.',
+      });
 
       // A cancellation ACK is not a terminal fill receipt. Reconcile next tick.
       if (!result) throw new Error(`Cancellation of ${order.order_id} failed; reservation retained`);
@@ -10260,11 +10271,19 @@ const getRecentFailedEntry = (action, instrumentName, cooldownMs = FAILED_ENTRY_
   if (reason.toLowerCase().includes('invalid limit price') && reason.toLowerCase().includes('decimal places')) {
     return null;
   }
+  // These local pre-submit failures mean delta/the quote moved after planning.
+  // A new tick must rebuild the bid and pass the same final price validator;
+  // they are not evidence of a persistent venue failure on this instrument.
+  if (action === 'buy_put' && (
+    /^Final order rejected \(put_price_failed\): /.test(reason)
+    || reason === 'Final put bid violates approved cap or fresh PUT EDGE'
+  )) return null;
   const elapsed = Date.now() - new Date(lastFailed.triggered_at).getTime();
   if (elapsed < 0 || elapsed >= cooldownMs) return null;
   return {
     triggeredAt: lastFailed.triggered_at,
     elapsed,
+    remaining: cooldownMs - elapsed,
     reason: lastFailed.execution_result || null,
   };
 };
@@ -10981,10 +11000,15 @@ const getEntryOrderFilledValue = (order) => {
 
 const accountEntryOrderObservation = (tracked, live) => {
   const result = require('./bot/order-accounting').accountRestingObservation({ db, botData, tracked, live });
-  if (result.deltaAmount > 0) notifyOrderLifecycle({ stage: result.resting ? 'partial_fill' : 'executed',
+  const filledSummary = live.order_status === 'filled' && result.deltaAmount === 0;
+  const notificationAmount = filledSummary ? result.filledAmount : result.deltaAmount;
+  const notificationValue = filledSummary ? result.filledValue : result.deltaValue;
+  if (result.deltaAmount > 0 || result.statusChanged) notifyOrderLifecycle({
+    stage: result.resting ? 'partial_fill' : result.deltaAmount > 0 || filledSummary ? 'executed' : live.order_status === 'expired' ? 'expired' : 'cancelled',
     action: tracked.action, instrumentName: tracked.instrument_name, amount: tracked.amount,
-    filledAmount: result.deltaAmount, price: result.deltaValue / result.deltaAmount,
-    totalValue: result.deltaValue, orderId: tracked.order_id, status: live.order_status });
+    filledAmount: notificationAmount, price: notificationAmount > 0 ? notificationValue / notificationAmount : tracked.limit_price,
+    totalValue: notificationValue, orderId: tracked.order_id, status: live.order_status,
+    reason: live.cancel_reason ? `Venue: ${live.cancel_reason}` : null });
   return result;
 };
 
@@ -11060,7 +11084,8 @@ const validateEntryReplacementEconomics = ({ action, activeRule, triggerData, de
     reason: validation?.reason || 'Replacement economics unavailable', validation, research };
 };
 
-const prepareEntryOrderReplacement = async ({ action, reviewedOrder, desiredOrder, approvedNotional = null, instrument = null }) => {
+const prepareEntryOrderReplacement = async ({ action, reviewedOrder, desiredOrder, approvedNotional = null, instrument = null,
+  onCancellationRequested = null, onCancellationAcknowledged = null }) => {
   if (!reviewedOrder?.order_id || reviewedOrder.action !== action.action
     || reviewedOrder.instrument_name !== action.instrument_name || desiredOrder.instrument_name !== action.instrument_name) {
     return { allowed: false, reason: 'Replacement entry identity conflicts with the reviewed order' };
@@ -11088,13 +11113,21 @@ const prepareEntryOrderReplacement = async ({ action, reviewedOrder, desiredOrde
     const comparison = require('./bot/resting-entry-plan').compareRestingEntryOrder(current,
       { ...desiredOrder, amount: remainingApproved(current) });
     if (comparison.decision === 'keep') return { allowed: false, reason: 'Equivalent entry already resting; keep it' };
-    if (comparison.decision === 'unresolved') return { allowed: false, reason: 'Existing entry terms are unresolved' };
-    await cancelOrder(current.order_id, current.instrument_name);
+    if (comparison.decision === 'unresolved') return { allowed: false, deferred: true, reason: 'Existing entry terms are unresolved' };
+    // Persist intent before the network call so process death cannot lose the
+    // replacement. The acknowledgement is separate from terminal order proof.
+    if (onCancellationRequested) await onCancellationRequested();
+    const acknowledged = await cancelOrder(current.order_id, current.instrument_name, {
+      action: action.action, amount: current.amount, price: current.limit_price,
+      reason: `Repricing entry from $${current.limit_price} to $${desiredOrder.limit_price}`,
+      nextStep: 'Recheck price, remaining size and budget before submitting the replacement.',
+    });
+    if (acknowledged && onCancellationAcknowledged) await onCancellationAcknowledged();
   }
   const terminal = await fetchOrderStatus(reviewedOrder.order_id);
-  if (!terminal) return { allowed: false, reason: 'Entry cancellation status unknown; reservation retained' };
+  if (!terminal) return { allowed: false, deferred: true, reason: 'Entry cancellation status unknown; reservation retained; replacement pending' };
   const accounting = accountEntryOrderObservation({ ...reviewedOrder }, terminal);
-  if (accounting.resting) return { allowed: false, reason: 'Entry remains open; replacement deferred' };
+  if (accounting.resting) return { allowed: false, deferred: true, reason: 'Entry remains open; replacement pending' };
   const amount = remainingApproved({ ...terminal, filled_value: accounting.filledValue });
   if (!isVenueOrderAmountTradable(amount)) return { allowed: false, reason: 'No tradable approved entry remainder remains after fills' };
   if ((await readFreshEntryOrderSnapshot(action)).orders.length) return { allowed: false, reason: 'An entry remains on the venue; replacement deferred' };
@@ -11103,11 +11136,16 @@ const prepareEntryOrderReplacement = async ({ action, reviewedOrder, desiredOrde
 
 const accountExitOrderObservation = (tracked, live) => {
   const result = require('./bot/order-accounting').accountRestingObservation({ db, botData, tracked, live });
-  if (result.deltaAmount > 0) notifyOrderLifecycle({
-    stage: result.resting ? 'partial_fill' : 'executed', action: tracked.action,
-    instrumentName: tracked.instrument_name, amount: tracked.amount, filledAmount: result.deltaAmount,
-    price: result.deltaValue / result.deltaAmount, totalValue: result.deltaValue,
+  const filledSummary = live.order_status === 'filled' && result.deltaAmount === 0;
+  const notificationAmount = filledSummary ? result.filledAmount : result.deltaAmount;
+  const notificationValue = filledSummary ? result.filledValue : result.deltaValue;
+  if (result.deltaAmount > 0 || result.statusChanged) notifyOrderLifecycle({
+    stage: result.resting ? 'partial_fill' : result.deltaAmount > 0 || filledSummary ? 'executed' : live.order_status === 'expired' ? 'expired' : 'cancelled', action: tracked.action,
+    instrumentName: tracked.instrument_name, amount: tracked.amount,
+    filledAmount: notificationAmount, price: notificationAmount > 0 ? notificationValue / notificationAmount : tracked.limit_price,
+    totalValue: notificationValue,
     orderId: tracked.order_id, status: live.order_status,
+    reason: live.cancel_reason ? `Venue: ${live.cancel_reason}` : null,
   });
   return result;
 };
@@ -11209,7 +11247,11 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
 
   let executed = 0;
   let resting = 0;
-  for (const action of pending.slice(0, 2)) { // Max 2 per tick
+  // Durable entry cancellation waits must never occupy both review slots ahead
+  // of a risk-reducing exit. Retain the existing per-tick review bound.
+  const prioritizedPending = [...pending].sort((a, b) =>
+    Number(isReduceOnlyExitAction(b.action)) - Number(isReduceOnlyExitAction(a.action)));
+  for (const action of prioritizedPending.slice(0, 2)) { // Max 2 per tick
     const activeRule = db.getActiveRules().find(rule => Number(rule.id) === Number(action.rule_id));
     if (!activeRule || activeRule.action !== action.action
       || JSON.stringify(parseMaybeJsonObject(activeRule.criteria)) !== JSON.stringify(parseMaybeJsonObject(action.rule_criteria))) {
@@ -11269,6 +11311,9 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
       // Parse trigger details for advisory's preferred order type and value context.
       let triggerData = {};
       try { triggerData = typeof action.trigger_details === 'string' ? JSON.parse(action.trigger_details) : (action.trigger_details || {}); } catch {}
+      // This immutable queued baseline remains the durable quantity/notional
+      // authority until submission. Never persist a partially rebased snapshot.
+      const entryAuthority = triggerData;
       const ruleCriteria = parseMaybeJsonObject(action.rule_criteria);
       let exitSnapshot = null;
       let exitOrderPlan = null;
@@ -11282,16 +11327,46 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
           || sourceOrder.instrument_name !== action.instrument_name || sourceOrder.action !== action.action) {
           throw new Error('Original entry replacement authority is incomplete');
         }
-        entrySnapshot = await readFreshEntryOrderSnapshot(action);
+        // Venue reconciliation is not a reviewer failure. Keep the durable
+        // replacement authority intact while an acknowledgement becomes final.
+        try {
+          entrySnapshot = await readFreshEntryOrderSnapshot(action);
+        } catch (error) {
+          db.updatePendingAction(action.id, { execution_result: `Entry reconciliation pending: ${error.message}` });
+          console.log(`📋 Defer entry replacement ${action.instrument_name}: ${error.message}`);
+          continue;
+        }
         if (entrySnapshot.orders.some(order => order.order_id !== sourceOrder.order_id)) {
           console.log(`📋 Defer entry replacement ${action.instrument_name}: another entry is active`);
           continue;
         }
         const liveOrder = entrySnapshot.orders.find(order => order.order_id === sourceOrder.order_id);
+        if (liveOrder && entryAuthority.entry_cancellation_requested === true) {
+          // If the process died between recording intent and receiving the ACK,
+          // retry only cancellation. An acknowledged but still-open order keeps
+          // the replacement pending, even if its new desired price now matches.
+          if (entryAuthority.entry_cancellation_acknowledged !== true) {
+            const acknowledged = await cancelOrder(liveOrder.order_id, liveOrder.instrument_name, {
+              action: action.action, amount: liveOrder.amount, price: liveOrder.limit_price,
+              reason: 'Resuming pending entry replacement',
+              nextStep: 'Recheck price, remaining size and budget before submitting the replacement.',
+            });
+            if (acknowledged) db.updatePendingAction(action.id, { trigger_details: {
+              ...entryAuthority, entry_cancellation_acknowledged: true,
+            } });
+          }
+          db.updatePendingAction(action.id, { execution_result: 'Entry cancellation awaiting terminal confirmation; replacement pending' });
+          console.log(`📋 Entry replacement pending ${action.instrument_name}: awaiting terminal cancellation confirmation`);
+          continue;
+        }
         entryReviewedOrder = liveOrder;
         if (!entryReviewedOrder) {
-          const terminal = await fetchOrderStatus(sourceOrder.order_id);
-          if (!terminal) throw new Error('Original entry state is unknown');
+          let terminal;
+          try { terminal = await fetchOrderStatus(sourceOrder.order_id); } catch { /* retry the same authority next tick */ }
+          if (!terminal) {
+            db.updatePendingAction(action.id, { execution_result: 'Original entry state is unknown; replacement pending' });
+            continue;
+          }
           const accounted = accountEntryOrderObservation({ ...sourceOrder }, terminal);
           if (accounted.resting) throw new Error('Entry book changed during replacement review');
           entryReviewedOrder = { ...sourceOrder, ...terminal, filled_value: accounted.filledValue };
@@ -11314,7 +11389,15 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
           putBudgetRemaining: botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought,
           otherPutReserved: otherReserved,
           effectiveTargetScore: Math.max(Number(ruleCriteria.target_score) || 0, Number(triggerData.target_score) || 0) });
-        if (!planned.desiredOrder || ['invalid', 'unresolved'].includes(planned.decision)) {
+        if (planned.decision === 'invalid') {
+          // Proven rule/risk ineligibility is not venue uncertainty. Retire this
+          // intent so a terminal source cannot block other eligible instruments.
+          db.updatePendingAction(action.id, { status: 'cancelled',
+            execution_result: `Entry replacement no longer eligible: ${planned.reason}` });
+          console.log(`📋 Cancel entry replacement ${action.instrument_name}: ${planned.reason}`);
+          continue;
+        }
+        if (!planned.desiredOrder || planned.decision === 'unresolved') {
           console.log(`📋 Defer entry replacement ${action.instrument_name}: ${planned.reason}`);
           continue;
         }
@@ -11937,11 +12020,27 @@ Output JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"
               execution_result: `Entry replacement economics rejected: ${economics.reason}; original order retained` });
             continue;
           }
-          const replacement = await prepareEntryOrderReplacement({ action, reviewedOrder: entryReviewedOrder,
-            desiredOrder: desired, approvedNotional: entryApprovedNotional, instrument: executionInstrument });
+          let replacement;
+          try {
+            replacement = await prepareEntryOrderReplacement({ action, reviewedOrder: entryReviewedOrder,
+              desiredOrder: desired, approvedNotional: entryApprovedNotional, instrument: executionInstrument,
+              onCancellationRequested: () => db.updatePendingAction(action.id, { trigger_details: {
+                ...entryAuthority, entry_cancellation_requested: true,
+              } }),
+              onCancellationAcknowledged: () => db.updatePendingAction(action.id, { trigger_details: {
+                ...entryAuthority, entry_cancellation_requested: true, entry_cancellation_acknowledged: true,
+              } }),
+            });
+          } catch (error) {
+            // A read failure after cancellation must not consume review retries
+            // or discard the request. The original queued snapshot stays in the
+            // database so late fills are deducted once on the next fresh review.
+            replacement = { allowed: false, deferred: true, reason: `Entry reconciliation pending: ${error.message}` };
+          }
           if (!replacement.allowed) {
-            db.updatePendingAction(action.id, { status: 'cancelled', confirmation_reasoning: reasoning,
+            db.updatePendingAction(action.id, { status: replacement.deferred ? 'pending' : 'cancelled', confirmation_reasoning: reasoning,
               execution_result: replacement.reason });
+            console.log(`📋 Entry replacement ${replacement.deferred ? 'pending' : 'cancelled'} ${action.instrument_name}: ${replacement.reason}`);
             continue;
           }
           executionAmount = replacement.amount;
