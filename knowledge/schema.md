@@ -68,7 +68,7 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 - **TLDR** (bold, 1 line)
 - **Current IV Environment** (absolute levels + percentile)
 - **Skew Analysis** (put-call IV spread, direction)
-- **Term Structure** (near vs far IV, contango/backwardation)
+- **Term Structure** (near vs far IV, contango/backwardation, and how the fixed-maturity curve moved over the past week)
 - **Cost Assessment** (cheap | fair | expensive with evidence)
 
 ### protection/windows.md

@@ -4875,6 +4875,8 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 13. Strategy pages contain durable conditional rules, not the current spot, skew, score, budget, gate state, or other live snapshot values. Live market state belongs in research pages and the trading advisory
 14. The Outstanding Validation Findings are instructions to you, not page content. Never write a findings, validation, audit, or resolved-issues section into a page; remove any such section a page already has
 15. Momentum labels (short/medium momentum states such as "upward/accelerating") are no longer tracked or used by any decision. Remove them from current-state sections; describe price action with measured spot values
+16. Research pages describe the market, not the bot's book. Keep open positions, campaign status, fills, buyback attempts and budget state out of pricing, skew, term-structure and regime sections; remove any already there. A past trade may appear only as a dated example in a Historical section, where it illustrates a pricing observation
+17. Term Structure sections read the packet's Term Curve: the curve's shape across expiries, and how its fixed-maturity history moved (steepening, flattening, inverting; front-only or whole-curve moves)
 
 Output your updates as XML blocks. Only include pages that need changes:
 
