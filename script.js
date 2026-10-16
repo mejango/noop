@@ -3863,6 +3863,11 @@ const extractTradeLessons = async () => {
     const canonicalLessons = db.getCanonicalTradeLessons?.() || [];
     const legacyLessons = db.getLegacyTradeLessons?.() || [];
     const isBootstrap = canonicalLessons.length === 0;
+    // Contradictions were linked against older lesson wording and never revisited, so a lesson
+    // stayed disputed forever. Show them again so each update re-judges them against the current rule.
+    const openContradictions = canonicalLessons
+      .map((lesson) => ({ lesson, reviews: db.getContradictingReviewsForLesson?.(lesson.id) || [] }))
+      .filter(({ reviews }) => reviews.length > 0);
     const reviews = isBootstrap
       ? (db.getRecentTradeReviews(TRADE_LESSON_BOOTSTRAP_REVIEW_LIMIT) || [])
       : (db.getTradeReviewsSinceId?.(botData.lastTradeLessonReviewId || 0, 12) || []);
@@ -3892,11 +3897,14 @@ ${legacyLessons.length > 0 ? legacyLessons.slice(0, 12).map((lesson) => `- ${Str
 Reviewed campaigns (the #ID is the only valid evidence identifier):
 ${reviews.map(formatTradeReviewForLessonSynthesis).join('\n')}
 
+Open contradictions (reviews currently linked as opposing a lesson; re-judge each against the lesson as you now write it):
+${openContradictions.length > 0 ? openContradictions.map(({ lesson, reviews: opposing }) => `[lesson:${lesson.lesson_key}]\n${opposing.map(formatTradeReviewForLessonSynthesis).join('\n')}`).join('\n\n') : 'None'}
+
 Requirements:
 1. Use only the exact lesson keys listed above. Return one update per relevant key and no duplicate keys.
 2. Write a concise operational rule of 1-3 sentences. State conditional factors instead of inventing a universal percentage from a small sample.
 3. Link every claim to supporting_review_ids. Counts are computed by code; never output an evidence count.
-4. Put genuinely opposing reviews in contradicting_review_ids. Do not silently average incompatible recommendations.
+4. Put genuinely opposing reviews in contradicting_review_ids. Do not silently average incompatible recommendations. When you update a lesson that has open contradictions, contradicting_review_ids is its complete current list: keep an open contradiction only if it still opposes the rule as now written, judged on information available at decision time (rule 5). Move it to supporting_review_ids if it now supports the rule; omit it if it neither supports nor opposes. A review that called a decision wrong only because of what happened afterward is not a contradiction
 5. Judge decisions using information available at decision time. Post-expiry price is not evidence for an expired option's payoff or hold-to-expiry P&L, but it may support labeled conclusions about market trajectory, regime judgment, and follow-on opportunities.
 6. Treat missing or impossible spot data as uncertainty. Never claim spot is below strike when the supplied numbers say otherwise.
 7. Use applicability for short phrases describing when the rule matters, such as "spot below strike", "under 24h DTE", or "risk mandate unchanged".
@@ -3940,6 +3948,8 @@ Output JSON only:
     }
 
     const reviewIds = new Set(reviews.map((review) => Number(review.id)).filter(Number.isInteger));
+    const linkableIds = new Set([...reviewIds, ...openContradictions.flatMap(({ reviews: opposing }) => opposing.map((r) => Number(r.id)))]);
+    const rejudgedKeys = new Set(openContradictions.map(({ lesson }) => lesson.lesson_key));
     let storedCount = 0;
     for (const update of updates) {
       const definition = definitions.get(update.lesson_key);
@@ -3949,7 +3959,7 @@ Output JSON only:
         category: definition.category,
         action_family: definition.action_family,
         status: 'candidate',
-      }, reviewIds);
+      }, linkableIds, { rejudgeContradictions: rejudgedKeys.has(update.lesson_key) });
       if (stored) storedCount += 1;
     }
     if (storedCount === 0) {
@@ -4883,6 +4893,7 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 15. Momentum labels (short/medium momentum states such as "upward/accelerating") are no longer tracked or used by any decision. Remove them from current-state sections; describe price action with measured spot values
 16. Research pages describe the market, not the bot's book. Keep open positions, campaign status, fills, buyback attempts and budget state out of pricing, skew, term-structure and regime sections; remove any already there. A past trade may appear only as a dated example in a Historical section, where it illustrates a pricing observation
 17. Term Structure sections read the packet's Term Curve: the curve's shape across expiries, and how its fixed-maturity history moved (steepening, flattening, inverting; front-only or whole-curve moves)
+18. The schema's Reference-only sections must read exactly as the schema gives them; replace any other wording there, including older canonical text
 
 Output your updates as XML blocks. Only include pages that need changes:
 

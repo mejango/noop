@@ -120,7 +120,7 @@ const REFERENCE_ONLY_SECTIONS: Record<string, Record<string, string>> = {
   },
   'revenue/efficiency.md': {
     'Strike Selection Patterns': 'Strikes 11–22% OTM have produced consistent disciplined wins; select strike distance by the OTM buffer tolerable if spot touches the top of the expected range. See [lesson:short_call.strike_and_sizing].',
-    'Buyback Patterns': 'When spot is ≥10% below strike with DTE collapsing, buying back converts near-certain theta income into a certain realized loss. Assess strike distance, DTE, and momentum before any buyback; a buyback below strike requires a credible breakout thesis. See [lesson:short_call.exit_insurance] and [lesson:process.decision_quality].',
+    'Buyback Patterns': 'A buyback is insurance, not a rescue: once most of the premium has decayed, buying back below strike is a disciplined exit when its certain cost is smaller than the risk it removes, and spot later staying below strike does not make it a mistake. Assess strike distance, DTE, IV trend, and momentum before any buyback. See [lesson:short_call.exit_insurance] and [lesson:process.decision_quality].',
   },
 };
 

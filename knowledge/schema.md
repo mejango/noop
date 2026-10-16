@@ -119,6 +119,11 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 - **Strike Selection Patterns** (which strike-delta combos yield best risk-adjusted premium)
 - **Buyback Patterns** (when buybacks capture value vs destroy it, timing insights)
 
+### Reference-only sections (copy exactly; never add values, history or analysis)
+- revenue/pricing.md, Skew & IV Context: "Current skew and IV readings are perishable. Consult protection/pricing.md and regimes/current.md for current values."
+- revenue/efficiency.md, Strike Selection Patterns: "Strikes 11–22% OTM have produced consistent disciplined wins; select strike distance by the OTM buffer tolerable if spot touches the top of the expected range. See [lesson:short_call.strike_and_sizing]."
+- revenue/efficiency.md, Buyback Patterns: "A buyback is insurance, not a rescue: once most of the premium has decayed, buying back below strike is a disciplined exit when its certain cost is smaller than the risk it removes, and spot later staying below strike does not make it a mistake. Assess strike distance, DTE, IV trend, and momentum before any buyback. See [lesson:short_call.exit_insurance] and [lesson:process.decision_quality]."
+
 ### strategy/lessons.md
 - **TLDR** (bold, 1 line)
 - **Active Lessons** (currently valid actionable insights)

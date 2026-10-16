@@ -6650,6 +6650,29 @@ describe('Canonical trade learning', () => {
     assert.strictEqual(lesson.revision, 2, 'evidence-derived disputed status must not create a revision loop');
   });
 
+  test('a re-judged contradiction the model no longer lists stops disputing the lesson', () => {
+    const update = {
+      lesson_key: 'short_call.exit_insurance',
+      title: 'Short-call exit insurance',
+      lesson: 'Treat a below-strike buyback as explicit insurance, while escalating when pre-expiry breakout risk is supported by current market evidence.',
+      category: 'exit_timing',
+      action_family: 'short_call_campaign',
+      applicability: ['spot below strike', 'breakout risk live'],
+      status: 'candidate',
+      supporting_review_ids: [],
+      contradicting_review_ids: [],
+      change_summary: 'Re-judged',
+    };
+    learningDb.upsertCanonicalTradeLesson(update, new Set([contradictingReviewId]));
+    assert.strictEqual(learningDb.getCanonicalTradeLessons()[0].status, 'disputed', 'without re-judging, an omission keeps the old link');
+
+    learningDb.upsertCanonicalTradeLesson(update, new Set([contradictingReviewId]), { rejudgeContradictions: true });
+    const lesson = learningDb.getCanonicalTradeLessons()[0];
+    assert.strictEqual(lesson.status, 'active');
+    assert.strictEqual(lesson.contradicting_review_count, 0);
+    assert.strictEqual(lesson.supporting_campaign_count, 2, 'supporting links are untouched');
+  });
+
   test('review prompts separate pre-expiry payoff evidence from post-expiry context', () => {
     assert.ok(SCRIPT_SOURCE.includes('Post-expiry prices may be used only as labeled hindsight context for market trajectory, regime judgment, and possible follow-on trades.'));
     assert.ok(SCRIPT_SOURCE.includes("Post-expiry price is not evidence for an expired option's payoff or hold-to-expiry P&L, but it may support labeled conclusions about market trajectory, regime judgment, and follow-on opportunities."));

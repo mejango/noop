@@ -1166,6 +1166,17 @@ const stmts = {
       linked_at = datetime('now')
   `),
 
+  unlinkTradeLessonEvidence: db.prepare(`
+    DELETE FROM trade_lesson_evidence WHERE lesson_id = @lesson_id AND review_id = @review_id
+  `),
+
+  getContradictingReviewsForLesson: db.prepare(`
+    SELECT tr.* FROM trade_lesson_evidence tle
+    JOIN trade_reviews tr ON tr.id = tle.review_id
+    WHERE tle.lesson_id = @lesson_id AND tle.stance = 'contradicting'
+    ORDER BY tr.id
+  `),
+
   refreshTradeLessonEvidenceCount: db.prepare(`
     UPDATE trade_lessons
     SET evidence_count = (
@@ -2581,7 +2592,10 @@ const getActiveTradeLessons = () => {
   return canonical.length > 0 ? canonical : getLegacyTradeLessons();
 };
 
-const upsertCanonicalTradeLesson = (lesson, allowedReviewIds = null) => {
+// rejudgeContradictions: the caller showed the model this lesson's open contradictions, so its
+// contradicting_review_ids is the full current set. A shown contradiction it no longer lists is unlinked
+// (or relinked as supporting if listed there), which is how a disputed lesson can become active again.
+const upsertCanonicalTradeLesson = (lesson, allowedReviewIds = null, { rejudgeContradictions = false } = {}) => {
   const upsert = db.transaction((input, allowedIds) => {
     const lessonKey = String(input.lesson_key || '').trim();
     const title = String(input.title || '').trim();
@@ -2650,6 +2664,11 @@ const upsertCanonicalTradeLesson = (lesson, allowedReviewIds = null) => {
       const id = Number(reviewId);
       if (Number.isInteger(id) && (!allowed || allowed.has(id))) evidence.set(id, 'contradicting');
     }
+    if (rejudgeContradictions) {
+      for (const { id } of stmts.getContradictingReviewsForLesson.all({ lesson_id: lessonId })) {
+        if (!evidence.has(id)) stmts.unlinkTradeLessonEvidence.run({ lesson_id: lessonId, review_id: id });
+      }
+    }
     for (const [reviewId, stance] of evidence) {
       if (!stmts.getTradeReviewById.get({ id: reviewId })) continue;
       stmts.linkTradeLessonEvidence.run({ lesson_id: lessonId, review_id: reviewId, stance });
@@ -2661,6 +2680,8 @@ const upsertCanonicalTradeLesson = (lesson, allowedReviewIds = null) => {
 
   return upsert(lesson, allowedReviewIds);
 };
+
+const getContradictingReviewsForLesson = (lessonId) => stmts.getContradictingReviewsForLesson.all({ lesson_id: lessonId });
 
 const archiveTradeLesson = (id) => {
   stmts.archiveTradeLesson.run({ id });
@@ -2946,6 +2967,7 @@ module.exports = {
   countReviewedSinceLastTradeLesson,
   insertTradeLesson,
   upsertCanonicalTradeLesson,
+  getContradictingReviewsForLesson,
   getActiveTradeLessons,
   getCanonicalTradeLessons,
   getLegacyTradeLessons,
