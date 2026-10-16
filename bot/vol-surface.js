@@ -205,11 +205,13 @@ function formatVolSurfaceForAdvisor(s) {
 // Every listed expiry's ATM IV and 25Δ risk reversal, with the change since the same expiry ~24h earlier.
 // ATM = mean of the put and call nearest 50Δ, matching the dashboard's term-structure chart.
 // expiries / pastExpiries: [{ expiry (unix s), points: [{type, delta, iv (vol pts)}] }]; pastExpiries may be empty.
+function twoSidedAtm(pts) {
+  const sides = [sideAtm(pts, 'P'), sideAtm(pts, 'C')].filter(v => v != null);
+  return sides.length ? sides.reduce((s, v) => s + v, 0) / sides.length : null;
+}
+
 function buildTermCurve(expiries, atMs, pastExpiries = []) {
-  const atm = (pts) => {
-    const sides = [sideAtm(pts, 'P'), sideAtm(pts, 'C')].filter(v => v != null);
-    return sides.length ? sides.reduce((s, v) => s + v, 0) / sides.length : null;
-  };
+  const atm = twoSidedAtm;
   const past = new Map(pastExpiries.map(e => [e.expiry, e.points]));
   const diff = (now, then) => (now != null && then != null ? round(now - then) : null);
   return expiries
@@ -226,17 +228,56 @@ function buildTermCurve(expiries, atMs, pastExpiries = []) {
     });
 }
 
-function formatTermCurveForAdvisor(rows) {
+const TERM_TENORS = [7, 14, 30, 60, 90];
+
+// The curve at fixed maturities, so snapshots days apart compare like for like despite expiry rolls.
+// snapshots: [{ label, atMs, expiries }] (expiries as in buildTermCurve; empty when that snapshot is missing).
+// ponytail: linear in IV between neighbouring expiries, no extrapolation; total-variance interpolation if the front gets sparse.
+function buildTermHistory(snapshots, tenors = TERM_TENORS) {
+  const at = (expiries, atMs, metric, tenor) => {
+    const pts = expiries
+      .map(e => ({ dte: (e.expiry * 1000 - atMs) / DAY_MS, v: metric(e.points) }))
+      .filter(p => p.dte > 0 && p.v != null)
+      .sort((a, b) => a.dte - b.dte);
+    for (let i = 0; i < pts.length; i++) {
+      if (pts[i].dte === tenor) return pts[i].v;
+      if (i > 0 && pts[i - 1].dte < tenor && pts[i].dte > tenor) {
+        const w = (tenor - pts[i - 1].dte) / (pts[i].dte - pts[i - 1].dte);
+        return pts[i - 1].v + w * (pts[i].v - pts[i - 1].v);
+      }
+    }
+    return null;
+  };
+  return {
+    labels: snapshots.map(s => s.label),
+    rows: tenors.map(tenor => ({
+      tenor,
+      atm: snapshots.map(s => round(at(s.expiries, s.atMs, twoSidedAtm, tenor))),
+      rr25: snapshots.map(s => round(at(s.expiries, s.atMs, riskReversal25, tenor))),
+    })),
+  };
+}
+
+// curve: { rows: buildTermCurve(...), history: buildTermHistory(...) | null }
+function formatTermCurveForAdvisor(curve) {
+  const { rows, history } = curve || {};
   if (!rows?.length) return 'Term curve unavailable (no recent full-chain smile).';
   const f = (v, signed = false) => (v == null ? 'n/a' : `${signed && v > 0 ? '+' : ''}${v}`);
+  const grid = history?.rows?.length ? [
+    '',
+    `Curve history at fixed maturities (interpolated between listed expiries; n/a = no snapshot or outside the listed range). Columns: ${history.labels.join(', ')}.`,
+    `tenor | ATM IV ${history.labels.join(' / ')} | 25Δ RR ${history.labels.join(' / ')}`,
+    ...history.rows.map(r => `${r.tenor}d | ${r.atm.map(v => f(v)).join(' / ')} | ${r.rr25.map(v => f(v, true)).join(' / ')}`),
+  ] : [];
   return [
     'Raw shape, no percentiles: every listed expiry, front to back. ATM = mean of the put and call nearest 50Δ. 25Δ RR = call IV − put IV (negative: puts richer). Δ24h compares the same expiry about 24h earlier (n/a if not listed then). Contango = ATM rising with DTE; front above back = stress.',
     'expiry | dte | ATM IV | ATM Δ24h | 25Δ RR | RR Δ24h',
     ...rows.map(r => `${r.expiry} | ${r.dte}d | ${f(r.atm_iv)} | ${f(r.atm_iv_d24h, true)} | ${f(r.rr25, true)} | ${f(r.rr25_d24h, true)}`),
+    ...grid,
   ].join('\n');
 }
 
 module.exports = {
   ivAtAbsDelta, sideAtm, zoneMetrics, riskReversal25, realizedVol, percentile, pickZoneExpiry,
-  buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor, buildTermCurve, formatTermCurveForAdvisor,
+  buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor, buildTermCurve, buildTermHistory, formatTermCurveForAdvisor,
 };

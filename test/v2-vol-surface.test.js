@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const {
   ivAtAbsDelta, sideAtm, realizedVol, percentile, pickZoneExpiry,
-  buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor, buildTermCurve, formatTermCurveForAdvisor,
+  buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor, buildTermCurve, buildTermHistory, formatTermCurveForAdvisor,
 } = require('../bot/vol-surface');
 
 const HOUR = 3_600_000;
@@ -168,8 +168,31 @@ test('term curve lists every live expiry front to back with same-expiry 24h chan
   assert.deepEqual(rows.map(r => r.dte), [6, 60]);
   assert.deepEqual(rows[0], { expiry: '2026-10-02', dte: 6, atm_iv: 39, atm_iv_d24h: -2, rr25: -2, rr25_d24h: 1 });
   assert.equal(rows[1].atm_iv_d24h, null);
-  const text = formatTermCurveForAdvisor(rows);
+  const text = formatTermCurveForAdvisor({ rows });
   assert.match(text, /2026-10-02 \| 6d \| 39 \| -2 \| -2 \| \+1/);
   assert.match(text, /2026-11-25 \| 60d \| 50 \| n\/a \| -3 \| n\/a/);
   assert.match(formatTermCurveForAdvisor(null), /unavailable/);
+});
+
+test('term history interpolates fixed maturities and leaves gaps as n/a', () => {
+  const pts = (atm, rr) => [
+    { type: 'P', delta: -0.5, iv: atm }, { type: 'C', delta: 0.5, iv: atm },
+    { type: 'P', delta: -0.25, iv: 50 }, { type: 'C', delta: 0.25, iv: 50 + rr },
+  ];
+  const at = (atMs, list) => list.map(([days, atm, rr]) => ({ expiry: (atMs + days * DAY) / 1000, points: pts(atm, rr) }));
+  const weekAgo = NOW - 7 * DAY;
+  const history = buildTermHistory([
+    { label: 'now', atMs: NOW, expiries: at(NOW, [[5, 40, -4], [21, 48, -2], [63, 52, 0]]) },
+    { label: '7d ago', atMs: weekAgo, expiries: at(weekAgo, [[12, 44, -1], [70, 50, 1]]) },
+    { label: '3d ago', atMs: NaN, expiries: [] },
+  ], [7, 14, 90]);
+  assert.deepEqual(history.labels, ['now', '7d ago', '3d ago']);
+  // now, 7d: 40 + (2/16)*8 = 41; 7d ago, 7d: before the first listed expiry, so n/a.
+  assert.deepEqual(history.rows[0], { tenor: 7, atm: [41, null, null], rr25: [-3.8, null, null] });
+  // 7d ago, 14d: 44 + (2/58)*6 = 44.2.
+  assert.deepEqual(history.rows[1].atm, [44.5, 44.2, null]);
+  assert.deepEqual(history.rows[2].atm, [null, null, null]);
+  const text = formatTermCurveForAdvisor({ rows: buildTermCurve(at(NOW, [[5, 40, -4]]), NOW), history });
+  assert.match(text, /7d \| 41 \/ n\/a \/ n\/a \| -3\.8 \/ n\/a \/ n\/a/);
+  assert.match(text, /Columns: now, 7d ago, 3d ago/);
 });

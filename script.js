@@ -141,7 +141,7 @@ const {
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
 const { buildSmileRows, SMILE_SNAPSHOT_INTERVAL_MS } = require('./bot/iv-smile');
 const { assessRichness } = require('./bot/iv-richness');
-const { buildVolSurface, buildSurfaceHistory, formatVolSurfaceForAdvisor, buildTermCurve, formatTermCurveForAdvisor } = require('./bot/vol-surface');
+const { buildVolSurface, buildSurfaceHistory, formatVolSurfaceForAdvisor, buildTermCurve, buildTermHistory, formatTermCurveForAdvisor } = require('./bot/vol-surface');
 const { buildMarketEvidence, formatMarketEvidence, buildSmileHistory, SMILE_FEATURES } = require('./bot/market-evidence');
 let lastSmileSnapshotAt = 0;
 const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
@@ -4361,7 +4361,7 @@ const writeRawEvidencePacket = (journalEntries = []) => {
     '## Volatility Surface (computed; authoritative for IV levels, percentiles and 24h/7d moves)',
     formatVolSurfaceForAdvisor(buildStoredVolSurface()),
     '',
-    '## Term Curve (every expiry; raw ATM and 25Δ skew shape with 24h change)',
+    '## Term Curve (every expiry; raw ATM and 25Δ skew shape with 24h change, plus fixed-maturity history over 7d)',
     formatTermCurveForAdvisor(buildStoredTermCurve()),
     '',
     '## Shared liquidity and smile history (source validation, coverage, 30d/90d context)',
@@ -5713,7 +5713,7 @@ The journal (observation, hypothesis, regime_note) should track:
 - Is OTM put protection getting cheaper or more expensive? (IV environment, skew, put delta-value scores)
 - Is call premium rich or thin? (call IV, premium/delta ratios, term structure)
 - How is the volatility surface moving? Use snapshot.volatility_surface for IV levels, percentiles and 24h/7d moves in both trade zones; cite its numbers instead of inferring IV from scores, and relate the moves to spot, OI and funding.
-- What shape is the term curve in? Use snapshot.term_curve (every expiry's ATM IV and 25Δ RR with 24h change): is the front lifting alone or the whole curve, is skew fear short-dated or long-dated, and does the shape match an earlier regime you have noted?
+- What shape is the term curve in? Use snapshot.term_curve (every expiry's ATM IV and 25Δ RR with 24h change, plus the 7d-90d curve now, 1d, 3d and 7d ago): is the front lifting alone or the whole curve, is skew fear short-dated or long-dated, is the curve steepening, flattening or inverting over the week, and does the shape match an earlier regime you have noted?
 - Are macro conditions building toward a crash? (flows, leverage, funding, OI structure)
 - What regime are we in and what does it mean for BOTH put buying AND call selling?
 - Where is the cheap convexity in the put chain right now?
@@ -6230,16 +6230,25 @@ const buildStoredVolSurface = () => {
   }
 };
 
-// Full ATM term curve from the newest stored smile, against the snapshot ~24h before it (within 1h).
+// Full ATM term curve from the newest stored smile, plus the fixed-maturity curve 1d, 3d and 7d
+// before it. A past snapshot counts only if it lies within 1h of its target time.
 const buildStoredTermCurve = () => {
   try {
     const rows = db?.getLatestSmileSnapshot?.() || [];
     const atMs = rows.length ? Date.parse(rows[0].timestamp) : NaN;
     if (!Number.isFinite(atMs) || Date.now() - atMs > 60 * 60 * 1000) return null;
-    const pastRows = db.getSmileSnapshotAtOrBefore?.({ at: new Date(atMs - 86_400_000).toISOString() }) || [];
-    const pastMs = pastRows.length ? Date.parse(pastRows[0].timestamp) : NaN;
-    const past = atMs - 86_400_000 - pastMs <= 60 * 60 * 1000 ? smileRowsToSurfaceExpiries(pastRows) : [];
-    return buildTermCurve(smileRowsToSurfaceExpiries(rows), atMs, past);
+    const snapshotAgo = (days) => {
+      const target = atMs - days * 86_400_000;
+      const pastRows = db.getSmileSnapshotAtOrBefore?.({ at: new Date(target).toISOString() }) || [];
+      const pastMs = pastRows.length ? Date.parse(pastRows[0].timestamp) : NaN;
+      return { atMs: pastMs, expiries: target - pastMs <= 60 * 60 * 1000 ? smileRowsToSurfaceExpiries(pastRows) : [] };
+    };
+    const now = smileRowsToSurfaceExpiries(rows);
+    const ago = { '1d ago': snapshotAgo(1), '3d ago': snapshotAgo(3), '7d ago': snapshotAgo(7) };
+    return {
+      rows: buildTermCurve(now, atMs, ago['1d ago'].expiries),
+      history: buildTermHistory([{ label: 'now', atMs, expiries: now }, ...Object.entries(ago).map(([label, s]) => ({ label, ...s }))]),
+    };
   } catch (e) {
     console.log('📈 Stored term curve unavailable:', e.message);
     return null;
