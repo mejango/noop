@@ -1425,6 +1425,11 @@ const stmts = {
     WHERE timestamp = (SELECT MAX(timestamp) FROM iv_smile_snapshots)
   `),
 
+  getSmileSnapshotAtOrBefore: db.prepare(`
+    SELECT timestamp, expiry, points FROM iv_smile_snapshots
+    WHERE timestamp = (SELECT MAX(timestamp) FROM iv_smile_snapshots WHERE timestamp <= @at)
+  `),
+
   getInstrumentIvNear: db.prepare(`
     SELECT implied_vol, timestamp FROM options_snapshots
     WHERE instrument_name = @instrument AND implied_vol > 0 AND timestamp <= @at

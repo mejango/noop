@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const {
   ivAtAbsDelta, sideAtm, realizedVol, percentile, pickZoneExpiry,
-  buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor,
+  buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor, buildTermCurve, formatTermCurveForAdvisor,
 } = require('../bot/vol-surface');
 
 const HOUR = 3_600_000;
@@ -151,4 +151,25 @@ test('production surface history loads the full record once, then appends only n
   assert.equal(second.length, first.length + 1);
   assert.deepEqual(smileQueries[1], { since: '2026-10-01T10:00:00.000Z', before: '2026-10-01T10:59:59.999Z' });
   assert.equal(candidateLoads, 1, 'pre-smile candidate history loads once');
+});
+
+test('term curve lists every live expiry front to back with same-expiry 24h changes', () => {
+  const pts = (atm, put25, call25) => [
+    { type: 'P', delta: -0.48, iv: atm + 1 }, { type: 'C', delta: 0.52, iv: atm - 1 },
+    { type: 'P', delta: -0.2, iv: put25 - 1 }, { type: 'P', delta: -0.3, iv: put25 + 1 },
+    { type: 'C', delta: 0.2, iv: call25 - 1 }, { type: 'C', delta: 0.3, iv: call25 + 1 },
+  ];
+  const expired = (NOW - DAY) / 1000;
+  const rows = buildTermCurve([
+    { expiry: putExpiry, points: pts(50, 55, 52) },
+    { expiry: callExpiry, points: pts(39, 42, 40) },
+    { expiry: expired, points: pts(30, 30, 30) },
+  ], NOW, [{ expiry: callExpiry, points: pts(41, 43, 40) }]);
+  assert.deepEqual(rows.map(r => r.dte), [6, 60]);
+  assert.deepEqual(rows[0], { expiry: '2026-10-02', dte: 6, atm_iv: 39, atm_iv_d24h: -2, rr25: -2, rr25_d24h: 1 });
+  assert.equal(rows[1].atm_iv_d24h, null);
+  const text = formatTermCurveForAdvisor(rows);
+  assert.match(text, /2026-10-02 \| 6d \| 39 \| -2 \| -2 \| \+1/);
+  assert.match(text, /2026-11-25 \| 60d \| 50 \| n\/a \| -3 \| n\/a/);
+  assert.match(formatTermCurveForAdvisor(null), /unavailable/);
 });

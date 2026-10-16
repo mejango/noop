@@ -202,7 +202,41 @@ function formatVolSurfaceForAdvisor(s) {
   ].join('\n');
 }
 
+// Every listed expiry's ATM IV and 25Δ risk reversal, with the change since the same expiry ~24h earlier.
+// ATM = mean of the put and call nearest 50Δ, matching the dashboard's term-structure chart.
+// expiries / pastExpiries: [{ expiry (unix s), points: [{type, delta, iv (vol pts)}] }]; pastExpiries may be empty.
+function buildTermCurve(expiries, atMs, pastExpiries = []) {
+  const atm = (pts) => {
+    const sides = [sideAtm(pts, 'P'), sideAtm(pts, 'C')].filter(v => v != null);
+    return sides.length ? sides.reduce((s, v) => s + v, 0) / sides.length : null;
+  };
+  const past = new Map(pastExpiries.map(e => [e.expiry, e.points]));
+  const diff = (now, then) => (now != null && then != null ? round(now - then) : null);
+  return expiries
+    .filter(e => e.expiry * 1000 > atMs)
+    .sort((a, b) => a.expiry - b.expiry)
+    .map(e => {
+      const a = atm(e.points), rr = riskReversal25(e.points), prev = past.get(e.expiry);
+      return {
+        expiry: new Date(e.expiry * 1000).toISOString().slice(0, 10),
+        dte: round((e.expiry * 1000 - atMs) / DAY_MS, 1),
+        atm_iv: round(a), atm_iv_d24h: prev ? diff(a, atm(prev)) : null,
+        rr25: round(rr), rr25_d24h: prev ? diff(rr, riskReversal25(prev)) : null,
+      };
+    });
+}
+
+function formatTermCurveForAdvisor(rows) {
+  if (!rows?.length) return 'Term curve unavailable (no recent full-chain smile).';
+  const f = (v, signed = false) => (v == null ? 'n/a' : `${signed && v > 0 ? '+' : ''}${v}`);
+  return [
+    'Raw shape, no percentiles: every listed expiry, front to back. ATM = mean of the put and call nearest 50Δ. 25Δ RR = call IV − put IV (negative: puts richer). Δ24h compares the same expiry about 24h earlier (n/a if not listed then). Contango = ATM rising with DTE; front above back = stress.',
+    'expiry | dte | ATM IV | ATM Δ24h | 25Δ RR | RR Δ24h',
+    ...rows.map(r => `${r.expiry} | ${r.dte}d | ${f(r.atm_iv)} | ${f(r.atm_iv_d24h, true)} | ${f(r.rr25, true)} | ${f(r.rr25_d24h, true)}`),
+  ].join('\n');
+}
+
 module.exports = {
   ivAtAbsDelta, sideAtm, zoneMetrics, riskReversal25, realizedVol, percentile, pickZoneExpiry,
-  buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor,
+  buildSurfaceHistory, buildVolSurface, formatVolSurfaceForAdvisor, buildTermCurve, formatTermCurveForAdvisor,
 };

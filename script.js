@@ -141,7 +141,7 @@ const {
 const { isBetterBuyPutCandidate, computeMatchedPutCallSkew } = require('./bot/option-market-quality');
 const { buildSmileRows, SMILE_SNAPSHOT_INTERVAL_MS } = require('./bot/iv-smile');
 const { assessRichness } = require('./bot/iv-richness');
-const { buildVolSurface, buildSurfaceHistory, formatVolSurfaceForAdvisor } = require('./bot/vol-surface');
+const { buildVolSurface, buildSurfaceHistory, formatVolSurfaceForAdvisor, buildTermCurve, formatTermCurveForAdvisor } = require('./bot/vol-surface');
 const { buildMarketEvidence, formatMarketEvidence, buildSmileHistory, SMILE_FEATURES } = require('./bot/market-evidence');
 let lastSmileSnapshotAt = 0;
 const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/funding-rates');
@@ -4361,6 +4361,9 @@ const writeRawEvidencePacket = (journalEntries = []) => {
     '## Volatility Surface (computed; authoritative for IV levels, percentiles and 24h/7d moves)',
     formatVolSurfaceForAdvisor(buildStoredVolSurface()),
     '',
+    '## Term Curve (every expiry; raw ATM and 25Δ skew shape with 24h change)',
+    formatTermCurveForAdvisor(buildStoredTermCurve()),
+    '',
     '## Shared liquidity and smile history (source validation, coverage, 30d/90d context)',
     formatMarketEvidence(buildStoredMarketEvidence()),
     '',
@@ -5592,6 +5595,8 @@ const generateJournalEntries = async (tickSummary, botData) => {
       // The trade zones' ATM, wings, risk reversal, term slope and IV − realized, each with its
       // all-history percentile and 24h/7d move: the dashboard's smile panel, as the journal's own evidence.
       volatility_surface: formatVolSurfaceForAdvisor(buildStoredVolSurface()),
+      // Every expiry's ATM and 25Δ RR, raw: the dashboard's term-structure and RR charts, for shape reading.
+      term_curve: formatTermCurveForAdvisor(buildStoredTermCurve()),
       market_history: buildStoredMarketEvidence(),
       put_price_divergence: putPriceDivergence,
       recent_orders: recentOrders.map(o => ({
@@ -5708,6 +5713,7 @@ The journal (observation, hypothesis, regime_note) should track:
 - Is OTM put protection getting cheaper or more expensive? (IV environment, skew, put delta-value scores)
 - Is call premium rich or thin? (call IV, premium/delta ratios, term structure)
 - How is the volatility surface moving? Use snapshot.volatility_surface for IV levels, percentiles and 24h/7d moves in both trade zones; cite its numbers instead of inferring IV from scores, and relate the moves to spot, OI and funding.
+- What shape is the term curve in? Use snapshot.term_curve (every expiry's ATM IV and 25Δ RR with 24h change): is the front lifting alone or the whole curve, is skew fear short-dated or long-dated, and does the shape match an earlier regime you have noted?
 - Are macro conditions building toward a crash? (flows, leverage, funding, OI structure)
 - What regime are we in and what does it mean for BOTH put buying AND call selling?
 - Where is the cheap convexity in the put chain right now?
@@ -6220,6 +6226,22 @@ const buildStoredVolSurface = () => {
     return buildVolSurfaceAt(smileRowsToSurfaceExpiries(rows), atMs);
   } catch (e) {
     console.log('📈 Stored vol surface unavailable:', e.message);
+    return null;
+  }
+};
+
+// Full ATM term curve from the newest stored smile, against the snapshot ~24h before it (within 1h).
+const buildStoredTermCurve = () => {
+  try {
+    const rows = db?.getLatestSmileSnapshot?.() || [];
+    const atMs = rows.length ? Date.parse(rows[0].timestamp) : NaN;
+    if (!Number.isFinite(atMs) || Date.now() - atMs > 60 * 60 * 1000) return null;
+    const pastRows = db.getSmileSnapshotAtOrBefore?.({ at: new Date(atMs - 86_400_000).toISOString() }) || [];
+    const pastMs = pastRows.length ? Date.parse(pastRows[0].timestamp) : NaN;
+    const past = atMs - 86_400_000 - pastMs <= 60 * 60 * 1000 ? smileRowsToSurfaceExpiries(pastRows) : [];
+    return buildTermCurve(smileRowsToSurfaceExpiries(rows), atMs, past);
+  } catch (e) {
+    console.log('📈 Stored term curve unavailable:', e.message);
     return null;
   }
 };
