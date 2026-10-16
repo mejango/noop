@@ -4140,6 +4140,10 @@ const getWikiLintSchedule = (meta = readWikiMeta(), nowMs = Date.now()) => {
 };
 
 const ensureWikiSupportFiles = () => {
+  // schema.md is code-owned: refresh the volume copy from the repo so prompts never read a stale schema.
+  const repoSchema = path.join(__dirname, 'knowledge', 'schema.md');
+  const wikiSchema = path.join(WIKI_DIR, 'schema.md');
+  if (repoSchema !== wikiSchema && fs.existsSync(repoSchema)) fs.copyFileSync(repoSchema, wikiSchema);
   if (!fs.existsSync(WIKI_INDEX_PATH)) {
     fs.writeFileSync(WIKI_INDEX_PATH, '# Knowledge Index\n\nSystem-maintained index. Awaiting first refresh.\n');
   }
