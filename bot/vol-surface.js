@@ -270,7 +270,7 @@ function formatTermCurveForAdvisor(curve) {
     ...history.rows.map(r => `${r.tenor}d | ${r.atm.map(v => f(v)).join(' / ')} | ${r.rr25.map(v => f(v, true)).join(' / ')}`),
   ] : [];
   return [
-    'Raw shape, no percentiles: every listed expiry, front to back. ATM = mean of the put and call nearest 50Δ. 25Δ RR = call IV − put IV (negative: puts richer). Δ24h compares the same expiry about 24h earlier (n/a if not listed then). Contango = ATM rising with DTE; front above back = stress.',
+    'Raw shape, no percentiles, in annualized vol points: every listed expiry, front to back; the bot trades the call-zone and put-zone expiries named in volatility_surface, the rest is context. ATM = mean of the put and call nearest 50Δ, so it can differ slightly from volatility_surface\'s one-sided zone ATM for the same expiry. 25Δ RR = call IV − put IV (negative: puts richer). Δ24h compares the same expiry about 24h earlier (n/a if not listed then). Contango = ATM rising with DTE; front above back = stress.',
     'expiry | dte | ATM IV | ATM Δ24h | 25Δ RR | RR Δ24h',
     ...rows.map(r => `${r.expiry} | ${r.dte}d | ${f(r.atm_iv)} | ${f(r.atm_iv_d24h, true)} | ${f(r.rr25, true)} | ${f(r.rr25_d24h, true)}`),
     ...grid,
