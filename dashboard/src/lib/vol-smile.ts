@@ -33,7 +33,13 @@ export function deltaX(p: Pick<SmilePoint, 'type' | 'delta'>) {
   return p.type === 'P' ? d - 0.5 : 0.5 - d;
 }
 
-// OTM-only smile from one expiry's get_tickers map; deep wings (<2Δ) are dropped as noise.
+// Recorded and priced down to 0.5Δ (keep in sync with bot/iv-smile.js) so deep-wing pricing history
+// covers every hour; the smile chart draws only >=2Δ, where quotes are meaningful.
+export const SMILE_MIN_ABS_DELTA = 0.005;
+export const CHART_MIN_ABS_DELTA = 0.02;
+export const chartExpiry = (e: SmileExpiry): SmileExpiry => ({ ...e, points: e.points.filter(p => Math.abs(p.delta) >= CHART_MIN_ABS_DELTA) });
+
+// OTM-only smile from one expiry's get_tickers map.
 export function buildExpiry(expiry: number, tickers: Record<string, RawTicker>, now = Date.now()): SmileExpiry | null {
   const points: SmilePoint[] = [];
   const forwards: number[] = [];
@@ -48,7 +54,7 @@ export function buildExpiry(expiry: number, tickers: Record<string, RawTicker>, 
     const strike = num(strikeStr), delta = num(op?.d), iv = num(op?.i);
     if (!strike || delta == null || !iv || iv <= 0 || !f) continue;
     const type = typeStr === 'P' ? 'P' : 'C';
-    if ((type === 'P') !== (strike < f) || Math.abs(delta) < 0.02) continue;
+    if ((type === 'P') !== (strike < f) || Math.abs(delta) < SMILE_MIN_ABS_DELTA) continue;
     const bi = num(op?.bi), ai = num(op?.ai);
     points.push({
       name, strike, type, delta, iv: iv * 100,

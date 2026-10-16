@@ -3,7 +3,9 @@
 // Compact full-chain smile snapshots for the dashboard's volatility-smile playback.
 // Point tuple layout (keep in sync with dashboard/src/lib/vol-smile.ts `fromCompact`):
 //   [strike, isCall (0|1), delta, iv, bidIv|null, askIv|null, oi]   — IVs as decimals
-// Same selection as the live chart: OTM vs the expiry's forward, |delta| >= 0.02.
+// OTM vs the expiry's forward, |delta| >= 0.005 (keep in sync with SMILE_MIN_ABS_DELTA in
+// dashboard/src/lib/vol-smile.ts). Deep wings must be recorded every hour or their pricing history
+// only holds the high-IV hours when delta crossed the old 0.02 cut; the chart still drops <2Δ itself.
 
 const SMILE_SNAPSHOT_INTERVAL_MS = 15 * 60 * 1000;
 
@@ -25,7 +27,7 @@ function buildSmileRows(tickerMap, expiryByDate) {
     const strike = num(strikeStr), delta = num(op?.d), iv = num(op?.i);
     if (!strike || delta == null || !(iv > 0) || !(f > 0)) continue;
     const isPut = typeStr === 'P';
-    if (isPut !== (strike < f) || Math.abs(delta) < 0.02) continue;
+    if (isPut !== (strike < f) || Math.abs(delta) < 0.005) continue;
     const bi = num(op?.bi), ai = num(op?.ai);
     entry.points.push([strike, isPut ? 0 : 1, r4(delta), r4(iv), bi > 0 ? r4(bi) : null, ai > 0 ? r4(ai) : null, num(t?.stats?.oi) ?? 0]);
   }

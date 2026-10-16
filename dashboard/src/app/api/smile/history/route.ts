@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSmileSnapshots, getSmileSnapshotTimestamps } from '@/lib/db';
+import { CHART_MIN_ABS_DELTA } from '@/lib/vol-smile';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,7 +18,7 @@ export function GET(request: Request) {
   const frames = new Map<string, { t: string; spot: number | null; expiries: unknown[] }>();
   for (const r of getSmileSnapshots(picked)) {
     const f = frames.get(r.timestamp) ?? { t: r.timestamp, spot: r.spot, expiries: [] };
-    f.expiries.push({ expiry: r.expiry, forward: r.forward, spot: r.spot, points: JSON.parse(r.points) });
+    f.expiries.push({ expiry: r.expiry, forward: r.forward, spot: r.spot, points: (JSON.parse(r.points) as (number | null)[][]).filter(t => Math.abs(Number(t[2])) >= CHART_MIN_ABS_DELTA) });
     frames.set(r.timestamp, f);
   }
   return NextResponse.json({ range, frames: Array.from(frames.values()) });

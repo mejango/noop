@@ -11,12 +11,12 @@ const mod = { exports: {} };
 new Function('module', 'exports', ts.transpileModule(src, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText)(mod, mod.exports);
-const { buildExpiry, ivAtDelta, deltaX, expiryStats, fromCompact } = mod.exports;
+const { buildExpiry, ivAtDelta, deltaX, expiryStats, fromCompact, chartExpiry } = mod.exports;
 const { buildSmileRows } = require('../bot/iv-smile');
 
 const tick = (d, i, f = '2000') => ({ option_pricing: { d: String(d), i: String(i), f, bi: String(i - 0.01), ai: String(i + 0.01) }, stats: { oi: '5' } });
 
-test('buildExpiry keeps OTM wings only and drops sub-2Δ noise', () => {
+test('buildExpiry keeps OTM wings down to 0.5Δ; the chart view drops sub-2Δ', () => {
   const e = buildExpiry(1_900_000_000, {
     'ETH-X-1600-P': tick(-0.05, 0.70),
     'ETH-X-1800-P': tick(-0.25, 0.60),
@@ -24,9 +24,11 @@ test('buildExpiry keeps OTM wings only and drops sub-2Δ noise', () => {
     'ETH-X-1800-C': tick(0.75, 0.60),  // ITM call
     'ETH-X-2200-C': tick(0.25, 0.52),
     'ETH-X-2600-C': tick(0.06, 0.58),
-    'ETH-X-4000-C': tick(0.01, 0.95),  // deep wing
+    'ETH-X-4000-C': tick(0.01, 0.95),  // deep wing: priced and recorded, not charted
+    'ETH-X-6000-C': tick(0.003, 1.4),  // sub-0.5Δ noise
   }, 1_899_000_000_000);
-  assert.deepEqual(e.points.map(p => p.name), ['ETH-X-1600-P', 'ETH-X-1800-P', 'ETH-X-2200-C', 'ETH-X-2600-C']);
+  assert.deepEqual(e.points.map(p => p.name), ['ETH-X-1600-P', 'ETH-X-1800-P', 'ETH-X-2200-C', 'ETH-X-2600-C', 'ETH-X-4000-C']);
+  assert.deepEqual(chartExpiry(e).points.map(p => p.name), ['ETH-X-1600-P', 'ETH-X-1800-P', 'ETH-X-2200-C', 'ETH-X-2600-C']);
   assert.equal(e.forward, 2000);
   assert.equal(e.points[0].iv, 70);
   assert.ok(Math.abs(e.dte - 1_000_000 / 86_400) < 1e-9);
