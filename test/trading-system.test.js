@@ -7296,5 +7296,24 @@ describe('wiki findings feed back into ingest', () => {
 // Summary
 // ============================================================================
 
+const lessonMarkerStart = SCRIPT_SOURCE.indexOf('const getStructuredWikiMarkers');
+const lessonMarkerEnd = SCRIPT_SOURCE.indexOf('const refreshWikiIndex', lessonMarkerStart);
+const { getDroppedLessonMarkers } = new Function(`
+  ${SCRIPT_SOURCE.slice(lessonMarkerStart, lessonMarkerEnd)}
+  return { getDroppedLessonMarkers };
+`)();
+
+describe('Strategy page rewrites', () => {
+  const active = new Set(['[lesson:short_call.exit_insurance]', '[lesson:process.decision_quality]']);
+  const old = 'Long page [lesson:short_call.exit_insurance] and [lesson:process.decision_quality] and [lesson:retired.rule] [tick:#12]';
+  test('a shorter rewrite keeping every active lesson passes', () => {
+    assert.deepStrictEqual(getDroppedLessonMarkers(old, 'Short [lesson:process.decision_quality] [LESSON:short_call.exit_insurance]', active), []);
+  });
+  test('dropping an active lesson is reported; retired lessons and ticks may go', () => {
+    assert.deepStrictEqual(getDroppedLessonMarkers(old, 'Short [lesson:process.decision_quality]', active), ['[lesson:short_call.exit_insurance]']);
+  });
+});
+
 console.log(`\nResults: ${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);
+

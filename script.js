@@ -4177,6 +4177,12 @@ const getStructuredWikiMarkers = (content = '') => new Set(
     .map((value) => value.toLowerCase()),
 );
 
+// Active [lesson:key] markers on the old page that the rewrite no longer carries.
+const getDroppedLessonMarkers = (oldContent, newContent, activeLessonMarkers) => {
+  const kept = getStructuredWikiMarkers(newContent);
+  return [...getStructuredWikiMarkers(oldContent)].filter((m) => activeLessonMarkers.has(m) && !kept.has(m));
+};
+
 const refreshWikiIndex = () => {
   const meta = readWikiMeta();
   const pageMeta = getWikiPageMetaMap(meta);
@@ -4960,9 +4966,17 @@ If no pages need updating, output: <no_updates/>`;
           continue;
         }
 
-        // Safety: reject updates that shrink page by > 50%
         const existingContent = pages[pagePath] || '';
-        if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) {
+        // Strategy pages are views of canonical Learning records, so loss is checkable exactly:
+        // any length is fine (rule 6 asks them to consolidate) as long as no active lesson drops out.
+        if (pagePath.startsWith('strategy/')) {
+          const dropped = getDroppedLessonMarkers(existingContent, newContent, availableLessonMarkers);
+          if (dropped.length > 0) {
+            reject(pagePath, `drops active lesson(s) ${dropped.slice(0, 5).join(', ')}`);
+            continue;
+          }
+        // Research pages have no record to check history against: reject a rewrite that halves one.
+        } else if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) {
           reject(pagePath, `shrinks by >50% (${existingContent.length} -> ${newContent.length})`);
           continue;
         }
