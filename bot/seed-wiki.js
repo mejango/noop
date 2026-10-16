@@ -129,9 +129,10 @@ Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(
   console.log('📚 Sending to Claude for synthesis...');
 
   try {
-    const model = process.env.ANTHROPIC_SONNET_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+    const model = process.env.ANTHROPIC_SONNET_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5';
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model,
+      thinking: { type: 'between_tools' },
       max_tokens: 8192,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -143,7 +144,7 @@ Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(
       timeout: 180000,
     });
 
-    const text = response.data?.content?.[0]?.text || '';
+    const text = (response.data?.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
 
     // Parse wiki_page blocks
     const pageRegex = /<wiki_page\s+path="([^"]+)">([\s\S]*?)<\/wiki_page>/g;

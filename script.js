@@ -105,6 +105,13 @@
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+// API errors carry their reason in the body ("credit balance is too low", "model not found");
+// append it so every "Request failed with status code 400" log line says why.
+axios.interceptors.response.use(null, (err) => {
+  const detail = err.response?.data?.error?.message;
+  if (detail && !err.message.includes(detail)) err.message += `: ${detail}`;
+  return Promise.reject(err);
+});
 const { fetchV4OnchainLiquidity } = require('./bot/v4-onchain-liquidity');
 const { fetchV3OnchainLiquidity } = require('./bot/v3-onchain-liquidity');
 const { refreshDexVolume, volumeSummary } = require('./bot/dex-volume');
@@ -3138,7 +3145,7 @@ Output ONLY this JSON:
 
       const response = await axios.post('https://api.anthropic.com/v1/messages', {
         model: ANTHROPIC_SONNET_MODEL,
-        thinking: { type: 'disabled' },
+        thinking: { type: 'between_tools' },
         max_tokens: 512,
         messages: [{ role: 'user', content: reviewPrompt }],
       }, {
@@ -3211,7 +3218,7 @@ Output JSON:
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
-      thinking: { type: 'disabled' },
+      thinking: { type: 'between_tools' },
       max_tokens: 500,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -3694,7 +3701,7 @@ Output JSON only:
 
         const response = await axios.post('https://api.anthropic.com/v1/messages', {
           model: ANTHROPIC_SONNET_MODEL,
-          thinking: { type: 'disabled' },
+          thinking: { type: 'between_tools' },
           max_tokens: 700,
           messages: [{ role: 'user', content: reviewPrompt }],
         }, {
@@ -3901,7 +3908,7 @@ Output JSON only:
 
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
-      thinking: { type: 'disabled' },
+      thinking: { type: 'between_tools' },
       max_tokens: 1800,
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -4705,7 +4712,7 @@ Generate ONLY these ${pagesNeedingSeed.length} page(s): ${pagesNeedingSeed.join(
 
   const response = await axios.post('https://api.anthropic.com/v1/messages', {
     model: ANTHROPIC_SONNET_MODEL,
-    thinking: { type: 'disabled' },
+    thinking: { type: 'between_tools' },
     max_tokens: 8192,
     messages: [{ role: 'user', content: prompt }],
   }, {
@@ -4876,7 +4883,7 @@ If no pages need updating, output: <no_updates/>`;
   const requestIngestBatch = async (batchPages) => {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
-      thinking: { type: 'disabled' },
+      thinking: { type: 'between_tools' },
       // 4096 truncated every run and silently applied nothing; 16384 fit only ~5 rewrites.
       max_tokens: 32000,
       messages: [{ role: 'user', content: buildIngestPrompt(batchPages) }],
@@ -5276,7 +5283,7 @@ Assign page_to_fix to the page whose content should change. For a cross-page con
   try {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
-      thinking: { type: 'disabled' },
+      thinking: { type: 'between_tools' },
       max_tokens: 4096, // up to 28 findings, each now carrying a verbatim quote
       messages: [{ role: 'user', content: prompt }],
     }, {
@@ -5889,7 +5896,7 @@ const callOpenAI = async (systemPrompt, userPrompt, {
   }
 };
 
-const ANTHROPIC_SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-5';
+const ANTHROPIC_SONNET_MODEL = process.env.ANTHROPIC_SONNET_MODEL || process.env.ANTHROPIC_MODEL || 'claude-sonnet-5-5';
 const ANTHROPIC_STRATEGY_MODEL = process.env.ANTHROPIC_STRATEGY_MODEL || 'claude-opus-5-5';
 // Opus 5.5 always thinks and defaults to medium effort. At max, thinking consumed the whole
 // 64k max_tokens with no text in 3 of 4 scheduled Step 1 runs (Sep 29: stop_reason=max_tokens,
@@ -5975,7 +5982,7 @@ const callAnthropicWithMinuteBoundaryRetry = async ({
   timeout = 120000,
   spreadAfterBoundary = false,
   maxServerErrorRetries = 2,
-  thinking = { type: 'disabled' },
+  thinking = { type: 'between_tools' },
   effort = null,
 }) => {
   const attemptCall = () => axios.post('https://api.anthropic.com/v1/messages', {
@@ -5983,6 +5990,8 @@ const callAnthropicWithMinuteBoundaryRetry = async ({
     max_tokens: maxTokens,
     thinking,
     ...(effort ? { output_config: { effort } } : {}),
+    // A safety-classifier decline reruns on a fallback model inside the same call (adaptive strategy calls only).
+    ...(thinking.type === 'adaptive' ? { fallbacks: 'default' } : {}),
     system,
     messages,
   }, {
@@ -5990,6 +5999,7 @@ const callAnthropicWithMinuteBoundaryRetry = async ({
       'x-api-key': process.env.ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
       'content-type': 'application/json',
+      ...(thinking.type === 'adaptive' ? { 'anthropic-beta': 'server-side-fallback-2026-07-01' } : {}),
     },
     timeout,
   });
@@ -11768,7 +11778,7 @@ JSON only: { "confirm": true/false, "order_type": "ioc"|"gtc"|"post_only"|null, 
       } else try {
         const anthropicResp = await axios.post('https://api.anthropic.com/v1/messages', {
           model: ANTHROPIC_SONNET_MODEL,
-          thinking: { type: 'disabled' },
+          thinking: { type: 'between_tools' },
           max_tokens: 1024,
           system: `You are a Spitznagel-style risk advisor. Confirm trades that are disciplined and arithmetic. For buy_put, assess overpayment through the approved PUT EDGE price contract at the proposed bid. Reject concrete price-contract or risk-constraint failures.
 ${getConfirmationScopePrompt()}
