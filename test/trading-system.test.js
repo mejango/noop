@@ -4863,7 +4863,7 @@ describe('Fixture scenario: exit monitoring for put rolling', () => {
     assert.strictEqual(covered.allowed, true);
   });
 
-  test('roll_protection holds the ticket when the bid recovers less than 40% of cost', () => {
+  test('roll_protection holds the ticket when the bid recovers less than 20% of cost', () => {
     const position = { instrument_name: 'ETH-20991226-1300-P', amount: 2.72, direction: 'long', avg_entry_price: 20.20 };
     const longerPut = { instrument_name: 'ETH-20991231-1500-P', amount: 10, direction: 'long', avg_entry_price: 26.81 };
     const criteria = { put_exit_intent: 'roll_protection' };
@@ -4871,7 +4871,11 @@ describe('Fixture scenario: exit monitoring for put rolling', () => {
       { dte: 19, unrealized_pnl_pct: -89.6, execution_price: 2.10 },
       { criteria, position, positions: [position, longerPut], plannedSellAmount: 2.72 });
     assert.strictEqual(pennies.allowed, false);
-    assert.match(pennies.reason, /recovers less than 40%/);
+    assert.match(pennies.reason, /recovers less than 20%/);
+    const quarter = getSellPutProtectionGate({ action: 'sell_put' },
+      { dte: 19, unrealized_pnl_pct: -75, execution_price: 5.05 },
+      { criteria, position, positions: [position, longerPut], plannedSellAmount: 2.72 });
+    assert.strictEqual(quarter.allowed, true, 'a 25% recovery clears the 20% floor');
     const recovering = getSellPutProtectionGate({ action: 'sell_put' },
       { dte: 19, unrealized_pnl_pct: -25, execution_price: 15.15 },
       { criteria, position, positions: [position, longerPut], plannedSellAmount: 2.72 });

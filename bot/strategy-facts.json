@@ -22,7 +22,7 @@
   "call_buyback_profit_threshold_pct": 60,
   "put_monetization_profit_threshold_pct": 1000,
   "put_monetization_max_tranche_fraction": 0.25,
-  "put_roll_min_recovery_pct": 40,
+  "put_roll_min_recovery_pct": 20,
   "put_monetization_ladder_pct": [
     1000,
     1500,
