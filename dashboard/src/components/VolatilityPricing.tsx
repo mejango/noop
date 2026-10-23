@@ -52,8 +52,12 @@ function QuoteSide({ label, quote, unavailable }: { label: 'Mark' | 'Bid' | 'Ask
   </div>;
 }
 
-export default function VolatilityPricing() {
-  const { data, error, loading, refetch } = usePolling('/api/volatility-pricing', EMPTY, 15_000, 8_000);
+export default function VolatilityPricing({ asset = 'ETH' }: { asset?: string }) {
+  const isEth = asset === 'ETH';
+  const pricingUrl = isEth ? '/api/volatility-pricing' : `/api/assets/${asset.toLowerCase()}/volatility-pricing`;
+  const { data: polledData, dataUrl, settledUrl, error: polledError, loading, refetch } = usePolling(pricingUrl, EMPTY, 15_000, 8_000);
+  const data = dataUrl === pricingUrl ? polledData : EMPTY;
+  const error = settledUrl === pricingUrl ? polledError : null;
   const age = useLiveTimeAgo(data.asOf);
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<'mark' | 'quotes'>('quotes');
@@ -193,7 +197,7 @@ export default function VolatilityPricing() {
                   </div>
                 </div>)}
                 {copied === 'failed' && <p role="status" className="text-xs text-amber-400">Copy unavailable.</p>}
-              </div> : <p className="text-xs text-gray-500">{data.source === 'snapshot' ? 'Live quotes refreshing…' : 'No quoted contract.'}</p>}
+              </div> : <p className="text-xs text-gray-500">{isEth && data.source === 'snapshot' ? 'Live quotes refreshing…' : 'No quoted contract.'}</p>}
           </section>}
           <div className="mt-5 space-y-2 text-xs text-gray-500 leading-relaxed">
             {data.historyFrom && data.historyTo && <p>History: {date(data.historyFrom)} – {date(data.historyTo)} (UTC)</p>}

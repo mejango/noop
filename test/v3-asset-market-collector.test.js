@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
 const { Worker } = require('node:worker_threads');
+const Database = require('better-sqlite3');
 const { collectAsset } = require('../bot/asset-market-collector');
 const { pingAssetMarkets, startAssetMarketWorkers } = require('../bot/asset-market-workers');
 
@@ -24,7 +25,7 @@ test('collects V3 market quotes on distinct pings and preserves the fullest retr
     };
     if (params.instrument_type === 'perp') return { tickers: { 'ZEC-PERP': { I: '1226.86', f: '0.0000125' } } };
     return { tickers: {
-      'ZEC-20261030-1100-P': { b: '20', a: '22', M: '21', I: '1226.86', B: '4', A: '5', option_pricing: { d: '-0.2', i: '0.7' }, stats: { oi: '10' } },
+      'ZEC-20261030-1100-P': { b: '20', a: '22', M: '21', I: '1226.86', B: '4', A: '5', option_pricing: { d: '-0.2', i: '0.7', bi: '0.65', ai: '0.75', f: '1228' }, stats: { oi: '10' } },
       'ZEC-20261030-1400-C': { b: '15', a: '17', M: '16', I: '1226.86', B: '3', A: '2', option_pricing: { d: '0.1', i: '0.6' }, stats: { oi: '12' } },
       'BTC-20261030-1400-C': { b: '1', a: '2' },
     } };
@@ -41,19 +42,79 @@ test('collects V3 market quotes on distinct pings and preserves the fullest retr
     assert.equal(summary.put_oi, 10);
     assert.equal(summary.call_iv, 0.6);
     assert.equal(options.length, 2);
+    assert.equal(options[0].bid_iv, 0.65);
+    assert.equal(options[0].ask_iv, 0.75);
+    assert.equal(options[0].forward, 1228);
     assert.equal(db.insertAssetMarketSnapshot(summary, options), true);
+    assert.deepEqual(db.db.prepare('SELECT bid_iv, ask_iv, forward FROM asset_option_quotes WHERE instrument_name = ?').get('ZEC-20261030-1100-P'),
+      { bid_iv: 0.65, ask_iv: 0.75, forward: 1228 });
     assert.equal(db.insertAssetMarketSnapshot({ ...summary, quoted_count: 0, quote_status: 'partial' }, []), false);
     assert.equal(db.db.prepare('SELECT count(*) AS n FROM asset_option_quotes').get().n, 2);
     const nextPing = await collectAsset('ZEC', post, now + 5 * 60_000);
+    nextPing.summary.short_momentum_main = 'upward';
+    nextPing.summary.medium_momentum_main = 'neutral';
     assert.equal(db.insertAssetMarketSnapshot(nextPing.summary, nextPing.options), true);
     assert.equal(db.db.prepare('SELECT count(*) AS n FROM asset_market_snapshots WHERE asset = ?').get('ZEC').n, 2);
     assert.equal(db.db.prepare('SELECT count(*) AS n FROM asset_option_quotes').get().n, 4);
     assert.equal(db.db.prepare('SELECT count(*) AS n FROM spot_prices').get().n, 0);
     assert.equal(db.db.prepare('SELECT count(*) AS n FROM options_snapshots').get().n, 0);
+    assert.deepEqual(db.db.prepare('SELECT short_momentum_main,medium_momentum_main FROM asset_market_snapshots WHERE hour = ?')
+      .get(nextPing.summary.hour), { short_momentum_main: 'upward', medium_momentum_main: 'neutral' });
+    assert.deepEqual(db.getAssetPriceHistory('ZEC', new Date(now + 10 * 60_000).toISOString()).map(row => row.price),
+      [1226.86, 1226.86]);
+    assert.deepEqual(db.getAssetPriceHistory('BTC', new Date(now + 10 * 60_000).toISOString()), []);
+    const liquidity = { asset: 'ZEC', observed_at: summary.hour, collected_at: summary.collected_at,
+      venue: 'Maya Protocol', pool_id: 'ZEC.ZEC', chain: 'Zcash', pair: 'ZEC/CACAO',
+      tvl_usd: 1000, volume_24h_usd: null, source: 'maya_midgard_balanced_pool_tvl_estimate_v1' };
+    db.insertAssetLiquiditySnapshot(liquidity);
+    db.insertAssetLiquiditySnapshot({ ...liquidity, tvl_usd: 1100 });
+    assert.deepEqual(db.db.prepare('SELECT asset,tvl_usd FROM asset_liquidity_snapshots').all(),
+      [{ asset: 'ZEC', tvl_usd: 1100 }]);
+    assert.throws(() => db.insertAssetLiquiditySnapshot({ ...liquidity, asset: 'ETH' }), /Invalid asset liquidity/);
     assert.throws(() => db.insertAssetMarketSnapshot(summary, [{ ...options[0], instrument_name: 'BTC-20261030-1100-P' }]));
     assert.equal(db.db.prepare('SELECT count(*) AS n FROM asset_option_quotes').get().n, 4);
   } finally {
     db.close();
+    delete require.cache[require.resolve('../bot/db')];
+    if (oldPath == null) delete process.env.NOOP_DB_PATH;
+    else process.env.NOOP_DB_PATH = oldPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('existing asset quote tables gain the new IV and forward fields without losing rows', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'noop-asset-migration-'));
+  const file = path.join(dir, 'noop.db');
+  const legacy = new Database(file);
+  legacy.exec(`CREATE TABLE asset_option_quotes (
+    asset TEXT NOT NULL, hour TEXT NOT NULL, instrument_name TEXT NOT NULL,
+    PRIMARY KEY (asset, hour, instrument_name)
+  );
+  INSERT INTO asset_option_quotes VALUES ('BTC', '2026-10-23T12:00:00Z', 'BTC-20261030-80000-P');
+  CREATE TABLE asset_market_snapshots (
+    asset TEXT NOT NULL, hour TEXT NOT NULL, collected_at TEXT NOT NULL, spot REAL,
+    funding_rate REAL, instrument_count INTEGER, option_count INTEGER, quoted_count INTEGER,
+    put_oi REAL, call_oi REAL, put_iv REAL, call_iv REAL, quote_status TEXT NOT NULL,
+    PRIMARY KEY(asset,hour)
+  );
+  INSERT INTO asset_market_snapshots (asset,hour,collected_at,spot,quote_status)
+    VALUES ('BTC','2026-10-23T12:00:00Z','2026-10-23T12:00:01Z',80000,'partial');`);
+  legacy.close();
+  const oldPath = process.env.NOOP_DB_PATH;
+  process.env.NOOP_DB_PATH = file;
+  delete require.cache[require.resolve('../bot/db')];
+  try {
+    const store = require('../bot/db');
+    const row = store.db.prepare('SELECT bid_iv, ask_iv, forward FROM asset_option_quotes WHERE asset = ?').get('BTC');
+    assert.deepEqual(row, { bid_iv: null, ask_iv: null, forward: null });
+    assert.deepEqual(store.db.prepare(`SELECT short_momentum_main,short_momentum_derivative,
+      medium_momentum_main,medium_momentum_derivative FROM asset_market_snapshots WHERE asset = 'BTC'`).get(),
+      { short_momentum_main: null, short_momentum_derivative: null,
+        medium_momentum_main: null, medium_momentum_derivative: null });
+    assert.equal(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='asset_liquidity_snapshots'").get().name,
+      'asset_liquidity_snapshots');
+    store.close();
+  } finally {
     delete require.cache[require.resolve('../bot/db')];
     if (oldPath == null) delete process.env.NOOP_DB_PATH;
     else process.env.NOOP_DB_PATH = oldPath;

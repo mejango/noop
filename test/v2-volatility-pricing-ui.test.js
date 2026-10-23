@@ -33,7 +33,7 @@ function fixture() {
 
 // Keep React's rendered elements while driving the component's state and event
 // handlers directly. Polling is isolated; quote formatting and colors are real.
-function mount(data, { loading = false, error = null } = {}) {
+function mount(data, { loading = false, error = null, asset = 'ETH', dataUrl = null } = {}) {
   let cursor = 0;
   const states = [];
   const Component = load('components/VolatilityPricing.tsx', name => {
@@ -46,11 +46,11 @@ function mount(data, { loading = false, error = null } = {}) {
         return [states[index], value => { states[index] = typeof value === 'function' ? value(states[index]) : value; }];
       },
     };
-    if (name === '@/lib/hooks') return { usePolling: () => ({ data, error, loading, refetch: () => {} }), useLiveTimeAgo: () => '1m ago' };
+    if (name === '@/lib/hooks') return { usePolling: url => ({ data, dataUrl: dataUrl ?? url, settledUrl: url, error, loading, refetch: () => {} }), useLiveTimeAgo: () => '1m ago' };
     if (name === '@/lib/volatility-pricing') return pricing;
     throw new Error(`Unexpected module: ${name}`);
   }).default;
-  return () => { cursor = 0; return Component(); };
+  return () => { cursor = 0; return Component({ asset }); };
 }
 
 function find(tree, predicate) {
@@ -216,4 +216,14 @@ test('contract selection still works in mark and bid/ask views', () => {
     assert.equal(cell(tree).props['aria-pressed'], true);
     find(tree, node => node.type === 'button' && node.props['aria-label'] === 'Close contract details').props.onClick();
   }
+});
+
+test('switching assets cannot show the previous asset’s pricing data', () => {
+  const headline = renderToStaticMarkup(card(mount(fixture(), {
+    asset: 'BTC', dataUrl: '/api/volatility-pricing',
+  })()));
+  assert.ok(!headline.includes('13/100'));
+  assert.ok(!headline.includes('38.8%'));
+  assert.ok(!headline.includes('58.8%'));
+  assert.deepEqual(meters(headline), []);
 });

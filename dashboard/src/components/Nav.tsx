@@ -1,7 +1,6 @@
 'use client';
 
-import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { usePolling, useLiveTimeAgo, useCountdown } from '@/lib/hooks';
 import { formatUSD } from '@/lib/format';
 import { ASSETS } from '@/lib/market-assets';
@@ -107,24 +106,36 @@ function EthStats() {
   );
 }
 
+function AssetStats({ asset }: { asset: string }) {
+  const { data, dataUrl } = usePolling<{ stats: { last_price: number; last_price_time: string } }>(
+    `/api/assets/${asset.toLowerCase()}/overview?range=1h`,
+    { stats: { last_price: 0, last_price_time: '' } },
+    60_000,
+  );
+  const liveAgo = useLiveTimeAgo(data.stats.last_price_time);
+  return <div className="text-xs md:text-sm text-gray-400"><span>{asset} <span className="text-juice-orange">{dataUrl && data.stats.last_price > 0 ? formatUSD(data.stats.last_price) : '—'}</span></span><span className="ml-2 text-gray-500">{dataUrl ? liveAgo : 'Loading…'}</span></div>;
+}
+
 export default function Nav() {
   const pathname = usePathname();
+  const router = useRouter();
   const marketPage = pathname.startsWith('/assets/');
   const activeAsset = marketPage ? pathname.split('/')[2]?.toUpperCase() : 'ETH';
   return (
     <nav className="border-b border-white/10 bg-juice-dark/80 backdrop-blur-md py-3">
       <div className="w-full px-3 md:px-6 xl:px-8 2xl:px-10 flex flex-wrap items-center justify-between gap-3">
-        <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
-        <div className="flex items-center gap-1" aria-label="Asset">
-          {ASSETS.map((asset) => (
-            <Link key={asset} href={asset === 'ETH' ? '/' : `/assets/${asset.toLowerCase()}`}
-              aria-current={asset === activeAsset ? 'page' : undefined}
-              className={`px-2 py-1 text-sm border ${asset === activeAsset ? 'border-juice-orange text-juice-orange' : 'border-white/10 text-gray-400 hover:text-white'}`}>
-              {asset}
-            </Link>
-          ))}
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
+          <select
+            aria-label="Asset"
+            value={activeAsset}
+            onChange={event => router.push(event.target.value === 'ETH' ? '/' : `/assets/${event.target.value.toLowerCase()}`)}
+            className="bg-juice-dark border border-juice-orange text-juice-orange text-sm pl-2 pr-8 py-1 cursor-pointer"
+          >
+            {ASSETS.map(asset => <option key={asset} value={asset}>{asset}</option>)}
+          </select>
         </div>
-        {!marketPage && <EthStats />}
+        {marketPage ? <AssetStats key={activeAsset} asset={activeAsset} /> : <EthStats />}
       </div>
     </nav>
   );

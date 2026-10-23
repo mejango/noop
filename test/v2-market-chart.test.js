@@ -27,7 +27,7 @@ visit(source);
 assert.ok(callback, 'Production chart merge must be found');
 const code = ts.transpileModule(`${declarations.join('\n')}
   return (${callback})();`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-const merge = new Function('chart', 'stats', 'latestTick', 'chartRange', 'dteDays', code);
+const merge = new Function('chart', 'stats', 'latestTick', 'chartRange', 'asset', 'isEth', 'dteDays', code);
 
 const SPOT = '2026-09-14T12:26:17.987Z';
 const QUOTE = '2026-09-14T12:26:19.466Z';
@@ -52,7 +52,19 @@ function fixture() {
     },
   };
 }
-const run = ({ chart, stats, latestTick }) => merge(chart, stats, latestTick, '24h', () => 0);
+const run = ({ chart, stats, latestTick }, asset = 'ETH') => merge(chart, stats, latestTick, '24h', asset, asset === 'ETH', () => 0);
+
+test('non-ETH merge keeps missing momentum unknown and preserves observed labels on a matching spot refresh', () => {
+  const input = fixture();
+  const [missing] = run(input, 'BTC');
+  assert.equal(missing.momentum, undefined);
+  assert.equal(missing.shortMomentum, undefined);
+  input.chart.prices[0].medium_momentum_main = 'upward';
+  input.chart.prices[0].short_momentum_main = 'downward';
+  const [observed] = run(input, 'BTC');
+  assert.equal(observed.momentum, 'upward');
+  assert.equal(observed.shortMomentum, 'downward');
+});
 
 test('latest point keeps snapshot RAW and telemetry EDGE when the tick prefers another contract', () => {
   const input = fixture();

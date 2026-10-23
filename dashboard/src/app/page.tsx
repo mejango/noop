@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { usePolling, useIsMobile } from '@/lib/hooks';
 import { formatUSD, dteDays } from '@/lib/format';
 import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
-import { DASHBOARD_RANGES } from '@/lib/dashboard-ranges';
+import { ASSET_DEFAULT_RANGE, DASHBOARD_RANGES } from '@/lib/dashboard-ranges';
 import { liquidityFeedGaps } from '@/lib/liquidity-feed-status';
 import { buildOptionsCashflowChart, cashflowDisplayDomain, type CashflowBucket } from '@/lib/options-cashflow-chart';
 import Card from '@/components/Card';
@@ -308,6 +308,8 @@ interface ChartData {
   tier?: string;
 }
 
+export type AssetOverviewData = { stats: Partial<Stats>; chart: Partial<ChartData>; ticks: TickSummary[]; range?: string };
+
 interface PnlBucketPoint extends CashflowBucket {
   timestamp: string;
   tradeCashflow: number;
@@ -487,9 +489,10 @@ const CHART_MARGINS_MOBILE = { top: 10, right: 10, left: 0, bottom: 18 };
 const ETH_SPOT_MIN = 100;
 const ETH_SPOT_MAX = 20000;
 
-function normalizeEthSpot(value: unknown): number | null {
+function normalizeEthSpot(value: unknown, asset = 'ETH'): number | null {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return null;
   const n = Number(value);
-  return Number.isFinite(n) && n >= ETH_SPOT_MIN && n <= ETH_SPOT_MAX ? n : null;
+  return Number.isFinite(n) && (asset === 'ETH' ? n >= ETH_SPOT_MIN : n > 0) && n <= (asset === 'ETH' ? ETH_SPOT_MAX : 1_000_000) ? n : null;
 }
 
 function median(values: number[]): number | null {
@@ -516,20 +519,20 @@ function spotBandPctForRange(range: string): number {
   }
 }
 
-function robustSpotBand(values: number[], range: string): [number, number] | null {
+function robustSpotBand(values: number[], range: string, asset = 'ETH'): [number, number] | null {
   const normalized = values
-    .map(normalizeEthSpot)
+    .map(value => normalizeEthSpot(value, asset))
     .filter((value): value is number => value != null);
   const center = median(normalized);
   if (center == null) return null;
   const deviations = normalized.map((value) => Math.abs(value - center));
   const mad = median(deviations) ?? 0;
-  const spread = Math.max(35, center * spotBandPctForRange(range), mad * 8);
-  return [Math.max(ETH_SPOT_MIN, center - spread), Math.min(ETH_SPOT_MAX, center + spread)];
+  const spread = Math.max(asset === 'ETH' ? 35 : center * 0.05, center * spotBandPctForRange(range), mad * 8);
+  return [Math.max(asset === 'ETH' ? ETH_SPOT_MIN : 0, center - spread), Math.min(asset === 'ETH' ? ETH_SPOT_MAX : 1_000_000, center + spread)];
 }
 
-function spotInBand(value: unknown, band: [number, number] | null): number | null {
-  const spot = normalizeEthSpot(value);
+function spotInBand(value: unknown, band: [number, number] | null, asset = 'ETH'): number | null {
+  const spot = normalizeEthSpot(value, asset);
   if (spot == null) return null;
   if (!band) return spot;
   return spot >= band[0] && spot <= band[1] ? spot : null;
@@ -787,8 +790,9 @@ function rangeFromRequestUrl(url: string | null, fallback: string): string {
   }
 }
 
-export default function OverviewPage() {
-  const [range, setRange] = useState<string>('14d');
+export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAssetError }: { asset?: string; initialAssetOverview?: AssetOverviewData; initialAssetError?: string }) {
+  const isEth = asset === 'ETH';
+  const [range, setRange] = useState<string>(isEth ? '14d' : ASSET_DEFAULT_RANGE);
   // Main chart series the legend can toggle; RAW scores start hidden (EDGE is what the bot acts on).
   const [hiddenLines, setHiddenLines] = useState<Set<string>>(() => new Set(['bestPut', 'bestCall']));
   const toggleLine = useCallback((key: string) => setHiddenLines((prev) => {
@@ -802,38 +806,52 @@ export default function OverviewPage() {
   const baseMargins = mobile ? CHART_MARGINS_MOBILE : CHART_MARGINS;
   // Reserve the portfolio axis gutter on every chart so timestamps line up.
   const margins = { ...baseMargins, right: baseMargins.right + primaryYAxisWidth };
-  const { data: stats, dataUrl: statsDataUrl } = usePolling<Stats>('/api/stats', emptyStats, 30_000);
+  const { data: ethStats, dataUrl: ethStatsDataUrl } = usePolling<Stats>(isEth ? '/api/stats' : null, emptyStats, 30_000);
   const chartUrl = `/api/chart?range=${encodeURIComponent(range)}`;
   const {
-    data: chart,
-    loading: chartLoading,
-    error: chartError,
-    dataUrl: chartDataUrl,
-    settledUrl: chartSettledUrl,
-  } = usePolling<ChartData>(chartUrl, emptyChart, 90_000);
-  const { data: ticks } = usePolling<TickSummary[]>('/api/ticks', []);
+    data: ethChart,
+    loading: ethChartLoading,
+    error: ethChartError,
+    dataUrl: ethChartDataUrl,
+    settledUrl: ethChartSettledUrl,
+  } = usePolling<ChartData>(isEth ? chartUrl : null, emptyChart, 90_000);
+  const { data: ethTicks } = usePolling<TickSummary[]>(isEth ? '/api/ticks' : null, []);
+  const assetUrl = `/api/assets/${asset.toLowerCase()}/overview?range=${encodeURIComponent(range)}`;
+  const { data: assetOverview, loading: assetLoading, error: assetError, dataUrl: assetDataUrl, settledUrl: assetSettledUrl } =
+    usePolling<AssetOverviewData>(isEth ? null : assetUrl, initialAssetOverview ?? { stats: emptyStats, chart: emptyChart, ticks: [], range: ASSET_DEFAULT_RANGE }, 90_000);
+  const initialAssetCurrent = !isEth && assetDataUrl == null && !!initialAssetOverview && range === (initialAssetOverview.range ?? ASSET_DEFAULT_RANGE);
+  const assetStats = useMemo<Stats>(() => ({ ...emptyStats, ...assetOverview.stats }), [assetOverview.stats]);
+  const stats = isEth ? ethStats : assetStats;
+  const statsDataUrl = isEth ? ethStatsDataUrl : (assetDataUrl === assetUrl || initialAssetCurrent ? assetUrl : null);
+  const assetChart = useMemo<ChartData>(() => ({ ...emptyChart, ...assetOverview.chart }), [assetOverview.chart]);
+  const chart = isEth ? ethChart : assetChart;
+  const ticks = isEth ? ethTicks : assetOverview.ticks;
+  const chartLoading = isEth ? ethChartLoading : assetLoading;
+  const chartError = isEth ? ethChartError : assetError ?? initialAssetError ?? null;
+  const chartDataUrl = isEth ? ethChartDataUrl : (assetDataUrl === assetUrl || initialAssetCurrent ? assetUrl : assetDataUrl);
+  const chartSettledUrl = isEth ? ethChartSettledUrl : (assetSettledUrl === assetUrl || initialAssetCurrent ? assetUrl : assetSettledUrl);
   const accountUrl = `/api/lyra/account?range=${encodeURIComponent(range)}`;
   const {
     data: account,
     error: accountError,
     dataUrl: accountDataUrl,
     settledUrl: accountSettledUrl,
-  } = usePolling<AccountData>(accountUrl, emptyAccount, 60_000);
+  } = usePolling<AccountData>(isEth ? accountUrl : null, emptyAccount, 60_000);
   const pnlQuery = `/api/pnl-report?range=${encodeURIComponent(range)}`;
   const {
     data: pnlReport,
     error: pnlError,
     dataUrl: pnlDataUrl,
     settledUrl: pnlSettledUrl,
-  } = usePolling<PnlReportData>(pnlQuery, emptyPnlReport, 90_000);
+  } = usePolling<PnlReportData>(isEth ? pnlQuery : null, emptyPnlReport, 90_000);
   const chartRange = rangeFromRequestUrl(chartDataUrl, range);
   const accountRange = rangeFromRequestUrl(accountDataUrl, range);
-  const chartRangeLoading = chartSettledUrl !== chartUrl;
-  const rangeLoading = chartRangeLoading || accountSettledUrl !== accountUrl || pnlSettledUrl !== pnlQuery;
+  const chartRangeLoading = chartSettledUrl !== (isEth ? chartUrl : assetUrl);
+  const rangeLoading = chartRangeLoading || (isEth && (accountSettledUrl !== accountUrl || pnlSettledUrl !== pnlQuery));
   const rangeLoadError = (
     (chartSettledUrl === chartUrl && chartError)
-    || (accountSettledUrl === accountUrl && accountError)
-    || (pnlSettledUrl === pnlQuery && pnlError)
+    || (isEth && accountSettledUrl === accountUrl && accountError)
+    || (isEth && pnlSettledUrl === pnlQuery && pnlError)
   );
   const pinPrice = usePinnableTooltip();
   const pinLiquidity = usePinnableTooltip();
@@ -960,7 +978,7 @@ export default function OverviewPage() {
       ...chart.options.map((point) => Number(point.lyra_spot)),
       Number(stats.last_price),
       Number(stats.lyra_spot),
-    ], chartRange);
+    ], chartRange, asset);
 
     type OptionDetail = {
       delta: number | null;
@@ -988,12 +1006,12 @@ export default function OverviewPage() {
 
     // Build rows from price data (primary time axis)
     const rows: Row[] = chart.prices.map(p => {
-      const m = p.medium_momentum_main || 'neutral';
+      const m = p.medium_momentum_main || (isEth ? 'neutral' : undefined);
       return {
         ts: new Date(p.timestamp).getTime(),
-        price: spotInBand(p.price, spotBand) ?? undefined,
+        price: spotInBand(p.price, spotBand, asset) ?? undefined,
         momentum: m,
-        shortMomentum: p.short_momentum_main || 'neutral',
+        shortMomentum: p.short_momentum_main || (isEth ? 'neutral' : undefined),
         mediumDerivative: p.medium_momentum_derivative || undefined,
         shortDerivative: p.short_momentum_derivative || undefined,
         momentumVal: 1, // all bars same height, color shows direction
@@ -1056,7 +1074,7 @@ export default function OverviewPage() {
       const idx = snapToNearest(new Date(o.timestamp).getTime());
       rows[idx].bestPut = o.best_put_value;
       rows[idx].bestCall = o.best_call_value;
-      const lyraSpot = spotInBand(o.lyra_spot, spotBand);
+      const lyraSpot = isEth ? spotInBand(o.lyra_spot, spotBand, asset) : null;
       if (lyraSpot != null) rows[idx].lyraSpot = lyraSpot;
       // Attach option details from heatmap data
       const putSnap = bestPutByTs.get(o.timestamp);
@@ -1079,10 +1097,10 @@ export default function OverviewPage() {
     if (liveTs && Number.isFinite(liveTs)) {
       const liveRow: Row = {
         ts: liveTs,
-        price: spotInBand(stats.last_price, spotBand) ?? undefined,
-        lyraSpot: spotInBand(stats.lyra_spot, spotBand),
-        momentum: stats.medium_momentum || 'neutral',
-        shortMomentum: stats.short_momentum || 'neutral',
+        price: spotInBand(stats.last_price, spotBand, asset) ?? undefined,
+        lyraSpot: isEth ? spotInBand(stats.lyra_spot, spotBand, asset) : null,
+        momentum: stats.medium_momentum || (isEth ? 'neutral' : undefined),
+        shortMomentum: stats.short_momentum || (isEth ? 'neutral' : undefined),
         mediumDerivative: stats.medium_derivative || undefined,
         shortDerivative: stats.short_derivative || undefined,
         momentumVal: 1,
@@ -1097,6 +1115,12 @@ export default function OverviewPage() {
         rows[rows.length - 1] = {
           ...last,
           ...liveRow,
+          ...(!isEth && {
+            momentum: liveRow.momentum ?? last.momentum,
+            shortMomentum: liveRow.shortMomentum ?? last.shortMomentum,
+            mediumDerivative: liveRow.mediumDerivative ?? last.mediumDerivative,
+            shortDerivative: liveRow.shortDerivative ?? last.shortDerivative,
+          }),
         };
       } else if (liveTs > last.ts) {
         rows.push(liveRow);
@@ -1104,12 +1128,12 @@ export default function OverviewPage() {
     }
 
     return rows;
-  }, [chart, chartRange, stats]);
+  }, [chart, chartRange, stats, asset, isEth]);
 
   // Data for momentum bar (only points with momentum data)
   const momentumData = useMemo(() =>
-    merged.filter(d => d.momentum !== undefined),
-    [merged]
+    merged.filter(d => d.momentum !== undefined && (isEth || d.shortMomentum !== undefined)),
+    [merged, isEth]
   );
 
   // Data for liquidity chart: build directly from API data (not snapped to spot prices)
@@ -1333,9 +1357,9 @@ export default function OverviewPage() {
     if (values.length === 0) return [0, 1];
     const min = Math.min(...values);
     const max = Math.max(...values);
-    const padding = Math.max((max - min) * 0.06, max * 0.01, 12);
+    const padding = Math.max((max - min) * 0.06, max * 0.01, isEth ? 12 : max * 0.005);
     return [Math.max(0, min - padding), max + padding];
-  }, [merged]);
+  }, [merged, isEth]);
 
   const findNearestMergedRow = useCallback((targetTs: number) => {
     if (merged.length === 0) return null;
@@ -1420,8 +1444,8 @@ export default function OverviewPage() {
         entry.pcRatio = o.pc_ratio ?? undefined;
         entry.putOI = o.put_oi;
         entry.callOI = o.call_oi;
-        entry.nearOI = o.near_put_oi + o.near_call_oi;
-        entry.farOI = o.far_put_oi + o.far_call_oi;
+        entry.nearOI = o.near_put_oi != null && o.near_call_oi != null ? o.near_put_oi + o.near_call_oi : undefined;
+        entry.farOI = o.far_put_oi != null && o.far_call_oi != null ? o.far_put_oi + o.far_call_oi : undefined;
         tsMap.set(ts, entry);
       }
     } else {
@@ -1548,7 +1572,7 @@ export default function OverviewPage() {
           </Card>
         </div>
 
-        <VolatilityPricing />
+        <VolatilityPricing asset={asset} />
       </div>
 
       {/* Time Range Selector */}
@@ -1580,8 +1604,8 @@ export default function OverviewPage() {
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
           {([
-            { key: 'price', label: 'ETH CG', swatch: chartColors.primary },
-            { key: 'lyraSpot', label: 'ETH L', swatch: 'repeating-linear-gradient(to right, rgba(255,255,255,0.9) 0 4px, transparent 4px 6px)' },
+            { key: 'price', label: isEth ? 'ETH CG' : `${asset} Derive`, swatch: chartColors.primary },
+            ...(isEth ? [{ key: 'lyraSpot', label: 'ETH L', swatch: 'repeating-linear-gradient(to right, rgba(255,255,255,0.9) 0 4px, transparent 4px 6px)' }] : []),
             { key: 'bestPut', label: 'PUT RAW', swatch: `repeating-linear-gradient(to right, ${chartColors.red} 0 2px, transparent 2px 5px)` },
             { key: 'putEdge', label: 'PUT EDGE', swatch: '#fb7185' },
             { key: 'bestCall', label: 'CALL RAW', swatch: `repeating-linear-gradient(to right, ${chartColors.secondary} 0 2px, transparent 2px 5px)` },
@@ -1630,7 +1654,7 @@ export default function OverviewPage() {
             </div>
           </div>
         )}
-        {!rangeLoading && rangeLoadError && chartDataUrl !== chartUrl && merged.length > 0 && (
+        {!rangeLoading && rangeLoadError && chartDataUrl !== (isEth ? chartUrl : assetUrl) && merged.length > 0 && (
           <div className="absolute left-1/2 top-3 z-10 -translate-x-1/2 rounded border border-amber-400/25 bg-[#171717]/95 px-3 py-2 text-xs text-amber-300 shadow-lg">
             Couldn’t load the {range} chart. Still showing {chartRange}.
           </div>
@@ -1689,8 +1713,8 @@ export default function OverviewPage() {
                   return pinPrice.wrap(
                     <div style={{ ...chartTooltip.contentStyle, padding: '8px 12px' }}>
                       <div className="text-xs text-gray-400 mb-1">{formatCompactDateTime(labelTs)}</div>
-                      <div className="text-sm" style={{ color: chartColors.primary }}>ETH CG: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
-                      {row.lyraSpot != null && <div className="text-sm text-white/50">ETH L: {formatUSD(row.lyraSpot)}</div>}
+                      <div className="text-sm" style={{ color: chartColors.primary }}>{isEth ? 'ETH CG' : `${asset} Derive`}: {row.price != null ? formatUSD(row.price) : 'N/A'}</div>
+                      {isEth && row.lyraSpot != null && <div className="text-sm text-white/50">ETH L: {formatUSD(row.lyraSpot)}</div>}
                       <div className="text-sm" style={{ color: chartColors.red }}>PUT Raw Score: {fmtPut}{pd ? <span className="text-xs text-gray-400 ml-2">Ask ${Number(pd.price).toFixed(4)}</span> : null}</div>
                       <div className="text-sm" style={{ color: '#fb7185' }}>PUT Edge Score: {fmtPutEdge}</div>
                       {pd && (
@@ -1740,7 +1764,7 @@ export default function OverviewPage() {
               {/* ETH price line */}
               <Line yAxisId="price" type="monotone" dataKey="price" hide={hiddenLines.has('price')} stroke={chartColors.primary} dot={false} strokeWidth={2} connectNulls isAnimationActive={false} />
               {/* Lyra spot price line */}
-              <Line
+              {isEth && <Line
                 yAxisId="price"
                 type="monotone"
                 dataKey="lyraSpot"
@@ -1752,7 +1776,7 @@ export default function OverviewPage() {
                 strokeWidth={1.5}
                 connectNulls
                 isAnimationActive={false}
-              />
+              />}
               {/* PUT/CALL value overlays */}
               <Line yAxisId="putVal" type="stepAfter" dataKey="bestPut" hide={hiddenLines.has('bestPut')} stroke={chartColors.red} strokeDasharray="2 4" strokeWidth={1} strokeOpacity={0.7} dot={false} connectNulls={false} isAnimationActive={false} />
               <Line yAxisId="putVal" type="stepAfter" dataKey="putEdge" hide={hiddenLines.has('putEdge')} stroke="#fb7185" strokeWidth={1.5} dot={false} connectNulls={false} isAnimationActive={false} />
@@ -1798,6 +1822,11 @@ export default function OverviewPage() {
           </>
         )}
       </Card>
+
+      {!isEth && <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
+        <Card title="Options Result, Cashflow & Account Value"><p className="text-sm text-gray-500">Trading inactive for {asset}.</p></Card>
+        {filteredLiquidity.length === 0 && <Card title="DEX Liquidity (TVL)"><p className="text-sm text-gray-500">No {asset} DEX liquidity observations yet.</p></Card>}
+      </div>}
 
       {/* P&L */}
       {pnlChartData.length > 0 && (
@@ -1926,11 +1955,11 @@ export default function OverviewPage() {
         const fallbackColors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6'];
         const getColor = (name: string, i: number) => dexColors[name] || fallbackColors[i % fallbackColors.length];
         const formatDexName = (name: string) => name === 'uniswap_v3' ? 'Uniswap V3 (subgraph)' : name === 'uniswap_v3_onchain' ? 'Uniswap V3 (onchain)' : name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        const marketLabel = (name: string) => name === 'uniswap_v3_onchain'
+        const marketLabel = (name: string) => !isEth ? null : name === 'uniswap_v3_onchain'
           ? 'USDC/WETH, 0.05% + 0.30% pools (combined)'
           : name === 'uniswap_v4' ? 'ETH/USDT, 0.05% pool' : null;
-        const hasOnchainV3 = liquidityData.some(row => row.uniswap_v3_onchain != null);
-        const feedGaps = liquidityFeedGaps(liquidityData, [hasOnchainV3 ? 'uniswap_v3_onchain' : 'uniswap_v3', 'uniswap_v4']);
+        const hasOnchainV3 = isEth && liquidityData.some(row => row.uniswap_v3_onchain != null);
+        const feedGaps = isEth ? liquidityFeedGaps(liquidityData, [hasOnchainV3 ? 'uniswap_v3_onchain' : 'uniswap_v3', 'uniswap_v4']) : [];
         const formatCompact = (v: number) => {
           if (v >= 1e9) return `$${(v / 1e9).toFixed(1)}B`;
           if (v >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
@@ -2049,7 +2078,9 @@ export default function OverviewPage() {
               </div>
             </div>
             <div className="text-xs text-gray-400 mb-2 space-y-0.5">
-              <div>Ethereum mainnet, Liquidity totals for the selected pools below.</div>
+              <div>{isEth ? 'Ethereum mainnet, Liquidity totals for the selected pools below.' : asset === 'BTC' || asset === 'ZEC'
+                ? 'Maya TVL is a balanced-pool estimate.'
+                : 'GeckoTerminal values are pool reserves.'}</div>
               {dexNames.filter(name => marketLabel(name)).map((name, i) => (
                 <div key={name} style={{ color: getColor(name, i) }}>
                   {formatDexName(name)}: {marketLabel(name)}
@@ -2370,12 +2401,13 @@ export default function OverviewPage() {
             )}
 
             </div>
-            <VolSmile positions={account.positions} />
+            <VolSmile asset={asset} positions={account.positions} />
           </Card>
         );
       })()}
 
       {/* Momentum Bar — two rows: medium (top) + short (bottom) */}
+      {!isEth && momentumData.length === 0 && <Card title="Momentum"><p className="text-sm text-gray-500">Waiting for enough {asset} price history to calculate momentum.</p></Card>}
       {momentumData.length > 0 && (() => {
         const MomentumTooltipBar = ({ data }: { data: typeof momentumData }) => {
           // eslint-disable-next-line react-hooks/rules-of-hooks
@@ -2920,8 +2952,13 @@ export default function OverviewPage() {
         </Card>
       )}
 
+      {!isEth && <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
+        <Card title="Positions"><p className="text-sm text-gray-500">Trading inactive for {asset}.</p></Card>
+        <Card title="Recorded Bot Trades"><p className="text-sm text-gray-500">Trading inactive for {asset}.</p></Card>
+      </div>}
+
       {/* Tick Log Table */}
-      <Card>
+      {isEth ? <Card>
         <div className="flex items-center justify-between mb-2">
           <span className="text-xs font-medium text-gray-400">Tick Log</span>
           <span className="text-xs text-gray-600">{ticks.length} ticks</span>
@@ -3008,7 +3045,19 @@ export default function OverviewPage() {
             </tbody>
           </table>
         </div>
-      </Card>
+      </Card> : <Card title="Market Observation Log" subtitle={`${chart.prices.length} observations in ${chartRange}`}>
+        <div className="overflow-auto max-h-[300px] md:max-h-[400px]">
+          <table className="w-full text-xs md:text-sm"><thead><tr className="text-gray-500"><th className="text-left py-2 px-3 font-medium">Time</th><th className="text-right py-2 px-3 font-medium">{asset} Derive Index</th></tr></thead>
+            <tbody>{chart.prices.length === 0 ? <tr><td colSpan={2} className="py-4 text-center text-gray-500">No market observations yet</td></tr> : [...chart.prices].reverse().slice(0, 40).map((point) =>
+              <tr key={point.timestamp} className="border-t border-white/[0.03]"><td className="py-1.5 px-3 text-gray-400">{new Date(point.timestamp).toLocaleString()}</td><td className="py-1.5 px-3 text-right text-juice-orange tabular-nums">{formatUSD(point.price)}</td></tr>
+            )}</tbody>
+          </table>
+        </div>
+      </Card>}
     </div>
   );
+}
+
+export default function OverviewPage() {
+  return <MarketOverview />;
 }

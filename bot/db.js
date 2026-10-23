@@ -102,6 +102,10 @@ db.exec(`
     call_oi REAL,
     put_iv REAL,
     call_iv REAL,
+    short_momentum_main TEXT,
+    short_momentum_derivative TEXT,
+    medium_momentum_main TEXT,
+    medium_momentum_derivative TEXT,
     quote_status TEXT NOT NULL,
     PRIMARY KEY (asset, hour)
   );
@@ -118,6 +122,9 @@ db.exec(`
     index_price REAL,
     delta REAL,
     implied_vol REAL,
+    bid_iv REAL,
+    ask_iv REAL,
+    forward REAL,
     open_interest REAL,
     bid_amount REAL,
     ask_amount REAL,
@@ -125,6 +132,21 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_asset_option_quotes_asset_hour
     ON asset_option_quotes(asset, hour);
+  CREATE TABLE IF NOT EXISTS asset_liquidity_snapshots (
+    asset TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    collected_at TEXT NOT NULL,
+    venue TEXT NOT NULL,
+    pool_id TEXT NOT NULL,
+    chain TEXT NOT NULL,
+    pair TEXT NOT NULL,
+    tvl_usd REAL NOT NULL CHECK(tvl_usd > 0),
+    volume_24h_usd REAL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (asset, observed_at, venue, pool_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_asset_liquidity_asset_time
+    ON asset_liquidity_snapshots(asset, observed_at);
   CREATE INDEX IF NOT EXISTS idx_options_snapshots_timestamp ON options_snapshots(timestamp);
   CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument ON options_snapshots(instrument_name);
   CREATE INDEX IF NOT EXISTS idx_onchain_data_timestamp ON onchain_data(timestamp);
@@ -233,6 +255,15 @@ const addColumnIfMissing = (table, name, definition) => {
   }
   return false;
 };
+db.transaction(() => {
+  addColumnIfMissing('asset_option_quotes', 'bid_iv', 'REAL');
+  addColumnIfMissing('asset_option_quotes', 'ask_iv', 'REAL');
+  addColumnIfMissing('asset_option_quotes', 'forward', 'REAL');
+  addColumnIfMissing('asset_market_snapshots', 'short_momentum_main', 'TEXT');
+  addColumnIfMissing('asset_market_snapshots', 'short_momentum_derivative', 'TEXT');
+  addColumnIfMissing('asset_market_snapshots', 'medium_momentum_main', 'TEXT');
+  addColumnIfMissing('asset_market_snapshots', 'medium_momentum_derivative', 'TEXT');
+})();
 db.transaction(() => {
   if (addColumnIfMissing('resting_orders', 'filled_value', 'REAL DEFAULT 0')) {
     db.exec('UPDATE resting_orders SET filled_value = NULL WHERE filled_amount > 0');
@@ -1902,18 +1933,51 @@ const insertAssetMarketSnapshot = db.transaction((summary, options = []) => {
       && ((existing.quote_status === 'complete' && summary.quote_status !== 'complete')
         || (existing.spot != null && summary.spot == null))))) return false;
   db.prepare(`INSERT OR REPLACE INTO asset_market_snapshots
-    (asset,hour,collected_at,spot,funding_rate,instrument_count,option_count,quoted_count,put_oi,call_oi,put_iv,call_iv,quote_status)
-    VALUES (@asset,@hour,@collected_at,@spot,@funding_rate,@instrument_count,@option_count,@quoted_count,@put_oi,@call_oi,@put_iv,@call_iv,@quote_status)`).run(summary);
+    (asset,hour,collected_at,spot,funding_rate,instrument_count,option_count,quoted_count,put_oi,call_oi,put_iv,call_iv,
+      short_momentum_main,short_momentum_derivative,medium_momentum_main,medium_momentum_derivative,quote_status)
+    VALUES (@asset,@hour,@collected_at,@spot,@funding_rate,@instrument_count,@option_count,@quoted_count,@put_oi,@call_oi,@put_iv,@call_iv,
+      @short_momentum_main,@short_momentum_derivative,@medium_momentum_main,@medium_momentum_derivative,@quote_status)`)
+    .run({ short_momentum_main: null, short_momentum_derivative: null,
+      medium_momentum_main: null, medium_momentum_derivative: null, ...summary });
   db.prepare('DELETE FROM asset_option_quotes WHERE asset = ? AND hour = ?').run(asset, hour);
   const insert = db.prepare(`INSERT INTO asset_option_quotes
-    (asset,hour,instrument_name,expiry,strike,option_type,bid,ask,mark,index_price,delta,implied_vol,open_interest,bid_amount,ask_amount)
-    VALUES (@asset,@hour,@instrument_name,@expiry,@strike,@option_type,@bid,@ask,@mark,@index_price,@delta,@implied_vol,@open_interest,@bid_amount,@ask_amount)`);
+    (asset,hour,instrument_name,expiry,strike,option_type,bid,ask,mark,index_price,delta,implied_vol,bid_iv,ask_iv,forward,open_interest,bid_amount,ask_amount)
+    VALUES (@asset,@hour,@instrument_name,@expiry,@strike,@option_type,@bid,@ask,@mark,@index_price,@delta,@implied_vol,@bid_iv,@ask_iv,@forward,@open_interest,@bid_amount,@ask_amount)`);
   for (const option of options) {
     if (!option.instrument_name?.startsWith(`${asset}-`)) throw new Error('Asset option identity mismatch');
     insert.run({ ...option, asset, hour });
   }
   return true;
 });
+
+const insertAssetLiquiditySnapshot = row => {
+  const allowed = require('./market-assets.json').slice(1);
+  const validTime = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value)
+    && Number.isFinite(Date.parse(value));
+  if (!allowed.includes(row?.asset) || !validTime(row.observed_at) || !validTime(row.collected_at)
+    || !['venue', 'pool_id', 'chain', 'pair', 'source'].every(key => typeof row[key] === 'string' && row[key].length > 0)
+    || !Number.isFinite(row.tvl_usd) || row.tvl_usd <= 0
+    || (row.volume_24h_usd != null && (!Number.isFinite(row.volume_24h_usd) || row.volume_24h_usd < 0))) {
+    throw new Error('Invalid asset liquidity snapshot');
+  }
+  return db.prepare(`INSERT INTO asset_liquidity_snapshots
+    (asset,observed_at,collected_at,venue,pool_id,chain,pair,tvl_usd,volume_24h_usd,source)
+    VALUES (@asset,@observed_at,@collected_at,@venue,@pool_id,@chain,@pair,@tvl_usd,@volume_24h_usd,@source)
+    ON CONFLICT(asset,observed_at,venue,pool_id) DO UPDATE SET
+      collected_at=excluded.collected_at,tvl_usd=excluded.tvl_usd,
+      volume_24h_usd=excluded.volume_24h_usd,source=excluded.source`).run(row);
+};
+
+const getAssetPriceHistory = (asset, before) => {
+  if (!require('./market-assets.json').slice(1).includes(asset) || !Number.isFinite(Date.parse(before))) {
+    throw new Error('Invalid asset price history request');
+  }
+  const since = new Date(Date.parse(before) - 7 * 86400000).toISOString();
+  return db.prepare(`SELECT spot AS price, hour AS timestamp FROM asset_market_snapshots
+    WHERE asset = ? AND hour >= ? AND hour < ? AND spot > 0
+    ORDER BY hour LIMIT 20000`).all(asset, since, before)
+    .map(row => ({ price: row.price, timestamp: Date.parse(row.timestamp) }));
+};
 
 const toNum = (v) => {
   if (v == null || v === '') return null;
@@ -2975,6 +3039,8 @@ module.exports = {
   db,
   insertSpotPrice,
   insertAssetMarketSnapshot,
+  insertAssetLiquiditySnapshot,
+  getAssetPriceHistory,
   insertOptionsSnapshotBatch,
   insertOnchainData,
   insertSignal,

@@ -86,7 +86,9 @@ async function collectAsset(asset, post = publicPost, now = Date.now()) {
         options.push({ instrument_name: name, expiry: number(details.expiry), strike: number(details.strike),
           option_type: type, bid: number(ticker.b), ask: number(ticker.a), mark: number(ticker.M),
           index_price: number(ticker.I), delta: number(ticker.option_pricing?.d),
-          implied_vol: number(ticker.option_pricing?.i), open_interest: number(ticker.stats?.oi),
+          implied_vol: number(ticker.option_pricing?.i), bid_iv: number(ticker.option_pricing?.bi),
+          ask_iv: number(ticker.option_pricing?.ai), forward: number(ticker.option_pricing?.f),
+          open_interest: number(ticker.stats?.oi),
           bid_amount: number(ticker.B), ask_amount: number(ticker.A) });
       }
     }

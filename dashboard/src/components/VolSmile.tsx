@@ -75,8 +75,12 @@ function Stat({ label, value, sub, tone }: { label: string; value: string; sub?:
   );
 }
 
-export default function VolSmile({ positions = [] }: { positions?: Position[] }) {
-  const { data, error } = usePolling<SmileResponse>('/api/smile', EMPTY, 60_000);
+export default function VolSmile({ asset = 'ETH', positions = [] }: { asset?: string; positions?: Position[] }) {
+  const isEth = asset === 'ETH';
+  const smileUrl = isEth ? '/api/smile' : `/api/assets/${asset.toLowerCase()}/smile`;
+  const { data: polledData, dataUrl, settledUrl, error: polledError } = usePolling<SmileResponse>(smileUrl, EMPTY, 60_000);
+  const data = dataUrl === smileUrl ? polledData : EMPTY;
+  const error = settledUrl === smileUrl ? polledError : null;
   const [picked, setPicked] = useState<{ expiry: number; slot: number }[] | null>(null);
   const [axis, setAxis] = useState<Axis>('delta');
   const [view, setView] = useState<'chart' | 'table'>('chart');
@@ -96,17 +100,27 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
   const [framesError, setFramesError] = useState<string | null>(null);
 
   useEffect(() => {
+    setPicked(null);
+    setReplay(false);
+    setFrames(null);
+    setPlaying(false);
+  }, [asset]);
+
+  useEffect(() => {
     if (!replay) return;
     let alive = true;
     setFrames(null);
     setFramesError(null);
-    fetch(`/api/smile/history?range=${range}`)
+    fetch(`${isEth ? '/api/smile/history' : `/api/assets/${asset.toLowerCase()}/smile/history`}?range=${range}`)
       .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((j: { frames?: { t: string; spot: number | null; expiries: CompactSmileRow[] }[] }) => {
         if (!alive) return;
         const decoded = (j.frames ?? []).map(f => {
           const t = Date.parse(f.t);
-          return { t, spot: f.spot, expiries: f.expiries.map(e => fromCompact(e, t)) };
+          return { t, spot: f.spot, expiries: f.expiries.map(e => {
+            const decoded = fromCompact(e, t);
+            return isEth ? decoded : { ...decoded, points: decoded.points.map(p => ({ ...p, name: p.name.replace(/^ETH-/, `${asset}-`) })) };
+          }) };
         });
         setFrames(decoded);
         setFrameIdx(0);
@@ -114,7 +128,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
       })
       .catch((e: Error) => alive && setFramesError(e.message));
     return () => { alive = false; };
-  }, [replay, range]);
+  }, [replay, range, asset, isEth]);
 
   useEffect(() => {
     if (!playing || !frames) return;
@@ -166,7 +180,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
     return s ? slotColor(s.slot) : null;
   };
 
-  const held = useMemo(() => new Map(positions.filter(p => Number(p.amount) !== 0).map(p => [p.instrument_name, Number(p.amount)])), [positions]);
+  const held = useMemo(() => new Map((isEth ? positions : []).filter(p => Number(p.amount) !== 0).map(p => [p.instrument_name, Number(p.amount)])), [positions, isEth]);
   const hist24 = useMemo(() => new Map(reference.map(h => [h.name, h])), [reference]);
   const histAt = reference[0]?.timestamp;
 
@@ -189,13 +203,13 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
       .filter(p => !quotedOnly || twoSided(p) || p.held != null) // keep held one-sided strikes visible
       .map(p => ({
         ...p, x: xOf(p, spot), label: row.label, iv24: hist24.get(p.name)?.iv ?? null, color,
-        spread: quotedOnly && twoSided(p) && inZone(p) ? [p.iv - p.bidIv!, p.askIv! - p.iv] as [number, number] : null,
+        spread: quotedOnly && twoSided(p) && (!isEth || inZone(p)) ? [p.iv - p.bidIv!, p.askIv! - p.iv] as [number, number] : null,
       }))
       .sort((a, b) => a.x - b.x);
     const past = reference.filter(h => h.expiry === expiry).map(h => ({ ...h, x: xOf(h, refSpot) })).sort((a, b) => a.x - b.x);
     return { row, color, pts, past };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }).filter(<T,>(s: T | null): s is T => s != null), [selection, rows, axis, held, hist24, reference, spot, refSpot, replay, quotedOnly, data.zones]);
+  }).filter(<T,>(s: T | null): s is T => s != null), [selection, rows, axis, held, hist24, reference, spot, refSpot, replay, quotedOnly, data.zones, isEth]);
 
   // During playback the axes are fixed across all frames, so motion is the data moving, not the scale.
   const replayDomain = useMemo(() => {
@@ -221,7 +235,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
   const exitReplay = () => { setReplay(false); setPlaying(false); setFrames(null); };
 
   if (error && !rows.length && !replay) return <div className="mt-3 pt-3 border-t border-white/5 text-[10px] text-gray-600">Volatility smile unavailable: {error}</div>;
-  if (!replay && (!rows.length || !callRow || !putRow)) return null;
+  if (!replay && (!rows.length || !callRow || !putRow)) return isEth ? null : <div className="mt-3 pt-3 border-t border-white/5 text-[10px] text-gray-600">Volatility smile: no saved option quotes yet.</div>;
 
   const cs = callRow?.stats, ps = putRow?.stats;
   const callPrev = callRow && reference.length ? ivAtDelta(reference.filter(h => h.expiry === callRow.expiry), 'C', 0.10) : null;
@@ -272,7 +286,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
           <span className="text-gray-600">
             {frame
               ? `, replay, ${fmtTime(frame.t)}`
-              : `, live Derive chain${data.asOf ? `, ${new Date(data.asOf).toLocaleTimeString()}` : ''}`}
+              : `, ${isEth ? 'live Derive chain' : 'recorded Derive chain'}${data.asOf ? `, ${new Date(data.asOf).toLocaleTimeString()}` : ''}`}
           </span>
         </div>
         <div className="flex flex-wrap gap-1 text-[10px]">
@@ -281,9 +295,9 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
           <button className={chip(view === 'chart' && axis === 'usd')} onClick={() => { setView('chart'); setAxis('usd'); }}>$ strike</button>
           <button className={chip(view === 'table')} onClick={() => setView('table')}>table</button>
           <button className={chip(quotedOnly)} onClick={() => setQuotedOnly(v => !v)}
-            title="Plot only strikes with a live bid and ask; show the bid–ask IV range in the bot's zones">bid–ask</button>
+            title={isEth ? "Plot only strikes with a live bid and ask; show the bid–ask IV range in the bot's zones" : 'Plot only strikes with a recorded bid and ask'}>bid–ask</button>
           {histAt && <button className={chip(showHistory)} onClick={() => setShowHistory(v => !v)}>{replay ? 'start' : '24h ago'}</button>}
-          <button className={chip(replay)} onClick={replay ? exitReplay : enterReplay}>{replay ? '● back to live' : '▶ replay'}</button>
+          <button className={chip(replay)} onClick={replay ? exitReplay : enterReplay}>{replay ? isEth ? '● back to live' : '● back to latest' : '▶ replay'}</button>
         </div>
       </div>
 
@@ -343,7 +357,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
             ? `Replay unavailable: ${framesError}`
             : !frames
               ? 'Loading snapshots…'
-              : 'No full-chain snapshots in this range yet. The bot records one every 15 minutes, so playback fills in from its next deploy onward.'}
+              : isEth ? 'No full-chain snapshots in this range yet. The bot records one every 15 minutes, so playback fills in from its next deploy onward.' : 'No saved option-chain snapshots in this range yet.'}
         </div>
       ) : (<>
 
@@ -351,13 +365,13 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
       <div className="grid grid-cols-2 md:grid-cols-4 gap-1.5 mb-2">
         <Stat label={`ATM IV, ${callRow.label}`} value={fmtPct(cs.atm)} sub={`${putRow.label}: ${fmtPct(ps.atm)}`} />
         <Stat
-          label={`10Δ call IV, sell zone ${callRow.label}`}
+          label={isEth ? `10Δ call IV, sell zone ${callRow.label}` : `10Δ call IV, ${callRow.label}`}
           value={fmtPct(cs.call10)}
           sub={`${fmtSigned(cs.call10 != null && cs.atm != null ? cs.call10 - cs.atm : null)} vs ATM${callPrev != null && cs.call10 != null ? `, ${fmtSigned(cs.call10 - callPrev)} ${refLabel}` : ''}`}
           tone={cs.call10 != null && cs.atm != null && cs.call10 > cs.atm ? 'good' : undefined}
         />
         <Stat
-          label={`10Δ put IV, buy zone ${putRow.label}`}
+          label={isEth ? `10Δ put IV, buy zone ${putRow.label}` : `10Δ put IV, ${putRow.label}`}
           value={fmtPct(ps.put10)}
           sub={`${fmtSigned(ps.put10 != null && ps.atm != null ? ps.put10 - ps.atm : null)} vs ATM${putPrev != null && ps.put10 != null ? `, ${fmtSigned(ps.put10 - putPrev)} ${refLabel}` : ''}`}
           tone={ps.put10 != null && ps.atm != null && ps.put10 - ps.atm < 3 ? 'good' : undefined}
@@ -400,7 +414,7 @@ export default function VolSmile({ positions = [] }: { positions?: Position[] })
               </span>
             )}
             {heldPts.length > 0 && <span className="text-gray-600">◯ your positions</span>}
-            {quotedOnly && <span className="text-gray-600">│ bid–ask IV in bot zones, two-sided quotes only</span>}
+            {quotedOnly && <span className="text-gray-600">{isEth ? '│ bid–ask IV in bot zones, two-sided quotes only' : '│ bid–ask IV, two-sided quotes only'}</span>}
             <span className="text-gray-600">dot size = open interest</span>
           </div>
           <ResponsiveContainer width="100%" height={260}>

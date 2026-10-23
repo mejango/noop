@@ -129,39 +129,30 @@ test('dashboard DB getter reads only the selected asset and its captured quotes'
 
 test('asset page server HTML contains its latest market observation before hydration', () => {
   const jsxRuntime = require('../dashboard/node_modules/react/jsx-runtime');
-  const latest = { asset: 'BTC', hour: '2026-10-23T02:00:00Z', collected_at: '2026-10-23T02:00:12Z',
-    spot: 61000, funding_rate: 0.0001, instrument_count: 100, option_count: 80, quoted_count: 50,
-    put_oi: 1000, call_oi: 1200, put_iv: 0.6, call_iv: 0.5, quote_status: 'partial' };
-  const chart = ({ children }) => React.createElement('div', null, children);
-  const dashboard = load('dashboard/src/components/AssetMarketDashboard.tsx', {
-    react: React,
-    'react/jsx-runtime': jsxRuntime,
-    recharts: { ResponsiveContainer: chart, LineChart: chart, Line: chart, XAxis: chart, YAxis: chart, Tooltip: chart },
-    '@/components/Card': ({ title, children }) => React.createElement('section', null, title, children),
-    '@/lib/hooks': { usePolling: (_url, initialData) => ({ data: initialData, dataUrl: null, error: null, loading: false }) },
-    '@/lib/format': { formatUSD: value => `$${Number(value).toLocaleString('en-US')}` },
-    '@/lib/chart': { chartAxis: { stroke: '#fff', tick: {} }, chartColors: { primary: '#fff', secondary: '#fff', red: '#fff', blue: '#fff' }, chartTooltip: {} },
-    '@/lib/dashboard-ranges': { ASSET_DEFAULT_RANGE: '24h', DASHBOARD_RANGES: ['24h'] },
-  });
+  const initial = { range: '24h', stats: { last_price: 61000, last_price_time: '2026-10-23T02:00:00Z' },
+    chart: { prices: [{ timestamp: '2026-10-23T02:00:00Z', price: 61000 }] }, ticks: [] };
+  const calls = [];
   const pageImports = {
     'react/jsx-runtime': jsxRuntime,
     'next/navigation': { notFound: () => { throw new Error('not found'); } },
     '@/lib/market-assets': { isMarketAsset: asset => asset === 'BTC' },
-    '@/lib/db': { getAssetMarketData: () => ({ ready: true, latest, history: [latest], quotes: [], observation_count: 1 }) },
-    '@/lib/dashboard-ranges': { ASSET_DEFAULT_RANGE: '24h', dashboardRangeMs: () => 86400000 },
-    '@/components/AssetMarketDashboard': dashboard.default,
+    '@/lib/asset-overview': { getAssetOverview: (asset, range) => { calls.push([asset, range]); return initial; } },
+    '@/lib/dashboard-ranges': { ASSET_DEFAULT_RANGE: '24h' },
+    '@/app/page': { MarketOverview: ({ asset, initialAssetOverview, initialAssetError }) =>
+      React.createElement('section', null, asset, ' ', initialAssetOverview?.stats.last_price?.toLocaleString('en-US'),
+        ' ', initialAssetOverview?.chart.prices.length, ' observation in the selected range',
+        ' ', initialAssetError || '') },
   };
   const page = load('dashboard/src/app/assets/[asset]/page.tsx', pageImports);
   const html = renderToStaticMarkup(page.default({ params: { asset: 'btc' } }));
-  assert.match(html, /\$61,000/);
+  assert.match(html, /BTC 61,000/);
   assert.match(html, /1 observation in the selected range/);
-  assert.match(html, /Last collected/);
-  assert.doesNotMatch(html, /Loading market history/);
+  assert.deepEqual(calls, [['BTC', '24h']], 'server loads the selected asset before rendering');
   const unavailablePage = load('dashboard/src/app/assets/[asset]/page.tsx', {
     ...pageImports,
-    '@/lib/db': { getAssetMarketData: () => { throw new Error('DB unavailable'); } },
+    '@/lib/asset-overview': { getAssetOverview: () => { throw new Error('DB unavailable'); } },
   });
   const unavailableHtml = renderToStaticMarkup(unavailablePage.default({ params: { asset: 'btc' } }));
   assert.match(unavailableHtml, /Market data temporarily unavailable/);
-  assert.doesNotMatch(unavailableHtml, /Collection has not started yet/);
+  assert.doesNotMatch(unavailableHtml, /61,000/);
 });

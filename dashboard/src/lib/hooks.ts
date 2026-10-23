@@ -14,9 +14,9 @@ type PollingResult<T> = {
   settledUrl: string | null;
 };
 
-export function usePolling<T>(url: string, initialData: T, interval = 60_000, timeoutMs?: number): PollingResult<T> {
+export function usePolling<T>(url: string | null, initialData: T, interval = 60_000, timeoutMs?: number): PollingResult<T> {
   const [data, setData] = useState<T>(initialData);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(url != null);
   const [error, setError] = useState<string | null>(null);
   const [fetchTick, setFetchTick] = useState(0);
   const [dataUrl, setDataUrl] = useState<string | null>(null);
@@ -25,6 +25,7 @@ export function usePolling<T>(url: string, initialData: T, interval = 60_000, ti
   const abortRef = useRef<AbortController | null>(null);
 
   const fetchData = useCallback(async () => {
+    if (url == null) return;
     const requestId = ++requestIdRef.current;
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -55,6 +56,7 @@ export function usePolling<T>(url: string, initialData: T, interval = 60_000, ti
   }, [url, timeoutMs]);
 
   useEffect(() => {
+    if (url == null) return;
     void fetchData();
     const id = setInterval(fetchData, interval);
     return () => {
