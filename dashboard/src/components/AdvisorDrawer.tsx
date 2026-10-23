@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { usePathname } from 'next/navigation';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import WikiBrowser from './WikiBrowser';
@@ -910,7 +911,7 @@ const PRIORITY_STYLES: Record<string, { color: string }> = {
   low: { color: 'text-gray-600' },
 };
 
-export default function AdvisorDrawer() {
+function AdvisorDrawerContent() {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<'chat' | 'journal' | 'wiki' | 'ops' | 'learning'>('journal');
   const [chats, setChats] = useState<Chat[]>([]);
@@ -2349,4 +2350,9 @@ export default function AdvisorDrawer() {
       </div>
     </>
   );
+}
+
+export default function AdvisorDrawer() {
+  const pathname = usePathname();
+  return pathname.startsWith('/assets/') ? null : <AdvisorDrawerContent />;
 }

@@ -1,7 +1,10 @@
 'use client';
 
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { usePolling, useLiveTimeAgo, useCountdown } from '@/lib/hooks';
 import { formatUSD } from '@/lib/format';
+import { ASSETS } from '@/lib/market-assets';
 
 const PUT_ANNUAL_RATE = 0.0333;
 const CYCLE_DAYS = 15;
@@ -45,7 +48,7 @@ function getPutBudgetPortfolioValue(
   return Number(usdcAmount || 0) + ((Number(ethAmount || 0) + Number(externalEthAmount || 0)) * spotPrice);
 }
 
-export default function Nav() {
+function EthStats() {
   const STATS_INTERVAL = 60_000;
   const { data: stats, fetchTick, dataUrl: statsDataUrl } = usePolling<NavStats>('/api/stats', emptyStats, STATS_INTERVAL);
   const { data: account } = usePolling<AccountData>('/api/lyra/account', emptyAccount, 60_000);
@@ -69,10 +72,7 @@ export default function Nav() {
   }
 
   return (
-    <nav className="border-b border-white/10 bg-juice-dark/80 backdrop-blur-md py-3">
-      <div className="w-full px-3 md:px-6 xl:px-8 2xl:px-10 flex items-center justify-between gap-3">
-        <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
-        <div className="flex items-center gap-2 md:gap-4 text-xs md:text-sm flex-wrap justify-end">
+    <div className="flex items-center gap-2 md:gap-4 text-xs md:text-sm flex-wrap justify-end">
           <span className="font-semibold">
             <span className="text-gray-400">ETH</span>{' '}
             <span className="text-juice-orange">{statsDataUrl ? formatUSD(stats.last_price) : '—'}</span>
@@ -103,7 +103,28 @@ export default function Nav() {
           )}
           <span className="text-gray-400 hidden md:inline">PUT <span className="text-white">{statsDataUrl ? formatUSD(putRemaining) : '—'}</span>/<span className="text-gray-500">{statsDataUrl ? formatUSD(putTotalBudget) : '—'}</span></span>
           <span className="text-gray-500 text-xs hidden md:inline">{!statsDataUrl ? 'Loading…' : b.putDaysLeft > 0 ? `${b.putDaysLeft}d left` : 'cycle ended'}</span>
+    </div>
+  );
+}
+
+export default function Nav() {
+  const pathname = usePathname();
+  const marketPage = pathname.startsWith('/assets/');
+  const activeAsset = marketPage ? pathname.split('/')[2]?.toUpperCase() : 'ETH';
+  return (
+    <nav className="border-b border-white/10 bg-juice-dark/80 backdrop-blur-md py-3">
+      <div className="w-full px-3 md:px-6 xl:px-8 2xl:px-10 flex flex-wrap items-center justify-between gap-3">
+        <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
+        <div className="flex items-center gap-1" aria-label="Asset">
+          {ASSETS.map((asset) => (
+            <Link key={asset} href={asset === 'ETH' ? '/' : `/assets/${asset.toLowerCase()}`}
+              aria-current={asset === activeAsset ? 'page' : undefined}
+              className={`px-2 py-1 text-sm border ${asset === activeAsset ? 'border-juice-orange text-juice-orange' : 'border-white/10 text-gray-400 hover:text-white'}`}>
+              {asset}
+            </Link>
+          ))}
         </div>
+        {!marketPage && <EthStats />}
       </div>
     </nav>
   );

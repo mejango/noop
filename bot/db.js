@@ -89,6 +89,42 @@ db.exec(`
 
   -- Indices for common queries
   CREATE INDEX IF NOT EXISTS idx_spot_prices_timestamp ON spot_prices(timestamp);
+  CREATE TABLE IF NOT EXISTS asset_market_snapshots (
+    asset TEXT NOT NULL,
+    hour TEXT NOT NULL,
+    collected_at TEXT NOT NULL,
+    spot REAL,
+    funding_rate REAL,
+    instrument_count INTEGER,
+    option_count INTEGER,
+    quoted_count INTEGER,
+    put_oi REAL,
+    call_oi REAL,
+    put_iv REAL,
+    call_iv REAL,
+    quote_status TEXT NOT NULL,
+    PRIMARY KEY (asset, hour)
+  );
+  CREATE TABLE IF NOT EXISTS asset_option_quotes (
+    asset TEXT NOT NULL,
+    hour TEXT NOT NULL,
+    instrument_name TEXT NOT NULL,
+    expiry INTEGER,
+    strike REAL,
+    option_type TEXT,
+    bid REAL,
+    ask REAL,
+    mark REAL,
+    index_price REAL,
+    delta REAL,
+    implied_vol REAL,
+    open_interest REAL,
+    bid_amount REAL,
+    ask_amount REAL,
+    PRIMARY KEY (asset, hour, instrument_name)
+  );
+  CREATE INDEX IF NOT EXISTS idx_asset_option_quotes_asset_hour
+    ON asset_option_quotes(asset, hour);
   CREATE INDEX IF NOT EXISTS idx_options_snapshots_timestamp ON options_snapshots(timestamp);
   CREATE INDEX IF NOT EXISTS idx_options_snapshots_instrument ON options_snapshots(instrument_name);
   CREATE INDEX IF NOT EXISTS idx_onchain_data_timestamp ON onchain_data(timestamp);
@@ -1852,6 +1888,33 @@ const insertSpotPrice = db.transaction((spotPrice, momentumResult = {}, botData 
   return result;
 });
 
+const insertAssetMarketSnapshot = db.transaction((summary, options = []) => {
+  const { asset, hour } = summary;
+  if (!require('./market-assets.json').slice(1).includes(asset)
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:00:00Z$/.test(hour)
+    || !Number.isFinite(Date.parse(hour))
+    || !['complete', 'partial', 'unavailable'].includes(summary.quote_status)
+    || !Array.isArray(options)) throw new Error('Invalid asset market snapshot');
+  const existing = db.prepare('SELECT quoted_count, quote_status, spot FROM asset_market_snapshots WHERE asset = ? AND hour = ?').get(asset, hour);
+  // Keep the fullest observation if a restart retries the same hour with less data.
+  if (existing && ((existing.quoted_count ?? -1) > (summary.quoted_count ?? -1)
+    || ((existing.quoted_count ?? -1) === (summary.quoted_count ?? -1)
+      && ((existing.quote_status === 'complete' && summary.quote_status !== 'complete')
+        || (existing.spot != null && summary.spot == null))))) return false;
+  db.prepare(`INSERT OR REPLACE INTO asset_market_snapshots
+    (asset,hour,collected_at,spot,funding_rate,instrument_count,option_count,quoted_count,put_oi,call_oi,put_iv,call_iv,quote_status)
+    VALUES (@asset,@hour,@collected_at,@spot,@funding_rate,@instrument_count,@option_count,@quoted_count,@put_oi,@call_oi,@put_iv,@call_iv,@quote_status)`).run(summary);
+  db.prepare('DELETE FROM asset_option_quotes WHERE asset = ? AND hour = ?').run(asset, hour);
+  const insert = db.prepare(`INSERT INTO asset_option_quotes
+    (asset,hour,instrument_name,expiry,strike,option_type,bid,ask,mark,index_price,delta,implied_vol,open_interest,bid_amount,ask_amount)
+    VALUES (@asset,@hour,@instrument_name,@expiry,@strike,@option_type,@bid,@ask,@mark,@index_price,@delta,@implied_vol,@open_interest,@bid_amount,@ask_amount)`);
+  for (const option of options) {
+    if (!option.instrument_name?.startsWith(`${asset}-`)) throw new Error('Asset option identity mismatch');
+    insert.run({ ...option, asset, hour });
+  }
+  return true;
+});
+
 const toNum = (v) => {
   if (v == null || v === '') return null;
   const n = Number(v);
@@ -2911,6 +2974,7 @@ module.exports = {
   ...dexVolumeStore,
   db,
   insertSpotPrice,
+  insertAssetMarketSnapshot,
   insertOptionsSnapshotBatch,
   insertOnchainData,
   insertSignal,

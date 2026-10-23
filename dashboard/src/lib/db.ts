@@ -519,13 +519,6 @@ function prepareAll(d: Database.Database) {
       ORDER BY created_at DESC, id DESC
     `),
 
-    getTableExists: d.prepare(`
-      SELECT name
-      FROM sqlite_master
-      WHERE type = 'table' AND name = ?
-      LIMIT 1
-    `),
-
     getRecentTradeOrderStats: d.prepare(`
       SELECT
         COUNT(*) as total_orders,
@@ -1705,7 +1698,7 @@ export function getTradeLessonRevisions() {
 
 export function hasTable(name: string) {
   try {
-    return !!getStmts().getTableExists.get(name);
+    return !!getDb().prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(name);
   } catch { return false; }
 }
 
@@ -1831,4 +1824,55 @@ export function getLiquidityVolumeOverTime(since: string) {
   const start=Date.parse(since);
   return aggregateVolume(getDexVolumeHistory(Number.isFinite(start) ? new Date(start-3600000).toISOString() : since))
     .filter(row=>Date.parse(row.timestamp as string)>=start);
+}
+
+export type AssetMarketSnapshot = {
+  asset: string;
+  hour: string;
+  collected_at: string;
+  spot: number | null;
+  funding_rate: number | null;
+  instrument_count: number | null;
+  option_count: number | null;
+  quoted_count: number | null;
+  put_oi: number | null;
+  call_oi: number | null;
+  put_iv: number | null;
+  call_iv: number | null;
+  quote_status: string;
+};
+
+export type AssetOptionQuote = {
+  instrument_name: string;
+  expiry: number | null;
+  strike: number | null;
+  option_type: string | null;
+  bid: number | null;
+  ask: number | null;
+  mark: number | null;
+  index_price: number | null;
+  delta: number | null;
+  implied_vol: number | null;
+  open_interest: number | null;
+  bid_amount: number | null;
+  ask_amount: number | null;
+};
+
+export function getAssetMarketData(asset: string, since: string) {
+  if (!hasTable('asset_market_snapshots')) {
+    return { history: [], latest: null, quotes: [], ready: false };
+  }
+  const database = getDb();
+  const latest = database.prepare('SELECT * FROM asset_market_snapshots WHERE asset = ? ORDER BY hour DESC LIMIT 1')
+    .get(asset) as AssetMarketSnapshot | undefined;
+  const history = database.prepare('SELECT * FROM asset_market_snapshots WHERE asset = ? AND hour >= ? ORDER BY hour ASC')
+    .all(asset, since) as AssetMarketSnapshot[];
+  const quotes = latest && hasTable('asset_option_quotes')
+    ? database.prepare(`SELECT instrument_name, expiry, strike, option_type, bid, ask, mark,
+        index_price, delta, implied_vol, open_interest, bid_amount, ask_amount
+        FROM asset_option_quotes WHERE asset = ? AND hour = ?
+        ORDER BY expiry ASC, ABS(strike - ?) ASC LIMIT 100`)
+      .all(asset, latest.hour, latest.spot || 0) as AssetOptionQuote[]
+    : [];
+  return { history, latest: latest || null, quotes, ready: true };
 }

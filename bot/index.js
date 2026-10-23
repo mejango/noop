@@ -25,10 +25,12 @@ global.__noopDb = db;
 
 // Load and run the main bot script
 require('../script.js');
+const stopAssetMarketCollector = require('./asset-market-collector').startAssetMarketCollector({ store: db });
 
 // Graceful shutdown
 const shutdown = () => {
   console.log('Closing database...');
+  stopAssetMarketCollector();
   db.close();
 };
 
