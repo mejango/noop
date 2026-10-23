@@ -155,6 +155,7 @@ const { fundingRatesFromTickerResult, summarizeFundingRates } = require('./bot/f
 const { summarizeAdvisoryQuotes, candidateSpreadPct } = require('./bot/advisory-quotes');
 const { readAdvisoryMarketSnapshot } = require('./bot/advisory-market-snapshot');
 const { runReviewedPublication } = require('./bot/advisory-publication');
+const { pingAssetMarkets } = require('./bot/asset-market-workers');
 
 const encoder = new AbiCoder();
 
@@ -13489,6 +13490,7 @@ const runBot = async () => {
 
   // Shared timestamp for all DB writes this tick
   const tickTimestamp = new Date().toISOString();
+  if (db) pingAssetMarkets(tickTimestamp);
 
   let onchainAnalysis = null;
 

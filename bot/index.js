@@ -23,14 +23,15 @@ console.log('='.repeat(70));
 // Export db for script.js to use
 global.__noopDb = db;
 
+const stopAssetMarketWorkers = require('./asset-market-workers').startAssetMarketWorkers();
+
 // Load and run the main bot script
 require('../script.js');
-const stopAssetMarketCollector = require('./asset-market-collector').startAssetMarketCollector({ store: db });
 
 // Graceful shutdown
 const shutdown = () => {
   console.log('Closing database...');
-  stopAssetMarketCollector();
+  stopAssetMarketWorkers();
   db.close();
 };
 

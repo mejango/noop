@@ -4,9 +4,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
+const { Worker } = require('node:worker_threads');
 const { collectAsset } = require('../bot/asset-market-collector');
+const { pingAssetMarkets, startAssetMarketWorkers } = require('../bot/asset-market-workers');
 
-test('collects V3 market quotes and preserves the fullest hourly SQLite snapshot', async () => {
+test('collects V3 market quotes on distinct pings and preserves the fullest retry', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'noop-asset-market-'));
   const oldPath = process.env.NOOP_DB_PATH;
   process.env.NOOP_DB_PATH = path.join(dir, 'noop.db');
@@ -28,7 +31,7 @@ test('collects V3 market quotes and preserves the fullest hourly SQLite snapshot
   };
   try {
     const { summary, options } = await collectAsset('ZEC', post, now);
-    assert.equal(summary.hour, '2026-10-23T12:00:00Z');
+    assert.equal(summary.hour, '2026-10-23T12:34:00.000Z');
     assert.equal(summary.spot, 1226.86);
     assert.equal(summary.funding_rate, 0.0000125);
     assert.equal(summary.quote_status, 'complete');
@@ -41,15 +44,65 @@ test('collects V3 market quotes and preserves the fullest hourly SQLite snapshot
     assert.equal(db.insertAssetMarketSnapshot(summary, options), true);
     assert.equal(db.insertAssetMarketSnapshot({ ...summary, quoted_count: 0, quote_status: 'partial' }, []), false);
     assert.equal(db.db.prepare('SELECT count(*) AS n FROM asset_option_quotes').get().n, 2);
+    const nextPing = await collectAsset('ZEC', post, now + 5 * 60_000);
+    assert.equal(db.insertAssetMarketSnapshot(nextPing.summary, nextPing.options), true);
+    assert.equal(db.db.prepare('SELECT count(*) AS n FROM asset_market_snapshots WHERE asset = ?').get('ZEC').n, 2);
+    assert.equal(db.db.prepare('SELECT count(*) AS n FROM asset_option_quotes').get().n, 4);
     assert.equal(db.db.prepare('SELECT count(*) AS n FROM spot_prices').get().n, 0);
     assert.equal(db.db.prepare('SELECT count(*) AS n FROM options_snapshots').get().n, 0);
     assert.throws(() => db.insertAssetMarketSnapshot(summary, [{ ...options[0], instrument_name: 'BTC-20261030-1100-P' }]));
-    assert.equal(db.db.prepare('SELECT count(*) AS n FROM asset_option_quotes').get().n, 2);
+    assert.equal(db.db.prepare('SELECT count(*) AS n FROM asset_option_quotes').get().n, 4);
   } finally {
     db.close();
     delete require.cache[require.resolve('../bot/db')];
     if (oldPath == null) delete process.env.NOOP_DB_PATH;
     else process.env.NOOP_DB_PATH = oldPath;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('each ETH ping reaches independent asset workers without awaiting their work', () => {
+  const created = [];
+  class FakeWorker extends EventEmitter {
+    constructor(_file, options) {
+      super();
+      this.asset = options.workerData.asset;
+      this.messages = [];
+      created.push(this);
+    }
+    postMessage(message) { this.messages.push(message); }
+    terminate() { return Promise.resolve(); }
+  }
+  const stop = startAssetMarketWorkers({ WorkerClass: FakeWorker });
+  try {
+    assert.deepEqual(created.map(worker => worker.asset), ['BTC', 'ZEC', 'HYPE', 'SOL']);
+    pingAssetMarkets('2026-10-23T12:34:00.000Z');
+    for (const worker of created) {
+      assert.deepEqual(worker.messages, [{ type: 'ping', timestamp: '2026-10-23T12:34:00.000Z' }]);
+    }
+    created[0].emit('exit', 1);
+    pingAssetMarkets('2026-10-23T12:39:00.000Z');
+    assert.equal(created[0].messages.length, 1);
+    for (const worker of created.slice(1)) assert.equal(worker.messages.length, 2);
+  } finally { stop(); }
+  assert.match(require('node:fs').readFileSync(path.join(__dirname, '../script.js'), 'utf8'), /pingAssetMarkets\(tickTimestamp\)/);
+});
+
+test('an asset worker initializes its own SQLite connection', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'noop-market-worker-'));
+  const env = { ...process.env, DATA_DIR: dir };
+  delete env.NOOP_DB_PATH;
+  const worker = new Worker(require.resolve('../bot/asset-market-worker'), { workerData: { asset: 'BTC' }, env });
+  try {
+    const ready = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Asset worker startup timed out')), 10_000);
+      worker.once('message', message => { clearTimeout(timer); resolve(message); });
+      worker.once('error', error => { clearTimeout(timer); reject(error); });
+    });
+    assert.deepEqual(ready, { type: 'ready', asset: 'BTC' });
+    assert.equal(fs.existsSync(path.join(dir, 'noop.db')), true);
+  } finally {
+    await worker.terminate();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

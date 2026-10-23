@@ -1891,12 +1891,12 @@ const insertSpotPrice = db.transaction((spotPrice, momentumResult = {}, botData 
 const insertAssetMarketSnapshot = db.transaction((summary, options = []) => {
   const { asset, hour } = summary;
   if (!require('./market-assets.json').slice(1).includes(asset)
-    || !/^\d{4}-\d{2}-\d{2}T\d{2}:00:00Z$/.test(hour)
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(hour)
     || !Number.isFinite(Date.parse(hour))
     || !['complete', 'partial', 'unavailable'].includes(summary.quote_status)
     || !Array.isArray(options)) throw new Error('Invalid asset market snapshot');
   const existing = db.prepare('SELECT quoted_count, quote_status, spot FROM asset_market_snapshots WHERE asset = ? AND hour = ?').get(asset, hour);
-  // Keep the fullest observation if a restart retries the same hour with less data.
+  // Keep the fullest observation if a retry repeats the same ping timestamp.
   if (existing && ((existing.quoted_count ?? -1) > (summary.quoted_count ?? -1)
     || ((existing.quoted_count ?? -1) === (summary.quoted_count ?? -1)
       && ((existing.quote_status === 'complete' && summary.quote_status !== 'complete')

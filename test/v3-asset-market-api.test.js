@@ -8,12 +8,14 @@ const vm = require('node:vm');
 const os = require('node:os');
 const Database = require('../dashboard/node_modules/better-sqlite3');
 const ts = require('../dashboard/node_modules/typescript');
+const React = require('../dashboard/node_modules/react');
+const { renderToStaticMarkup } = require('../dashboard/node_modules/react-dom/server');
 const root = path.resolve(__dirname, '..');
 
 function load(file, imports, processOverride = process) {
   const source = fs.readFileSync(path.join(root, file), 'utf8');
   const code = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
   const exports = {};
   vm.runInNewContext(code, {
@@ -32,20 +34,21 @@ test('asset API accepts only non-ETH assets and returns honest empty history', a
   const calls = [];
   const route = load('dashboard/src/app/api/assets/[asset]/route.ts', {
     'next/server': { NextResponse: { json: (value, options) => new Response(JSON.stringify(value), { status: options?.status || 200 }) } },
-    '@/lib/db': { getAssetMarketData: (asset, since) => {
-      calls.push([asset, since]);
-      return { ready: false, latest: null, history: [], quotes: [] };
+    '@/lib/db': { getAssetMarketData: (asset, since, rangeMs) => {
+      calls.push([asset, since, rangeMs]);
+      return { ready: false, latest: null, history: [], quotes: [], observation_count: 0 };
     } },
     '@/lib/market-assets': allowed,
-    '@/lib/dashboard-ranges': { DASHBOARD_RANGES: ['14d'], dashboardRangeMs: () => 14 * 86400000 },
+    '@/lib/dashboard-ranges': { ASSET_DEFAULT_RANGE: '24h', DASHBOARD_RANGES: ['14d', '24h'], dashboardRangeMs: () => 14 * 86400000 },
     '@/lib/response-cache': { cachedJsonRoute: (_request, _key, loader) => loader() },
   });
   const request = { nextUrl: new URL('http://localhost/api/assets/btc?range=14d') };
   const btc = await route.GET(request, { params: { asset: 'btc' } });
   assert.equal(btc.status, 200);
-  assert.deepEqual(await btc.json(), { asset: 'BTC', range: '14d', ready: false, latest: null, history: [], quotes: [] });
+  assert.deepEqual(await btc.json(), { asset: 'BTC', range: '14d', ready: false, latest: null, history: [], quotes: [], observation_count: 0 });
   assert.equal(calls[0][0], 'BTC');
   assert.ok(Number.isFinite(Date.parse(calls[0][1])));
+  assert.equal(calls[0][2], 14 * 86400000);
   for (const asset of ['ETH', 'DOGE']) {
     assert.equal((await route.GET(request, { params: { asset } })).status, 404);
   }
@@ -87,16 +90,78 @@ test('dashboard DB getter reads only the selected asset and its captured quotes'
       '../../../bot/economic-events': {}, '../../../bot/open-interest': {},
       '../../../bot/funding-rates': {}, '../../../bot/liquidity-quality': {},
     }, { env: { DATA_DIR: directory } });
-    const btc = db.getAssetMarketData('BTC', '2026-10-23T00:00:00Z');
+    const btc = db.getAssetMarketData('BTC', '2026-10-23T00:00:00Z', 86400000);
     assert.equal(btc.ready, true);
+    assert.equal(btc.observation_count, 2);
     assert.equal(btc.history.length, 2);
     assert.equal(btc.latest.spot, 61000);
     assert.deepEqual(Array.from(btc.quotes, (quote) => quote.instrument_name), ['BTC-20261225-60000-P']);
-    const zec = db.getAssetMarketData('ZEC', '2026-10-23T00:00:00Z');
+    const zec = db.getAssetMarketData('ZEC', '2026-10-23T00:00:00Z', 86400000);
+    assert.equal(zec.observation_count, 1);
     assert.equal(zec.history.length, 1);
     assert.equal(zec.latest.spot, 300);
     assert.deepEqual(Array.from(zec.quotes, (quote) => quote.instrument_name), ['ZEC-20261225-300-P']);
+    const writer = new Database(path.join(directory, 'noop.db'));
+    const insert = writer.prepare(`INSERT INTO asset_market_snapshots
+      (asset,hour,collected_at,spot,quote_status) VALUES ('BTC',?,?,?,'partial')`);
+    insert.run('2026-10-23T02:00:00.123Z', '2026-10-23T02:00:00.123Z', 61123);
+    const boundary = db.getAssetMarketData('BTC', '2026-10-23T02:00:00.050Z', 86400000);
+    assert.equal(boundary.observation_count, 1, 'mixed key range excludes the older exact-second row');
+    assert.equal(boundary.latest.hour, '2026-10-23T02:00:00.123Z', 'latest uses chronological order at the legacy boundary');
+    assert.deepEqual(Array.from(boundary.history, row => row.hour), ['2026-10-23T02:00:00.123Z']);
+    writer.transaction(() => {
+      insert.run('2026-10-23T02:00:45.123Z', '2026-10-23T02:00:45.123Z', 61500);
+      for (let i = 0; i < 1200; i++) {
+        const timestamp = new Date(Date.parse('2026-10-23T03:00:00Z') + i * 60000).toISOString().replace('.000Z', 'Z');
+        insert.run(timestamp, timestamp, 62000 + i);
+      }
+    })();
+    writer.close();
+    const sampled = db.getAssetMarketData('BTC', '2026-10-23T00:00:00Z', 86400000);
+    assert.equal(sampled.observation_count, 1204, 'old hourly and new per-ping rows remain counted');
+    assert.ok(sampled.history.length <= 500, 'chart transfer stays bounded');
+    assert.ok(sampled.history.some(row => row.hour === '2026-10-23T02:00:45.123Z'), 'chart sampling accepts millisecond timestamps');
+    assert.equal(sampled.history.at(-1).hour, sampled.latest.hour, 'chart keeps the latest observation');
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('asset page server HTML contains its latest market observation before hydration', () => {
+  const jsxRuntime = require('../dashboard/node_modules/react/jsx-runtime');
+  const latest = { asset: 'BTC', hour: '2026-10-23T02:00:00Z', collected_at: '2026-10-23T02:00:12Z',
+    spot: 61000, funding_rate: 0.0001, instrument_count: 100, option_count: 80, quoted_count: 50,
+    put_oi: 1000, call_oi: 1200, put_iv: 0.6, call_iv: 0.5, quote_status: 'partial' };
+  const chart = ({ children }) => React.createElement('div', null, children);
+  const dashboard = load('dashboard/src/components/AssetMarketDashboard.tsx', {
+    react: React,
+    'react/jsx-runtime': jsxRuntime,
+    recharts: { ResponsiveContainer: chart, LineChart: chart, Line: chart, XAxis: chart, YAxis: chart, Tooltip: chart },
+    '@/components/Card': ({ title, children }) => React.createElement('section', null, title, children),
+    '@/lib/hooks': { usePolling: (_url, initialData) => ({ data: initialData, dataUrl: null, error: null, loading: false }) },
+    '@/lib/format': { formatUSD: value => `$${Number(value).toLocaleString('en-US')}` },
+    '@/lib/chart': { chartAxis: { stroke: '#fff', tick: {} }, chartColors: { primary: '#fff', secondary: '#fff', red: '#fff', blue: '#fff' }, chartTooltip: {} },
+    '@/lib/dashboard-ranges': { ASSET_DEFAULT_RANGE: '24h', DASHBOARD_RANGES: ['24h'] },
+  });
+  const pageImports = {
+    'react/jsx-runtime': jsxRuntime,
+    'next/navigation': { notFound: () => { throw new Error('not found'); } },
+    '@/lib/market-assets': { isMarketAsset: asset => asset === 'BTC' },
+    '@/lib/db': { getAssetMarketData: () => ({ ready: true, latest, history: [latest], quotes: [], observation_count: 1 }) },
+    '@/lib/dashboard-ranges': { ASSET_DEFAULT_RANGE: '24h', dashboardRangeMs: () => 86400000 },
+    '@/components/AssetMarketDashboard': dashboard.default,
+  };
+  const page = load('dashboard/src/app/assets/[asset]/page.tsx', pageImports);
+  const html = renderToStaticMarkup(page.default({ params: { asset: 'btc' } }));
+  assert.match(html, /\$61,000/);
+  assert.match(html, /1 observation in the selected range/);
+  assert.match(html, /Last collected/);
+  assert.doesNotMatch(html, /Loading market history/);
+  const unavailablePage = load('dashboard/src/app/assets/[asset]/page.tsx', {
+    ...pageImports,
+    '@/lib/db': { getAssetMarketData: () => { throw new Error('DB unavailable'); } },
+  });
+  const unavailableHtml = renderToStaticMarkup(unavailablePage.default({ params: { asset: 'btc' } }));
+  assert.match(unavailableHtml, /Market data temporarily unavailable/);
+  assert.doesNotMatch(unavailableHtml, /Collection has not started yet/);
 });

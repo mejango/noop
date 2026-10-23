@@ -29,13 +29,14 @@ function tickerMap(result) {
   return result?.tickers && !Array.isArray(result.tickers) ? result.tickers : {};
 }
 
-function marketHour(now) {
-  return new Date(Math.floor(now / 3_600_000) * 3_600_000).toISOString().replace('.000Z', 'Z');
+function marketObservationTime(now) {
+  return new Date(now).toISOString();
 }
 
 async function collectAsset(asset, post = publicPost, now = Date.now()) {
   if (!assets.includes(asset)) throw new Error(`Unsupported market asset: ${asset}`);
-  const hour = marketHour(now);
+  // `hour` is the legacy snapshot key; new observations use the full ETH-ping time.
+  const hour = marketObservationTime(now);
   const summary = { asset, hour, collected_at: new Date(now).toISOString(), spot: null,
     funding_rate: null, instrument_count: null, option_count: null, quoted_count: null,
     put_oi: null, call_oi: null, put_iv: null, call_iv: null, quote_status: 'unavailable' };
@@ -56,6 +57,7 @@ async function collectAsset(asset, post = publicPost, now = Date.now()) {
     }, 'v3', { currency: asset, expired: false, instrument_type: 'option' });
   } catch (error) {
     console.warn(`Asset ${asset} instruments fetch failed: ${error.message}`);
+    summary.collected_at = new Date().toISOString();
     return { summary, options: [] };
   }
   summary.instrument_count = instruments.length;
@@ -63,26 +65,30 @@ async function collectAsset(asset, post = publicPost, now = Date.now()) {
   const dates = [...new Set([...byName.keys()].map(name => name.split('-')[1]).filter(date => /^\d{8}$/.test(date)))].sort();
   const options = [];
   let failures = 0;
-  for (const date of dates.slice(0, MAX_EXPIRIES)) {
-    let tickers;
-    try {
-      tickers = tickerMap(await post('get_tickers', { instrument_type: 'option', currency: asset, expiry_date: date }));
-    } catch (error) {
-      failures++;
-      console.warn(`Asset ${asset} ${date} ticker fetch failed: ${error.message}`);
-      continue;
-    }
-    for (const [name, ticker] of Object.entries(tickers)) {
-      const instrument = byName.get(name);
-      if (!instrument || !ticker || typeof ticker !== 'object') continue;
-      const details = instrument.option_details || {};
-      const type = details.option_type || name.split('-').at(-1);
-      if (type !== 'P' && type !== 'C') continue;
-      options.push({ instrument_name: name, expiry: number(details.expiry), strike: number(details.strike),
-        option_type: type, bid: number(ticker.b), ask: number(ticker.a), mark: number(ticker.M),
-        index_price: number(ticker.I), delta: number(ticker.option_pricing?.d),
-        implied_vol: number(ticker.option_pricing?.i), open_interest: number(ticker.stats?.oi),
-        bid_amount: number(ticker.B), ask_amount: number(ticker.A) });
+  for (let offset = 0; offset < Math.min(dates.length, MAX_EXPIRIES); offset += 4) {
+    const batch = dates.slice(offset, offset + 4);
+    const results = await Promise.all(batch.map(async date => {
+      try {
+        return tickerMap(await post('get_tickers', { instrument_type: 'option', currency: asset, expiry_date: date }));
+      } catch (error) {
+        failures++;
+        console.warn(`Asset ${asset} ${date} ticker fetch failed: ${error.message}`);
+        return {};
+      }
+    }));
+    for (const tickers of results) {
+      for (const [name, ticker] of Object.entries(tickers)) {
+        const instrument = byName.get(name);
+        if (!instrument || !ticker || typeof ticker !== 'object') continue;
+        const details = instrument.option_details || {};
+        const type = details.option_type || name.split('-').at(-1);
+        if (type !== 'P' && type !== 'C') continue;
+        options.push({ instrument_name: name, expiry: number(details.expiry), strike: number(details.strike),
+          option_type: type, bid: number(ticker.b), ask: number(ticker.a), mark: number(ticker.M),
+          index_price: number(ticker.I), delta: number(ticker.option_pricing?.d),
+          implied_vol: number(ticker.option_pricing?.i), open_interest: number(ticker.stats?.oi),
+          bid_amount: number(ticker.B), ask_amount: number(ticker.A) });
+      }
     }
   }
   summary.option_count = options.length;
@@ -96,34 +102,8 @@ async function collectAsset(asset, post = publicPost, now = Date.now()) {
   }
   summary.quote_status = !failures && dates.length <= MAX_EXPIRIES && options.length === instruments.length
     ? 'complete' : 'partial';
+  summary.collected_at = new Date().toISOString();
   return { summary, options };
 }
 
-function startAssetMarketCollector({ store, post = publicPost, intervalMs = 3_600_000 }) {
-  let lastHour = null;
-  let running = false;
-  let stopped = false;
-  const run = async () => {
-    const now = Date.now();
-    const hour = marketHour(now);
-    if (stopped || running || hour === lastHour) return;
-    running = true;
-    try {
-      for (const asset of assets) {
-        if (stopped) break;
-        try {
-          const { summary, options } = await collectAsset(asset, post, now);
-          if (!stopped) store.insertAssetMarketSnapshot(summary, options);
-        } catch (error) {
-          console.error(`Asset ${asset} collection failed: ${error.message}`);
-        }
-      }
-      lastHour = hour;
-    } finally { running = false; }
-  };
-  void run();
-  const timer = setInterval(() => { void run(); }, intervalMs);
-  return () => { stopped = true; clearInterval(timer); };
-}
-
-module.exports = { collectAsset, startAssetMarketCollector, marketHour };
+module.exports = { collectAsset, marketObservationTime };

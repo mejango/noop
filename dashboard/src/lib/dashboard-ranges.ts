@@ -15,6 +15,8 @@ export const DASHBOARD_RANGES = [
 
 export type DashboardRange = (typeof DASHBOARD_RANGES)[number];
 
+export const ASSET_DEFAULT_RANGE: DashboardRange = '24h';
+
 export const DASHBOARD_RANGE_MS = {
   '1h': HOUR_MS,
   '6h': 6 * HOUR_MS,

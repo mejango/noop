@@ -153,7 +153,7 @@ test('preflight never treats 503 or mismatched account evidence as readiness', a
 });
 
 test('collection mode appends observations and accounting without touching orders, decisions or advisory', async () => {
-  const writes = [], heartbeats = [], delays = [];
+  const writes = [], heartbeats = [], delays = [], assetPings = [];
   const instrument = { instrument_name: 'ETH-20261127-1600-P' };
   const forbidden = () => { throw new Error('Trading/advisory capability invoked during collection'); };
   const config = getDeriveConfig({ ...env, DERIVE_COLLECT_DATA: 'true' });
@@ -161,6 +161,7 @@ test('collection mode appends observations and accounting without touching order
   const bindings = {
     DERIVE_CONFIG: config, console: { log() {}, error: forbidden },
     process: { connected: true, send: m => heartbeats.push(m), env: { ANTHROPIC_API_KEY: 'test' } },
+    pingAssetMarkets: at => assetPings.push(at),
     setTimeout: (_fn, ms) => delays.push(ms), runBotWithWatchdog() {},
     fetchDeriveSpotPrice: async () => null, fetchCoinGeckoSpotPrice: async () => null,
     normalizeEthSpotPrice: () => null,
@@ -187,6 +188,8 @@ test('collection mode appends observations and accounting without touching order
   const run = vm.compileFunction(`${declaration(SCRIPT_SOURCE, 'runBot')}; return runBot;`, Object.keys(bindings))(...Object.values(bindings));
   await run();
   assert.deepEqual(writes, ['accounting', 'options', 'portfolio', 'tick', 'cycle']);
+  assert.equal(assetPings.length, 1);
+  assert.ok(Number.isFinite(Date.parse(assetPings[0])));
   assert.equal(heartbeats.length, 1);
   assert.deepEqual(delays, [60000]);
   for (const name of ['placeOrder', 'cancelOrder']) {

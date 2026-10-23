@@ -1858,15 +1858,31 @@ export type AssetOptionQuote = {
   ask_amount: number | null;
 };
 
-export function getAssetMarketData(asset: string, since: string) {
+export function getAssetMarketData(asset: string, since: string, rangeMs: number) {
   if (!hasTable('asset_market_snapshots')) {
-    return { history: [], latest: null, quotes: [], ready: false };
+    return { history: [], latest: null, quotes: [], observation_count: 0, ready: false };
   }
   const database = getDb();
-  const latest = database.prepare('SELECT * FROM asset_market_snapshots WHERE asset = ? ORDER BY hour DESC LIMIT 1')
-    .get(asset) as AssetMarketSnapshot | undefined;
-  const history = database.prepare('SELECT * FROM asset_market_snapshots WHERE asset = ? AND hour >= ? ORDER BY hour ASC')
-    .all(asset, since) as AssetMarketSnapshot[];
+  // Legacy hourly keys end in Z; per-ping keys carry milliseconds. The two
+  // lexically newest keys cover the only ordering ambiguity, within one second.
+  const latest = (database.prepare('SELECT * FROM asset_market_snapshots WHERE asset = ? ORDER BY hour DESC LIMIT 2')
+    .all(asset) as AssetMarketSnapshot[]).sort((a, b) => Date.parse(b.hour) - Date.parse(a.hour))[0];
+  const observationCount = (database.prepare(`SELECT COUNT(*) AS count FROM asset_market_snapshots
+      WHERE asset = ? AND hour >= substr(?, 1, 19) AND julianday(hour) >= julianday(?)`)
+    .get(asset, since, since) as { count: number }).count;
+  const bucketSeconds = Math.max(1, Math.ceil(rangeMs / (500 * 1000)));
+  const history = database.prepare(`WITH sampled AS (
+      SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY CAST(unixepoch(hour) / ? AS INTEGER)
+        ORDER BY julianday(hour) DESC
+      ) AS sample_rank
+      FROM asset_market_snapshots
+      WHERE asset = ? AND hour >= substr(?, 1, 19) AND julianday(hour) >= julianday(?)
+    )
+    SELECT asset,hour,collected_at,spot,funding_rate,instrument_count,option_count,
+      quoted_count,put_oi,call_oi,put_iv,call_iv,quote_status
+    FROM sampled WHERE sample_rank = 1 ORDER BY julianday(hour) ASC`)
+    .all(bucketSeconds, asset, since, since) as AssetMarketSnapshot[];
   const quotes = latest && hasTable('asset_option_quotes')
     ? database.prepare(`SELECT instrument_name, expiry, strike, option_type, bid, ask, mark,
         index_price, delta, implied_vol, open_interest, bid_amount, ask_amount
@@ -1874,5 +1890,5 @@ export function getAssetMarketData(asset: string, since: string) {
         ORDER BY expiry ASC, ABS(strike - ?) ASC LIMIT 100`)
       .all(asset, latest.hour, latest.spot || 0) as AssetOptionQuote[]
     : [];
-  return { history, latest: latest || null, quotes, ready: true };
+  return { history, latest: latest || null, quotes, observation_count: observationCount, ready: true };
 }
