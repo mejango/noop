@@ -126,14 +126,19 @@ export default function Nav() {
       <div className="w-full px-3 md:px-6 xl:px-8 2xl:px-10 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
-          <select
-            aria-label="Asset"
-            value={activeAsset}
-            onChange={event => router.push(event.target.value === 'ETH' ? '/' : `/assets/${event.target.value.toLowerCase()}`)}
-            className="bg-juice-dark border border-juice-orange text-juice-orange text-sm pl-2 pr-8 py-1 cursor-pointer"
-          >
-            {ASSETS.map(asset => <option key={asset} value={asset}>{asset}</option>)}
-          </select>
+          <span className="relative inline-flex items-center">
+            <select
+              aria-label="Asset"
+              value={activeAsset}
+              onChange={event => router.push(event.target.value === 'ETH' ? '/' : `/assets/${event.target.value.toLowerCase()}`)}
+              className="appearance-none bg-juice-dark border border-juice-orange text-juice-orange text-sm pl-3 pr-12 py-1 cursor-pointer"
+            >
+              {ASSETS.map(asset => <option key={asset} value={asset}>{asset}</option>)}
+            </select>
+            <svg aria-hidden="true" viewBox="0 0 12 8" width="12" height="8" className="pointer-events-none absolute right-4 text-juice-orange">
+              <path d="m1 1 5 5 5-5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </span>
         </div>
         {marketPage ? <AssetStats key={activeAsset} asset={activeAsset} /> : <EthStats />}
       </div>
