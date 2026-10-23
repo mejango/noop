@@ -1,4 +1,4 @@
-FROM node:20-alpine AS dashboard-builder
+FROM node:24.22.1-alpine AS dashboard-builder
 
 RUN apk add --no-cache python3 make g++
 
@@ -12,7 +12,7 @@ ENV BOT_CONFIG_PATH=/bot/config.json
 RUN npm run build
 
 # Production image
-FROM node:20-alpine
+FROM node:24.22.1-alpine
 
 RUN apk add --no-cache python3 make g++
 
