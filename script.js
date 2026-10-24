@@ -2231,7 +2231,8 @@ const fetchOpenOrders = async (options = {}) => {
     // Defensive: result could be array directly, or { orders: [...] }, or { result: { orders: [...] } }
     const raw = response.data?.result;
     const orders = Array.isArray(raw) ? raw : raw?.orders;
-    if (response.data?.error || !Array.isArray(orders)) throw new Error('Open order state unavailable');
+    if (response.data?.error) throw new Error(`Open order state unavailable: ${stringifyApiError(response.data.error).slice(0, 300)}`);
+    if (!Array.isArray(orders)) throw new Error('Open order state unavailable');
     return orders.map(o => ({
       order_id: o.order_id,
       instrument_name: o.instrument_name,
