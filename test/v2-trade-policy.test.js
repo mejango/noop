@@ -234,6 +234,47 @@ test('final roll rechecks quantity coverage and live conditions', () => {
   rejectCode(blocked, 'exit_conditions_failed');
 });
 
+test('roll coverage deducts only unfilled put sales and reserves tracked/venue duplicates once', () => {
+  const positions = [longPut(retiringName, 4), longPut(tailName, 4)];
+  const order = { order_id: 'replacement-sale', instrument_name: tailName, action: 'sell_put',
+    direction: 'sell', amount: 2, filled_amount: 1, status: 'open' };
+  const coverage = amount => getPutReplacementCoverage(positions[0], positions, amount, now, [order, { ...order, action: undefined }]);
+  assert.equal(coverage(4).allowed, false);
+  assert.equal(coverage(3).allowed, true);
+  assert.equal(coverage(3).replacementAmount, 3);
+  rejectCode(rollOrder({ positions, amount: 4, openOrders: [order] }), 'replacement_failed');
+  assert.equal(validateFinalOrderPolicy(rollOrder({ positions, amount: 3, openOrders: [order] })).allowed, true);
+  const olderTracked = { ...order, filled_amount: 0 };
+  assert.equal(getPutReplacementCoverage(positions[0], positions, 3, now, [olderTracked, order]).replacementAmount, 2);
+  const terminal = { ...order, status: 'cancelled' };
+  assert.equal(getPutReplacementCoverage(positions[0], positions, 4, now, [terminal]).allowed, true);
+  assert.equal(getPutReplacementCoverage(positions[0], positions, 4, now, [terminal, order]).allowed, false);
+});
+
+test('unusable or conflicting order evidence cannot release replacement capacity', () => {
+  const positions = [longPut(retiringName, 4), longPut(tailName, 4)];
+  const order = { order_id: 'replacement-sale', instrument_name: tailName, direction: 'sell',
+    amount: 1, filled_amount: 0, order_status: 'open' };
+  for (const orders of [null, {}, [null], [{ ...order, order_id: undefined }], [{ ...order, instrument_name: undefined }],
+    [{ ...order, direction: undefined }], [{ ...order, direction: 'long' }], [{ ...order, action: 'buy_put' }],
+    [{ ...order, filled_amount: undefined }], [{ ...order, filled_amount: 'Infinity' }], [{ ...order, filled_amount: 2 }],
+    [{ ...order, filled_amount: 1 }], [{ ...order, order_status: 'rejected', filled_amount: 0.5 }],
+    [{ ...order, order_status: 'unknown' }], [{ ...order, status: 'cancelled' }],
+    [order, { ...order, instrument_name: retiringName }], [order, { ...order, direction: 'buy' }], [order, { ...order, amount: 2 }]]) {
+    const result = getPutReplacementCoverage(positions[0], positions, 1, now, orders);
+    assert.equal(result.allowed, false, JSON.stringify(orders));
+    assert.match(result.reason, /commitments unavailable/i);
+  }
+});
+
+test('replacement coverage does not pledge holdings permanently or count pending purchases', () => {
+  const later = 'ETH-20261130-2000-P';
+  const positions = [longPut(tailName, 4), longPut(later, 4)];
+  assert.equal(getPutReplacementCoverage(positions[0], positions, 4, now).allowed, true, 'B can itself roll into held C');
+  const pendingBuy = { order_id: 'unfilled-protection', instrument_name: later, direction: 'buy', amount: 4, filled_amount: 0, status: 'open' };
+  assert.equal(getPutReplacementCoverage(positions[0], [positions[0]], 4, now, [pendingBuy]).allowed, false);
+});
+
 test('final put price obeys approved cap and fresh normalized score', () => {
   const accepted = validateFinalOrderPolicy(putOrder());
   assert.equal(accepted.allowed, true);
@@ -259,6 +300,15 @@ test('final profit buyback preserves the actual capture floor and approved price
   assert.ok(Math.abs(accepted.approvedBounds.buyCeiling - 2) < 1e-12);
   rejectCode(buybackOrder({ price: 2.01 }), 'capture_failed');
   rejectCode(buybackOrder({ price: 1.6, triggerData: { advisor_limit_price: 1.5 } }), 'capture_failed');
+});
+
+test('exit cost basis must be finite before computing capture or recovery', () => {
+  for (const avg_entry_price of [Infinity, 'Infinity', '1e309', null, undefined, 0, 'NaN']) {
+    const order = buybackOrder({ positions: [{ ...positionCall, avg_entry_price }] });
+    order.criteria.conditions = [condition('spot_price', 'gt', 0)];
+    rejectCode(order, 'missing_cost_basis');
+    rejectCode(rollOrder({ positions: [{ ...longPut(retiringName), avg_entry_price }, longPut(tailName)] }), 'missing_cost_basis');
+  }
 });
 
 test('final patient buyback cannot bypass fresh spot or delta conditions', () => {

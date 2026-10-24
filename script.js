@@ -3439,11 +3439,16 @@ const formatTradeLessonForPrompt = (lesson) => {
 const formatTradeReviewForLessonSynthesis = (review) => {
   const parsed = parseTradeInstrumentParts(review.instrument_name);
   const lessons = parseStoredStringArray(review.lessons);
+  const activity = review.is_active === 1 ? 'active' : review.is_active === 0 ? 'inactive' : 'unknown';
+  const confidence = typeof review.review_confidence === 'number' && Number.isFinite(review.review_confidence)
+    ? review.review_confidence : 'unknown';
   return [
     `#${review.id}`,
     review.instrument_name,
     `[${review.review_status}]`,
     `[${review.review_window_days}d]`,
+    `activity=${activity}`,
+    `confidence=${confidence}`,
     `family=${review.action_family || 'unknown'}`,
     `strike=${parsed?.strike ?? 'N/A'}`,
     `spot_open=${review.spot_open ?? 'N/A'}`,
@@ -3511,10 +3516,10 @@ ${openContradictions.length > 0 ? openContradictions.map(({ lesson, reviews: opp
 Requirements:
 1. Use only the exact lesson keys listed above. Return one update per relevant key and no duplicate keys.
 2. Write a concise operational rule of 1-3 sentences. State conditional factors instead of inventing a universal percentage from a small sample.
-3. Link every claim to supporting_review_ids. Counts are computed by code; never output an evidence count.
+3. Link every claim to supporting_review_ids. Counts are computed by code; never output an evidence count. Stored linked counts may include historical or inactive reviews and do not establish current or independent confirmations. The supplied active review records and their qualifications are authoritative for current review evidence.
 4. Put genuinely opposing reviews in contradicting_review_ids. Do not silently average incompatible recommendations. When you update a lesson that has open contradictions, contradicting_review_ids is its complete current list: keep an open contradiction only if it still opposes the rule as now written, judged on information available at decision time (rule 5). Move it to supporting_review_ids if it now supports the rule; omit it if it neither supports nor opposes. A review that called a decision wrong only because of what happened afterward is not a contradiction
 5. Judge decisions using information available at decision time. Post-expiry price is not evidence for an expired option's payoff or hold-to-expiry P&L, but it may support labeled conclusions about market trajectory, regime judgment, and follow-on opportunities.
-6. Treat missing or impossible spot data as uncertainty. Never claim spot is below strike when the supplied numbers say otherwise.
+6. Treat missing or impossible spot data as uncertainty. Never claim spot is below strike when the supplied numbers say otherwise. Review confidence qualifies the assessment, not the number of observations or an empirical probability. Preserve uncertainty for low or unknown confidence; unknown means missing metadata, not zero confidence.
 7. Use applicability for short phrases describing when the rule matters, such as "spot below strike", "under 24h DTE", or "risk mandate unchanged".
 8. change_summary must say what the new review evidence changed or confirmed in under 100 characters.
 ${isBootstrap ? '9. This is a bootstrap. Cover at least four relevant keys so the legacy list can be replaced safely.' : ''}
@@ -10404,6 +10409,16 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
       const trackedOpenOrders = db ? db.getOpenRestingOrders() : [];
       const blockingExit = getExistingRestingExitOrder(action, instrumentName, [...trackedOpenOrders, ...venueOpenOrders]);
       if (blockingExit) throw new Error(`Existing exit ${blockingExit.order_id || 'unknown'} must be terminal and reconciled before submitting ${action}`);
+      if (action === 'sell_put' && getSyntheticExitIntent(action, {}, executionContext.ruleCriteria || {}) === 'roll_protection'
+        && executionContext.validateOrder) {
+        // The last book read can reveal a sale of replacement protection. Use
+        // that same snapshot, then refresh positions so intervening fills cannot
+        // pair a smaller order remainder with an older, larger held quantity.
+        const validation = await executionContext.validateOrder({ price: normalized, amount, ticker, openOrders: venueOpenOrders });
+        if (validation === false || validation?.allowed === false || validation?.valid === false) {
+          throw new Error(validation?.reason || 'Final roll replacement policy rejected order');
+        }
+      }
     }
     return normalized;
   };
@@ -10626,10 +10641,14 @@ const getFinalOrderPolicy = (instrumentName = null) => ({
   putMaxTrancheFraction: PUT_MONETIZATION_MAX_TRANCHE_FRACTION,
 });
 
-const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData, ruleCriteria, orderType, tickerMap = {} }) => async ({ price, amount }) => {
+const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData, ruleCriteria, orderType, tickerMap = {} }) => async ({ price, amount, openOrders }) => {
   try {
+    const rollingPut = action.action === 'sell_put' && getPutExitIntent(ruleCriteria) === 'roll_protection';
+    const replacementOrders = rollingPut ? (openOrders === undefined ? await fetchOpenOrders({ throwOnError: true }) : openOrders) : null;
+    if (rollingPut && !Array.isArray(replacementOrders)) throw new Error('Replacement order snapshot unavailable');
     // Refresh after reviewer latency and again for any maker retry. Reads are
-    // independent; no stored trigger value authorizes a later submission.
+    // after the order book: a fill may reduce both the order remainder and held
+    // protection, so a newer remainder must never be paired with older positions.
     const [ticker, marginState, positions] = await Promise.all([
       fetchFreshTickerForInstrument(action.instrument_name),
       fetchSubaccount(),
@@ -10652,7 +10671,8 @@ const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData
       action: action.action, instrumentName: action.instrument_name, price, amount, orderType,
       criteria: ruleCriteria, triggerData, ticker,
       instrument: instruments.find(instrument => instrument.instrument_name === action.instrument_name),
-      positions, spotPrice: currentSpot, marginState, callMarginDecision, putBudgetRemaining,
+      positions, openOrders: rollingPut ? [...currentRestingOrders, ...replacementOrders] : undefined,
+      spotPrice: currentSpot, marginState, callMarginDecision, putBudgetRemaining,
       ruleBudgetLimit: activeRule.budget_limit, policy: getFinalOrderPolicy(action.instrument_name), now: Date.now(),
     });
     if (validation.allowed && isEntryAction(action.action)) {

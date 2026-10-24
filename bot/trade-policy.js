@@ -59,26 +59,66 @@ function optionIdentity(position, now = Date.now()) {
   return { name, type: match[5], strike: Number(match[4]), expiry, dte: (expiry - now) / 86400000 };
 }
 
-function getPutReplacementCoverage(position, positions = [], closeAmount = position?.amount, now = Date.now()) {
+function getPutReplacementCoverage(position, positions = [], closeAmount = position?.amount, now = Date.now(), openOrders = []) {
   const retiring = optionIdentity(position, now);
   const required = Number(closeAmount);
   if (!retiring || retiring.type !== 'P' || position?.direction !== 'long' || !positive(required)
     || !positive(position.amount) || required > Number(position.amount) + EPSILON) {
     return { allowed: false, reason: 'missing valid retiring long-put quantity', requiredAmount: required, replacementAmount: 0 };
   }
+  const commitments = new Map();
+  try {
+    if (!Array.isArray(openOrders)) throw new Error('open-order snapshot unavailable');
+    const byId = new Map();
+    for (const order of openOrders) {
+      if (!order || typeof order.order_id !== 'string' || !order.order_id
+        || typeof order.instrument_name !== 'string' || !order.instrument_name) throw new Error('missing order identity');
+      const actionSide = { buy_put: 'buy', buyback_call: 'buy', sell_put: 'sell', sell_call: 'sell' };
+      const inferred = order.action == null ? null : actionSide[order.action];
+      if ((order.action != null && !Object.hasOwn(actionSide, order.action))
+        || (order.direction != null && !['buy', 'sell'].includes(order.direction))
+        || (inferred && order.direction != null && inferred !== order.direction)) throw new Error('invalid or conflicting order side');
+      const direction = order.direction ?? inferred;
+      if (!direction) throw new Error('missing order side');
+      if (order.action != null && !order.instrument_name.endsWith(['buy_put', 'sell_put'].includes(order.action) ? '-P' : '-C')) {
+        throw new Error('order action and instrument disagree');
+      }
+      const status = order.order_status ?? order.status;
+      if (!['open', 'untriggered', 'filled', 'cancelled', 'expired', 'rejected'].includes(status)
+        || (order.order_status != null && order.status != null && order.order_status !== order.status)
+        || !positive(order.amount) || !finite(order.filled_amount) || Number(order.filled_amount) < 0
+        || Number(order.filled_amount) > Number(order.amount)
+        || (status === 'filled' && Number(order.filled_amount) !== Number(order.amount))
+        || (status === 'rejected' && Number(order.filled_amount) > 0)
+        || (['open', 'untriggered'].includes(status) && Number(order.filled_amount) >= Number(order.amount))) throw new Error('invalid order quantity or lifecycle');
+      const remaining = ['open', 'untriggered'].includes(status) ? Number(order.amount) - Number(order.filled_amount) : 0;
+      const prior = byId.get(order.order_id);
+      if (prior && (prior.instrument_name !== order.instrument_name || prior.direction !== direction
+        || prior.amount !== Number(order.amount))) throw new Error('conflicting duplicate order identity');
+      // A stale tracked observation retains its reservation until reconciliation.
+      // Duplicate venue/tracked records reserve once, using the larger remainder.
+      byId.set(order.order_id, { instrument_name: order.instrument_name, direction,
+        amount: Number(order.amount), remaining: Math.max(prior?.remaining || 0, remaining) });
+    }
+    for (const order of byId.values()) if (order.direction === 'sell' && order.instrument_name.endsWith('-P')) {
+      commitments.set(order.instrument_name, (commitments.get(order.instrument_name) || 0) + order.remaining);
+    }
+  } catch (error) {
+    return { allowed: false, reason: `Replacement commitments unavailable: ${error.message}`, requiredAmount: required, replacementAmount: 0 };
+  }
   const replacementAmount = positions.reduce((sum, candidate) => {
     const replacement = optionIdentity(candidate, now);
     if (!replacement || replacement.type !== 'P' || replacement.name === retiring.name
       || candidate.direction !== 'long' || !positive(candidate.amount)
       || replacement.expiry <= retiring.expiry || replacement.strike < retiring.strike) return sum;
-    return sum + Number(candidate.amount);
+    return sum + Math.max(0, Number(candidate.amount) - (commitments.get(replacement.name) || 0));
   }, 0);
   return {
     allowed: replacementAmount + EPSILON >= required,
     requiredAmount: required,
     replacementAmount,
     minimumStrike: retiring.strike,
-    reason: `later-expiry puts at strike >= ${retiring.strike}: ${replacementAmount} contracts available, ${required} required`,
+    reason: `later-expiry puts at strike >= ${retiring.strike}: ${replacementAmount} uncommitted contracts available, ${required} required`,
   };
 }
 
@@ -103,7 +143,7 @@ function liveRuleValues(position, ticker, spotPrice, now = Date.now()) {
 }
 
 function validateFinalOrderPolicy({ action, instrumentName, price, amount, orderType, criteria,
-  triggerData = {}, ticker, instrument, positions = [], spotPrice, marginState,
+  triggerData = {}, ticker, instrument, positions = [], openOrders = [], spotPrice, marginState,
   callMarginDecision, putBudgetRemaining, ruleBudgetLimit, policy, now = Date.now() }) {
   const reject = (code, reason) => ({ allowed: false, code, reason });
   if (!criteria || !policy) return reject('missing_rule', 'Missing rule or strategy policy');
@@ -189,7 +229,7 @@ function validateFinalOrderPolicy({ action, instrumentName, price, amount, order
       || Number(amount) > Number(position.amount) + EPSILON) return reject('close_quantity_failed', 'Final exit exceeds the live closeable position');
     const entryPrice = Number(position.avg_entry_price);
     const values = liveRuleValues(position, ticker, spotPrice, now);
-    if (!(entryPrice > 0)) return reject('missing_cost_basis', 'Live position cost basis is unavailable');
+    if (!positive(position.avg_entry_price)) return reject('missing_cost_basis', 'Live position cost basis is unavailable');
     const finalPnl = (action === 'buyback_call' ? entryPrice - Number(price) : Number(price) - entryPrice) / entryPrice * 100;
     if (action === 'buyback_call') {
       if (!ask) return reject('missing_buyback_ask', 'Fresh buyback ask is required');
@@ -209,7 +249,7 @@ function validateFinalOrderPolicy({ action, instrumentName, price, amount, order
       if (intent === 'roll_protection') {
         if (identity.dte > policy.putRollDte || orderType !== 'ioc') return reject('roll_failed', 'Roll is outside its DTE window or is not IOC');
         if (Number(price) + EPSILON < entryPrice * (Number(policy.putRollMinRecoveryPct) || 0) / 100) return reject('roll_recovery_failed', 'Roll price recovers too little of cost; hold the ticket');
-        const coverage = getPutReplacementCoverage(position, positions, amount, now);
+        const coverage = getPutReplacementCoverage(position, positions, amount, now, openOrders);
         if (!coverage.allowed) return reject('replacement_failed', coverage.reason);
         if (!bid || !evaluateConditions(criteria.conditions, criteria.condition_logic, values)) return reject('exit_conditions_failed', 'Fresh roll conditions or executable bid are unavailable');
       } else if (intent === 'monetize_tail_win') {

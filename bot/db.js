@@ -1114,7 +1114,7 @@ const stmts = {
       review_status, review_confidence, summary, lessons, pnl_realized,
       premium_opened, premium_closed, spot_open, spot_close,
       spot_min_while_open, spot_max_while_open, spot_min_after_close, spot_max_after_close,
-      iv_open, iv_close, created_at
+      iv_open, iv_close, created_at, is_active
     FROM trade_reviews
     WHERE is_active = 1
     ORDER BY closed_at DESC
@@ -1126,7 +1126,7 @@ const stmts = {
       review_status, review_confidence, summary, lessons, pnl_realized,
       premium_opened, premium_closed, spot_open, spot_close,
       spot_min_while_open, spot_max_while_open, spot_min_after_close, spot_max_after_close,
-      created_at
+      created_at, is_active
     FROM trade_reviews
     WHERE is_active = 1
       AND id > @after_id
@@ -2808,7 +2808,10 @@ const upsertCanonicalTradeLesson = (lesson, allowedReviewIds = null, { rejudgeCo
   return upsert(lesson, allowedReviewIds);
 };
 
-const getContradictingReviewsForLesson = (lessonId) => stmts.getContradictingReviewsForLesson.all({ lesson_id: lessonId });
+// Synthesis reads active evidence; explicit rejudging above still needs every
+// stored contradiction so its existing unlink/status behavior stays intact.
+const getContradictingReviewsForLesson = (lessonId) => stmts.getContradictingReviewsForLesson
+  .all({ lesson_id: lessonId }).filter(review => review.is_active === 1);
 
 const archiveTradeLesson = (id) => {
   stmts.archiveTradeLesson.run({ id });
