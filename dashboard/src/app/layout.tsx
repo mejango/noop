@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import { JetBrains_Mono } from "next/font/google";
+import { IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import Nav from "@/components/Nav";
 import AdvisorDrawer from "@/components/AdvisorDrawer";
 
-const mono = JetBrains_Mono({
+const mono = IBM_Plex_Mono({
   weight: ["400", "700"],
   subsets: ["latin"],
   variable: "--font-mono",
