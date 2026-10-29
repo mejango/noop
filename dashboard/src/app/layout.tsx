@@ -1,13 +1,13 @@
 import type { Metadata } from "next";
-import { Space_Mono } from "next/font/google";
+import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import Nav from "@/components/Nav";
 import AdvisorDrawer from "@/components/AdvisorDrawer";
 
-const spaceMono = Space_Mono({
+const mono = JetBrains_Mono({
   weight: ["400", "700"],
   subsets: ["latin"],
-  variable: "--font-space-mono",
+  variable: "--font-mono",
 });
 
 export const metadata: Metadata = {
@@ -25,7 +25,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${spaceMono.variable} font-mono antialiased bg-juice-dark text-white min-h-screen`}>
+      <body className={`${mono.variable} font-mono antialiased bg-juice-dark text-gray-200 min-h-screen`}>
         <Nav />
         <main className="w-full px-3 py-4 md:px-6 md:py-6 xl:px-8 2xl:px-10">
           {children}

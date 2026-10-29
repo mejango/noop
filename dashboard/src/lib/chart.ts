@@ -1,28 +1,28 @@
-// Shared chart theme aligned with juice design system
+// Shared chart theme, btop-style terminal palette
 
 export const chartColors = {
-  primary: '#F5A623',    // juice-orange — ETH price, primary series
-  secondary: '#5CEBDF',  // juice-cyan — secondary series
-  tertiary: '#10b981',   // emerald — call scores, success
-  quaternary: '#f59e0b', // amber — warnings
-  red: '#f87171',        // red — put scores, exhaustion
-  blue: '#3b82f6',       // blue — liquidity
-  trade: '#facc15',      // yellow — trade markers
-  refHigh: '#10b981',    // emerald — reference high
-  refLow: '#ef4444',     // red — reference low
+  primary: '#d7c46c',    // khaki — ETH price, primary series
+  secondary: '#5f9ad7',  // btop temp blue — secondary series
+  tertiary: '#77ca9b',   // green — call scores, success
+  quaternary: '#cbc06c', // amber — warnings
+  red: '#dc4c4c',        // red — put scores, exhaustion
+  blue: '#9a7bd8',       // purple — liquidity
+  trade: '#f0f0f0',      // white — trade markers
+  refHigh: '#77ca9b',    // green — reference high
+  refLow: '#dc4c4c',     // red — reference low
 } as const;
 
 export const chartAxis = {
-  stroke: '#666666',
-  tick: { fill: '#999999', fontSize: 11 },
-  tickSecondary: { fill: '#666666', fontSize: 10 },
+  stroke: '#4a4a4a',
+  tick: { fill: '#8a8a8a', fontSize: 11 },
+  tickSecondary: { fill: '#5a5a5a', fontSize: 10 },
 } as const;
 
 export const chartTooltip = {
   contentStyle: {
-    backgroundColor: '#1a1a1a',
-    border: '1px solid rgba(255, 255, 255, 0.15)',
-    borderRadius: 8,
+    backgroundColor: '#000000',
+    border: '1px solid #4a4a4a',
+    borderRadius: 0,
     fontSize: 12,
   },
   // Legends render later in the DOM; keep the tooltip above them.

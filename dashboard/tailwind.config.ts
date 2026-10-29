@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import colors from "tailwindcss/colors";
 
 const config: Config = {
   content: [
@@ -10,13 +11,15 @@ const config: Config = {
       colors: {
         background: "var(--background)",
         foreground: "var(--foreground)",
-        "juice-orange": "#F5A623",
-        "juice-cyan": "#5CEBDF",
-        "juice-dark": "#1a1a1a",
+        // btop-style terminal palette; token names kept so call sites stay unchanged.
+        gray: colors.neutral,
+        "juice-orange": "#d7c46c",
+        "juice-cyan": "#5f9ad7",
+        "juice-dark": "#000000",
       },
       fontFamily: {
-        sans: ["var(--font-space-mono)", "Menlo", "monospace"],
-        mono: ["var(--font-space-mono)", "Menlo", "monospace"],
+        sans: ["var(--font-mono)", "Menlo", "monospace"],
+        mono: ["var(--font-mono)", "Menlo", "monospace"],
       },
     },
   },

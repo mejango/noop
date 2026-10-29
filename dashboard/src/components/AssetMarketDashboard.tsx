@@ -86,7 +86,7 @@ export default function AssetMarketDashboard({ asset, initialData, initialError 
         <div className="flex flex-wrap gap-1" aria-label="History range">
           {DASHBOARD_RANGES.map((value) => <button key={value} type="button" onClick={() => setRange(value)}
             aria-pressed={range === value}
-            className={`border px-2 py-1 text-xs ${range === value ? 'border-juice-orange text-juice-orange' : 'border-white/10 text-gray-400'}`}>{value}</button>)}
+            className={`border px-2 py-1 text-xs ${range === value ? 'border-juice-orange text-juice-orange' : 'border-white/25 text-gray-400'}`}>{value}</button>)}
         </div>
       </div>
 
@@ -120,7 +120,7 @@ export default function AssetMarketDashboard({ asset, initialData, initialError 
           <Card title="Latest option quotes" subtitle={`${quotes.length} shown, latest observation`}>
             {quotes.length ? <div className="overflow-x-auto"><table className="w-full text-xs text-left">
               <thead className="text-gray-400"><tr><th className="p-2">Instrument</th><th className="p-2 text-right">Bid</th><th className="p-2 text-right">Ask</th><th className="p-2 text-right">IV</th><th className="p-2 text-right">OI</th></tr></thead>
-              <tbody>{quotes.map((quote) => <tr key={quote.instrument_name} className="border-t border-white/10">
+              <tbody>{quotes.map((quote) => <tr key={quote.instrument_name} className="border-t border-white/25">
                 <td className="p-2">{quote.instrument_name}</td>
                 <td className="p-2 text-right">{formatNumber(quote.bid, 4)}</td>
                 <td className="p-2 text-right">{formatNumber(quote.ask, 4)}</td>

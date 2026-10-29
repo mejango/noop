@@ -91,12 +91,12 @@ export default function VolatilityPricing({ asset = 'ETH' }: { asset?: string })
   }
 
   return (
-    <div className="glass overflow-hidden">
+    <div className="glass relative">
       <button type="button" onClick={() => { setView('quotes'); setOpen(true); }} aria-haspopup="dialog"
         className="w-full h-full text-left p-4 flex flex-col gap-2 hover:bg-white/[0.025] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-juice-orange">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="text-sm font-semibold text-juice-orange">Volatility Pricing</h3>
-          <span className="text-[10px] text-gray-500">View breakdown ↗</span>
+          <h3 className="tui-title text-sm font-bold text-juice-orange">Volatility Pricing</h3>
+          <span className="ml-auto text-[10px] text-gray-500">View breakdown ↗</span>
         </div>
         <div className="grid grid-cols-2 gap-3 w-full">
           <SideSummary side="bid" summary={bidSummary} unavailable={unavailable} loading={initialLoading} />
@@ -113,7 +113,7 @@ export default function VolatilityPricing({ asset = 'ETH' }: { asset?: string })
       <dialog ref={dialog} onCancel={() => setOpen(false)} onClose={() => setOpen(false)}
         onClick={e => { if (e.target === e.currentTarget) setOpen(false); }}
         aria-labelledby="volatility-pricing-title"
-        className="w-[min(1600px,calc(100vw-32px))] max-h-[85vh] overflow-y-auto rounded-lg border border-gray-700 bg-[#181818] text-gray-200 p-0 backdrop:bg-black/75">
+        className="w-[min(1600px,calc(100vw-32px))] max-h-[85vh] overflow-y-auto rounded-lg border border-gray-700 bg-black text-gray-200 p-0 backdrop:bg-black/75">
         <div className="p-5 md:p-6">
           <div className="flex justify-between items-start gap-4 mb-4">
             <h2 id="volatility-pricing-title" className="text-lg text-juice-orange font-semibold">Volatility Pricing</h2>

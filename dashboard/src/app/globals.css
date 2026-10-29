@@ -3,8 +3,9 @@
 @tailwind utilities;
 
 :root {
-  --background: #1a1a1a;
-  --foreground: #fafafa;
+  --background: #000000;
+  --foreground: #d4d4d4;
+  --tui-line: #4a4a4a;
 }
 
 /* Remove all border radius globally */
@@ -25,8 +26,10 @@ body {
 
 /* Glass morphism utilities */
 @layer utilities {
+  /* btop-style box: thin grey line, no fill */
   .glass {
-    @apply bg-white/5 border border-white/10;
+    @apply bg-transparent border;
+    border-color: var(--tui-line);
   }
   .glass-hover {
     @apply hover:bg-white/10 hover:border-white/20;
@@ -34,6 +37,29 @@ body {
   .gradient-text {
     @apply bg-gradient-to-r from-juice-orange to-juice-cyan bg-clip-text text-transparent;
   }
+}
+
+/* btop-style box title set into the top border: ─┐title┌─ */
+.tui-title {
+  position: absolute;
+  top: -0.68em;
+  left: 0.5rem;
+  padding: 0;
+  background: var(--background);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.tui-title::before,
+.tui-title::after {
+  color: var(--tui-line);
+  font-weight: 400;
+}
+.tui-title::before { content: '┐'; }
+.tui-title::after { content: '┌'; }
+
+::selection {
+  background: #6a2f2f;
+  color: #ffffff;
 }
 
 /* Custom scrollbar */
@@ -45,11 +71,10 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2a2a2a;
-  border-radius: 3px;
+  background: var(--tui-line);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(245, 166, 35, 0.5);
+  background: #d7c46c;
 }
 
 /* Hide scrollbar utility */
@@ -70,8 +95,8 @@ body {
 
 /* Glow effects */
 .glow-orange {
-  box-shadow: 0 0 20px rgba(245, 166, 35, 0.3);
+  box-shadow: 0 0 20px rgba(215, 196, 108, 0.3);
 }
 .glow-cyan {
-  box-shadow: 0 0 20px rgba(92, 235, 223, 0.3);
+  box-shadow: 0 0 20px rgba(95, 154, 215, 0.3);
 }

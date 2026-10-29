@@ -95,7 +95,7 @@ const STATUS_META: Record<WikiPageStatus, { label: string; className: string; do
   stale: { label: 'stale', className: 'text-amber-300 border-amber-500/25 bg-amber-500/10', dot: 'bg-amber-400' },
   fixing: { label: 'fixing', className: 'text-sky-300 border-sky-500/25 bg-sky-500/10', dot: 'bg-sky-400' },
   needs_attention: { label: 'attention', className: 'text-red-300 border-red-500/25 bg-red-500/10', dot: 'bg-red-400' },
-  unreviewed: { label: 'unreviewed', className: 'text-gray-400 border-white/10 bg-white/5', dot: 'bg-gray-500' },
+  unreviewed: { label: 'unreviewed', className: 'text-gray-400 border-white/25 bg-white/5', dot: 'bg-gray-500' },
   missing: { label: 'missing', className: 'text-red-300 border-red-500/25 bg-red-500/10', dot: 'bg-red-400' },
 };
 
@@ -187,7 +187,7 @@ function PageOwnership({ owner }: { owner: WikiPageMeta['owner'] }) {
       Learning-derived
     </span>
   ) : (
-    <span className="border border-white/10 bg-white/[0.03] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-gray-500">
+    <span className="border border-white/25 bg-white/[0.03] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-gray-500">
       Wiki research
     </span>
   );
@@ -383,7 +383,7 @@ export default function WikiBrowser() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="sticky top-0 z-10 border-b border-white/5 bg-[#111]/95 px-3 py-2 backdrop-blur">
+      <div className="sticky top-0 z-10 border-b border-white/5 bg-black/95 px-3 py-2 backdrop-blur">
         <div className="flex gap-1.5">
           <input
             type="text"
@@ -391,7 +391,7 @@ export default function WikiBrowser() {
             onChange={(event) => setSearchQuery(event.target.value)}
             onKeyDown={(event) => event.key === 'Enter' && handleSearch()}
             placeholder="Search evidence, regimes, rules..."
-            className="flex-1 border border-white/10 bg-white/5 px-2 py-1.5 text-[11px] text-white placeholder-gray-600 focus:border-juice-orange/50 focus:outline-none"
+            className="flex-1 border border-white/25 bg-white/5 px-2 py-1.5 text-[11px] text-white placeholder-gray-600 focus:border-juice-orange/50 focus:outline-none"
           />
           <button
             onClick={handleSearch}
@@ -440,7 +440,7 @@ export default function WikiBrowser() {
           <div className="space-y-3 px-3 py-3">
             <button onClick={returnHome} className="text-[10px] text-gray-500 transition-colors hover:text-gray-300">← Back to Wiki</button>
             {selectedMeta && (
-              <div className="border border-white/10 bg-white/[0.02] p-3">
+              <div className="border border-white/25 bg-white/[0.02] p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="mr-auto text-sm font-bold text-white">{selectedMeta.title}</p>
                   <StatusPill status={selectedMeta.status} />
@@ -470,7 +470,7 @@ export default function WikiBrowser() {
                           placeholder="Admin passphrase (once per 12h)"
                           aria-label="Admin passphrase"
                           autoComplete="current-password"
-                          className="min-w-0 flex-1 border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-white placeholder-gray-600 focus:border-juice-orange/50 focus:outline-none"
+                          className="min-w-0 flex-1 border border-white/25 bg-black/20 px-2 py-1 text-[10px] text-white placeholder-gray-600 focus:border-juice-orange/50 focus:outline-none"
                         />
                       )}
                       <button
@@ -501,7 +501,7 @@ export default function WikiBrowser() {
                     onClick={copyLatestRepair}
                     disabled={repairBusy !== null}
                     title="Copy the proposed final Markdown without diff markers"
-                    className="border border-white/10 bg-white/[0.03] px-2 py-1 text-[10px] text-gray-300 transition-colors hover:border-white/20 hover:bg-white/[0.07] hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    className="border border-white/25 bg-white/[0.03] px-2 py-1 text-[10px] text-gray-300 transition-colors hover:border-white/20 hover:bg-white/[0.07] hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {repairCopied ? 'Copied' : 'Copy latest'}
                   </button>
@@ -523,7 +523,7 @@ export default function WikiBrowser() {
                     {repairBusy === 'apply' ? 'Validating…' : 'Apply + AI validate'}
                   </button>
                 </div>
-                <div className="mt-3 max-h-[32rem] overflow-auto border border-white/10 bg-black/30 font-mono text-[9px] leading-relaxed">
+                <div className="mt-3 max-h-[32rem] overflow-auto border border-white/25 bg-black/30 font-mono text-[9px] leading-relaxed">
                   {repairDiff.map((item, index) => (
                     <div
                       key={`${index}-${item.type}`}
@@ -549,7 +549,7 @@ export default function WikiBrowser() {
                     </div>
                   </details>
                 )}
-                <div className="prose prose-invert prose-xs max-w-none break-words border border-white/5 bg-black/10 p-3 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:mb-2 [&_h1]:mt-3 [&_h1]:text-sm [&_h1]:font-bold [&_h1]:text-juice-orange [&_h2]:mb-1 [&_h2]:mt-3 [&_h2]:text-xs [&_h2]:font-bold [&_h2]:text-white [&_h3]:mb-1 [&_h3]:mt-2 [&_h3]:text-xs [&_h3]:font-bold [&_h3]:text-gray-300 [&_li]:my-0.5 [&_ol]:my-1 [&_ol]:pl-4 [&_p]:my-1 [&_p]:text-xs [&_p]:leading-relaxed [&_strong]:text-white [&_table]:my-2 [&_table]:w-full [&_table]:border-collapse [&_table]:text-xs [&_td]:border-b [&_td]:border-white/5 [&_td]:px-2 [&_td]:py-1 [&_th]:border-b [&_th]:border-white/10 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-medium [&_th]:text-gray-400 [&_ul]:my-1 [&_ul]:pl-4">
+                <div className="prose prose-invert prose-xs max-w-none break-words border border-white/5 bg-black/10 p-3 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_h1]:mb-2 [&_h1]:mt-3 [&_h1]:text-sm [&_h1]:font-bold [&_h1]:text-juice-orange [&_h2]:mb-1 [&_h2]:mt-3 [&_h2]:text-xs [&_h2]:font-bold [&_h2]:text-white [&_h3]:mb-1 [&_h3]:mt-2 [&_h3]:text-xs [&_h3]:font-bold [&_h3]:text-gray-300 [&_li]:my-0.5 [&_ol]:my-1 [&_ol]:pl-4 [&_p]:my-1 [&_p]:text-xs [&_p]:leading-relaxed [&_strong]:text-white [&_table]:my-2 [&_table]:w-full [&_table]:border-collapse [&_table]:text-xs [&_td]:border-b [&_td]:border-white/5 [&_td]:px-2 [&_td]:py-1 [&_th]:border-b [&_th]:border-white/25 [&_th]:px-2 [&_th]:py-1 [&_th]:text-left [&_th]:font-medium [&_th]:text-gray-400 [&_ul]:my-1 [&_ul]:pl-4">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{pageDetail.content}</ReactMarkdown>
                 </div>
               </>
@@ -643,7 +643,7 @@ export default function WikiBrowser() {
                 <p className="mb-2 text-[10px] uppercase tracking-[0.18em] text-gray-500">What changed</p>
                 <div className="space-y-1">
                   {recentChanges.map((page) => (
-                    <button key={page.path} onClick={() => loadPage(page.path)} className="block w-full border-l border-white/10 py-1 pl-3 text-left hover:border-juice-orange/50">
+                    <button key={page.path} onClick={() => loadPage(page.path)} className="block w-full border-l border-white/25 py-1 pl-3 text-left hover:border-juice-orange/50">
                       <p className="text-[10px] text-gray-300">{page.title}<span className="text-gray-600">, {formatRelative(page.lastModified)}</span></p>
                       <p className="mt-0.5 line-clamp-2 text-[10px] text-gray-500">{page.changeSummary}</p>
                     </button>

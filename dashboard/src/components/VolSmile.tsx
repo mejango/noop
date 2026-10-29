@@ -490,7 +490,7 @@ export default function VolSmile({ asset = 'ETH', positions = [] }: { asset?: st
                       <select
                         value={skewKey}
                         onChange={e => setSkewKey(e.target.value as SkewKey)}
-                        className="bg-gray-800 border border-white/10 rounded px-1 py-0.5 text-[10px] text-gray-300 cursor-pointer"
+                        className="bg-gray-800 border border-white/25 rounded px-1 py-0.5 text-[10px] text-gray-300 cursor-pointer"
                       >
                         {SKEW_METRICS.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
                       </select>

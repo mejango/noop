@@ -122,7 +122,7 @@ export default function Nav() {
   const marketPage = pathname.startsWith('/assets/');
   const activeAsset = marketPage ? pathname.split('/')[2]?.toUpperCase() : 'ETH';
   return (
-    <nav className="border-b border-white/10 bg-juice-dark/80 backdrop-blur-md py-3">
+    <nav className="border-b border-white/25 bg-black py-3">
       <div className="w-full px-3 md:px-6 xl:px-8 2xl:px-10 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
