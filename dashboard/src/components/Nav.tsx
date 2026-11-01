@@ -126,16 +126,16 @@ export default function Nav() {
       <div className="w-full px-3 md:px-6 xl:px-8 2xl:px-10 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-lg md:text-2xl font-bold tracking-tight text-white shrink-0">🥱 NO OPERATION</span>
-          <span className="relative inline-flex items-center">
+          <span className="group relative inline-flex items-center ml-3">
             <select
               aria-label="Asset"
               value={activeAsset}
               onChange={event => router.push(event.target.value === 'ETH' ? '/' : `/assets/${event.target.value.toLowerCase()}`)}
-              className="appearance-none bg-juice-dark border border-juice-orange text-juice-orange text-sm pl-3 pr-12 py-1 cursor-pointer"
+              className="appearance-none bg-transparent text-gray-300 group-hover:text-juice-orange text-sm pl-0 pr-6 py-1 cursor-pointer focus:outline-none focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-4 focus-visible:outline-juice-orange"
             >
               {ASSETS.map(asset => <option key={asset} value={asset}>{asset}</option>)}
             </select>
-            <svg aria-hidden="true" viewBox="0 0 12 8" width="12" height="8" className="pointer-events-none absolute right-4 text-juice-orange">
+            <svg aria-hidden="true" viewBox="0 0 12 8" width="12" height="8" className="pointer-events-none absolute right-1 text-gray-500 group-hover:text-juice-orange">
               <path d="m1 1 5 5 5-5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </span>
