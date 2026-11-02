@@ -21,6 +21,7 @@ const BUCKET_MS: Record<string, number> = {
   '14d':  60 * 60 * 1000,        // 1 hour
   '30d':  2 * 60 * 60 * 1000,    // 2 hours
   '90d':  4 * 60 * 60 * 1000,    // 4 hours
+  '150d': 8 * 60 * 60 * 1000,    // 8 hours
   '365d': 24 * 60 * 60 * 1000,   // 1 day
   'all':  4 * 60 * 60 * 1000,    // 4 hours
 };
@@ -35,13 +36,14 @@ const HEATMAP_BUCKET_MS: Record<string, number> = {
   '14d':  4 * 60 * 60 * 1000,    // 4 hours
   '30d':  6 * 60 * 60 * 1000,    // 6 hours
   '90d':  12 * 60 * 60 * 1000,   // 12 hours
+  '150d': 24 * 60 * 60 * 1000,   // 1 day
   '365d': 2 * 24 * 60 * 60 * 1000, // 2 days
   'all':  2 * 24 * 60 * 60 * 1000, // 2 days
 };
 
 type TimestampedRow = Record<string, unknown> & { timestamp: string };
 
-const ROLLUP_RANGES = new Set(['90d', '365d', 'all']);
+const ROLLUP_RANGES = new Set(['90d', '150d', '365d', 'all']);
 const RAW_BUCKETED_RANGES = new Set(['30d']);
 const ROLLUP_TAIL_OVERLAP_MS = 60 * 60 * 1000;
 

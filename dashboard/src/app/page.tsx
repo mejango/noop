@@ -514,6 +514,7 @@ function spotBandPctForRange(range: string): number {
     case '14d': return 0.35;
     case '30d': return 0.45;
     case '90d': return 0.75;
+    case '150d': return 1;
     case '365d': return 1.5;
     default: return 0.35;
   }
@@ -732,6 +733,7 @@ function getScatterTimeBucketMs(range: string): number {
     case '14d': return 6 * 60 * 60 * 1000;
     case '30d': return 12 * 60 * 60 * 1000;
     case '90d': return 24 * 60 * 60 * 1000;
+    case '150d': return 2 * 24 * 60 * 60 * 1000;
     case '365d': return 3 * 24 * 60 * 60 * 1000;
     default: return 6 * 60 * 60 * 1000;
   }
@@ -747,6 +749,7 @@ function getScatterPointBudget(range: string): number {
     case '14d': return 520;
     case '30d': return 240;
     case '90d': return 260;
+    case '150d': return 270;
     case '365d': return 280;
     default: return 220;
   }

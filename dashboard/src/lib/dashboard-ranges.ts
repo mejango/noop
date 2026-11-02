@@ -10,6 +10,7 @@ export const DASHBOARD_RANGES = [
   '14d',
   '30d',
   '90d',
+  '150d',
   '365d',
 ] as const;
 
@@ -26,6 +27,7 @@ export const DASHBOARD_RANGE_MS = {
   '14d': 14 * DAY_MS,
   '30d': 30 * DAY_MS,
   '90d': 90 * DAY_MS,
+  '150d': 150 * DAY_MS,
   '365d': 365 * DAY_MS,
 } satisfies Record<DashboardRange, number>;
 
