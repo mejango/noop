@@ -1,3 +1,4 @@
+const { boundedSignatureExpirySec } = require('../bot/signature-expiry');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -599,6 +600,8 @@ test('venue placement journals before sending, blocks persistence failures and c
     VENUE_AMOUNT_DECIMALS: 2,
     createWallet: () => ({ address: 'fixture-wallet', signingKey: { sign: () => ({ serialized: 'fixture-signature' }) } }),
     signMessage: async () => 'fixture-header-signature',
+    boundedSignatureExpirySec,
+    sessionKeyExpirySec: async () => null,
     encodeTradeData: () => '0x00',
     encoder: { encode: () => '0x00' },
     ethers: { keccak256: () => '0x00' },

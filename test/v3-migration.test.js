@@ -1,4 +1,5 @@
 'use strict';
+const { boundedSignatureExpirySec } = require('../bot/signature-expiry');
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { ethers } = require('ethers');
@@ -121,6 +122,7 @@ test('production V3 order signs the exact string nonce and wire amounts with the
     DERIVE_CONFIG: config, SUBACCOUNT_ID: config.subaccountId, DERIVE_ACCOUNT_ADDRESS: owner,
     DOMAIN_SEPARATOR: config.domainSeparator, ethers, encoder, Buffer, encodeTradeData,
     createWallet: () => wallet, signMessage: async (_wallet, timestamp) => wallet.signMessage(String(timestamp)),
+    boundedSignatureExpirySec, sessionKeyExpirySec: async () => null,
     axios: { post: async (url, order, options) => { sent = { url, order, options }; return { data: { result: { order } } }; } },
     API_URL: { PLACE_ORDER: `${config.baseUrl}/private/order` }, console: { log() {}, error() {} },
   } });

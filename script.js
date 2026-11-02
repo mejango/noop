@@ -156,6 +156,7 @@ const { summarizeAdvisoryQuotes, candidateSpreadPct } = require('./bot/advisory-
 const { readAdvisoryMarketSnapshot } = require('./bot/advisory-market-snapshot');
 const { runReviewedPublication } = require('./bot/advisory-publication');
 const { pingAssetMarkets } = require('./bot/asset-market-workers');
+const { boundedSignatureExpirySec, createKeyExpiryLookup } = require('./bot/signature-expiry');
 
 const encoder = new AbiCoder();
 
@@ -182,6 +183,7 @@ const API_URL = {
   CANCEL_ORDER: `${DERIVE_CONFIG.baseUrl}/private/cancel`,
   GET_ORDER: `${DERIVE_CONFIG.baseUrl}/private/get_order`,
   GET_SUBACCOUNT: `${DERIVE_CONFIG.baseUrl}/private/get_subaccount`,
+  SESSION_KEYS: `${DERIVE_CONFIG.baseUrl}/private/session_keys`,
 }
 
 // CoinGecko API for spot price
@@ -2037,6 +2039,20 @@ const signMessage = async (wallet, timestamp) => {
   }
 };
 
+const fetchSessionKeys = async () => {
+  const wallet = createWallet();
+  const timestamp = Date.now();
+  const signature = await signMessage(wallet, timestamp);
+  const response = await axios.post(API_URL.SESSION_KEYS, { wallet: DERIVE_ACCOUNT_ADDRESS }, {
+    headers: { [`${DERIVE_CONFIG.headerPrefix}Wallet`]: DERIVE_ACCOUNT_ADDRESS,
+      [`${DERIVE_CONFIG.headerPrefix}Timestamp`]: timestamp.toString(), [`${DERIVE_CONFIG.headerPrefix}Signature`]: signature },
+    timeout: 10000,
+  });
+  if (response.data?.error) throw new Error(stringifyApiError(response.data.error));
+  return response.data?.result?.public_session_keys;
+};
+const sessionKeyExpirySec = createKeyExpiryLookup({ fetchKeys: fetchSessionKeys });
+
 // Encode trade data
 function encodeTradeData(order, assetAddress, optionSubId) {
   console.log({
@@ -2073,7 +2089,9 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
     const wallet = createWallet();
     const timestamp = Date.now(); // Current UTC timestamp in ms
     const signature = await signMessage(wallet, timestamp);
-    const signatureExpirySec = Math.floor((Date.now() / 1000) + (timeInForce === 'ioc' ? 900 : 86400));
+    const signatureExpirySec = boundedSignatureExpirySec({
+      nowSec: Math.floor(Date.now() / 1000), timeInForce, keyExpirySec: await sessionKeyExpirySec(wallet.address),
+    });
     const orderPrice = normalizeOrderPriceForVenue(price, instrument, direction);
     const step = orderPrice.step;
     const limitPrice = orderPrice.price;
@@ -2086,7 +2104,7 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         limit_price: limitPriceString,
         amount: formatVenueOrderAmount(amount),
         // Give IOC orders extra buffer for signer/exchange clock skew. Derive rejects borderline 300s expiries.
-        signature_expiry_sec: signatureExpirySec, // IOC: 15min, GTC/post_only: 24h
+        signature_expiry_sec: signatureExpirySec, // IOC: 15min, GTC/post_only: 24h, never past the session key's expiry
         max_fee: Math.max(0.08 * limitPrice, 10.0).toFixed(2).toString(), // Max fee per unit of volume (USDC). Generous ceiling — actual fee is much lower (~0.1% of notional)
         // Noop submits sparse discretionary orders, not continuous maker quotes.
         // Venue-side MMP has been causing opaque sell-order cancellations and poor reconciliation.
@@ -2186,7 +2204,8 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
 // Malformed-request codes and Derive's rate limiter (HTTP 500, -32000
 // "Rate limit exceeded ... Retry after N ms") both mean the order was never accepted.
 const isDefinitiveVenueRejection = (apiError) => (
-  [-32600, -32602].includes(Number(apiError?.code)) || /rate limit exceeded/i.test(String(apiError?.message || ''))
+  // 14038: signature outlives the session key; the venue refused it outright.
+  [-32600, -32602, 14038].includes(Number(apiError?.code)) || /rate limit exceeded/i.test(String(apiError?.message || ''))
 );
 
 const venueHasNonce = async (nonce, sinceMs) => {
