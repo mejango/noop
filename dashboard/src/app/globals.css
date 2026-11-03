@@ -106,3 +106,17 @@ body {
 .glow-cyan {
   box-shadow: 0 0 20px rgba(95, 154, 215, 0.3);
 }
+
+/* Text spinner, same as croptop: one monospace glyph cycling - \ | / */
+@keyframes loading-ticks {
+  0%   { content: "-"; }
+  25%  { content: "\\"; }
+  50%  { content: "|"; }
+  75%  { content: "/"; }
+}
+.loading-ticks::after {
+  content: "-";
+  display: inline-block;
+  width: 1ch;
+  animation: loading-ticks 0.4s steps(1, end) infinite;
+}

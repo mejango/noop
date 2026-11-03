@@ -1595,7 +1595,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
                 }`}
               >
                 {range === r && rangeLoading && (
-                  <span className="h-3 w-3 rounded-full border border-white/30 border-t-white animate-spin" aria-hidden="true" />
+                  <span className="loading-ticks" aria-hidden="true" />
                 )}
                 {r}
               </button>
@@ -1652,7 +1652,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
         {chartRangeLoading && merged.length > 0 && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/35 backdrop-blur-[1px] pointer-events-none">
             <div className="flex items-center gap-2 rounded border border-white/15 bg-black/95 px-3 py-2 text-xs text-gray-200 shadow-lg">
-              <span className="h-3.5 w-3.5 rounded-full border border-white/30 border-t-white animate-spin" aria-hidden="true" />
+              <span className="loading-ticks" aria-hidden="true" />
               Loading {range} data…
             </div>
           </div>
@@ -1664,7 +1664,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
         )}
         {chartLoading && merged.length === 0 ? (
           <div className="h-[300px] md:h-[500px] flex items-center justify-center gap-2 text-gray-500">
-            <span className="h-4 w-4 rounded-full border border-gray-600 border-t-gray-300 animate-spin" aria-hidden="true" />
+            <span className="loading-ticks" aria-hidden="true" />
             Loading {range} data…
           </div>
         ) : merged.length === 0 ? (
