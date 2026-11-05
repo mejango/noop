@@ -33,3 +33,10 @@ test('sell_call rules may not carry exposure caps the engine does not enforce', 
 test('call margin policy tells advisors and voters the margin target is the only exposure limit', () => {
   assert.match(getCallMarginDisciplinePrompt(), /Call exposure is governed only by the active margin target; do not add ETH-coverage or other exposure caps\./);
 });
+
+test('advisors size calls from risk/reward through budget_limit, with margin as the ceiling', () => {
+  const { getAdvisoryRuleContractPrompt } = loadProduction(['getAdvisoryRuleContractPrompt']);
+  const contract = getAdvisoryRuleContractPrompt();
+  assert.match(contract, /For calls: budget_limit is the most premium \(USD\) this rule may collect; size it from your risk\/reward view/);
+  assert.doesNotMatch(contract, /ETH collateral/);
+});
