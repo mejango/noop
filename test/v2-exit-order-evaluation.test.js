@@ -29,7 +29,7 @@ function evaluationFixture({ price = 2.2, quantity = 8.26, existing = true, pend
     insertPendingAction: row => { inserted.push(row); return { lastInsertRowid: 11010 }; },
   };
   const pure = loadProduction(['getCloseablePositionForExit', 'getSyntheticExitIntent',
-    'normalizePreferredOrderType', 'hasPendingOrConfirmedActionForRule'], { bindings: { db } });
+    'normalizePreferredOrderType', 'getEntryBookLiquidity', 'hasPendingOrConfirmedActionForRule'], { bindings: { db } });
   const bindings = {
     ...pure, ...planning, db, console: quiet,
     logRuleDecisionSafe: value => decisions.push(value),

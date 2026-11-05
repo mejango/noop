@@ -37,7 +37,7 @@ function fixture({ reverse = false, criteria = {}, failures = {}, rejections = {
     'getBuyPutEntryPricing', 'classifyBuyPutEdge', 'computeDteFromInstrumentName', 'getTickerImpliedVol',
     'normalizeBuyPutValueSignal', 'hasExplicitBuyPutValueSignal', 'isActionableBuyPutSignal',
     'summarizeReservedEntryCapacity', 'floorOrderAmountToVenuePrecision', 'isVenueOrderAmountTradable',
-    'normalizePreferredOrderType', 'roundForAdvisory', 'hasPendingOrConfirmedActionForRule',
+    'normalizePreferredOrderType', 'getEntryBookLiquidity', 'roundForAdvisory', 'hasPendingOrConfirmedActionForRule',
     'getRecentRejectedAction', 'getRecentFailedEntry', 'isIocZeroFillFailure',
   ], { bindings: { Date: Clock, botData, db } });
   const bindings = {

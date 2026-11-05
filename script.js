@@ -8244,6 +8244,18 @@ const getEffectiveCallExposureLimitPct = (positions = [], spotPrice = 0) => (
   getCallExposureLimitPct(getEffectiveCallExposureCapPct(positions, spotPrice))
 );
 
+// Visible book size caps an entry only when it takes liquidity; a maker order rests for later counterparties.
+const getEntryBookLiquidity = (rule, optionType, best, price) => {
+  const buyPutMakerBid = rule.action === 'buy_put'
+    && (
+      best.priceSource === 'score_threshold'
+      || (Number(best.askPrice) > 0 && price < Number(best.askPrice) - 1e-9)
+    );
+  return optionType === 'P'
+    ? (buyPutMakerBid ? Infinity : best.askAmount)
+    : best.bidAmount;
+};
+
 // One sell_call entry may use the remaining headroom or one tranche of total capacity, whichever is smaller.
 const getSellCallTrancheQty = (marginState, capPct, marginHeadroom, marginPerUnit) => {
   if (!(marginPerUnit > 0) || !(marginHeadroom >= 0)) return 0;
@@ -9396,14 +9408,7 @@ const evaluateTradingRules = async (positions, instruments, tickerMap, spotPrice
             maxByBudget = Math.min(maxByBudget, maxQtyAtCap);
           }
         }
-        const buyPutMakerBid = rule.action === 'buy_put'
-          && (
-            best.priceSource === 'score_threshold'
-            || (Number(best.askPrice) > 0 && price < Number(best.askPrice) - 1e-9)
-          );
-        const bookLiq = optionType === 'P'
-          ? (buyPutMakerBid ? Infinity : best.askAmount)
-          : best.bidAmount;
+        const bookLiq = getEntryBookLiquidity(rule, optionType, best, price);
         const step = best.amountStep || 0.01;
         const raw = Math.min(maxByBudget, bookLiq, 20);
         let qty = Math.floor(raw / step) * step;
