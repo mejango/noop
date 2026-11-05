@@ -6111,7 +6111,7 @@ const buildRulebookRequirements = ({
         type: 'exit',
         instrument_name: snapshot.instrument,
         applies: 'open short call',
-        instruction: 'Create a reduce-only buyback_call watcher with buyback_intent="profit_capture" for 80%+ capture or patient target-capture bids, or buyback_intent="threat_management" only for genuine short-call danger. Price rising alone is not enough.',
+        instruction: `Create a reduce-only buyback_call watcher with buyback_intent="profit_capture" for ${CALL_BUYBACK_PROFIT_THRESHOLD}%+ capture or patient target-capture bids, or buyback_intent="threat_management" only for genuine short-call danger. Price rising alone is not enough.`,
       });
     }
   }
@@ -10154,7 +10154,7 @@ const getStandingRulebookDisciplinePrompt = () => [
   '- Do not use broad spot_price floors as a proxy for sell_call recovery, stability, or good premium. After a sharp drop, spot can remain above a floor while call selling is still unattractive.',
   `- sell_call rules must stay inside the normal call sale universe: ${CALL_EXPIRATION_RANGE[0]}-${CALL_EXPIRATION_RANGE[1]} DTE and ${CALL_DELTA_RANGE[0]}-${CALL_DELTA_RANGE[1]} delta.`,
   `- sell_put rules must declare put_exit_intent. Use "roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds longer-dated long puts; roll_protection may close the aging instrument fully because the replacement protection is already on. Use "monetize_tail_win" only when executable unrealized_pnl_pct > ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and min_exit_price/limit_price. For monetization, never sell all downside protection at once or dump into sparse crash bids.`,
-  '- buyback_call rules must declare buyback_intent. Use "profit_capture" for 80%+ executable capture or a patient synthetic reduce-only resting limit whose price would achieve that capture. Use "threat_management" only for genuine short-call danger; price rising alone is not enough.',
+  `- buyback_call rules must declare buyback_intent. Use "profit_capture" for ${CALL_BUYBACK_PROFIT_THRESHOLD}%+ executable capture or a patient synthetic reduce-only resting limit whose price would achieve that capture. Use "threat_management" only for genuine short-call danger; price rising alone is not enough.`,
   '- Do not omit a required watcher just because it is not currently triggered. Tighten criteria instead.',
 ].join('\n');
 
@@ -12375,7 +12375,7 @@ Given market data, produce a JSON trading agenda with:
         "min_exit_price": <minimum acceptable sell price for monetize_tail_win>,
         "buyback_intent": "profit_capture" | "threat_management",
         "allow_below_profit_floor": false,
-        "target_capture_pct": 80,
+        "target_capture_pct": ${CALL_BUYBACK_PROFIT_THRESHOLD},
         "max_buyback_price": <number>
       },
       "priority": "high" | "medium" | "low",
@@ -12545,29 +12545,31 @@ Interpret "Taleb" operationally, not stylistically:
 ${getAdvisoryDataQualityPrompt()}
 ${getMomentumEvidenceDisciplinePrompt()}
 
-## DTE Discipline (Non-Negotiable)
-- Buy puts at 45-78 DTE. Never below 35 DTE. Short-dated puts bleed theta — you're paying for time decay, not convexity. Veto any buy_put rule outside [45, 78].
-- Roll (sell_put exit) at ~${PUT_ROLL_DTE_THRESHOLD} DTE only when the book already holds longer-dated long puts. When DTE is above ${PUT_ROLL_DTE_THRESHOLD}, only consider monetizing protective puts after executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}%, and only in tranches with retained downside protection.
-- Sell calls at 5-12 DTE. Short-dated calls maximize theta harvesting. Veto any sell_call rule with dte above 14.
+${getAdvisoryAccountModelPrompt()}
 
-## Fresh-Best Put Value Discipline
+${getCallMarginDisciplinePrompt()}
+
+## Put Entry Price Discipline
 ${getBuyPutEntryPriceDisciplinePrompt()}
-${getFreshBestBuyPutDisciplinePrompt()}
-${getStandingRulebookDisciplinePrompt()}
+
+## Rule Contract (shared with the Spitznagel advisor)
+Judge every rule against this contract. Veto or amend rules that break it, and keep every suggested_change within the fields and values it allows. Do not veto a rule for meeting a policy it states.
+${getAdvisoryRuleContractPrompt()}
 
 ## Call Buyback Anti-Fragility (Taleb)
 Panic buybacks are the opposite of antifragility. The crowd buys back calls when price rises because it FEELS dangerous. That's paying a fear premium — the exact behavior we profit from.
 - The asymmetry of short calls is known and bounded. You sold time decay. The question is always: is the position genuinely threatened, or does it just feel that way?
 - Scrutinize any buyback rule that triggers on price movement alone. Ask: is the portfolio actually at risk of ruin, or is this noise?
 - Do not veto advisor-led take-profit buyback rules merely because they free margin. If live executable economics are worse than the ${CALL_BUYBACK_PROFIT_THRESHOLD}% capture line and the advisor names a patient synthetic reduce-only resting price that would improve the exit if filled, that is disciplined harvesting, not panic. If live economics already beat that line, do not let the agenda bid back up to the threshold.
+- On an upside breakout with short calls already open, selling richer additional calls under the active cap can be more antifragile than paying fear premium to buy back.
 - Rolling for a net debit is paying to extend exposure. If you can't roll favorably, accepting assignment is the antifragile response — it means you were right about the price level when you sold.
 - Use your judgment on what constitutes a real threat vs. noise. The Greeks, remaining DTE, premium captured, and portfolio shape tell the story — not the last candle.
 
 ## Market Regime Awareness
 ETH crashes cascade — they accelerate, not slow down. Your critique should consider:
-- Selling puts during an active crash means selling convexity that could multiply further. Scrutinize the timing.
+- Monetizing owned puts during an active crash sells convexity that could multiply further. Scrutinize the timing and the retained protection.
 - For buy_put, verify fresh PUT EDGE at the proposed bid against the approved min_score/target_score; spiked IV is descriptive and is not a standalone veto.
-- In recovery (price stabilizing, IV still elevated), selling puts to fearful buyers can capture inflated premiums.
+- In recovery (price stabilizing, IV still elevated), monetizing an owned tail-win put tranche can capture inflated premiums. sell_put never opens a short put.
 - But these are tendencies, not absolutes. The actual Greeks, DTE, position size, and portfolio shape matter. Use your judgment.
 - Ask: is this trade benefiting from disorder (antifragile) or just reacting to it (fragile)?
 

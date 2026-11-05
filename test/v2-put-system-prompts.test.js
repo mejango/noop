@@ -74,3 +74,21 @@ test('confirmation systems retain real call-margin and put-exit policy while sta
   assert.match(systems.get('openai confirmation'), /intrinsic payoff is bounded by the strike when the underlying reaches zero/);
   assert.match(systems.get('advisory verifier'), /actual option payoff and portfolio exposure; require survival within the stated position, margin, and budget constraints/);
 });
+
+test('Taleb verifier reviews against the same account model, call-margin policy and rule contract as the primary advisor', () => {
+  const policies = loadProduction(
+    ['getAdvisoryAccountModelPrompt', 'getAdvisoryRuleContractPrompt', 'getCallMarginDisciplinePrompt'],
+    { bindings: { PUT_INSURED_EXTERNAL_ETH: 20, path: undefined } },
+  );
+  for (const name of ['primary advisory', 'advisory verifier']) {
+    for (const [policyName, policy] of Object.entries(policies)) {
+      assert.ok(systems.get(name).includes(policy()), `${name}: ${policyName}`);
+    }
+  }
+  // sell_put only closes owned puts, and the sell_call DTE limit lives in the shared contract.
+  assert.doesNotMatch(systems.get('advisory verifier'), /selling puts to fearful buyers|dte above 14/);
+});
+
+test('buyback capture prompts use the configured threshold, never a hardcoded 80%', () => {
+  assert.doesNotMatch(SCRIPT_SOURCE, /80%\+|"target_capture_pct": 80\b/);
+});
