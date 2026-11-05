@@ -4,8 +4,8 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { loadProduction } = require('./helpers/load-production');
 
-const { buildSpotPathContext, formatSpotPathStructureForAdvisor, buildMandelbrotContextBlock } = loadProduction([
-  'buildSpotPathContext', 'formatSpotPathStructureForAdvisor', 'buildMandelbrotContextBlock',
+const { buildSpotPathContext, formatSpotPathStructureForAdvisor } = loadProduction([
+  'buildSpotPathContext', 'formatSpotPathStructureForAdvisor',
 ], { bindings: { path: require('node:path') } });
 
 const HOUR = 3_600_000;
@@ -40,13 +40,4 @@ test('tail and scaling statistics separate wild from mild and persistent from me
   assert.match(text, /variance ratio/);
   assert.doesNotMatch(text, /samples_oldest_to_newest/);
   assert.match(formatSpotPathStructureForAdvisor(null), /unavailable/);
-});
-
-test('advisors get the Mandelbrot regime and invalidations, not the narrative', () => {
-  const block = buildMandelbrotContextBlock({
-    regime: 'transitional', confidence: 0.78, roughness_score: 0.71,
-    geometry_notes: ['long prose'], market_rationale: 'more prose', invalidations: ['funding flips negative', 'skew collapses'],
-  });
-  assert.equal(block, 'Regime: transitional (confidence 0.78).\nInvalidated if: funding flips negative | skew collapses');
-  assert.match(buildMandelbrotContextBlock(null), /No Mandelbrot/);
 });

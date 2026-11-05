@@ -6360,18 +6360,6 @@ const selectAssessmentText = (...candidates) => {
   return 'No assessment produced';
 };
 
-// Advisors get the regime call and what would falsify it. The full narrative stays in the
-// mandelbrot_archive journal (dashboard drawer) so one model's prose doesn't steer the next.
-const buildMandelbrotContextBlock = (mandelbrotContext) => {
-  if (!mandelbrotContext) return 'No Mandelbrot regime context available.';
-  const confidence = Number(mandelbrotContext.confidence);
-  const invalidations = Array.isArray(mandelbrotContext.invalidations) ? mandelbrotContext.invalidations.slice(0, 4) : [];
-  return [
-    `Regime: ${mandelbrotContext.regime}${Number.isFinite(confidence) ? ` (confidence ${confidence.toFixed(2)})` : ''}.`,
-    invalidations.length ? `Invalidated if: ${invalidations.map(v => String(v).trim()).join(' | ')}` : 'No invalidations recorded.',
-  ].join('\n');
-};
-
 // The computed 30d hourly path statistics, without the raw sample series.
 const formatSpotPathStructureForAdvisor = (ctx) => {
   if (!ctx || !ctx.point_count) return 'Spot path statistics unavailable.';
@@ -6625,98 +6613,6 @@ const buildSpotPathContext = ({
       point.price,
     ]),
   };
-};
-
-const generateMandelbrotRegimeContext = async ({
-  spotPrice,
-  spotPathContext,
-  sentiment,
-  wikiSignals,
-  volSurface = null,
-  marketEvidence = null,
-}) => {
-  if (!process.env.OPENAI_API_KEY) return null;
-
-  const systemPrompt = `You are a Mandelbrot-style market structure analyst for an ETH options tail-hedging system.
-
-You do NOT propose trades directly. You do NOT predict price direction. You do NOT recommend any particular action set.
-Your job is to synthesize current market structure in a Mandelbrotian way and classify whether current behavior looks calm, transitional, clustered-stress, or cascade-risk.
-You are writing for a downstream Spitznagel-style strategist who will make the actual trade recommendations.
-Use Mandelbrot's finance framing from *The (Mis)Behavior of Markets* and *Fractals and Scaling in Finance*: markets are often discontinuous, concentrated, fat-tailed, and governed by scaling relationships that make Gaussian intuitions unreliable.
-
-Focus on:
-- whether the volatility surface (IV level vs realized, wing premiums, risk reversals, term slope), funding, open interest, spread/depth, and option pricing suggest unstable distribution geometry
-- whether volatility and option-market participation are clustering across the supplied windows
-- roughness versus smoothness of the supplied 30-day hourly spot path
-- whether movement is concentrated into bursts rather than dispersed smoothly
-- whether the process appears mild or wild, smooth or discontinuous
-
-Spot-path discipline:
-- Treat the hourly spot path as structural evidence for roughness, burstiness, discontinuity, concentration, and scaling instability.
-- Do not reduce the path to a simple upward/downward momentum label.
-- Do not frame the regime primarily as directional unless skew, OI, funding, liquidity, or option pricing confirms that directional label matters.
-
-Operational definitions:
-- Roughness: the path is jagged, bursty, reversal-heavy, and unevenly distributed through time rather than unfolding gradually.
-- Smoothness: the path is relatively continuous, incremental, and evenly dispersed, with less jump concentration and less cross-window instability.
-- Mild randomness: disturbances look more diffusion-like and locally bounded; large moves do not dominate the sample.
-- Wild randomness: extremes matter disproportionately; jumps and tail episodes dominate realized structure more than Gaussian intuition would suggest.
-- Volatility clustering: large moves tend to arrive near other large moves, rather than independently and evenly through time.
-- Scaling instability: behavior changes materially across 6h, 24h, 7d, and 30d windows instead of preserving a stable risk geometry.
-- Discontinuity: gaps, jumps, and abrupt path changes matter more than smooth drift.
-- Concentration: a small number of episodes account for a large share of realized movement, stress, or repricing.
-
-Be skeptical of Gaussian assumptions and of square-root-of-time intuitions. Prefer describing geometry, clustering, concentration, discontinuity, scaling instability, and persistence over forecasting direction.
-Use only the supplied market data. Do not invent measurements. Do not suggest trades, thresholds, or portfolio actions.
-
-Return JSON only:
-{
-  "regime": "calm" | "transitional" | "clustered_stress" | "cascade_risk",
-  "confidence": 0.0,
-  "roughness_score": 0.0,
-  "wildness_score": 0.0,
-  "vol_clustering_score": 0.0,
-  "scaling_instability_score": 0.0,
-  "geometry_notes": ["..."],
-  "key_considerations_for_spitznagel": ["..."],
-  "market_rationale": "2-4 sentence synthesis of what a Spitznagel-style strategist should pay attention to in current market structure",
-  "invalidations": ["..."]
-}`;
-
-  const userPrompt = `Assess the market structure from a Mandelbrot lens.
-
-=== FUNDING AND OPEN INTEREST BY WINDOW ===
-${JSON.stringify(Object.fromEntries(Object.entries(summarizeSentimentWindowsForLLM(sentiment?.windows || {}))
-    .map(([label, row]) => [label, { funding_rate: row.funding_rate, aggregate_oi: row.aggregate_oi }])), null, 2)}
-
-=== VOLATILITY SURFACE (bot's call and put expiries; percentiles vs 30d) ===
-${formatVolSurfaceForAdvisor(volSurface)}
-
-=== SHARED LIQUIDITY AND SMILE HISTORY ===
-${formatMarketEvidence(marketEvidence)}
-
-=== BROAD QUOTE SNAPSHOT (all recorded tenors, not the entry candidate pool) ===
-${JSON.stringify(summarizeMarketQualitySnapshotForLLM(sentiment?.latest?.marketQuality || []), null, 2)}
-
-=== SPOT PATH CONTEXT (30D, HOURLY) ===
-${JSON.stringify(spotPathContext || buildSpotPathContext({ spotPrice, spotRows: [] }), null, 2)}
-
-=== WIKI SIGNALS ===
-${JSON.stringify(wikiSignals || null, null, 2)}
-
-Return JSON only. Synthesize market characteristics for a downstream strategist; do not include trading recommendations.`;
-
-  try {
-    const text = await callOpenAI(systemPrompt, userPrompt, { maxTokens: 8192, timeout: 120000, model: OPENAI_STRATEGY_MODEL });
-    if (!text) return null;
-    const parsed = extractJSON(text);
-    if (!parsed || typeof parsed !== 'object') return null;
-    if (!['calm', 'transitional', 'clustered_stress', 'cascade_risk'].includes(parsed.regime)) return null;
-    return parsed;
-  } catch (e) {
-    console.log(`📋 Mandelbrot regime context failed (non-fatal): ${e.message}`);
-    return null;
-  }
 };
 
 // ─── LLM-Driven Trading: Monitoring ──────────────────────────────────────────
@@ -12254,28 +12150,6 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
     positionSnapshots: positionAdviceSnapshots,
   });
 
-  // ── Step 0: Regime Examiner (OpenAI, Mandelbrot temperament) ──────────────
-
-  console.log('📋 Advisory Step 0: Mandelbrot regime context (OpenAI GPT)...');
-  let mandelbrotContext = null;
-  try {
-    mandelbrotContext = await generateMandelbrotRegimeContext({
-      spotPrice,
-      spotPathContext: advisorySpotPathContext,
-      sentiment,
-      wikiSignals,
-      volSurface,
-      marketEvidence,
-    });
-    if (mandelbrotContext) {
-      console.log(`📋 Mandelbrot regime: ${mandelbrotContext.regime} @ ${(Number(mandelbrotContext.confidence || 0) * 100).toFixed(0)}% confidence`);
-    } else {
-      console.log('📋 Mandelbrot regime unavailable; continuing without it');
-    }
-  } catch (e) {
-    console.log(`📋 Advisory Step 0 failed (non-fatal): ${e.message}`);
-  }
-
   // ── Step 1: Primary Advisor (Claude Opus 5.5, Spitznagel temperament) ───────────
 
   console.log('📋 Advisory Step 1: Primary advisor (Claude Opus 5.5)...');
@@ -12475,12 +12349,9 @@ Knowledge warnings: ${wikiSignals.warnings?.length ? wikiSignals.warnings.join('
 ${wikiSignals.playbookRules.length > 0 ? `Playbook rules:\n${wikiSignals.playbookRules.map(r => `- ${r}`).join('\n')}` : ''}` : ''}
 === SPOT PATH STRUCTURE (30d hourly closes, computed) ===
 ${formatSpotPathStructureForAdvisor(advisorySpotPathContext)}
-
-=== MANDELBROT REGIME (label and invalidations; full narrative archived) ===
-${buildMandelbrotContextBlock(mandelbrotContext)}
 ${wikiContext ? `\n=== KNOWLEDGE WIKI (cumulative bot knowledge) ===\n${wikiContext}` : ''}
 
-Use the spot path structure and Mandelbrot regime as descriptive market-structure context. They highlight what should matter intellectually, but they do not prescribe trade actions.`;
+Use the spot path structure as descriptive market-structure context. It highlights what should matter intellectually, but it does not prescribe trade actions.`;
 
   const primaryUserPrompt = `${sharedAdvisoryInputBlock}
 
@@ -12703,13 +12574,9 @@ ${formatMarketEvidence(marketEvidence)}
 ## Required Standing Rulebook Coverage
 ${formatRulebookRequirements(rulebookRequirements)}
 
-## Mandelbrot Market-Structure Archive
-${buildMandelbrotContextBlock(mandelbrotContext)}
-
 ## Rules for Synthesis:
 - VETOES are binding: if Taleb vetoes a rule, remove it
 - AMENDMENTS are suggestions: apply if they improve convexity without breaking margin discipline
-- Mandelbrot archive is descriptive context only. It characterizes market structure and regime shape; it does not prescribe trade ideas or rule translations.
 - The Spitznagel advisor's sizing limits take precedence (arithmetic discipline)
 - Taleb's concerns about fat-tail exposure should be taken seriously
 - When advisors agree, high confidence. When they disagree, reduce priority or tighten conditions.
@@ -12740,9 +12607,6 @@ ${formatMarketEvidence(marketEvidence)}
 
 === REQUIRED STANDING RULEBOOK COVERAGE ===
 ${formatRulebookRequirements(rulebookRequirements)}
-
-=== MANDELBROT MARKET STRUCTURE ARCHIVE ===
-${buildMandelbrotContextBlock(mandelbrotContext)}
 
 === ACCOUNT HEALTH ===
 ${JSON.stringify(accountHealth, null, 2)}
@@ -12988,12 +12852,12 @@ Return the full repaired agenda JSON.`,
     exitRules: persistedAgenda.exit_rules,
   });
 
-  return { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion, mandelbrotContext,
+  return { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion,
     rollingOptionValueContext, volSurface, marketEvidence, persistedAgenda, spotPrice };
 };
 
 const publishTradingAdvisoryDraft = (draft, { inputSnapshot, checkedSnapshot, attempt }) => {
-  const { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion, mandelbrotContext,
+  const { advisoryId, allRules, finalAgenda, primaryAgenda, secondOpinion,
     rollingOptionValueContext, volSurface = null, marketEvidence = null, persistedAgenda, spotPrice } = draft;
   const publication = {
     input_as_of: inputSnapshot.marketTimestamp,
@@ -13009,7 +12873,6 @@ const publishTradingAdvisoryDraft = (draft, { inputSnapshot, checkedSnapshot, at
   ];
   if (primaryAgenda?.assessment) journalEntries.push({ entry_type: 'advisory_spitznagel', content: primaryAgenda.assessment });
   if (secondOpinion) journalEntries.push({ entry_type: 'advisory_taleb', content: JSON.stringify(secondOpinion, null, 2) });
-  if (mandelbrotContext) journalEntries.push({ entry_type: 'mandelbrot_archive', content: JSON.stringify(mandelbrotContext, null, 2) });
   journalEntries.push({ entry_type: 'advisory_context', content: JSON.stringify({
     advisory_id: advisoryId, rolling_option_value_context: rollingOptionValueContext, volatility_surface: volSurface, market_history: marketEvidence, publication,
   }, null, 2) });

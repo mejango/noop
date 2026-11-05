@@ -137,7 +137,7 @@ const HIDDEN_JOURNAL_ENTRY_TYPES = new Set([
   'advisory_main',
   'advisory_spitznagel',
   'advisory_taleb',
-  'mandelbrot_archive',
+  'mandelbrot_archive', // retired 2026-11-05; keeps historical rows out of the journal feed
   'advisory_context',
 ]);
 
@@ -231,7 +231,6 @@ interface AdvisoryArtifacts {
   main: AdvisoryArtifact | null;
   spitznagel: AdvisoryArtifact | null;
   taleb: AdvisoryArtifact | null;
-  mandelbrot: AdvisoryArtifact | null;
   context: AdvisoryArtifact | null;
 }
 
@@ -245,15 +244,6 @@ function parseArtifactContent(content: string) {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function formatArtifactValue(value: unknown) {
-  if (typeof value === 'number') {
-    return Number.isInteger(value) ? String(value) : value.toFixed(2);
-  }
-  if (typeof value === 'string') return value;
-  if (typeof value === 'boolean') return value ? 'yes' : 'no';
-  return JSON.stringify(value);
 }
 
 function splitThesisBreakdown(content: string) {
@@ -326,53 +316,6 @@ function renderTalebArtifact(content: string) {
         <div className="space-y-1">
           <p className="text-[10px] text-blue-400 uppercase tracking-wider">Additions</p>
           <pre className="text-[10px] text-gray-400 leading-relaxed whitespace-pre-wrap overflow-x-auto">{JSON.stringify(additions, null, 2)}</pre>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function renderMandelbrotArtifact(content: string) {
-  const parsed = parseArtifactContent(content);
-  if (!isPlainObject(parsed)) {
-    return <pre className="text-[10px] text-gray-300 leading-relaxed whitespace-pre-wrap overflow-x-auto">{content}</pre>;
-  }
-
-  const geometryNotes = Array.isArray(parsed.geometry_notes) ? parsed.geometry_notes as unknown[] : [];
-  const invalidations = Array.isArray(parsed.invalidations) ? parsed.invalidations as unknown[] : [];
-  const metrics = ([
-    ['Regime', parsed.regime],
-    ['Confidence', parsed.confidence],
-    ['Roughness', parsed.roughness_score],
-    ['Wildness', parsed.wildness_score],
-    ['Vol clustering', parsed.vol_clustering_score],
-    ['Scaling instability', parsed.scaling_instability_score],
-  ] as Array<[string, unknown]>).filter(([, value]) => value != null);
-
-  return (
-    <div className="space-y-2">
-      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px]">
-        {metrics.map(([label, value]) => (
-          <div key={label} className="flex justify-between gap-2">
-            <span className="text-gray-500">{label}</span>
-            <span className="text-gray-300 font-mono">{formatArtifactValue(value)}</span>
-          </div>
-        ))}
-      </div>
-      {geometryNotes.length > 0 && (
-        <div className="space-y-1">
-          <p className="text-[10px] text-cyan-400 uppercase tracking-wider">Geometry Notes</p>
-          {geometryNotes.map((note, index) => (
-            <p key={`geometry-${index}`} className="text-[11px] text-gray-300 leading-relaxed">{String(note)}</p>
-          ))}
-        </div>
-      )}
-      {invalidations.length > 0 && (
-        <div className="space-y-1">
-          <p className="text-[10px] text-gray-500 uppercase tracking-wider">Invalidations</p>
-          {invalidations.map((note, index) => (
-            <p key={`invalidation-${index}`} className="text-[11px] text-gray-400 leading-relaxed">{String(note)}</p>
-          ))}
         </div>
       )}
     </div>
@@ -1972,7 +1915,7 @@ function AdvisorDrawerContent() {
                 )}
 
                 {/* Advisory Assessment */}
-                {(opsData.assessment || opsData.advisoryArtifacts?.main || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb || opsData.advisoryArtifacts?.mandelbrot || opsData.advisoryArtifacts?.context) && (
+                {(opsData.assessment || opsData.advisoryArtifacts?.main || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb || opsData.advisoryArtifacts?.context) && (
                   <div className="space-y-2">
                     {(opsData.advisoryArtifacts?.main || opsData.assessment) && (
                       <div className="bg-white/5 border border-white/25 px-3 py-2.5">
@@ -2005,7 +1948,7 @@ function AdvisorDrawerContent() {
                             </>
                           );
                         })()}
-                        {(opsData.advisoryArtifacts?.context || opsData.advisoryArtifacts?.mandelbrot || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb) && (
+                        {(opsData.advisoryArtifacts?.context || opsData.advisoryArtifacts?.spitznagel || opsData.advisoryArtifacts?.taleb) && (
                           <div className="mt-3 pt-2 border-t border-white/5 space-y-2">
                             <p className="text-[10px] text-gray-500 uppercase tracking-wider">Council Breakdown</p>
                             {opsData.advisoryArtifacts?.context && (
@@ -2015,15 +1958,6 @@ function AdvisorDrawerContent() {
                                   <span className="text-gray-600 normal-case">{timeAgo(opsData.advisoryArtifacts.context.timestamp)}</span>
                                 </summary>
                                 <div className="mt-2">{renderAdvisoryContextArtifact(opsData.advisoryArtifacts.context.content)}</div>
-                              </details>
-                            )}
-                            {opsData.advisoryArtifacts?.mandelbrot && (
-                              <details className="border border-white/5 bg-black/10 px-2.5 py-2 group">
-                                <summary className="cursor-pointer list-none flex items-center justify-between text-[10px] uppercase tracking-wider text-cyan-300">
-                                  <span>Mandelbrot Analysis</span>
-                                  <span className="text-gray-600 normal-case">{timeAgo(opsData.advisoryArtifacts.mandelbrot.timestamp)}</span>
-                                </summary>
-                                <div className="mt-2">{renderMandelbrotArtifact(opsData.advisoryArtifacts.mandelbrot.content)}</div>
                               </details>
                             )}
                             {opsData.advisoryArtifacts?.spitznagel && (

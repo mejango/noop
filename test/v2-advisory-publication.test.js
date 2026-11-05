@@ -56,7 +56,7 @@ function productionFlow(reads, { storageFailure = false, notificationFailure = n
       reviews.push(input);
       const assessment = `PUT quote status ${input.quoteAvailability.put.status}`;
       return { advisoryId, allRules: [{ action: 'buy_put' }], finalAgenda: { assessment }, primaryAgenda: { assessment },
-        secondOpinion: { stance: assessment }, mandelbrotContext: null,
+        secondOpinion: { stance: assessment },
         rollingOptionValueContext: { put_value_context: { availability: input.quoteAvailability.put } },
         persistedAgenda: { entry_rules: [{}], exit_rules: [] }, spotPrice: input.spotPrice };
     },

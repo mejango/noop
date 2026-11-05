@@ -798,13 +798,11 @@ describe('Standing rulebook coverage requirements', () => {
     assert.doesNotMatch(prompt, /PUT composite selector|The composite selector then adjusts|include min_edge_score only/);
   });
 
-  test('Mandelbrot prompt uses 30-day hourly spot path instead of momentum labels', () => {
+  test('advisors read the computed 30-day hourly spot path; the Mandelbrot model call is retired', () => {
     assert.ok(SCRIPT_SOURCE.includes('const SPOT_PATH_LOOKBACK_DAYS = 30'));
-    assert.ok(SCRIPT_SOURCE.includes('=== SPOT PATH CONTEXT (30D, HOURLY) ==='));
-    assert.ok(SCRIPT_SOURCE.includes("sample_format: '[hours_from_now, spot_price]'"));
-    assert.ok(SCRIPT_SOURCE.includes('samples_oldest_to_newest'));
-    assert.ok(SCRIPT_SOURCE.includes('Do not reduce the path to a simple upward/downward momentum label'));
+    assert.ok(SCRIPT_SOURCE.includes('=== SPOT PATH STRUCTURE (30d hourly closes, computed) ==='));
     assert.ok(SCRIPT_SOURCE.includes('db.getSpotPricesHourly(since30dSentiment)'));
+    assert.doesNotMatch(SCRIPT_SOURCE, /mandelbrot/i);
     assert.ok(!SCRIPT_SOURCE.includes('Momentum: ${JSON.stringify(momentum, null, 2)}'));
   });
 
