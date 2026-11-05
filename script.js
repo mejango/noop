@@ -7260,6 +7260,9 @@ const refinePatientBuybackPlanPrice = (plan, ticker, instrument) => {
   return build(ceilingPrice, 'capture_floor_ceiling');
 };
 
+// Every sell_call criteria field the rule engine reads. Call exposure is governed by the margin target alone.
+const SELL_CALL_CRITERIA_FIELDS = new Set(['option_type', 'delta_range', 'dte_range', 'max_strike_pct', 'min_score', 'min_bid', 'market_conditions']);
+
 const validateAdvisorRuleContract = (rule, context = {}) => {
   const criteria = parseMaybeJsonObject(rule?.criteria);
   if (!rule || !criteria) return { valid: false, reason: 'criteria must be a JSON object' };
@@ -7284,6 +7287,8 @@ const validateAdvisorRuleContract = (rule, context = {}) => {
     if (!isRangeWithin(criteria.dte_range, CALL_EXPIRATION_RANGE[0], CALL_EXPIRATION_RANGE[1])) return { valid: false, reason: `sell_call dte_range must stay within ${JSON.stringify(CALL_EXPIRATION_RANGE)}` };
     if (!(Number(criteria.min_score) > 0)) return { valid: false, reason: 'sell_call requires min_score as the DTE-normalized CALL EDGE gate' };
     if (!(Number(criteria.min_bid) > 0)) return { valid: false, reason: 'sell_call requires min_bid as the liquidity/premium floor' };
+    const unsupportedFields = Object.keys(criteria).filter((field) => !SELL_CALL_CRITERIA_FIELDS.has(field));
+    if (unsupportedFields.length > 0) return { valid: false, reason: `sell_call criteria has unsupported fields (${unsupportedFields.join(', ')}); call exposure is governed only by the active margin target` };
     const marketConditions = Array.isArray(criteria.market_conditions) ? criteria.market_conditions : [];
     if (marketConditions.some((condition) => !RULE_MARKET_FIELDS.has(condition?.field))) return { valid: false, reason: `sell_call market_conditions may only use ${[...RULE_MARKET_FIELDS].join(', ')}` };
     return { valid: true };
@@ -8251,9 +8256,10 @@ const getEntryBookLiquidity = (rule, optionType, best, price) => {
       best.priceSource === 'score_threshold'
       || (Number(best.askPrice) > 0 && price < Number(best.askPrice) - 1e-9)
     );
-  return optionType === 'P'
-    ? (buyPutMakerBid ? Infinity : best.askAmount)
-    : best.bidAmount;
+  if (optionType === 'P') return buyPutMakerBid ? Infinity : best.askAmount;
+  const sellCallMaker = rule.action === 'sell_call'
+    && (normalizePreferredOrderType(rule.action, rule.preferred_order_type) || 'post_only') === 'post_only';
+  return sellCallMaker ? Infinity : best.bidAmount;
 };
 
 // One sell_call entry may use the remaining headroom or one tranche of total capacity, whichever is smaller.
@@ -10194,7 +10200,7 @@ ${getStandingRulebookDisciplinePrompt()}
 - If the market is unclear, tighten the watcher criteria and lower priority. Do not omit required standing watchers solely because they are not currently triggered.
 - Maximum 5 entry rules; exit rules should cover each required open-position watcher from REQUIRED STANDING RULEBOOK COVERAGE.`;
 
-const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normally target ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. The ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% is last-mile execution safety for estimate drift, not planned sell-call capacity. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries must stay at or below the active target cap after sizing; at-or-below means <= and equality at the cap is allowed. Do not create dust orders merely to use the execution buffer. When spot is breaking upward and short calls are already on, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% with a buffered limit of ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% only if margin context explicitly shows breakout_override=active. These are discipline limits for new entries, not margin-emergency thresholds. Reject call sells that exceed the active target cap, exceed the buffered limit, lack buying power, or are too small to matter.`;
+const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normally target ${(CALL_EXPOSURE_CAP_PCT * 100).toFixed(0)}% inferred Derive margin utilization. The ${(CALL_EXPOSURE_BUFFER_PCT * 100).toFixed(0)} percentage point buffer up to ${(CALL_EXPOSURE_LIMIT_PCT * 100).toFixed(0)}% is last-mile execution safety for estimate drift, not planned sell-call capacity. ${(CALL_ENTRY_CAP_PCT * 100).toFixed(0)}% is a caution threshold, not an automatic rejection line. New entries must stay at or below the active target cap after sizing; at-or-below means <= and equality at the cap is allowed. Do not create dust orders merely to use the execution buffer. When spot is breaking upward and short calls are already on, the active target can widen to ${(CALL_BREAKOUT_OVERRIDE_CAP_PCT * 100).toFixed(0)}% with a buffered limit of ${(CALL_BREAKOUT_OVERRIDE_LIMIT_PCT * 100).toFixed(0)}% only if margin context explicitly shows breakout_override=active. These are discipline limits for new entries, not margin-emergency thresholds. Call exposure is governed only by the active margin target; do not add ETH-coverage or other exposure caps. Reject call sells that exceed the active target cap, exceed the buffered limit, lack buying power, or are too small to matter.`;
 
 const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, keep two intents separate. Intent 1 is profit/capacity reset while the short call is winning: use buyback_intent="profit_capture" and executable unrealized_pnl_pct >= ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic trigger, or set a patient max_buyback_price/target_capture_pct where the bid would capture at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% if filled. Do not add DTE or mark_price blockers for this intent; executable capture already uses the live buyback ask. Intent 2 is threat management when the short call is genuinely dangerous and time/range for recovery is running out: use buyback_intent="threat_management" with allow_below_profit_floor=true, and conditions on real threat facts such as delta, spot vs strike, and remaining DTE. Do not prematurely buy back just because price is rising; spot can come back down, and buying back fear premium can make us the sucker of the trade. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks only when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
 
