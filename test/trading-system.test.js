@@ -799,7 +799,7 @@ describe('Standing rulebook coverage requirements', () => {
   });
 
   test('Mandelbrot prompt uses 30-day hourly spot path instead of momentum labels', () => {
-    assert.ok(SCRIPT_SOURCE.includes('const MANDELBROT_SPOT_PATH_LOOKBACK_DAYS = 30'));
+    assert.ok(SCRIPT_SOURCE.includes('const SPOT_PATH_LOOKBACK_DAYS = 30'));
     assert.ok(SCRIPT_SOURCE.includes('=== SPOT PATH CONTEXT (30D, HOURLY) ==='));
     assert.ok(SCRIPT_SOURCE.includes("sample_format: '[hours_from_now, spot_price]'"));
     assert.ok(SCRIPT_SOURCE.includes('samples_oldest_to_newest'));

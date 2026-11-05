@@ -4,8 +4,8 @@ const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { loadProduction } = require('./helpers/load-production');
 
-const { buildMandelbrotSpotPathContext, formatSpotPathStructureForAdvisor, buildMandelbrotContextBlock } = loadProduction([
-  'buildMandelbrotSpotPathContext', 'formatSpotPathStructureForAdvisor', 'buildMandelbrotContextBlock',
+const { buildSpotPathContext, formatSpotPathStructureForAdvisor, buildMandelbrotContextBlock } = loadProduction([
+  'buildSpotPathContext', 'formatSpotPathStructureForAdvisor', 'buildMandelbrotContextBlock',
 ], { bindings: { path: require('node:path') } });
 
 const HOUR = 3_600_000;
@@ -23,16 +23,16 @@ test('tail and scaling statistics separate wild from mild and persistent from me
   // Mild: steady ±0.3% noise. Wild: the same, plus rare 4% jumps.
   const mildMoves = Array.from({ length: n }, (_, i) => (i % 3 === 0 ? 0.3 : -0.15));
   const wildMoves = mildMoves.map((m, i) => (i % 97 === 50 ? (i % 2 ? 4 : -4) : m));
-  const mild = buildMandelbrotSpotPathContext({ spotPrice: 2000, spotRows: pathOf(mildMoves), nowMs: NOW });
-  const wild = buildMandelbrotSpotPathContext({ spotPrice: 2000, spotRows: pathOf(wildMoves), nowMs: NOW });
+  const mild = buildSpotPathContext({ spotPrice: 2000, spotRows: pathOf(mildMoves), nowMs: NOW });
+  const wild = buildSpotPathContext({ spotPrice: 2000, spotRows: pathOf(wildMoves), nowMs: NOW });
   assert.ok(wild.tail_and_scaling.excess_kurtosis_hourly > 10, `wild kurtosis ${wild.tail_and_scaling.excess_kurtosis_hourly}`);
   assert.ok(mild.tail_and_scaling.excess_kurtosis_hourly < 1);
 
   // Alternating ±1% cancels within each day: far below square-root-of-time scaling.
-  const reverting = buildMandelbrotSpotPathContext({ spotPrice: 2000, spotRows: pathOf(Array.from({ length: n }, (_, i) => (i % 2 ? 1 : -1))), nowMs: NOW });
+  const reverting = buildSpotPathContext({ spotPrice: 2000, spotRows: pathOf(Array.from({ length: n }, (_, i) => (i % 2 ? 1 : -1))), nowMs: NOW });
   assert.ok(reverting.tail_and_scaling.variance_ratio_24h < 0.1);
   // Trending: each day moves one way for all 24 hours, alternating by day.
-  const trending = buildMandelbrotSpotPathContext({ spotPrice: 2000, spotRows: pathOf(Array.from({ length: n }, (_, i) => (Math.floor(i / 24) % 2 ? 0.2 : -0.2) + (i % 2 ? 0.05 : -0.05))), nowMs: NOW });
+  const trending = buildSpotPathContext({ spotPrice: 2000, spotRows: pathOf(Array.from({ length: n }, (_, i) => (Math.floor(i / 24) % 2 ? 0.2 : -0.2) + (i % 2 ? 0.05 : -0.05))), nowMs: NOW });
   assert.ok(trending.tail_and_scaling.variance_ratio_24h > 5);
 
   const text = formatSpotPathStructureForAdvisor(wild);

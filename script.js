@@ -431,9 +431,9 @@ const PUT_MONETIZATION_LADDER_PCT = Array.isArray(STRATEGY_FACTS.put_monetizatio
   : [PUT_MONETIZATION_PROFIT_THRESHOLD];
 const PUT_MONETIZATION_MIN_INTRINSIC_FRACTION = Number(STRATEGY_FACTS.put_monetization_min_intrinsic_fraction) || 0;
 const REJECTED_ACTION_BACKOFF_MS = 60 * 60 * 1000;
-const MANDELBROT_SPOT_PATH_LOOKBACK_DAYS = 30;
-const MANDELBROT_SPOT_PATH_INTERVAL_HOURS = 1;
-const MANDELBROT_SPOT_PATH_MAX_POINTS = (MANDELBROT_SPOT_PATH_LOOKBACK_DAYS * 24) + 1;
+const SPOT_PATH_LOOKBACK_DAYS = 30;
+const SPOT_PATH_INTERVAL_HOURS = 1;
+const SPOT_PATH_MAX_POINTS = (SPOT_PATH_LOOKBACK_DAYS * 24) + 1;
 
 // Trading parameters - CALLS  
 const CALL_EXPIRATION_RANGE = STRATEGY_FACTS.call_dte_range;
@@ -6452,7 +6452,7 @@ const normalizeSpotPathRow = (row) => {
 };
 
 const buildHourlySpotPathSamples = (rows = []) => {
-  const intervalMs = MANDELBROT_SPOT_PATH_INTERVAL_HOURS * 60 * 60 * 1000;
+  const intervalMs = SPOT_PATH_INTERVAL_HOURS * 60 * 60 * 1000;
   const buckets = new Map();
   const normalized = rows.map(normalizeSpotPathRow).filter(Boolean).sort((a, b) => a.ts - b.ts);
   for (const point of normalized) {
@@ -6466,7 +6466,7 @@ const buildHourlySpotPathSamples = (rows = []) => {
   }
   return Array.from(buckets.values())
     .sort((a, b) => a.ts - b.ts)
-    .slice(-MANDELBROT_SPOT_PATH_MAX_POINTS)
+    .slice(-SPOT_PATH_MAX_POINTS)
     .map((point) => ({
       ts: point.ts,
       hour: new Date(point.ts).toISOString().slice(0, 13),
@@ -6492,7 +6492,7 @@ const average = (values) => {
 };
 
 const getSpotPathPriceNear = (samples, targetTs) => {
-  const toleranceMs = MANDELBROT_SPOT_PATH_INTERVAL_HOURS * 2.5 * 60 * 60 * 1000;
+  const toleranceMs = SPOT_PATH_INTERVAL_HOURS * 2.5 * 60 * 60 * 1000;
   for (let i = samples.length - 1; i >= 0; i--) {
     if (samples[i].ts <= targetTs) {
       return targetTs - samples[i].ts <= toleranceMs ? samples[i].price : null;
@@ -6506,7 +6506,7 @@ const getSpotPathPriceNear = (samples, targetTs) => {
   return null;
 };
 
-const buildMandelbrotSpotPathContext = ({
+const buildSpotPathContext = ({
   spotPrice,
   spotRows = [],
   nowMs = Date.now(),
@@ -6574,8 +6574,8 @@ const buildMandelbrotSpotPathContext = ({
 
   return {
     source,
-    lookback_days: MANDELBROT_SPOT_PATH_LOOKBACK_DAYS,
-    sample_interval_hours: MANDELBROT_SPOT_PATH_INTERVAL_HOURS,
+    lookback_days: SPOT_PATH_LOOKBACK_DAYS,
+    sample_interval_hours: SPOT_PATH_INTERVAL_HOURS,
     sample_format: '[hours_from_now, spot_price]',
     current_spot: roundForAdvisory(currentSpot, 2),
     point_count: samples.length,
@@ -6699,7 +6699,7 @@ ${formatMarketEvidence(marketEvidence)}
 ${JSON.stringify(summarizeMarketQualitySnapshotForLLM(sentiment?.latest?.marketQuality || []), null, 2)}
 
 === SPOT PATH CONTEXT (30D, HOURLY) ===
-${JSON.stringify(spotPathContext || buildMandelbrotSpotPathContext({ spotPrice, spotRows: [] }), null, 2)}
+${JSON.stringify(spotPathContext || buildSpotPathContext({ spotPrice, spotRows: [] }), null, 2)}
 
 === WIKI SIGNALS ===
 ${JSON.stringify(wikiSignals || null, null, 2)}
@@ -12001,7 +12001,7 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
     console.log('📋 Advisory: volatility surface unavailable:', e.message);
   }
 
-  let mandelbrotSpotPathContext = buildMandelbrotSpotPathContext({
+  let advisorySpotPathContext = buildSpotPathContext({
     spotPrice,
     spotRows: [],
     nowMs,
@@ -12023,14 +12023,14 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
         spotPathRows = db.getRecentSpotPrices(since30dSentiment) || [];
         source = 'spot_prices_raw_downsampled';
       }
-      mandelbrotSpotPathContext = buildMandelbrotSpotPathContext({
+      advisorySpotPathContext = buildSpotPathContext({
         spotPrice,
         spotRows: spotPathRows,
         nowMs,
         source,
       });
     } catch (e) {
-      console.log(`📋 Advisory: failed to fetch Mandelbrot spot path: ${e.message}`);
+      console.log(`📋 Advisory: failed to fetch spot path: ${e.message}`);
     }
   }
 
@@ -12261,7 +12261,7 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
   try {
     mandelbrotContext = await generateMandelbrotRegimeContext({
       spotPrice,
-      spotPathContext: mandelbrotSpotPathContext,
+      spotPathContext: advisorySpotPathContext,
       sentiment,
       wikiSignals,
       volSurface,
@@ -12474,7 +12474,7 @@ Call premium: ${wikiSignals.revenueAssessment || 'unknown'}
 Knowledge warnings: ${wikiSignals.warnings?.length ? wikiSignals.warnings.join('; ') : 'none'}
 ${wikiSignals.playbookRules.length > 0 ? `Playbook rules:\n${wikiSignals.playbookRules.map(r => `- ${r}`).join('\n')}` : ''}` : ''}
 === SPOT PATH STRUCTURE (30d hourly closes, computed) ===
-${formatSpotPathStructureForAdvisor(mandelbrotSpotPathContext)}
+${formatSpotPathStructureForAdvisor(advisorySpotPathContext)}
 
 === MANDELBROT REGIME (label and invalidations; full narrative archived) ===
 ${buildMandelbrotContextBlock(mandelbrotContext)}
