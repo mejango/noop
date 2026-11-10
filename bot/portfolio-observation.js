@@ -83,4 +83,17 @@ function buildPortfolioObservation(account, { timestamp, spotPrice, grossOptions
   };
 }
 
-module.exports = { buildPortfolioObservation };
+function buildReportingAccount(account, { subaccountId, label, spotPrice }) {
+  if (String(account?.subaccount_id) !== String(subaccountId) || account.failed_to_fetch !== false) {
+    throw new Error('Reporting account identity or fetch status is unverified');
+  }
+  const observation = buildPortfolioObservation(account, { timestamp: account.snapshot_received_at, spotPrice });
+  return { subaccountId: String(subaccountId), label, valueUsd: observation.portfolio_value_usd,
+    receivedAt: observation.timestamp,
+    collaterals: account.collaterals.map(row => ({ asset: row.asset_name,
+      amount: finiteNumber(row.amount, `${row.asset_name} amount`),
+      markPrice: row.mark_price == null ? null : finiteNumber(row.mark_price, `${row.asset_name} mark price`),
+      markValue: row.mark_value == null ? null : finiteNumber(row.mark_value, `${row.asset_name} mark value`) })) };
+}
+
+module.exports = { buildPortfolioObservation, buildReportingAccount, finiteNumber };

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getEconomicHistory, getOrderCashflowTotalsBefore, getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange, getSpotPricesAtOrBefore } from '@/lib/db';
+import { getEconomicHistory, getOrderCashflowTotalsBefore, getOrdersInRange, getPortfolioSnapshotBefore, getPortfolioSnapshotsInRange, getReportingPortfolio, getSpotPricesAtOrBefore } from '@/lib/db';
 import { deriveExpirySettlementReport, getExpiredExposures, parseInstrument, SETTLEMENT_SPOT_MAX_AGE_MS } from '@/lib/expiry-settlement';
 import { cachedJsonRoute } from '@/lib/response-cache';
 import { dashboardRangeMs } from '@/lib/dashboard-ranges';
@@ -15,6 +15,25 @@ type SnapshotRow = {
   total_realized_pnl: number;
   portfolio_value_usd: number;
 };
+
+type ReportingPoint = {
+  timestamp: string; ts: number; sourceValue: number | null; destinationValue: number | null;
+  combinedValue: number | null; kind: string; reason: string | null;
+  observedTs?: number;
+};
+
+// Keep both sides of every unavailable interval even when charting a long
+// window. Downsampling must not silently turn an accounting gap into a line.
+function downsampleReporting(rows: ReportingPoint[], maxPoints = 720) {
+  const selected = new Map(downsampleKeepLast(rows, maxPoints, row => row.ts).map(row => [row.ts, row]));
+  if (rows.length) { selected.set(rows[0].ts, rows[0]); selected.set(rows[rows.length - 1].ts, rows[rows.length - 1]); }
+  rows.forEach((row, index) => {
+    if (index > 0 && (row.combinedValue == null) !== (rows[index - 1].combinedValue == null)) {
+      selected.set(rows[index - 1].ts, rows[index - 1]); selected.set(row.ts, row);
+    }
+  });
+  return Array.from(selected.values()).sort((a, b) => a.ts - b.ts);
+}
 
 type OrderRow = {
   id: number | string;
@@ -188,6 +207,7 @@ function getPnlResponse(req: NextRequest) {
 
     const rawSnapshots = getPortfolioSnapshotsInRange(fromIso, toIso) as SnapshotRow[];
     const baseline = getPortfolioSnapshotBefore(fromIso) as SnapshotRow | undefined;
+    const reporting = getReportingPortfolio(fromIso, toIso);
     // Resolve each expiry directly; a moving latest-N spot window makes old reports unstable.
     // DRY_RUN=1 records simulated fills with success=1; they are not cashflow.
     const allOrders = (getOrdersInRange('1970-01-01T00:00:00.000Z', toIso) as OrderRow[])
@@ -286,6 +306,65 @@ function getPnlResponse(req: NextRequest) {
           ethBalance: Number(opening.eth_balance ?? 0),
         }, ...portfolioSeries]
       : portfolioSeries;
+
+    const paired = new Map<number, ReportingPoint>();
+    for (const point of reporting.rows as ReportingPoint[]) {
+      // Aligned venue closes take precedence over independently read current
+      // accounts at an identical timestamp.
+      if (!paired.has(point.ts) || point.kind === 'history') paired.set(point.ts, point);
+    }
+    const pairedRows = Array.from(paired.values()).sort((a, b) => a.ts - b.ts);
+    const ageLimit = (row: ReportingPoint) => row.kind === 'history'
+      ? reporting.coverage.historyPeriodMs : reporting.coverage.freshnessMs;
+    const validUntil = (row: ReportingPoint) => (row.observedTs ?? row.ts) + ageLimit(row);
+    const unknown = (ts: number, reason: string): ReportingPoint => ({ timestamp: new Date(ts).toISOString(), ts,
+      sourceValue: null, destinationValue: null, combinedValue: null, kind: 'gap', reason });
+    const openingPair = reporting.baseline as ReportingPoint | null;
+    const openingPairValid = openingPair && openingPair.ts <= from.getTime() && from.getTime() <= validUntil(openingPair);
+    const combinedRows: ReportingPoint[] = [];
+    if (reporting.coverage.configured && (!pairedRows.length || pairedRows[0].ts > from.getTime())) {
+      combinedRows.push(openingPairValid ? { ...openingPair, timestamp: fromIso, ts: from.getTime(), observedTs: openingPair.ts }
+        : unknown(from.getTime(), 'combined_opening_unavailable'));
+    }
+    for (const point of pairedRows) {
+      const previous = combinedRows[combinedRows.length - 1];
+      if (previous?.combinedValue != null && point.ts > validUntil(previous)) {
+        combinedRows.push(unknown(Math.max(previous.ts + 1, validUntil(previous)), 'combined_observation_gap'));
+      }
+      combinedRows.push(point);
+    }
+    const lastPair = combinedRows[combinedRows.length - 1];
+    if (lastPair && to.getTime() > lastPair.ts && (lastPair.combinedValue == null || to.getTime() > validUntil(lastPair))) {
+      const expiredAt = Math.max(lastPair.ts + 1, validUntil(lastPair) + 1);
+      if (lastPair.combinedValue != null && expiredAt < to.getTime()) {
+        combinedRows.push(unknown(expiredAt, 'combined_observation_gap'));
+      }
+      combinedRows.push(unknown(to.getTime(), 'combined_closing_unavailable'));
+    }
+    const combinedOpening = combinedRows[0]?.ts === from.getTime() ? combinedRows[0].combinedValue : null;
+    const combinedClosing = combinedRows[combinedRows.length - 1]?.combinedValue ?? null;
+    let combinedHigh: number | null = null, combinedLow: number | null = null;
+    for (const row of combinedRows) if (row.combinedValue != null) {
+      combinedHigh = combinedHigh == null ? row.combinedValue : Math.max(combinedHigh, row.combinedValue);
+      combinedLow = combinedLow == null ? row.combinedValue : Math.min(combinedLow, row.combinedValue);
+    }
+    const displayedCombined = downsampleReporting(combinedRows);
+    const combinedTimestamps = displayedCombined.filter(row => row.combinedValue != null).map(row => row.timestamp);
+    const combinedSpots = combinedTimestamps.length ? getSpotPricesAtOrBefore(combinedTimestamps, SETTLEMENT_SPOT_MAX_AGE_MS) : [];
+    let spotIndex = 0;
+    let combinedSpot: { timestamp: string; price: number } | undefined;
+    const combinedPortfolio = displayedCombined.map(row => {
+      while (spotIndex < combinedSpots.length && Date.parse(combinedSpots[spotIndex].timestamp) <= row.ts) {
+        combinedSpot = combinedSpots[spotIndex++];
+      }
+      const eth = exposure.length ? externalEthAt(row.ts) : null;
+      const price = combinedSpot && row.ts - Date.parse(combinedSpot.timestamp) <= SETTLEMENT_SPOT_MAX_AGE_MS
+        ? Number(combinedSpot.price) : null;
+      return { timestamp: row.timestamp, ts: row.ts, portfolioValue: row.combinedValue,
+        fullPortfolioValue: row.combinedValue == null || eth == null ? null : eth === 0 ? row.combinedValue
+          : price != null && price > 0 ? row.combinedValue + eth * price : null,
+        sourceValue: row.sourceValue, destinationValue: row.destinationValue, kind: row.kind, reason: row.reason };
+    });
 
     let highWatermark = portfolioValue(opening);
     let lowWatermark = highWatermark;
@@ -431,8 +510,11 @@ function getPnlResponse(req: NextRequest) {
         hasBaseline: Boolean(opening),
         bucketMs,
         insuredExternalEth: exposure.length ? exposure[exposure.length - 1].eth : 0,
-        // portfolio[].portfolioValue is the Derive subaccount; fullPortfolioValue adds off-exchange ETH at spot.
+        // Legacy portfolio[] remains source-only; combinedPortfolio[] has the
+        // explicit two-account scope. Each full value adds external ETH once.
         valuationScope: 'derive_subaccount',
+        combinedAccounts: { ...reporting.coverage, sourceAccountId: reporting.config?.accountId ?? null,
+          destinationAccountId: reporting.config?.destinationAccountId ?? null },
         externalHoldingsUnavailableReason: 'Off-exchange ETH is excluded from this account report\'s balances, and the current insurance setting is not applied to historical balances. The full-portfolio series adds it from the recorded exposure history.',
         externalEthRecordedFrom: exposure.length ? new Date(exposure[0].ts).toISOString() : null,
         performanceAvailable: false,
@@ -448,6 +530,9 @@ function getPnlResponse(req: NextRequest) {
         cashflowBasis: 'Recorded bot-order cashflows plus valued exchange settlements. External fills and fees are not reconciled; spot estimates are excluded. Gross cashflow is not realized P&L.',
       },
       summary: {
+        combined: { openingValue: combinedOpening, closingValue: combinedClosing,
+          portfolioChange: combinedOpening != null && combinedClosing != null ? combinedClosing - combinedOpening : null,
+          highWatermark: combinedHigh, lowWatermark: combinedLow },
         openingValue,
         closingValue,
         portfolioChange,
@@ -474,6 +559,7 @@ function getPnlResponse(req: NextRequest) {
         maxDrawdownPct: null,
       },
       series: {
+        combinedPortfolio,
         portfolio: downsampleKeepLast(seriesWithOpening, 720, (row) => row.ts),
         buckets: Array.from(bucketMap.values())
           .sort((a, b) => a.bucketTs - b.bucketTs)
@@ -498,6 +584,8 @@ function getPnlResponse(req: NextRequest) {
             endUnrealizedPnl: bucket.endUnrealizedPnl,
           })),
       },
+      latestCombinedPortfolio: reporting.latest ? { ...reporting.latest,
+        combinedValue: reporting.coverage.latestStatus === 'complete' ? reporting.latest.combinedValue : null } : null,
       actionBreakdown: Array.from(actionMap.values()).sort((a, b) => Math.abs(b.cashflow) - Math.abs(a.cashflow)),
       settlementEstimates: settlementEstimates.map(row => ({ ...row, cashflow: signedCashflow(row.action, row.total_value) })),
       missingSettlementEstimates,

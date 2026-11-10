@@ -86,6 +86,7 @@ test('dashboard DB getter reads only the selected asset and its captured quotes'
       '../../../bot/dex-volume': {}, '../../../bot/correlation': {},
       'better-sqlite3': Database, '../../../bot/market-evidence': { HISTORY_SQL: {} },
       '../../../bot/derive-config': {}, path,
+      '../../../bot/portfolio-reporting': require('../bot/portfolio-reporting'),
       './strategy-config': { BOT_CONFIG: { PUT_ANNUAL_RATE: 0.0333, PERIOD_DAYS: 15 } },
       '../../../bot/economic-events': {}, '../../../bot/open-interest': {},
       '../../../bot/funding-rates': {}, '../../../bot/liquidity-quality': {},

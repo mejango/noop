@@ -8,6 +8,8 @@ import { chartColors, chartAxis, chartTooltip } from '@/lib/chart';
 import { ASSET_DEFAULT_RANGE, DASHBOARD_RANGES } from '@/lib/dashboard-ranges';
 import { liquidityFeedGaps } from '@/lib/liquidity-feed-status';
 import { buildOptionsCashflowChart, cashflowDisplayDomain, type CashflowBucket } from '@/lib/options-cashflow-chart';
+import { buildCombinedPortfolioChart, combinedPortfolioBefore, combinedHistoryLabel, combinedAvailabilityMessage, collateralAmounts,
+  type CombinedAccountsMeta, type CombinedPortfolioPoint, type CombinedPortfolioSummary, type LatestCombinedPortfolio } from '@/lib/portfolio-chart';
 import Card from '@/components/Card';
 import VolSmile from '@/components/VolSmile';
 import VolatilityPricing from '@/components/VolatilityPricing';
@@ -342,6 +344,7 @@ interface PnlReportData {
     unvaluedRecordedSettlementCount?: number;
     openingMissingSettlementEstimateCount?: number;
     openingUnvaluedRecordedSettlementCount?: number;
+    combinedAccounts?: CombinedAccountsMeta;
   };
   summary: {
     openingValue: number;
@@ -366,6 +369,7 @@ interface PnlReportData {
     lowWatermark: number;
     maxDrawdown: number | null;
     maxDrawdownPct: number | null;
+    combined?: CombinedPortfolioSummary;
   };
   series: {
     portfolio: Array<{
@@ -379,7 +383,9 @@ interface PnlReportData {
       ethBalance: number;
     }>;
     buckets: PnlBucketPoint[];
+    combinedPortfolio?: CombinedPortfolioPoint[];
   };
+  latestCombinedPortfolio?: LatestCombinedPortfolio | null;
   actionBreakdown: Array<{
     action: string;
     count: number;
@@ -924,28 +930,34 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
     .map((row) => ({ ts: row.ts, portfolioValueUsd: row.portfolioValue, fullPortfolioValueUsd: row.fullPortfolioValue ?? null }))
     .filter((row) => Number.isFinite(row.ts) && Number.isFinite(row.portfolioValueUsd)), [pnlReport]);
   const pnlShowFullPortfolio = Number(pnlReport.meta.insuredExternalEth ?? 0) > 0;
+  const pnlCombinedConfigured = pnlReport.meta.combinedAccounts?.configured === true;
+  const pnlCombinedSeries = useMemo(() => buildCombinedPortfolioChart(pnlReport.series.combinedPortfolio), [pnlReport]);
+  const pnlCombinedLatest = pnlReport.latestCombinedPortfolio;
+  const pnlCombinedAvailability = combinedAvailabilityMessage(pnlReport.meta.combinedAccounts);
+  const pnlSingleCombinedPoint = pnlCombinedSeries.filter(row => row.combinedPortfolioValueUsd != null).length === 1;
   // Tooltip rows are daily/weekly buckets; give each the account values at the bucket's end.
   const pnlTooltipData = useMemo(() => pnlChartData.map((row) => {
     const end = row.ts + pnlReport.meta.bucketMs;
     let last: (typeof pnlPortfolioSeries)[number] | undefined;
     for (const point of pnlPortfolioSeries) if (point.ts < end) last = point; else break;
-    return { ...row, portfolioValueUsd: last?.portfolioValueUsd ?? row.portfolioValueUsd, fullPortfolioValueUsd: last?.fullPortfolioValueUsd ?? null };
-  }), [pnlChartData, pnlPortfolioSeries, pnlReport.meta.bucketMs]);
+    return { ...row, portfolioValueUsd: last?.portfolioValueUsd ?? row.portfolioValueUsd, fullPortfolioValueUsd: last?.fullPortfolioValueUsd ?? null,
+      ...combinedPortfolioBefore(pnlCombinedSeries, end) };
+  }), [pnlChartData, pnlPortfolioSeries, pnlCombinedSeries, pnlReport.meta.bucketMs]);
 
   const pnlPortfolioDomain = useMemo<[number, number]>(() => {
-    const values = pnlPortfolioSeries
+    const values = [...pnlPortfolioSeries, ...pnlCombinedSeries.map(row => ({ ts: row.ts, portfolioValueUsd: row.combinedPortfolioValueUsd }))]
       .filter((row) => row.ts >= pnlXDomain[0] && row.ts <= pnlXDomain[1])
-      .map((row) => row.portfolioValueUsd);
+      .map((row) => row.portfolioValueUsd).filter((value): value is number => value != null && Number.isFinite(value));
     if (values.length === 0) return [0, 1];
     const min = Math.min(...values);
     const max = Math.max(...values);
     const pad = Math.max(25, (max - min) * 0.08);
     return [min - pad, max + pad];
-  }, [pnlPortfolioSeries, pnlXDomain]);
+  }, [pnlPortfolioSeries, pnlCombinedSeries, pnlXDomain]);
 
   // Off-exchange ETH dwarfs the Derive account, so the full portfolio gets its own (hidden) scale.
   const pnlFullPortfolioDomain = useMemo<[number, number]>(() => {
-    const values = pnlPortfolioSeries
+    const values = [...pnlPortfolioSeries, ...pnlCombinedSeries.map(row => ({ ts: row.ts, fullPortfolioValueUsd: row.combinedFullPortfolioValueUsd }))]
       .filter((row) => row.ts >= pnlXDomain[0] && row.ts <= pnlXDomain[1])
       .flatMap((row) => row.fullPortfolioValueUsd != null ? [row.fullPortfolioValueUsd] : []);
     if (values.length === 0) return [0, 1];
@@ -953,11 +965,16 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
     const max = Math.max(...values);
     const pad = Math.max(25, (max - min) * 0.08);
     return [min - pad, max + pad];
-  }, [pnlPortfolioSeries, pnlXDomain]);
+  }, [pnlPortfolioSeries, pnlCombinedSeries, pnlXDomain]);
   const pnlDeriveShare = useMemo(() => {
+    if (pnlCombinedConfigured) {
+      const last = pnlCombinedSeries[pnlCombinedSeries.length - 1];
+      return last?.combinedFullPortfolioValueUsd && last.combinedPortfolioValueUsd != null
+        ? last.combinedPortfolioValueUsd / last.combinedFullPortfolioValueUsd : null;
+    }
     const last = [...pnlPortfolioSeries].reverse().find((row) => row.fullPortfolioValueUsd);
     return last?.fullPortfolioValueUsd ? last.portfolioValueUsd / last.fullPortfolioValueUsd : null;
-  }, [pnlPortfolioSeries]);
+  }, [pnlPortfolioSeries, pnlCombinedSeries, pnlCombinedConfigured]);
 
   const pnlCoverageLabel = useMemo(() => {
     if (!pnlReport.meta.from || !pnlReport.meta.to) return null;
@@ -1834,9 +1851,21 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
       {/* P&L */}
       {pnlChartData.length > 0 && (
         <Card title="Options Result, Cashflow & Account Value" subtitle={pnlCoverageLabel ?? `${pnlRange} options activity`}>
-          <p className="text-xs text-gray-500 mb-3">The result includes call expiry costs and put expiry proceeds, using estimates when exchange records are unavailable. Fees and open-position P&amp;L are excluded. Account value includes deposits and withdrawals.{pnlShowFullPortfolio && <> Full portfolio adds off-exchange ETH at spot{pnlReport.meta.externalEthRecordedFrom ? `, using the earliest recorded amount before ${new Date(pnlReport.meta.externalEthRecordedFrom).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : ''}.</>}</p>
+          <p className="text-xs text-gray-500 mb-3">The result includes call expiry costs and put expiry proceeds, using estimates when exchange records are unavailable. Fees and open-position P&amp;L are excluded. Account value includes deposits and withdrawals.{pnlCombinedConfigured && <> Combined Derive value covers NOOP and DRV-NOOP, including DRV and USDC holdings.</>}{pnlShowFullPortfolio && <> Full portfolio adds off-exchange ETH at spot{pnlReport.meta.externalEthRecordedFrom ? `, using the earliest recorded amount before ${new Date(pnlReport.meta.externalEthRecordedFrom).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : ''}.</>}</p>
+          {pnlCombinedConfigured && <div className="mb-3 space-y-2 text-xs">
+            <div className="flex flex-wrap gap-x-6 gap-y-2">
+              <div><span className="text-gray-400">Combined Derive </span><span className="text-sky-200">{pnlCombinedLatest?.combinedValue != null ? formatUSD(pnlCombinedLatest.combinedValue) : 'Unavailable'}</span></div>
+              {pnlCombinedLatest?.accounts.map(account => <div key={account.subaccountId}>
+                <span className="text-gray-400">{account.label} </span>
+                <span>{account.valueUsd != null ? formatUSD(account.valueUsd) : 'Unavailable'}</span>
+                {collateralAmounts(account.collaterals) && <span className="text-gray-500"> ({collateralAmounts(account.collaterals)})</span>}
+              </div>)}
+            </div>
+            <p className="text-gray-500">{combinedHistoryLabel(pnlReport.meta.combinedAccounts)}{pnlCombinedLatest?.timestamp && <> Holdings observed {new Date(pnlCombinedLatest.timestamp).toLocaleString()}.</>}</p>
+            {pnlCombinedAvailability && <p className="text-amber-400">Combined value unavailable. {pnlCombinedAvailability}</p>}
+          </div>}
           {pnlMissingSettlements > 0 && <p className="text-xs text-amber-400 mb-3">Partial estimate: {pnlMissingSettlements} expired positions or recorded settlements lack a valuation and are omitted. This is not complete P&amp;L.</p>}
-          <ResponsiveContainer width="100%" height={mobile ? 390 : 350}>
+          <ResponsiveContainer width="100%" height={mobile ? (pnlCombinedConfigured ? 440 : 390) : (pnlCombinedConfigured ? 380 : 350)}>
             <ComposedChart data={pnlTooltipData} margin={baseMargins} stackOffset="sign" barGap={0} barCategoryGap="25%">
               <XAxis {...timeAxis}
                 domain={pnlXDomain}
@@ -1878,6 +1907,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
               <YAxis yAxisId="fullPortfolio" hide width={0} domain={pnlFullPortfolioDomain} allowDataOverflow />
               <Tooltip
                 {...chartTooltip}
+                filterNull={false}
                 formatter={(value: number | string | undefined, name: string | undefined) => {
                   const labels: Record<string, string> = {
                     cumulativeRevenue: 'Cum Revenue',
@@ -1892,12 +1922,14 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
                     periodCallExpenses: 'Recorded Call Costs',
                     periodCallSettlements: 'Call Expiry Costs (est.)',
                     periodPutSettlements: 'Put Expiry Proceeds (est.)',
-                    portfolioValueUsd: 'Derive account USD (period end)',
-                    fullPortfolioValueUsd: `Full portfolio USD, period end (incl. ${Number(pnlReport.meta.insuredExternalEth ?? 0).toFixed(4)} off-exchange ETH)`,
+                    portfolioValueUsd: 'NOOP source USD (period end)',
+                    fullPortfolioValueUsd: 'NOOP source + off-exchange ETH (period end)',
+                    combinedPortfolioValueUsd: 'Combined Derive USD (period end)',
+                    combinedFullPortfolioValueUsd: `Full portfolio USD, period end (both accounts + ${Number(pnlReport.meta.insuredExternalEth ?? 0).toFixed(4)} off-exchange ETH)`,
                   };
-                  const numericValue = typeof value === 'number' ? value : Number(value ?? 0);
+                  const numericValue = typeof value === 'number' ? value : Number(value);
                   const key = name ?? '';
-                  return [formatUSD(numericValue), labels[key] ?? key];
+                  return [value == null || !Number.isFinite(numericValue) ? 'Unavailable' : formatUSD(numericValue), labels[key] ?? key];
                 }}
                 labelFormatter={(label) => pnlReport.meta.bucketMs >= 86400000
                   ? `${pnlReport.meta.bucketMs > 86400000 ? 'Week' : 'Day'} of ${new Date(Number(label)).toLocaleDateString([], { timeZone: 'UTC' })} (UTC)`
@@ -1905,7 +1937,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
               />
               <Legend
                 key={mobile ? 'options-mobile' : 'options-desktop'}
-                height={mobile ? 110 : 36}
+                height={mobile ? (pnlCombinedConfigured ? 160 : 110) : (pnlCombinedConfigured ? 66 : 36)}
                 wrapperStyle={{ fontSize: 11, color: '#9ca3af' }}
                 formatter={(value) => (
                   <span style={{ color: '#9ca3af' }}>
@@ -1921,8 +1953,10 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
                      value === 'periodCallExpenses' ? 'call costs' :
                      value === 'periodCallSettlements' ? 'call expiry (est.)' :
                      value === 'periodPutSettlements' ? 'put expiry (est.)' :
-                     value === 'portfolioValueUsd' ? 'derive account usd' :
-                     value === 'fullPortfolioValueUsd' ? `full portfolio usd (own scale${pnlDeriveShare != null ? `, derive ${(pnlDeriveShare * 100).toFixed(1)}%` : ''})` : value}
+                     value === 'portfolioValueUsd' ? 'NOOP source USD' :
+                     value === 'fullPortfolioValueUsd' ? 'source + off-exchange ETH (own scale)' :
+                     value === 'combinedPortfolioValueUsd' ? 'combined Derive USD' :
+                     value === 'combinedFullPortfolioValueUsd' ? `full portfolio USD (own scale${pnlDeriveShare != null ? `, Derive ${(pnlDeriveShare * 100).toFixed(1)}%` : ''})` : value}
                   </span>
                 )}
               />
@@ -1941,8 +1975,16 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
               {/* Invisible bucket-end copies so the tooltip lists account values. */}
               <Line yAxisId="portfolio" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />
               {pnlShowFullPortfolio && <Line yAxisId="fullPortfolio" dataKey="fullPortfolioValueUsd" name="fullPortfolioValueUsd" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />}
-              <Line yAxisId="portfolio" xAxisId="portfolio" data={pnlPortfolioSeries} type="linear" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={2} dot={false} strokeDasharray="5 4" isAnimationActive={false} />
-              {pnlShowFullPortfolio && <Line yAxisId="fullPortfolio" xAxisId="portfolio" data={pnlPortfolioSeries} type="linear" dataKey="fullPortfolioValueUsd" name="fullPortfolioValueUsd" stroke="#e0f2fe" strokeWidth={2} dot={false} connectNulls isAnimationActive={false} />}
+              <Line yAxisId="portfolio" xAxisId="portfolio" data={pnlPortfolioSeries} type="linear" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke={pnlCombinedConfigured ? '#64748b' : '#7dd3fc'} strokeWidth={1.75} dot={false} strokeDasharray="5 4" tooltipType="none" isAnimationActive={false} />
+              {pnlShowFullPortfolio && <Line yAxisId="fullPortfolio" xAxisId="portfolio" data={pnlPortfolioSeries} type="linear" dataKey="fullPortfolioValueUsd" name="fullPortfolioValueUsd" stroke={pnlCombinedConfigured ? '#94a3b8' : '#e0f2fe'} strokeWidth={1.75} strokeDasharray={pnlCombinedConfigured ? '3 3' : undefined} dot={false} connectNulls={false} tooltipType="none" isAnimationActive={false} />}
+              {pnlCombinedConfigured && <>
+                <Line yAxisId="portfolio" dataKey="combinedPortfolioValueUsd" name="combinedPortfolioValueUsd" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />
+                <Line yAxisId="portfolio" xAxisId="portfolio" data={pnlCombinedSeries} type="linear" dataKey="combinedPortfolioValueUsd" name="combinedPortfolioValueUsd" stroke="#7dd3fc" strokeWidth={2.5} dot={pnlSingleCombinedPoint ? { r: 3 } : false} connectNulls={false} tooltipType="none" isAnimationActive={false} />
+                {pnlShowFullPortfolio && <>
+                  <Line yAxisId="fullPortfolio" dataKey="combinedFullPortfolioValueUsd" name="combinedFullPortfolioValueUsd" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />
+                  <Line yAxisId="fullPortfolio" xAxisId="portfolio" data={pnlCombinedSeries} type="linear" dataKey="combinedFullPortfolioValueUsd" name="combinedFullPortfolioValueUsd" stroke="#e0f2fe" strokeWidth={2.5} dot={pnlSingleCombinedPoint ? { r: 3 } : false} connectNulls={false} tooltipType="none" isAnimationActive={false} />
+                </>}
+              </>}
             </ComposedChart>
           </ResponsiveContainer>
         </Card>

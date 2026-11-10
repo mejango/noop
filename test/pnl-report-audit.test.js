@@ -81,6 +81,8 @@ function routeFixture({
   spots = [],
   events = [],
   exposureHistory,
+  reporting = { config: null, rows: [], baseline: null, latest: null,
+    coverage: { configured: false, historyPeriodMs: 900000, freshnessMs: 600000, latestStatus: 'unavailable' } },
   snapshots = [],
   baseline,
   from = FROM,
@@ -90,6 +92,7 @@ function routeFixture({
 } = {}) {
   const spotQueries = [];
   const db = {
+    getReportingPortfolio: () => reporting,
     getPortfolioSnapshotsInRange: (start, end) => snapshots.filter(row => row.timestamp >= start && row.timestamp <= end),
     getPortfolioSnapshotBefore: () => baseline,
     getOrdersInRange: (start, end) => orders.filter(row => row.timestamp >= start && row.timestamp <= end),
@@ -546,4 +549,122 @@ test('DRY RUN simulated fills are excluded from every cashflow total', async () 
   assert.equal(report.meta.orderCount, 1);
   assert.equal(report.summary.callNetCashflow, 100);
   assert.equal(report.summary.coveredCall.callPnl, -400);
+});
+
+const pairedPoint = (timestamp, sourceValue, destinationValue, extra = {}) => ({ timestamp, ts: Date.parse(timestamp),
+  sourceValue, destinationValue, combinedValue: sourceValue == null || destinationValue == null ? null : sourceValue + destinationValue,
+  kind: 'history', reason: null, ...extra });
+function reportingFixture(rows, extra = {}) {
+  return { config: { accountId: '25923', destinationAccountId: '120934' }, rows, baseline: null, latest: null,
+    coverage: { configured: true, historyPeriodMs: 900000, freshnessMs: 600000,
+      firstTimestamp: rows[0]?.timestamp ?? null, lastTimestamp: rows.at(-1)?.timestamp ?? null,
+      latestStatus: 'complete', reason: null, historyStatus: 'complete' }, ...extra };
+}
+
+test('paired reporting includes ALT assets and external ETH once while preserving source and option accounting', async () => {
+  const from = EXPIRY, to = isoAt(900000);
+  const source = { from, to, baseline: snapshot(isoAt(-60000), 100), snapshots: [snapshot(to, 95)],
+    orders: [order({ timestamp: isoAt(1000), action: 'sell_put', instrument_name: 'ETH-20260320-1800-P', total_value: 20 })],
+    spots: [quote(0, 2000), quote(900000, 2100)], exposureHistory: [{ effective_at: from, external_eth: '4' }] };
+  const legacy = await routeFixture(source).report();
+  // A five dollar internal transfer cancels in combined NAV; the option sale
+  // remains the same existing cashflow regardless of reporting holdings.
+  const report = await routeFixture({ ...source, reporting: reportingFixture([
+    pairedPoint(from, 100, 5), pairedPoint(to, 95, 10),
+  ]) }).report();
+  assert.deepEqual(report.series.portfolio, legacy.series.portfolio);
+  assert.deepEqual(report.series.buckets, legacy.series.buckets);
+  const { combined, ...summary } = report.summary;
+  const { combined: ignored, ...legacySummary } = legacy.summary;
+  assert.deepEqual(summary, legacySummary);
+  assert.equal(report.summary.netTradeCashflow, 20);
+  assert.deepEqual(report.series.combinedPortfolio.map(row => row.portfolioValue), [105, 105]);
+  assert.deepEqual(report.series.combinedPortfolio.map(row => row.fullPortfolioValue), [8105, 8505]);
+  assert.deepEqual(combined, { openingValue: 105, closingValue: 105, portfolioChange: 0, highWatermark: 105, lowWatermark: 105 });
+});
+
+test('combined coverage never labels earlier source-only history as a two-account opening', async () => {
+  const report = await routeFixture({ from: EXPIRY, to: isoAt(900000),
+    baseline: snapshot(isoAt(-60000), 100), snapshots: [snapshot(isoAt(900000), 95)],
+    reporting: reportingFixture([pairedPoint(isoAt(900000), 95, 10)]),
+  }).report();
+  assert.equal(report.summary.openingValue, 100);
+  assert.equal(report.summary.combined.openingValue, null);
+  assert.equal(report.summary.combined.portfolioChange, null);
+  assert.deepEqual(report.series.combinedPortfolio.map(row => row.portfolioValue), [null, 105]);
+});
+
+test('a baseline keeps its original age and cannot extend combined coverage across missing closes', async () => {
+  const reporting = reportingFixture([pairedPoint(isoAt(1800000), 90, 10)], {
+    baseline: pairedPoint(isoAt(-840000), 100, 5),
+  });
+  const report = await routeFixture({ from: EXPIRY, to: isoAt(1800000), reporting }).report();
+  assert.equal(report.summary.combined.openingValue, 105);
+  assert.equal(report.series.combinedPortfolio[1].portfolioValue, null);
+  assert.equal(report.series.combinedPortfolio[1].ts, expiryMs + 60000);
+  const stale = await routeFixture({ from: EXPIRY, to: isoAt(1800000),
+    reporting: reportingFixture([], { baseline: pairedPoint(isoAt(-900001), 100, 5) }),
+  }).report();
+  assert.equal(stale.summary.combined.openingValue, null);
+  assert.equal(stale.summary.combined.closingValue, null);
+});
+
+test('combined chart sampling retains the opening, missing leg and both sides of a gap', async () => {
+  const rows = Array.from({ length: 2000 }, (_, i) => pairedPoint(isoAt(i * 900000), 100 + i, 10));
+  rows[1000] = pairedPoint(rows[1000].timestamp, 1100, null, { reason: 'historical_account_value_missing' });
+  const report = await routeFixture({ from: EXPIRY, to: rows.at(-1).timestamp, reporting: reportingFixture(rows) }).report();
+  for (const index of [0, 999, 1000, 1001, 1999]) {
+    const point = report.series.combinedPortfolio.find(row => row.ts === rows[index].ts);
+    assert.ok(point, `retains point ${index}`);
+    assert.equal(point.portfolioValue, rows[index].combinedValue);
+  }
+  assert.ok(report.series.combinedPortfolio.length < 1000);
+});
+
+test('stale current holdings are not a current combined total, but their observed history remains', async () => {
+  const current = pairedPoint(EXPIRY, 100, 10, { kind: 'current', accounts: [{ subaccountId: '120934',
+    label: 'DRV-NOOP', valueUsd: 10, collaterals: [{ asset: 'DRV', amount: 16, markValue: 4.88 }] }] });
+  const reporting = reportingFixture([current], { latest: current });
+  reporting.coverage.latestStatus = 'stale';
+  const report = await routeFixture({ from: EXPIRY, to: isoAt(600001), reporting }).report();
+  assert.equal(report.latestCombinedPortfolio.combinedValue, null);
+  assert.equal(report.latestCombinedPortfolio.accounts[0].collaterals[0].amount, 16);
+  assert.equal(report.series.combinedPortfolio[0].portfolioValue, 110);
+  assert.equal(report.series.combinedPortfolio.at(-1).portfolioValue, null);
+  assert.equal(report.summary.combined.closingValue, null);
+});
+
+test('aligned historical closes take precedence at ties and zero or negative NAV remains evidence', async () => {
+  const report = await routeFixture({ from: EXPIRY, to: isoAt(900000), reporting: reportingFixture([
+    pairedPoint(EXPIRY, 1, 1, { kind: 'current' }), pairedPoint(EXPIRY, -5, 5), pairedPoint(isoAt(900000), -10, 5),
+  ]) }).report();
+  assert.deepEqual(report.series.combinedPortfolio.map(row => row.portfolioValue), [0, -5]);
+  assert.deepEqual(report.summary.combined, { openingValue: 0, closingValue: -5, portfolioChange: -5, highWatermark: 0, lowWatermark: -5 });
+});
+
+test('full combined value needs a bounded historical ETH mark and never looks ahead', async () => {
+  const reporting = reportingFixture([pairedPoint(EXPIRY, 100, 10), pairedPoint(isoAt(900000), 100, 10)]);
+  const report = await routeFixture({ from: EXPIRY, to: isoAt(900000), reporting,
+    exposureHistory: [{ effective_at: EXPIRY, external_eth: '4' }], spots: [quote(1, 2000)],
+  }).report();
+  assert.deepEqual(report.series.combinedPortfolio.map(row => row.portfolioValue), [110, 110]);
+  assert.deepEqual(report.series.combinedPortfolio.map(row => row.fullPortfolioValue), [null, 8110]);
+});
+
+test('unknown external holdings do not produce a full combined total, while recorded zero holdings do', async () => {
+  const base = { from: EXPIRY, to: isoAt(900000), reporting: reportingFixture([pairedPoint(EXPIRY, 100, 10)]) };
+  const unknown = await routeFixture(base).report();
+  assert.equal(unknown.series.combinedPortfolio[0].portfolioValue, 110);
+  assert.equal(unknown.series.combinedPortfolio[0].fullPortfolioValue, null);
+  const zero = await routeFixture({ ...base, exposureHistory: [{ effective_at: EXPIRY, external_eth: '0' }] }).report();
+  assert.equal(zero.series.combinedPortfolio[0].fullPortfolioValue, 110);
+});
+
+test('an expired closing observation inserts a gap at expiry so earlier hover points cannot carry it forward', async () => {
+  const report = await routeFixture({ from: EXPIRY, to: isoAt(3600000),
+    reporting: reportingFixture([pairedPoint(EXPIRY, 100, 10, { kind: 'current' })]),
+  }).report();
+  assert.equal(report.series.combinedPortfolio[1].ts, expiryMs + 600001);
+  assert.equal(report.series.combinedPortfolio[1].portfolioValue, null);
+  assert.equal(report.summary.combined.closingValue, null);
 });

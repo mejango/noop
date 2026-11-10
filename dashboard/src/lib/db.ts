@@ -6,6 +6,7 @@ import { getDeriveConfig } from '../../../bot/derive-config';
 import path from 'path';
 import { BOT_CONFIG } from './strategy-config';
 import { getEconomicHistory as readEconomicHistory } from '../../../bot/economic-events';
+import { readReportingPortfolio } from '../../../bot/portfolio-reporting';
 import { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } from '../../../bot/open-interest';
 import { FUNDING_EXCHANGE, FUNDING_SYMBOL } from '../../../bot/funding-rates';
 import { invalidDexReason, sanitizeOnchainRow, liquidityChartSeries } from '../../../bot/liquidity-quality';
@@ -1738,6 +1739,33 @@ export function getPortfolioSnapshotsInRange(from: string, to: string) {
       total_unrealized_pnl: number; total_realized_pnl: number; portfolio_value_usd: number;
     }[];
   } catch { return []; }
+}
+
+// Reporting has its own account scope. Source snapshots above still own the
+// trading budget, operations and legacy source-only history.
+type ReportingPortfolio = {
+  config: { accountId: string; destinationAccountId: string } | null;
+  scope: string | null;
+  coverage: { configured: boolean; firstTimestamp: string | null; lastTimestamp: string | null;
+    latestStatus: string; reason: string | null; historyStatus: string; freshnessMs: number; historyPeriodMs: number };
+  rows: ReportingPortfolioPoint[]; baseline: ReportingPortfolioPoint | null; latest: ReportingPortfolioPoint | null;
+};
+type ReportingPortfolioPoint = {
+  timestamp: string; ts: number; sourceValue: number | null; destinationValue: number | null;
+  combinedValue: number | null; kind: string; reason: string | null;
+  accounts?: { subaccountId: string; label: string; valueUsd: number; receivedAt: string;
+    collaterals: { asset: string; amount: number; markPrice: number | null; markValue: number | null }[] }[];
+};
+export function getReportingPortfolio(from: string, to: string): ReportingPortfolio {
+  try {
+    return readReportingPortfolio(getDb(), { derive: getDeriveConfig(), from, to, now: Date.now() });
+  } catch (error) {
+    console.warn('Combined portfolio reporting unavailable:', error instanceof Error ? error.message : 'unknown error');
+    return { config: null, scope: null, rows: [], baseline: null, latest: null,
+      coverage: { configured: true, firstTimestamp: null, lastTimestamp: null,
+        latestStatus: 'unavailable', reason: 'reporting_read_failed', historyStatus: 'unavailable',
+        freshnessMs: 0, historyPeriodMs: 0 } };
+  }
 }
 
 export function getPortfolioSnapshotBefore(ts: string) {

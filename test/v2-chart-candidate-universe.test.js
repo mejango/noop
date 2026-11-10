@@ -62,6 +62,7 @@ function fixture(t) {
     'better-sqlite3': function () { return connection; }, path,
     './strategy-config': { BOT_CONFIG: {} },
     '../../../bot/derive-config': require('../bot/derive-config'),
+    '../../../bot/portfolio-reporting': require('../bot/portfolio-reporting'),
     '../../../bot/liquidity-quality': require('../bot/liquidity-quality'),
     '../../../bot/market-evidence': require('../bot/market-evidence'),
     '../../../bot/correlation': require('../bot/correlation'),

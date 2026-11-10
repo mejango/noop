@@ -4,7 +4,6 @@ import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ResponsiveContainer,
-  AreaChart,
   Area,
   CartesianGrid,
   XAxis,
@@ -17,6 +16,8 @@ import {
 } from 'recharts';
 import { usePolling } from '@/lib/hooks';
 import { formatUSD } from '@/lib/format';
+import { buildCombinedPortfolioChart, combinedPortfolioBefore, combinedHistoryLabel, combinedAvailabilityMessage, collateralAmounts,
+  type CombinedAccountsMeta, type CombinedPortfolioPoint, type CombinedPortfolioSummary, type LatestCombinedPortfolio } from '@/lib/portfolio-chart';
 
 type RangeKey = '7d' | '14d' | '30d' | '90d' | '180d' | '1y' | 'custom';
 
@@ -38,6 +39,7 @@ type Report = {
     economicHistoryAvailable: boolean;
     accountingCoverage: { trades: boolean; settlements: boolean; transfers: boolean };
     unvaluedRecordedSettlementCount: number;
+    combinedAccounts?: CombinedAccountsMeta;
   };
   summary: {
     openingValue: number;
@@ -59,6 +61,7 @@ type Report = {
     lowWatermark: number;
     maxDrawdown: number | null;
     maxDrawdownPct: number | null;
+    combined?: CombinedPortfolioSummary;
   };
   series: {
     portfolio: Array<{
@@ -70,6 +73,7 @@ type Report = {
       usdcBalance: number;
       ethBalance: number;
     }>;
+    combinedPortfolio?: CombinedPortfolioPoint[];
     buckets: Array<{
       timestamp: string;
       tradeCashflow: number;
@@ -86,6 +90,7 @@ type Report = {
       endUnrealizedPnl: number | null;
     }>;
   };
+  latestCombinedPortfolio?: LatestCombinedPortfolio | null;
   actionBreakdown: Array<{
     action: string;
     count: number;
@@ -191,8 +196,13 @@ function fmtPct(n: number) {
   return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 }
 
-function fmtSignedUsd(n: number) {
+function fmtSignedUsd(n: number | null | undefined) {
+  if (n == null) return 'Unavailable';
   return `${n >= 0 ? '+' : ''}${formatUSD(n)}`;
+}
+
+function fmtBalance(n: number | null | undefined) {
+  return n == null ? 'Unavailable' : formatUSD(n);
 }
 
 function dateLabel(ts: string, bucketMs = 0) {
@@ -226,11 +236,20 @@ export default function PnlReportPage() {
   }, [fromInput, initialWindow.from, initialWindow.to, range, toInput]);
 
   const { data: report, loading, error } = usePolling<Report>(queryUrl, emptyReport, 60_000);
+  const combinedConfigured = report.meta.combinedAccounts?.configured === true;
+  const combinedSeries = useMemo(() => buildCombinedPortfolioChart(report.series.combinedPortfolio), [report]);
+  const balanceSummary = combinedConfigured ? report.summary.combined : report.summary;
+  const portfolioChange = balanceSummary?.portfolioChange;
+  const latestCombined = report.latestCombinedPortfolio;
+  const combinedAvailability = combinedAvailabilityMessage(report.meta.combinedAccounts);
+  const singleCombinedPoint = combinedSeries.filter(row => row.combinedPortfolioValueUsd != null).length === 1;
+  const portfolioDomain: [number, number] = [new Date(report.meta.from || initialWindow.from).getTime(), new Date(report.meta.to || initialWindow.to).getTime()];
 
   const portfolioSeries = useMemo(() => report.series.portfolio.map((point) => ({
     ...point,
+    ...combinedPortfolioBefore(combinedSeries, point.ts + 1),
     label: dateLabel(point.timestamp, report.meta.bucketMs),
-  })), [report]);
+  })), [report, combinedSeries]);
 
   const bucketSeries = useMemo(() => report.series.buckets.map((point) => ({
     ...point,
@@ -247,10 +266,10 @@ export default function PnlReportPage() {
   };
 
   const summaryCards = [
-    { label: 'Portfolio Change', value: fmtSignedUsd(report.summary.portfolioChange), tone: report.summary.portfolioChange >= 0 ? 'text-emerald-600' : 'text-red-600' },
+    { label: combinedConfigured ? 'Combined Derive Change' : 'NOOP Source Change', value: fmtSignedUsd(portfolioChange), tone: portfolioChange == null ? 'text-zinc-600' : portfolioChange >= 0 ? 'text-emerald-600' : 'text-red-600' },
     { label: 'Return', value: report.summary.portfolioReturnPct == null ? 'Unavailable' : fmtPct(report.summary.portfolioReturnPct), tone: 'text-zinc-600' },
     { label: 'Recorded Gross Cashflow', value: fmtSignedUsd(report.summary.netTradeCashflow), tone: report.summary.netTradeCashflow >= 0 ? 'text-emerald-600' : 'text-red-600' },
-    { label: 'Unrealized Change', value: fmtSignedUsd(report.summary.unrealizedChange), tone: report.summary.unrealizedChange >= 0 ? 'text-emerald-600' : 'text-red-600' },
+    { label: 'NOOP Source Unrealized Change', value: fmtSignedUsd(report.summary.unrealizedChange), tone: report.summary.unrealizedChange >= 0 ? 'text-emerald-600' : 'text-red-600' },
     { label: 'Max Drawdown', value: report.summary.maxDrawdown == null || report.summary.maxDrawdownPct == null ? 'Unavailable' : `${fmtSignedUsd(-report.summary.maxDrawdown)} / ${report.summary.maxDrawdownPct.toFixed(2)}%`, tone: 'text-zinc-600' },
     { label: 'Spot Move', value: `${formatUSD(report.summary.openingSpot)} → ${formatUSD(report.summary.closingSpot)} (${fmtPct(report.summary.spotChangePct)})`, tone: 'text-zinc-900' },
   ];
@@ -366,7 +385,9 @@ export default function PnlReportPage() {
 
           <div className="mt-3 text-sm text-zinc-600 space-y-1">
             <p>{report.meta.performanceUnavailableReason}</p>
-            <p>Balances cover the Derive subaccount. {report.meta.externalHoldingsUnavailableReason}</p>
+            <p>Balances cover {combinedConfigured ? 'NOOP and DRV-NOOP on Derive, including DRV and USDC holdings' : 'the NOOP source account on Derive'}. Off-exchange ETH is excluded from these balances. Value changes include deposits and withdrawals.</p>
+            {combinedConfigured && <p>{combinedHistoryLabel(report.meta.combinedAccounts)} Opening value and change are unavailable when the selected range starts before combined coverage.</p>}
+            {combinedAvailability && <p className="text-amber-700">Combined value unavailable. {combinedAvailability}</p>}
             <p>{report.meta.cashflowBasis}</p>
             {!report.meta.economicHistoryAvailable && <p>Exchange accounting history is unavailable; recorded cashflows may be incomplete.</p>}
             {report.meta.economicHistoryAvailable && (!report.meta.accountingCoverage.trades || !report.meta.accountingCoverage.settlements) && (
@@ -379,16 +400,17 @@ export default function PnlReportPage() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-3 text-sm">
             <div className="border border-zinc-200 p-4 bg-[#fcfaf6]">
-              <p className="text-xs uppercase tracking-[0.18em] text-zinc-500 mb-2">Balances</p>
+              <p className="text-xs uppercase tracking-[0.18em] text-zinc-500 mb-2">{combinedConfigured ? 'Combined Derive Balances' : 'NOOP Source Balances'}</p>
               <div className="space-y-1">
-                <div className="flex justify-between"><span>Opening Value</span><span>{formatUSD(report.summary.openingValue)}</span></div>
-                <div className="flex justify-between"><span>Closing Value</span><span>{formatUSD(report.summary.closingValue)}</span></div>
-                <div className="flex justify-between"><span>High Watermark</span><span>{formatUSD(report.summary.highWatermark)}</span></div>
-                <div className="flex justify-between"><span>Low Watermark</span><span>{formatUSD(report.summary.lowWatermark)}</span></div>
+                <div className="flex justify-between"><span>Opening Value</span><span>{fmtBalance(balanceSummary?.openingValue)}</span></div>
+                <div className="flex justify-between"><span>Closing Value</span><span>{fmtBalance(balanceSummary?.closingValue)}</span></div>
+                <div className="flex justify-between"><span>Observed High</span><span>{fmtBalance(balanceSummary?.highWatermark)}</span></div>
+                <div className="flex justify-between"><span>Observed Low</span><span>{fmtBalance(balanceSummary?.lowWatermark)}</span></div>
+                {combinedConfigured && <div className="pt-2 text-zinc-500 border-t border-zinc-200">NOOP source context: {formatUSD(report.summary.openingValue)} opening → {formatUSD(report.summary.closingValue)} closing.</div>}
               </div>
             </div>
             <div className="border border-zinc-200 p-4 bg-[#fcfaf6]">
-              <p className="text-xs uppercase tracking-[0.18em] text-zinc-500 mb-2">Leg Cashflow</p>
+              <p className="text-xs uppercase tracking-[0.18em] text-zinc-500 mb-2">NOOP Source Leg Cashflow</p>
               <div className="space-y-1">
                 <div className="flex justify-between"><span>Puts</span><span className={report.summary.putNetCashflow >= 0 ? 'text-emerald-600' : 'text-red-600'}>{fmtSignedUsd(report.summary.putNetCashflow)}</span></div>
                 <div className="flex justify-between"><span>Calls</span><span className={report.summary.callNetCashflow >= 0 ? 'text-emerald-600' : 'text-red-600'}>{fmtSignedUsd(report.summary.callNetCashflow)}</span></div>
@@ -406,18 +428,30 @@ export default function PnlReportPage() {
               </div>
             </div>
           </div>
+          {combinedConfigured && <div className="mt-3 border border-zinc-200 p-4 text-sm">
+            <div className="flex flex-wrap justify-between gap-2 mb-2">
+              <p className="font-semibold">Latest combined Derive value: {fmtBalance(latestCombined?.combinedValue)}</p>
+              <p className="text-zinc-500">{latestCombined?.timestamp ? `Holdings observed ${new Date(latestCombined.timestamp).toLocaleString()}` : 'Awaiting account observations'}</p>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {latestCombined?.accounts.map(account => <div key={account.subaccountId}>
+                <p>{account.label}: {fmtBalance(account.valueUsd)}</p>
+                <p className="text-zinc-500">{collateralAmounts(account.collaterals) || 'No recorded collateral holdings'}</p>
+              </div>)}
+            </div>
+          </div>}
         </div>
 
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
           <div className="bg-white border border-black/10 p-5">
             <div className="mb-3">
               <p className="text-xs uppercase tracking-[0.24em] text-zinc-500">Account Balance</p>
-              <h3 className="text-xl font-semibold mt-1">Subaccount value vs. spot</h3>
+              <h3 className="text-xl font-semibold mt-1">{combinedConfigured ? 'Combined Derive value' : 'NOOP source value'} vs. spot</h3>
             </div>
             <div className="h-[320px]">
               {mounted ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={portfolioSeries}>
+                  <ComposedChart data={portfolioSeries}>
                     <defs>
                       <linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="#d97706" stopOpacity={0.35} />
@@ -425,14 +459,19 @@ export default function PnlReportPage() {
                       </linearGradient>
                     </defs>
                     <CartesianGrid stroke="#e7e5e4" strokeDasharray="3 3" />
-                    <XAxis dataKey="label" minTickGap={24} tick={{ fill: '#57534e', fontSize: 12 }} />
+                    <XAxis dataKey="ts" type="number" domain={portfolioDomain} minTickGap={24} tickFormatter={value => dateLabel(new Date(value).toISOString(), report.meta.bucketMs)} tick={{ fill: '#57534e', fontSize: 12 }} />
+                    <XAxis xAxisId="combined" dataKey="ts" type="number" domain={portfolioDomain} hide />
                     <YAxis yAxisId="equity" tickFormatter={(v) => `$${Math.round(v)}`} tick={{ fill: '#57534e', fontSize: 12 }} width={72} />
                     <YAxis yAxisId="spot" orientation="right" tickFormatter={(v) => `$${Math.round(v)}`} tick={{ fill: '#57534e', fontSize: 12 }} width={60} />
-                    <Tooltip formatter={(value) => formatUSD(Number(value ?? 0))} />
+                    <Tooltip filterNull={false} formatter={(value) => value == null ? 'Unavailable' : formatUSD(Number(value))} labelFormatter={value => new Date(Number(value)).toLocaleString()} />
                     <Legend />
-                    <Area yAxisId="equity" type="monotone" dataKey="portfolioValue" name="Subaccount Value" stroke="#a16207" fill="url(#equityFill)" strokeWidth={2.5} />
-                    <Line yAxisId="spot" type="monotone" dataKey="spotPrice" name="ETH Spot" stroke="#1d4ed8" dot={false} strokeWidth={1.75} />
-                  </AreaChart>
+                    {combinedConfigured ? <>
+                      <Line yAxisId="equity" type="linear" dataKey="portfolioValue" name="NOOP source" stroke="#a8a29e" strokeDasharray="5 4" strokeWidth={1.75} dot={false} isAnimationActive={false} />
+                      <Line yAxisId="equity" dataKey="combinedPortfolioValueUsd" name="Combined Derive" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />
+                      <Area yAxisId="equity" xAxisId="combined" data={combinedSeries} type="linear" dataKey="combinedPortfolioValueUsd" name="Combined Derive" stroke="#a16207" fill="url(#equityFill)" strokeWidth={2.5} dot={singleCombinedPoint ? { r: 3 } : false} connectNulls={false} tooltipType="none" isAnimationActive={false} />
+                    </> : <Area yAxisId="equity" type="linear" dataKey="portfolioValue" name="NOOP source" stroke="#a16207" fill="url(#equityFill)" strokeWidth={2.5} isAnimationActive={false} />}
+                    <Line yAxisId="spot" type="linear" dataKey="spotPrice" name="ETH Spot" stroke="#1d4ed8" dot={false} strokeWidth={1.75} isAnimationActive={false} />
+                  </ComposedChart>
                 </ResponsiveContainer>
               ) : (
                 <div className="h-full bg-[#fcfaf6] border border-zinc-200" />

@@ -2028,6 +2028,19 @@ const createWallet = () => {
 };
 
 const spotAccumulationSettings = getSpotAccumulationSettings({ env: process.env, derive: DERIVE_CONFIG, sqlite: db?.db });
+const portfolioReportingCollector = db?.db ? require('./bot/portfolio-reporting').createPortfolioReportingCollector({
+  sqlite: db.db, derive: DERIVE_CONFIG,
+  read: async (method, body) => {
+    const timestamp = Date.now();
+    const signature = await signMessage(createWallet(), timestamp);
+    const response = await axios.post(`${DERIVE_CONFIG.baseUrl}/${method}`, body, {
+      headers: require('./bot/derive-config').authHeaders(DERIVE_CONFIG, timestamp, signature), timeout: 15000,
+    });
+    if (response.data?.error || !response.data?.result) throw new Error('Portfolio reporting venue read failed');
+    return response.data.result;
+  },
+}) : null;
+
 let spotAccumulationRuntime = null;
 const getSpotAccumulationRuntime = () => {
   if (!spotAccumulationSettings.config) return null;
@@ -13459,9 +13472,11 @@ const runBot = async () => {
         }
       } catch (e) { console.log('DB: options snapshot write failed:', e.message); }
 
-      // One final account response supplies all portfolio snapshot components.
+      // Source execution snapshots retain their existing account-only semantics.
+      let reportingSourceAccount = null;
       try {
         const account = await fetchSubaccount({ forObservation: true });
+        reportingSourceAccount = account;
         const cashflow = db.getGrossOptionsCashflow();
         db.insertPortfolioSnapshot(buildPortfolioObservation(account, {
           timestamp: account?.snapshot_received_at,
@@ -13469,6 +13484,9 @@ const runBot = async () => {
           grossOptionsCashflow: cashflow.gross_options_cashflow,
         }));
       } catch (e) { console.log('DB: portfolio snapshot deferred:', e.message); }
+      try { await portfolioReportingCollector?.collect({ sourceAccount: reportingSourceAccount, spotPrice }); }
+      catch (e) { console.log('DB: combined portfolio observation deferred:', e.message); }
+
 
       try {
         if (!DERIVE_CONFIG.maintenance && typeof db.evaluateDueDecisionOutcomes === 'function') {
