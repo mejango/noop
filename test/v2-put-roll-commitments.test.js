@@ -9,12 +9,13 @@ const pricing = require('../bot/order-pricing');
 const NOW = Date.parse('2030-09-01T20:00:00Z');
 class Clock extends Date { static now() { return NOW; } }
 const RETIRING = 'ETH-20300920-2000-P', REPLACEMENT = 'ETH-20301031-2000-P';
-const criteria = { put_exit_intent: 'roll_protection', conditions: [{ field: 'dte', op: 'lte', value: 25 }] };
+const defaultCriteria = { put_exit_intent: 'roll_protection', conditions: [{ field: 'dte', op: 'lte', value: 25 }] };
 const position = (instrument_name, amount) => ({ instrument_name, amount, direction: 'long', avg_entry_price: 10 });
 const pendingSale = (overrides = {}) => ({ order_id: 'replacement-sale', instrument_name: REPLACEMENT,
   action: 'sell_put', direction: 'sell', amount: 1, filled_amount: 0, limit_price: 120, order_status: 'open', ...overrides });
 
-function fixture() {
+function fixture(overrides = {}) {
+  const criteria = { ...defaultCriteria, ...overrides };
   const state = { positions: [position(RETIRING, 4), position(REPLACEMENT, 4)], venue: [], tracked: [],
     bookReads: 0, events: [], placements: [] };
   const instruments = [RETIRING, REPLACEMENT].map(instrument_name => ({ instrument_name,
@@ -134,4 +135,24 @@ test('historical trigger intent cannot bypass the active rule final roll check',
   assert.equal(result.failed, true);
   assert.match(result.reason, /uncommitted/);
   assert.equal(state.placements.length, 0);
+});
+
+
+test('final refresh preserves the advisor retained quantity after a partial fill', async () => {
+  const state = fixture({ retain_amount: 2 });
+  assert.equal((await state.validate({ price: 5, amount: 2 })).allowed, true);
+  assert.equal((await state.validate({ price: 5, amount: 3 })).code, 'retained_protection');
+  state.positions = [position(RETIRING, 3), position(REPLACEMENT, 4)];
+  assert.equal((await state.validate({ price: 5, amount: 2 })).code, 'retained_protection');
+  assert.equal((await state.validate({ price: 5, amount: 1 })).allowed, true);
+  state.positions = [position(RETIRING, 2), position(REPLACEMENT, 4)];
+  assert.equal((await state.validate({ price: 5, amount: 1 })).code, 'retained_protection');
+});
+
+
+test('final retained guard uses venue precision for decimal position quantities', async () => {
+  const state = fixture({ retain_amount: 0.2 });
+  state.positions = [position(RETIRING, 0.3), position(REPLACEMENT, 4)];
+  assert.equal((await state.validate({ price: 5, amount: 0.1 })).allowed, true);
+  assert.equal((await state.validate({ price: 5, amount: 0.2 })).code, 'retained_protection');
 });

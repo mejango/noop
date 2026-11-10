@@ -6978,6 +6978,11 @@ const getSellPutExitAmount = (rule, criteria, position, values) => {
   if (fullAmount <= 0 || rule?.action !== 'sell_put') return fullAmount;
 
   const intent = getPutExitIntent(criteria);
+  if (intent === 'roll_protection') {
+    const retained = criteria?.retain_amount === undefined ? 0 : criteria.retain_amount;
+    if (typeof retained !== 'number' || !Number.isFinite(retained) || retained < 0) return 0;
+    return Math.max(0, fullAmount - retained);
+  }
   const dte = Number(values?.dte);
   const pnlPct = Number(values?.unrealized_pnl_pct);
   const isTailWin = intent === 'monetize_tail_win'
@@ -7199,8 +7204,10 @@ const validateAdvisorRuleContract = (rule, context = {}) => {
       if (!hasThresholdCondition(criteria, 'dte', ['lt', 'lte'], PUT_ROLL_DTE_THRESHOLD, 'at_most')) return { valid: false, reason: `roll_protection requires dte <= ${PUT_ROLL_DTE_THRESHOLD}` };
       if (criteria.requires_longer_dated_protection !== true) return { valid: false, reason: 'roll_protection must require longer-dated protection in the book' };
       if (rule.preferred_order_type && rule.preferred_order_type !== 'ioc') return { valid: false, reason: 'roll_protection sell_put must use ioc/non-resting execution' };
+      if (criteria.retain_amount !== undefined && (typeof criteria.retain_amount !== 'number' || !Number.isFinite(criteria.retain_amount) || criteria.retain_amount < 0)) return { valid: false, reason: 'roll_protection retain_amount must be a finite non-negative number' };
       const snapshot = (context.positionSnapshots || []).find((item) => item?.instrument === rule.instrument_name);
-      if (snapshot && !hasLongerDatedPutProtectionSnapshot(snapshot, context.positionSnapshots)) return { valid: false, reason: 'roll_protection rejected: no longer-dated long put currently in book' };
+      const closeAmount = snapshot ? getSellPutExitAmount(rule, criteria, snapshot, {}) : 0;
+      if (snapshot && closeAmount > 0 && !getPutReplacementCoverage(snapshot, context.positionSnapshots, closeAmount).allowed) return { valid: false, reason: 'roll_protection rejected: no longer-dated long put currently in book' };
     }
 
     if (intent === 'monetize_tail_win') {
@@ -7575,7 +7582,7 @@ const formatSellPutConfirmationContext = ({ action, triggerData, livePositions, 
     Number.isFinite(plannedAmount) && positionAmount > 0 ? plannedAmount / positionAmount : NaN
   ));
   const hasLongerDatedProtection = position
-    ? hasLongerDatedPutProtection(position, livePositions || [])
+    ? hasLongerDatedPutProtection(position, livePositions || [], plannedAmount)
     : null;
   const fmt = (value, digits = 2) => Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a';
   const fmtPrice = (value) => Number(value) > 0 ? `$${Number(value).toFixed(4)}` : 'n/a';
@@ -10049,7 +10056,10 @@ const getFreshBestBuyPutDisciplinePrompt = () => [
   `- target_score means a maximum bid of abs(delta) * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT} / target_score. The executor uses this cap and the live book to compute a tick-aligned price. It may rest below the ask; for spot-lag repricing it may be near the ask.`,
 ].join('\n');
 
+const getPutRollSizingPrompt = () => 'PUT ROLL SIZING: Compare hold, partial roll, and full roll. A full close is allowed, not required. If selling everything would remove useful near-term protection, evaluate selling some and retaining the rest before delaying the entire roll. Set criteria.retain_amount to the absolute quantity of this instrument to keep (same units as position amount); the executor sells only the excess above that floor, including on repeated evaluations. Omitted or zero means a full close. Explain quantity sold, quantity retained, and the remaining hedge role using available delta, strike and expiry evidence. Later-expiry protection at the same or higher strike must cover the quantity sold; retained aging puts do not replace that requirement. Existing DTE, price recovery, reduce-only and budget rules still apply. Do not use monetization tranche_fraction to size a roll.';
+
 const getStandingRulebookDisciplinePrompt = () => [
+  getPutRollSizingPrompt(),
   'STANDING RULEBOOK DISCIPLINE:',
   '- The advisory output is a standing rulebook for tick-by-tick execution, not only a list of trades that should execute at the current tick.',
   '- Every REQUIRED STANDING RULEBOOK COVERAGE item must have a corresponding rule in the final agenda. If the favorable condition is not true now, encode the condition that would make it favorable later.',
@@ -10100,7 +10110,7 @@ const getCallMarginDisciplinePrompt = () => `CALL DISCIPLINE: Short calls normal
 
 const getCallBuybackDisciplinePrompt = () => `CALL BUYBACK DISCIPLINE: For buyback_call, keep two intents separate. Intent 1 is profit/capacity reset while the short call is winning: use buyback_intent="profit_capture" and executable unrealized_pnl_pct >= ${CALL_BUYBACK_PROFIT_THRESHOLD}% as the economic trigger, or set a patient max_buyback_price/target_capture_pct where the bid would capture at least ${CALL_BUYBACK_PROFIT_THRESHOLD}% if filled. Do not add DTE or mark_price blockers for this intent; executable capture already uses the live buyback ask. Intent 2 is threat management when the short call is genuinely dangerous and time/range for recovery is running out: use buyback_intent="threat_management" with allow_below_profit_floor=true, and conditions on real threat facts such as delta, spot vs strike, and remaining DTE. Do not prematurely buy back just because price is rising; spot can come back down, and buying back fear premium can make us the sucker of the trade. The short call premium is already collected; mark expansion alone does not erase that. A buyback below strike is paying to remove tail risk of further upside continuation. Confirm or create buybacks only when the position is genuinely threatened, assignment risk is credible, the insurance cost is justified by actual breakout evidence, or an advisor-led take-profit rule names patient pricing. If live executable buyback price already implies strictly better capture than a profit-capture rule, do not bid back up to the threshold. Never confirm a threshold-style buyback when live market price is unavailable. Treat margin context as sizing/redeployment context, not a standalone buyback trigger.`;
 
-const getPutExitDisciplinePrompt = () => `PUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put returns cash and reduces the hedge position, but removing hedge offsets may worsen portfolio margin; assess the remaining portfolio. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds enough later-expiry long puts at the same or higher strike to replace the quantity sold. For roll_protection, a full close of the aging instrument is allowed, negative PnL is not a rejection reason, and monetize_tail_win tranche/profit thresholds do not apply because replacement protection is already in the book. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. For monetization, never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Monetization is a ladder (${PUT_MONETIZATION_LADDER_PCT.join('% / ')}%): each tranche requires a larger multiple and the final remainder is held to settlement, so a tranche that meets its rung is the plan working, not premature. Your discretion is the offer price: read the book, mark, intrinsic and IV, and name the price we are willing to sell this tranche at — we make the market, we do not hit thin bids — never below ${(PUT_MONETIZATION_MIN_INTRINSIC_FRACTION * 100).toFixed(0)}% of intrinsic. If you reject a sell_put, do it because the typed intent's requirements fail, never because the market might go further.`;
+const getPutExitDisciplinePrompt = () => `${getPutRollSizingPrompt()}\nPUT EXIT DISCIPLINE: For sell_put, judge whether rolling or monetizing an owned long hedge is sensible. Never treat sell_put as opening naked short put exposure. Selling an owned long put returns cash and reduces the hedge position, but removing hedge offsets may worsen portfolio margin; assess the remaining portfolio. Use put_exit_intent="roll_protection" only when DTE <= ${PUT_ROLL_DTE_THRESHOLD} and the book already holds enough later-expiry long puts at the same or higher strike to replace the quantity sold. For roll_protection, a full close of the aging instrument is allowed, negative PnL is not a rejection reason, and monetize_tail_win tranche/profit thresholds do not apply because replacement protection is already in the book. Use put_exit_intent="monetize_tail_win" only when executable unrealized_pnl_pct is greater than ${PUT_MONETIZATION_PROFIT_THRESHOLD}; set retain_downside_protection=true, sell in tranches with tranche_fraction <= ${PUT_MONETIZATION_MAX_TRANCHE_FRACTION}, and name min_exit_price/limit_price as the minimum acceptable sell price. For monetization, never sell all protection at once. In severe crash markets, do not undersell a valuable put just because visible bids are sparse; if making the market, choose a responsible floor from intrinsic value, Greeks, IV/skew, spread/depth, DTE, and remaining hedge role. Monetization is a ladder (${PUT_MONETIZATION_LADDER_PCT.join('% / ')}%): each tranche requires a larger multiple and the final remainder is held to settlement, so a tranche that meets its rung is the plan working, not premature. Your discretion is the offer price: read the book, mark, intrinsic and IV, and name the price we are willing to sell this tranche at — we make the market, we do not hit thin bids — never below ${(PUT_MONETIZATION_MIN_INTRINSIC_FRACTION * 100).toFixed(0)}% of intrinsic. If you reject a sell_put, do it because the typed intent's requirements fail, never because the market might go further.`;
 
 const normalizeLearningText = (value) => String(value || '').toLowerCase();
 
@@ -10616,6 +10626,12 @@ const createFinalOrderValidator = ({ action, instruments, spotPrice, triggerData
     if (!activeRule || activeRule.action !== action.action
       || JSON.stringify(parseMaybeJsonObject(activeRule.criteria)) !== JSON.stringify(ruleCriteria)) {
       return { allowed: false, code: 'inactive_rule', reason: 'The approved rule is no longer active or has changed' };
+    }
+    if (rollingPut) {
+      const position = positions.find(item => item.instrument_name === action.instrument_name && item.direction === 'long');
+      if (amount > floorOrderAmountToVenuePrecision(getSellPutExitAmount(activeRule, ruleCriteria, position, {}))) {
+        return { allowed: false, code: 'retained_protection', reason: 'Roll would sell below the approved retained quantity' };
+      }
     }
     const currentSpot = Number(ticker?.I) > 0 ? Number(ticker.I) : spotPrice;
     const currentRestingOrders = db.getOpenRestingOrders();
