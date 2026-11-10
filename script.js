@@ -9676,12 +9676,12 @@ const manageOpenOrders = async (tickerMap, positions = [], instruments = [], spo
   if (process.env.DRY_RUN === '1') return; // No real orders in dry run
   if (!db) return;
   const accounting = require('./bot/order-accounting');
-  const resolved = await accounting.resolveAbandonedSubmission(db, { venueHasNonce });
+  const resolved = await accounting.resolveAbandonedSubmission(db, { venueHasNonce, subaccountId: DERIVE_CONFIG.subaccountId });
   if (resolved) {
     console.log(`📋 Execution ${resolved.id} (nonce ${resolved.nonce}) never reached the venue — marked rejected`);
     sendTelegram(`♻️ *Execution ${resolved.id} reconciled*: venue has no order for nonce ${resolved.nonce}; trading resumes`);
   }
-  accounting.assertNoUnresolvedSubmission(db);
+  accounting.assertNoUnresolvedSubmission(db, DERIVE_CONFIG.subaccountId);
 
   let openOrders;
   try {
@@ -10370,7 +10370,7 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
     return { failed: true, reason: error.message };
   }
   const accounting = require('./bot/order-accounting');
-  accounting.assertNoUnresolvedSubmission(db);
+  accounting.assertNoUnresolvedSubmission(db, DERIVE_CONFIG.subaccountId);
   let submissionId = null;
   const beforeSend = (request) => {
     submissionId = db.db.transaction(() => {

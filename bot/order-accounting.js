@@ -62,11 +62,34 @@ function commit(db, botData, fn) {
   catch (error) { botData.putNetBought = previousBudget; throw error; }
 }
 
-// An acknowledged venue order and its local fill accounting must commit together.
-// This small durable latch also survives process death after sending an order.
+// Canonical account identity is shared by migration, lookup and new claims.
+// Missing or ambiguous legacy identity keeps a global recovery barrier.
+function submissionAccount(request) {
+  const value = request?.subaccount_id;
+  if (!['string', 'number'].includes(typeof value)) return null;
+  const text = String(value);
+  return /^[1-9]\d*$/.test(text) && Number.isSafeInteger(Number(value)) ? text : null;
+}
+function parsedRequest(row) {
+  try { return JSON.parse(row.request_json); } catch { return null; }
+}
+function requestedScope(value) {
+  if (value == null) return null; // Explicitly unscoped callers remain conservative.
+  const scope = submissionAccount({ subaccount_id: value });
+  if (!scope) throw new Error('Invalid execution subaccount scope');
+  return scope;
+}
+function rowScope(row) {
+  const scope = submissionAccount(parsedRequest(row));
+  return scope && row.subaccount_id === scope ? scope : null;
+}
+
+// An acknowledged order and local accounting commit together. Separate venue
+// subaccounts have separate funds; uncertain legacy identity still blocks all.
 function executionStore(db) {
   if (!db?.db?.prepare) throw new Error('Execution database unavailable');
-  db.db.exec(`CREATE TABLE IF NOT EXISTS execution_submissions (
+  const sqlite = db.db;
+  sqlite.exec(`CREATE TABLE IF NOT EXISTS execution_submissions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pending_action_id INTEGER,
     instrument_name TEXT NOT NULL,
@@ -74,31 +97,64 @@ function executionStore(db) {
     request_json TEXT NOT NULL,
     response_json TEXT,
     status TEXT NOT NULL DEFAULT 'unknown',
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    subaccount_id TEXT
   )`);
-  db.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_single_unresolved ON execution_submissions ((1)) WHERE status IN ('unknown','acknowledged')");
-  return db.db;
+  const indexes = sqlite.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='execution_submissions'").all();
+  if (!indexes.some(row => row.name === 'idx_execution_unresolved_subaccount')
+    || indexes.some(row => row.name === 'idx_execution_single_unresolved')) {
+    sqlite.transaction(() => {
+      const hasScope = sqlite.prepare('PRAGMA table_info(execution_submissions)').all().some(column => column.name === 'subaccount_id');
+      if (!hasScope) {
+        sqlite.exec('ALTER TABLE execution_submissions ADD COLUMN subaccount_id TEXT');
+        const setScope = sqlite.prepare('UPDATE execution_submissions SET subaccount_id=? WHERE id=?');
+        for (const row of sqlite.prepare('SELECT id,request_json FROM execution_submissions').all()) {
+          setScope.run(submissionAccount(parsedRequest(row)), row.id);
+        }
+      }
+      // Build the replacement before removing the old guard. Duplicate known
+      // accounts fail migration atomically, preserving every original receipt.
+      sqlite.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_unresolved_subaccount
+        ON execution_submissions(subaccount_id) WHERE status IN ('unknown','acknowledged');
+        CREATE TRIGGER IF NOT EXISTS execution_unscoped_insert BEFORE INSERT ON execution_submissions
+        WHEN NEW.status IN ('unknown','acknowledged') AND EXISTS (
+          SELECT 1 FROM execution_submissions s WHERE s.status IN ('unknown','acknowledged')
+          AND (NEW.subaccount_id IS NULL OR s.subaccount_id IS NULL))
+        BEGIN SELECT RAISE(ABORT, 'Unscoped execution requires global recovery'); END;
+        CREATE TRIGGER IF NOT EXISTS execution_unscoped_update BEFORE UPDATE OF status,subaccount_id ON execution_submissions
+        WHEN NEW.status IN ('unknown','acknowledged') AND EXISTS (
+          SELECT 1 FROM execution_submissions s WHERE s.id<>NEW.id AND s.status IN ('unknown','acknowledged')
+          AND (NEW.subaccount_id IS NULL OR s.subaccount_id IS NULL))
+        BEGIN SELECT RAISE(ABORT, 'Unscoped execution requires global recovery'); END;
+        DROP INDEX IF EXISTS idx_execution_single_unresolved;`);
+    }).immediate();
+  }
+  return sqlite;
 }
-
-function assertNoUnresolvedSubmission(db) {
-  const row = executionStore(db).prepare("SELECT id,instrument_name,nonce FROM execution_submissions WHERE status IN ('unknown','acknowledged') ORDER BY id LIMIT 1").get();
+function unresolvedSubmissions(db, subaccountId, status = null) {
+  const scope = requestedScope(subaccountId);
+  return executionStore(db).prepare("SELECT * FROM execution_submissions WHERE status IN ('unknown','acknowledged') ORDER BY id").all()
+    .filter(row => (!status || row.status === status) && (scope == null || rowScope(row) == null || rowScope(row) === scope));
+}
+function assertNoUnresolvedSubmission(db, subaccountId = null) {
+  const row = unresolvedSubmissions(db, subaccountId)[0];
   if (row) throw new Error(`Execution ${row.id} (${row.instrument_name}, nonce ${row.nonce}) requires accounting recovery before trading`);
 }
 
 // A submission left 'unknown' by a placement error self-heals once the venue
 // provably never accepted it. A nonce the venue does know still needs manual
 // fill accounting, so that case keeps throwing above.
-async function resolveAbandonedSubmission(db, { venueHasNonce, minAgeMs = 2 * 60 * 1000, now = Date.now() } = {}) {
-  const row = executionStore(db).prepare("SELECT id,nonce,created_at,status,pending_action_id,request_json FROM execution_submissions WHERE status='unknown' ORDER BY id LIMIT 1").get();
+async function resolveAbandonedSubmission(db, { venueHasNonce, subaccountId = null, minAgeMs = 2 * 60 * 1000, now = Date.now() } = {}) {
+  const row = unresolvedSubmissions(db, subaccountId, 'unknown')[0];
   if (!row || now - Date.parse(row.created_at) < minAgeMs) return null;
   // DRV belongs to a different subaccount. Source-only history absence cannot
   // release its funds; the accumulation runtime requires affirmative evidence.
-  if (JSON.parse(row.request_json).action === 'buy_drv') return null;
+  if (!rowScope(row) || parsedRequest(row)?.action === 'buy_drv') return null;
   if (await venueHasNonce(row.nonce, Date.parse(row.created_at))) return null;
   return db.db.transaction(() => {
     const changed = executionStore(db).prepare(`UPDATE execution_submissions SET status='rejected',
-      response_json=json_set(coalesce(response_json,'{}'),'$.auto_reconciliation','venue reports no order for this nonce') WHERE id=? AND status='unknown'`)
-      .run(row.id).changes;
+      response_json=json_set(coalesce(response_json,'{}'),'$.auto_reconciliation','venue reports no order for this nonce') WHERE id=? AND status='unknown' AND request_json=? AND subaccount_id=?`)
+      .run(row.id, row.request_json, row.subaccount_id).changes;
     if (changed !== 1) return null;
     // The confirmed action that produced this send would otherwise stay 'confirmed'
     // forever and block every later entry of the same kind.
@@ -111,10 +167,13 @@ async function resolveAbandonedSubmission(db, { venueHasNonce, minAgeMs = 2 * 60
 }
 
 function beginSubmission(db, pendingActionId, request) {
-  assertNoUnresolvedSubmission(db);
-  return Number(executionStore(db).prepare(`INSERT INTO execution_submissions
-    (pending_action_id,instrument_name,nonce,request_json) VALUES (?,?,?,?)`)
-    .run(pendingActionId ?? null, request.instrument_name, String(request.nonce), JSON.stringify(request)).lastInsertRowid);
+  const sqlite = executionStore(db), scope = submissionAccount(request);
+  return sqlite.transaction(() => {
+    assertNoUnresolvedSubmission(db, scope);
+    return Number(sqlite.prepare(`INSERT INTO execution_submissions
+      (pending_action_id,instrument_name,nonce,request_json,subaccount_id) VALUES (?,?,?,?,?)`)
+      .run(pendingActionId ?? null, request.instrument_name, String(request.nonce), JSON.stringify(request), scope).lastInsertRowid);
+  }).immediate();
 }
 
 function noteSubmission(db, submissionId, result, definitive = false) {

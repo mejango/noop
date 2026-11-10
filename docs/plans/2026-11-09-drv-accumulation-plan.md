@@ -21,7 +21,9 @@ Transfers retain four current put-budget cycles plus outstanding source cash com
 
 Buy `DRV-USDC` using IOC limit orders, venue quantity/tick increments and a ceiling 50 bps above a fresh ask. Size includes the signed fee cap. Exact private quotes and positive post-trade margins must pass. Price, depth, cash or evidence failures defer; they do not authorize chasing a price or borrowing USDC. DRV holdings do not become insured ETH.
 
-Final preview and authentication precede an atomic reservation/send claim immediately before HTTP. The shared order journal and source-transfer guard prevent overlapping commitments. Missing history alone cannot reject an ALT request. Explicit, matching definitive order refusals may release a pristine zero-spend reservation; unknown responses and unsettled fills remain reserved.
+Final preview and authentication precede an atomic reservation/send claim immediately before HTTP. The shared order journal blocks unresolved orders in the same subaccount; missing or conflicting account identity blocks every account. Unresolved transfers still block conflicting source sends. After a transfer settles, pending ALT fills retain their reservations while source options continue. New accumulation sends retain source priority. Missing history alone cannot reject an ALT request. Explicit, matching definitive order refusals may release a pristine zero-spend reservation; unknown responses and unsettled fills remain reserved.
+
+Journal migration preserves existing rows and replaces global unresolved-order uniqueness with subaccount uniqueness. Avoid overlapping old and new bot versions: the old version recreates the global constraint. Rollback to it requires reconciling concurrent unresolved rows first; otherwise repair forward without deleting evidence.
 
 ## Runtime settings
 
@@ -64,7 +66,7 @@ Private operational diagnostics are retained outside the public release. Do not 
 
 ## Validation
 
-The isolated release passed the complete `npm test` command under Node 20.19.1: 512 trading-system checks, 749 Node regression tests, 118 accumulation/signing/transfer/preflight tests, 46 backtest checks and the dashboard standalone checks. Independent review covered sample lifetime conservation, restart completion, source priority, durable pre-send claims and refusal recovery. Synthetic test data remains separate from production observations.
+The isolated release passed the complete `npm test` command under Node 20.19.1: 512 trading-system checks, 758 Node regression tests, 120 accumulation/signing/transfer/preflight tests, 46 backtest checks and the dashboard standalone checks. Independent review covered sample lifetime conservation, restart completion, source priority, durable pre-send claims and refusal recovery. Synthetic test data remains separate from production observations.
 
 Read-only venue trials verified account compatibility, transfer encoding and unsigned DRV quote/margin behavior. These observations do not prove an actual transfer, fill or deployment. Verify the deployed revision, packaged diagnostics, default-off settings and a healthy bot cycle before operator activation; inspect actual settled receipts after the operator runs a sample.
 

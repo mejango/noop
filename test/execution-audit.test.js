@@ -1051,3 +1051,79 @@ test('pending inactive-rule cancellation behavior remains unchanged', async () =
   assert.equal(updates[0].update.execution_result, 'inactive_rule');
   assert.equal(updates[0].update.confirmation_reasoning, 'Obsolete pending action: rule is inactive or changed');
 });
+
+test('source management and placement continue while ALT acknowledgement awaits settlement', async t => {
+  const state = runtime(t);
+  const accounting = require('../bot/order-accounting');
+  const id = accounting.beginSubmission(state.db, null, { instrument_name: 'DRV-USDC', action: 'buy_drv', nonce: 'alt', subaccount_id: 120934 });
+  accounting.noteSubmission(state.db, id, { result: { order: { order_id: 'alt-order' } } });
+  await state.manageOpenOrders({}, [], [instrument()], 2000);
+  let placed = 0;
+  state.placeOrder = async (...args) => {
+    const request = { instrument_name: args[0], amount: args[1], direction: args[2], limit_price: args[3],
+      nonce: 'source-during-alt-settlement', subaccount_id: 25923, time_in_force: args[7] };
+    args[9](request);
+    placed++;
+    assert.equal(state.db.db.prepare("SELECT count(*) n FROM execution_submissions WHERE status IN ('unknown','acknowledged')").get().n, 2);
+    return { result: { order: venueOrder(request), trades: [] } };
+  };
+  state.db.replaceActiveRules('fixture', [{ rule_type: 'entry', action: 'buy_put', criteria: {} }]);
+  assert.equal((await state.executeOrder('buy_put', putName, 5, 10, [instrument()], 2000, 'gtc')).resting, true);
+  assert.equal(placed, 1);
+  assert.equal(state.db.db.prepare('SELECT status FROM execution_submissions WHERE id=?').get(id).status, 'acknowledged');
+  assert.equal(state.db.db.prepare('SELECT status FROM execution_submissions WHERE nonce=?').get('source-during-alt-settlement').status, 'accounted');
+});
+
+test('journal claims canonicalize numeric/string identities and preserve same-account exclusion', t => {
+  const a = require('../bot/order-accounting'), db = { db: new Database(':memory:') };
+  t.after(() => db.db.close());
+  const request = { instrument_name: putName, nonce: 'source', subaccount_id: 25923 };
+  a.beginSubmission(db, null, request);
+  assert.throws(() => a.beginSubmission(db, null, { ...request, subaccount_id: '25923', nonce: 'duplicate' }), /recovery/);
+  a.beginSubmission(db, null, { ...request, subaccount_id: 120934, nonce: 'alt' });
+  assert.equal(db.db.prepare('SELECT count(*) AS n FROM execution_submissions').get().n, 2);
+  assert.throws(() => a.assertNoUnresolvedSubmission(db), /recovery/);
+  assert.throws(() => a.beginSubmission(db, null, { ...request, subaccount_id: undefined }), /recovery/);
+});
+
+for (const request of ['{', '{}', '{"subaccount_id":"025923"}', '{"subaccount_id":0}', '{"subaccount_id":9007199254740992}', '{"subaccount_id":25923}']) {
+  test(`legacy journal migration preserves receipt and conservatively scopes ${request}`, async t => {
+    const a = require('../bot/order-accounting'), db = { db: new Database(':memory:') };
+    t.after(() => db.db.close());
+    db.db.exec(`CREATE TABLE execution_submissions (id INTEGER PRIMARY KEY, pending_action_id INTEGER, instrument_name TEXT NOT NULL,
+      nonce TEXT NOT NULL, request_json TEXT NOT NULL, response_json TEXT, status TEXT DEFAULT 'unknown', created_at TEXT);
+      CREATE UNIQUE INDEX idx_execution_single_unresolved ON execution_submissions((1)) WHERE status IN ('unknown','acknowledged');`);
+    db.db.prepare('INSERT INTO execution_submissions VALUES(1,NULL,?,?,?,?,?,?)').run(putName, 'legacy', request, '{"receipt":"preserve"}', 'unknown', '2026-01-01T00:00:00Z');
+    const known = request === '{"subaccount_id":25923}';
+    if (known) assert.doesNotThrow(() => a.assertNoUnresolvedSubmission(db, 120934));
+    else assert.throws(() => a.assertNoUnresolvedSubmission(db, 120934), /recovery/);
+    assert.throws(() => a.assertNoUnresolvedSubmission(db, 25923), /recovery/);
+    assert.equal(db.db.prepare('SELECT response_json FROM execution_submissions').get().response_json, '{"receipt":"preserve"}');
+    assert.equal(db.db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='idx_execution_single_unresolved'").get().n, 0);
+    if (!known) {
+      let lookedUp = false;
+      assert.equal(await a.resolveAbandonedSubmission(db, { subaccountId: 25923, venueHasNonce: async () => { lookedUp = true; return false; } }), null);
+      assert.equal(lookedUp, false);
+      assert.throws(() => db.db.prepare('INSERT INTO execution_submissions(instrument_name,nonce,request_json,subaccount_id) VALUES(?,?,?,?)').run(putName, 'new', '{"subaccount_id":25923}', '25923'), /global recovery/);
+    }
+  });
+}
+
+test('source recovery selects its own unknown behind an older ALT unknown, and rechecks identity after lookup', async t => {
+  const a = require('../bot/order-accounting'), db = { db: new Database(':memory:') };
+  t.after(() => db.db.close());
+  const alt = a.beginSubmission(db, null, { instrument_name: 'DRV-USDC', action: 'buy_drv', nonce: 'alt', subaccount_id: 120934 });
+  const sourceId = a.beginSubmission(db, null, { instrument_name: putName, nonce: 'source', subaccount_id: 25923 });
+  db.db.exec("UPDATE execution_submissions SET created_at='2026-01-01T00:00:00Z'");
+  const lookedUp = [];
+  const resolved = await a.resolveAbandonedSubmission(db, { subaccountId: 25923, venueHasNonce: async nonce => { lookedUp.push(nonce); return false; } });
+  assert.equal(resolved.id, sourceId);
+  assert.deepEqual(lookedUp, ['source']);
+  assert.equal(db.db.prepare('SELECT status FROM execution_submissions WHERE id=?').get(alt).status, 'unknown');
+  const next = a.beginSubmission(db, null, { instrument_name: putName, nonce: 'next', subaccount_id: 25923 });
+  db.db.exec("UPDATE execution_submissions SET created_at='2026-01-01T00:00:00Z'");
+  assert.equal(await a.resolveAbandonedSubmission(db, { subaccountId: 25923, venueHasNonce: async () => {
+    db.db.prepare('UPDATE execution_submissions SET request_json=? WHERE id=?').run('{"subaccount_id":7}', next); return false;
+  } }), null);
+  assert.equal(db.db.prepare('SELECT status FROM execution_submissions WHERE id=?').get(next).status, 'unknown');
+});

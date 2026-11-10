@@ -339,6 +339,73 @@ test('sample unresolved fill recovers before completion without another purchase
   assert.equal(h.state.transfers, 1); assert.equal(h.state.orders, 1);
 });
 
+test('pending ALT sample preserves its reservation while source submissions and recovery stay isolated', async t => {
+  const h = sampleHarness(t);
+  await h.runtime.advance(h.args());
+  h.state.orderSettled = false;
+  assert.equal((await h.runtime.advance(h.args())).status, 'deferred');
+  const pending = h.runtime.snapshot();
+  const alt = h.db.db.prepare('SELECT * FROM execution_submissions').get();
+  assert.equal(alt.status, 'acknowledged');
+  assert.equal(pending.reservations[0].status, 'pending');
+  assert.equal(pending.assets.DRV.settled_spend_usdc, '0');
+  assert.equal(pending.funding.source_reserved_usdc, '0');
+  assert.doesNotThrow(() => h.runtime.assertSourceClear());
+  assert.doesNotThrow(() => accounting.assertNoUnresolvedSubmission(h.db, 25923));
+  assert.throws(() => accounting.assertNoUnresolvedSubmission(h.db, 120934), /recovery/);
+  assert.throws(() => accounting.assertNoUnresolvedSubmission(h.db), /recovery/);
+
+  const sourceId = accounting.beginSubmission(h.db, null, { action: 'buy_put', account_address: owner,
+    instrument_name: 'ETH-20261225-1600-P', nonce: 'source-while-alt-pending', subaccount_id: 25923 });
+  const source = h.db.db.prepare('SELECT * FROM execution_submissions WHERE id=?').get(sourceId);
+  assert.equal(source.status, 'unknown');
+  assert.equal(h.db.db.prepare('SELECT count(*) n FROM execution_submissions').get().n, 2);
+  assert.throws(() => accounting.assertNoUnresolvedSubmission(h.db, 25923), /recovery/);
+  assert.match((await h.create().recover()).reason, /Unresolved execution/);
+  assert.deepEqual(h.runtime.snapshot().reservations, pending.reservations);
+  assert.deepEqual(h.db.db.prepare('SELECT * FROM execution_submissions WHERE id=?').get(sourceId), source);
+
+  h.state.mode = 'off'; h.state.orderSettled = true;
+  const recovered = h.create();
+  // Recovery settles only the matching ALT journal, even while the source
+  // submission keeps the global accumulation gate closed and new sends are off.
+  assert.match((await recovered.recover()).reason, /Unresolved execution/);
+  assert.equal(recovered.snapshot().reservations[0].status, 'terminal');
+  assert.equal(recovered.snapshot().assets.DRV.settled_spend_usdc, '4.01');
+  assert.equal(h.db.db.prepare('SELECT status FROM execution_submissions WHERE id=?').get(alt.id).status, 'accounted');
+  assert.deepEqual(h.db.db.prepare('SELECT * FROM execution_submissions WHERE id=?').get(sourceId), source);
+  assert.throws(() => accounting.assertNoUnresolvedSubmission(h.db, 25923), /recovery/);
+  assert.doesNotThrow(() => accounting.assertNoUnresolvedSubmission(h.db, 120934));
+  assert.equal(h.state.transfers, 1); assert.equal(h.state.orders, 1);
+
+  // A separately proved source rejection releases only its own latch. The
+  // completed sample still cannot spend its residual funds after restarts.
+  accounting.noteSubmission(h.db, sourceId, { definitive_rejection: true }, true);
+  h.state.mode = 'sample';
+  const completed = h.runtime.snapshot();
+  for (let run = 0; run < 3; run++) assert.equal((await h.create().advance(h.args())).status, 'sample_complete');
+  assert.deepEqual(h.runtime.snapshot(), completed);
+  assert.equal(h.state.transfers, 1); assert.equal(h.state.orders, 1);
+});
+
+test('main loop invokes existing accumulation recovery before maintenance or unrelated source failures', async () => {
+  const { declaration, SCRIPT_SOURCE } = require('./helpers/load-production');
+  const vm = require('node:vm');
+  for (const maintenance of [true, false]) {
+    const calls = [];
+    const bindings = {
+      getSpotAccumulationRuntime: () => ({ recover: async () => { calls.push('recover'); } }),
+      DERIVE_CONFIG: { maintenance, collectData: false }, process: {},
+      console: { log() {}, error() {} },
+      fetchDeriveSpotPrice: async () => { calls.push('source'); throw new Error('source unavailable'); },
+      sendTelegram: () => {}, setTimeout: () => { calls.push('reschedule'); }, runBotWithWatchdog: () => {},
+    };
+    const runBot = vm.compileFunction(`${declaration(SCRIPT_SOURCE, 'runBot')}\nreturn runBot;`, Object.keys(bindings))(...Object.values(bindings));
+    await runBot();
+    assert.deepEqual(calls, maintenance ? ['recover', 'reschedule'] : ['recover', 'source', 'reschedule']);
+  }
+});
+
 test('sample terminal partial fill completes the sample and leaves unused allocated cash untouched', async t => {
   const h = sampleHarness(t); await h.runtime.advance(h.args());
   const collect = h.venue.collectOrder;

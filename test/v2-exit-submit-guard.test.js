@@ -21,6 +21,7 @@ function fixture({ openOrders, trackedOrders = [], retry = false }) {
     ...pure, ...pricing, process: { env: {} }, console: { log() {}, error() {}, warn() {} },
     db: { getOpenRestingOrders: () => trackedOrders, insertOrder() {} },
     botData: {}, DERIVE_ACCOUNT_ADDRESS: 'fixture-account',
+    DERIVE_CONFIG: require('../bot/derive-config').getDeriveConfig({}),
     require: () => ({ assertNoUnresolvedSubmission() {}, noteSubmission() {} }),
     fetchPositions: async () => [{ instrument_name: name, direction: 'short', amount: 2 }],
     fetchFreshTickerForInstrument: async () => ({ b: 1.8, a: ++tickers > 1 ? 2.1 : 4 }),

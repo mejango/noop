@@ -44,6 +44,7 @@ function fixture(overrides = {}) {
     instruments, spotPrice: 2500, triggerData: {}, ruleCriteria: criteria, orderType: 'ioc' });
   const execution = { ...helpers, ...pricing, ...bindings, process: { env: {} },
     console: { log() {}, error() {}, warn() {} }, DERIVE_ACCOUNT_ADDRESS: 'fixture-account',
+    DERIVE_CONFIG: require('../bot/derive-config').getDeriveConfig({}),
     require: () => ({ assertNoUnresolvedSubmission() {}, noteSubmission() {} }),
     placeOrder: async (...args) => { state.placements.push(args); return { zero_fill_rejected: true }; },
   };
