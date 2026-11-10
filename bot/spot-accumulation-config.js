@@ -31,7 +31,6 @@ function getSpotAccumulationSettings({ env = process.env, derive, sqlite, nowMs 
     throw new Error('Stored accumulation identity or boundary conflicts with configuration');
   }
   const maxBatch = env.SPOT_ACCUMULATION_MAX_BATCH_USDC;
-  if (mode === 'live' && !maxBatch) throw new Error('Live accumulation requires SPOT_ACCUMULATION_MAX_BATCH_USDC');
   let maxBatchUsdc = maxBatch == null || maxBatch === '' ? null : fromUnits(toUnits(maxBatch, 'maximum accumulation batch', false));
   if (mode === 'sample') {
     if (maxBatchUsdc && maxBatchUsdc !== SAMPLE_BUDGET_USDC) throw new Error('Startup sample budget is fixed at 5 USDC');

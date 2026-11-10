@@ -1,6 +1,6 @@
 # DRV spot accumulation implementation
 
-The runtime supports DRV purchases on Derive behind a default-off gate. Deployment does not enable financial actions. The [strategy design](../dip-buy-design-2026-10-16.md) describes allocation and source protection.
+The runtime supports DRV purchases on Derive behind a default-off gate. Deployment and restart honor the operator's configured mode. The [strategy design](../dip-buy-design-2026-10-16.md) describes allocation and source protection.
 
 ## Plan refinement
 
@@ -32,7 +32,7 @@ Journal migration preserves existing rows and replaces global unresolved-order u
 | `SPOT_ACCUMULATION_MODE` | `off` by default; `dry_run` computes proposals without new allocation writes or executable signatures; `live` permits guarded future-sale-funded sends; `sample` permits the explicit one-time balance-funded test. |
 | `SPOT_ACCUMULATION_DESTINATION_ID` | Required distinct same-owner ALT subaccount ID. Source identity comes from the existing V3 Derive configuration. |
 | `SPOT_ACCUMULATION_FROM` | Explicit ISO eligibility boundary within V3 history and no later than startup. Sample mode can choose its first startup time when no boundary is stored. Persisted identity/boundary cannot silently change on restart. |
-| `SPOT_ACCUMULATION_MAX_BATCH_USDC` | Positive explicit cap required in ordinary live mode. Sample mode pins this to 5 and rejects any different override. The separate sample allowance also caps lifetime sample funding. |
+| `SPOT_ACCUMULATION_MAX_BATCH_USDC` | Optional positive cap. Leave unset to use the full eligible allocation, subject to cash, commitments, fees, depth and price checks. Sample mode pins this to 5 and rejects any different override; its separate allowance also caps lifetime sample funding. |
 
 Derive maintenance and global `DRY_RUN=1` block financial sends. `off` continues recovery of existing durable attempts while disabling new attempts. The bot reconciles before source trading and advances accumulation only after its source-options cycle succeeds. Ordinary sale credits require complete settled history; the operator-funded sample does not invent source trade history.
 
@@ -51,7 +51,9 @@ The first eligible sample tick creates one immutable `spot_operator_funding` all
 
 The first positive terminal, fully settled DRV purchase completes the sample, including a partial fill. Further ticks and restarts return `sample_complete` without new sends. Definitive zero-fill refusals may retry within the original allowance. Ambiguous or unsettled outcomes retain their reservations. Any unspent test funding remains allocated with its operator provenance.
 
-Set `SPOT_ACCUMULATION_MODE=off` to stop new attempts. Keep the ledger, reservations and execution journal for recovery. Never delete state, reset the boundary, infer transfer success from balances alone or blindly resend a transfer whose acknowledgement was lost. Sample mode does not enable recurring purchases. A later ordinary live configuration needs its explicit batch cap and preserves previous identity, funding and spending.
+Set `SPOT_ACCUMULATION_MODE=off` to stop new attempts. Keep the ledger, reservations and execution journal for recovery. Never delete state, reset the boundary, infer transfer success from balances alone or blindly resend a transfer whose acknowledgement was lost. Sample mode does not enable recurring purchases.
+
+After the sample, set `SPOT_ACCUMULATION_MODE=live` and restart to enable the recurring policy. No additional fixed dollar cap is required; the destination, activation boundary and prior spending are preserved. New routine funding comes only from eligible settled put-sale proceeds. Any unused operator allowance retains its original bounded sample provenance and can be consumed alongside later proceeds, without creating another grant. Purchases already made reduce the remaining allocation so no sale funds two purchases.
 
 ## Code ownership and diagnostics
 
@@ -66,7 +68,7 @@ Private operational diagnostics are retained outside the public release. Do not 
 
 ## Validation
 
-The isolated release passed the complete `npm test` command under Node 20.19.1: 512 trading-system checks, 758 Node regression tests, 120 accumulation/signing/transfer/preflight tests, 46 backtest checks and the dashboard standalone checks. Independent review covered sample lifetime conservation, restart completion, source priority, durable pre-send claims and refusal recovery. Synthetic test data remains separate from production observations.
+The isolated release passed the complete `npm test` command under Node 20.19.1: 512 trading-system checks, 758 Node regression tests, 123 accumulation/signing/transfer/preflight tests, 46 backtest checks and the dashboard standalone checks. Independent review covered sample lifetime conservation, restart completion, source priority, durable pre-send claims and refusal recovery. Synthetic test data remains separate from production observations.
 
 Read-only venue trials verified account compatibility, transfer encoding and unsigned DRV quote/margin behavior. These observations do not prove an actual transfer, fill or deployment. Verify the deployed revision, packaged diagnostics, default-off settings and a healthy bot cycle before operator activation; inspect actual settled receipts after the operator runs a sample.
 

@@ -16,7 +16,7 @@ function history() {
   return { complete: true, throughTimestamp: new Date(NOW).toISOString(), events: [normalizeV2Trade(raw, 25923, 'v3')],
     orders: [{ action: 'sell_put', success: 1, instrument_name: raw.instrument_name, raw_response: JSON.stringify({ result: { order: raw } }) }] };
 }
-function harness(t) {
+function harness(t, runtimeConfig = config) {
   const db = { db: new Database(':memory:') }; t.after(() => db.db.close());
   const state = { mode: 'live', canSend: true, transfers: 0, orders: 0, signed: 0, previews: 0,
     transferSettled: true, orderSettled: true, transferLostAck: false, orderLostAck: false, nonce: 100 };
@@ -52,7 +52,7 @@ function harness(t) {
           trade_price: '1', trade_fee: '0.01', fee_currency: 'USDC', batch_status: state.orderSettled ? 'Settled' : 'Executing' }] };
     },
   };
-  const create = () => createSpotAccumulationRuntime({ db, config, venue, mode: () => state.mode, canSend: () => state.canSend, now: () => NOW });
+  const create = () => createSpotAccumulationRuntime({ db, config: runtimeConfig, venue, mode: () => state.mode, canSend: () => state.canSend, now: () => NOW });
   const args = () => ({ cycleBudget: '100', pendingActions: [], sourceHistory: history(), optionsCycleSucceeded: true });
   return { db, state, venue, create, runtime: create(), args };
 }
@@ -452,4 +452,34 @@ test('sample completion by a concurrent runtime blocks another prepared sample a
   assert.equal(h.state.orders, 1); assert.equal(h.state.transfers, 1);
   assert.equal(h.runtime.snapshot().reservations.length, 1);
   assert.equal(h.runtime.snapshot().operator_funding_usdc, '5');
+});
+
+test('uncapped live execution transfers all eligible proceeds and buys beyond fifty without spending setup balances', async t => {
+  const { maxBatchUsdc, ...uncapped } = config;
+  const h = harness(t, uncapped);
+  assert.equal((await h.runtime.advance(h.args())).status, 'transfer_reconciled');
+  let snapshot = h.runtime.snapshot();
+  assert.equal(snapshot.total_net_usdc, '100');
+  assert.equal(snapshot.operator_funding_usdc, '0');
+  assert.equal(snapshot.transfers[0].amount, '100');
+  assert.equal(snapshot.funding.source_available_usdc, '0');
+  assert.equal(snapshot.funding.destination_available_usdc, '100');
+  assert.equal((await h.create().advance(h.args())).status, 'order_reconciled');
+  snapshot = h.runtime.snapshot();
+  assert.equal(snapshot.reservations[0].request.amount, '98');
+  assert.equal(snapshot.assets.DRV.settled_spend_usdc, '98.01');
+  assert.equal(snapshot.funding.destination_available_usdc, '1.99');
+  assert.equal((await h.create().advance(h.args())).status, 'deferred');
+  assert.equal(h.state.transfers, 1); assert.equal(h.state.orders, 1);
+});
+
+test('uncapped live execution cannot fund any send from balances when there are no eligible proceeds', async t => {
+  const { maxBatchUsdc, ...uncapped } = config;
+  const h = harness(t, uncapped), args = h.args();
+  args.sourceHistory.events = []; args.sourceHistory.orders = [];
+  assert.equal((await h.runtime.advance(args)).status, 'deferred');
+  assert.equal(h.runtime.snapshot().total_funding_usdc, '0');
+  assert.equal(h.runtime.snapshot().transfers.length, 0);
+  assert.equal(h.runtime.snapshot().reservations.length, 0);
+  assert.equal(h.state.signed, 0); assert.equal(h.state.transfers, 0); assert.equal(h.state.orders, 0);
 });

@@ -9,13 +9,13 @@ const derive = { version: 'v3', network: 'mainnet', subaccountId: 25923,
 const env = { SPOT_ACCUMULATION_MODE: 'dry_run', SPOT_ACCUMULATION_DESTINATION_ID: '120934',
   SPOT_ACCUMULATION_FROM: '2026-11-10T15:00:00Z' };
 
-test('off is inert; dry run is explicit and creates no state; live requires a bounded batch', t => {
+test('off is inert; dry run is explicit and creates no state; live accepts an optional batch cap', t => {
   const sqlite = new Database(':memory:'); t.after(() => sqlite.close());
   const get = e => getSpotAccumulationSettings({ env: e, derive, sqlite, nowMs: NOW });
   assert.deepEqual(get({}), { mode: 'off', config: null });
   assert.equal(get(env).config.destinationAccountId, '120934');
   assert.equal(sqlite.prepare("SELECT count(*) n FROM sqlite_master").get().n, 0);
-  assert.throws(() => get({ ...env, SPOT_ACCUMULATION_MODE: 'live' }), /MAX_BATCH/);
+  assert.equal(get({ ...env, SPOT_ACCUMULATION_MODE: 'live' }).config.maxBatchUsdc, undefined);
   assert.equal(get({ ...env, SPOT_ACCUMULATION_MODE: 'live', SPOT_ACCUMULATION_MAX_BATCH_USDC: '10' }).config.maxBatchUsdc, '10');
   for (const patch of [{ SPOT_ACCUMULATION_MODE: 'on' }, { SPOT_ACCUMULATION_DESTINATION_ID: '25923' },
     { SPOT_ACCUMULATION_FROM: '' }, { SPOT_ACCUMULATION_FROM: '2026-11-11' },
@@ -45,6 +45,9 @@ test('sample opt-in pins five dollars and persists its first startup boundary ac
   assert.equal(getSpotAccumulationSettings({ env: sampleEnv, derive, sqlite, nowMs: NOW + 60000 }).config.activationTimestamp,
     config.activationTimestamp);
   assert.equal(getSpotAccumulationSettings({ env: {}, derive, sqlite, nowMs: NOW + 60000 }).mode, 'off');
+  const live = getSpotAccumulationSettings({ env: { SPOT_ACCUMULATION_MODE: 'live' }, derive, sqlite, nowMs: NOW + 60000 });
+  const { maxBatchUsdc, ...identity } = config;
+  assert.deepEqual(live, { mode: 'live', config: identity }, 'live retains the stored sample identity and boundary without inheriting its cap');
   for (const cap of ['4', '5.01', '50']) assert.throws(() => getSpotAccumulationSettings({
     env: { ...sampleEnv, SPOT_ACCUMULATION_MAX_BATCH_USDC: cap }, derive, sqlite, nowMs: NOW }), /fixed at 5/);
   const empty = new Database(':memory:'); t.after(() => empty.close());
@@ -98,4 +101,30 @@ test('runtime and diagnostics share pending commitments without double-counting 
   for (const [id, status] of ['pending','confirmed','resting','executed','cancelled'].entries()) insert.run(id, '2026-11-10T15:00:00Z', status);
   assert.deepEqual(readSpotPendingActions({ sqlite }).map(row => row.status), ['pending','confirmed']);
   assert.equal(sqlite.prepare('SELECT count(*) n FROM pending_actions').get().n, 5);
+});
+
+test('production runtime wiring permits uncapped live mode while retaining maintenance and dry-run guards', () => {
+  const { declaration, SCRIPT_SOURCE } = require('./helpers/load-production');
+  const vm = require('node:vm');
+  const bindings = {
+    spotAccumulationSettings: { config: { destinationAccountId: '120934' } },
+    process: { env: { SPOT_ACCUMULATION_MODE: 'live' } },
+    DERIVE_CONFIG: { maintenance: false }, DERIVE_ACCOUNT_ADDRESS: derive.wallet,
+    createWallet: () => ({}), db: {},
+    require: name => name.endsWith('spot-accumulation-venue')
+      ? { createSpotVenue: () => ({}) }
+      : { createSpotAccumulationRuntime: input => input },
+  };
+  const get = vm.compileFunction(`let spotAccumulationRuntime = null;\n${declaration(SCRIPT_SOURCE, 'getSpotAccumulationRuntime')}\nreturn getSpotAccumulationRuntime;`,
+    Object.keys(bindings))(...Object.values(bindings));
+  const runtime = get();
+  assert.equal(runtime.canSend(), true);
+  bindings.DERIVE_CONFIG.maintenance = true;
+  assert.equal(runtime.canSend(), false);
+  bindings.DERIVE_CONFIG.maintenance = false;
+  bindings.process.env.DRY_RUN = '1';
+  assert.equal(runtime.canSend(), false);
+  delete bindings.process.env.DRY_RUN;
+  bindings.process.env.SPOT_ACCUMULATION_MODE = 'off';
+  assert.equal(runtime.canSend(), false);
 });

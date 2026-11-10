@@ -31,8 +31,9 @@ function createSpotAccumulationRuntime({ db, config, venue, mode = () => 'off', 
   function assertSendAllowed(expectedMode) {
     const selected = currentMode();
     if (!['live', 'sample'].includes(selected) || selected !== expectedMode || canSend() !== true) throw new Error('Accumulation sends disabled');
-    const cap = toUnits(config.maxBatchUsdc, 'live batch cap', false);
-    if (selected === 'sample' && cap !== toUnits(SAMPLE_BUDGET_USDC)) throw new Error('Startup sample requires its fixed lifetime budget');
+    if (selected === 'sample' && toUnits(config.maxBatchUsdc, 'sample budget', false) !== toUnits(SAMPLE_BUDGET_USDC)) {
+      throw new Error('Startup sample requires its fixed lifetime budget');
+    }
   }
   const sampleComplete = snapshot => snapshot.reservations.some(row => row.status === 'terminal'
     && toUnits(row.settled_spend_usdc) > 0n);

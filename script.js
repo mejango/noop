@@ -2033,7 +2033,7 @@ const getSpotAccumulationRuntime = () => {
   if (!spotAccumulationSettings.config) return null;
   if (spotAccumulationRuntime) return spotAccumulationRuntime;
   const mode = () => process.env.SPOT_ACCUMULATION_MODE || 'off';
-  const canSend = () => ['live', 'sample'].includes(mode()) && Boolean(spotAccumulationSettings.config.maxBatchUsdc)
+  const canSend = () => ['live', 'sample'].includes(mode())
     && !DERIVE_CONFIG.maintenance && process.env.DRY_RUN !== '1';
   const venue = require('./bot/spot-accumulation-venue').createSpotVenue({
     config: { ...DERIVE_CONFIG, accountAddress: DERIVE_ACCOUNT_ADDRESS,
