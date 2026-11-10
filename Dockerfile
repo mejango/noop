@@ -26,6 +26,7 @@ RUN npm ci --omit=dev
 COPY bot/ ./bot/
 COPY script.js ./
 COPY scripts/archive-v2-data.js scripts/import-economic-events.js scripts/derive-preflight.js scripts/verify-db-continuity.js scripts/repair-dex-liquidity.js scripts/backfill-dex-volume.js ./scripts/
+COPY scripts/derive-spot-preflight.js scripts/spot-accumulation.js ./scripts/
 
 # Copy knowledge wiki templates (used to seed empty volumes on first deploy)
 COPY knowledge/ ./knowledge-templates/

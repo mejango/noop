@@ -5,6 +5,8 @@ const test = require('node:test');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { createRequire } = require('node:module');
+const accounting = require('../bot/order-accounting');
 const tradePolicy = require('../bot/trade-policy');
 const pricing = require('../bot/order-pricing');
 const { loadProduction } = require('./helpers/load-production');
@@ -30,6 +32,11 @@ async function confirm(overrides = {}) {
   const vote = { confirm: true, order_type: 'gtc', limit_price: overrides.price ?? 8, reasoning: 'Approved concrete order' };
   const ctx = {
     ...tradePolicy, ...pricing, inferActionFromOpenOrder, Date: Clock, Math, Number, JSON,
+    require(name) {
+      // Confirmed-intent retirement has real SQLite coverage in execution-audit.test.js.
+      if (name === './bot/order-accounting') return { ...accounting, retireInactiveUnsubmittedConfirmed: () => [] };
+      return createRequire(path.join(__dirname, '..', 'script.js'))(name);
+    },
     console: { log() {}, error() {} }, process: { env: overrides.env || {} },
     ANTHROPIC_SONNET_MODEL: 'mock', OPENAI_CONFIRMATION_MODEL: 'mock',
     PUT_DELTA_RANGE: [-0.12, -0.02], PUT_EXPIRATION_RANGE: [45, 78], CALL_DELTA_RANGE: [0.04, 0.12], CALL_EXPIRATION_RANGE: [5, 12],

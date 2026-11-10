@@ -33,6 +33,7 @@ function loadProduction(names, { bindings = {}, source = SCRIPT_SOURCE } = {}) {
     BOT_CONFIG,
     DERIVE_CONFIG: require('../../bot/derive-config').getDeriveConfig({}),
     ...require('../../bot/derive-config'),
+    ...require('../../bot/derive-errors'),
     STRATEGY_FACTS: require('../../bot/strategy-facts.json'),
     ...require('../../bot/put-score'),
     ...require('../../bot/call-score'),

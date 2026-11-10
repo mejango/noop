@@ -10,6 +10,7 @@ const { loadProduction, declaration } = require('./helpers/load-production');
 const tradePolicy = require('../bot/trade-policy');
 const pricing = require('../bot/order-pricing');
 const restingPlan = require('../bot/resting-exit-plan');
+const accounting = require('../bot/order-accounting');
 const source = fs.readFileSync(path.join(__dirname, '..', 'script.js'), 'utf8');
 const fixedTime = Date.parse('2030-09-12T12:00:00Z');
 class Clock extends Date { constructor(...args) { super(...(args.length ? args : [fixedTime])); } static now() { return fixedTime; } }
@@ -57,7 +58,11 @@ async function confirmExit(overrides = {}) {
   const ctx = {
     ...tradePolicy, ...pricing, ...restingPlan, ...helpers, Date: Clock, Math, Number, JSON,
     liveRuleValues: (position, ticker, spot, now = fixedTime) => tradePolicy.liveRuleValues(position, ticker, spot, now),
-    require: createRequire(path.join(__dirname, '..', 'script.js')),
+    require(name) {
+      // Confirmed-intent retirement has real SQLite coverage in execution-audit.test.js.
+      if (name === './bot/order-accounting') return { ...accounting, retireInactiveUnsubmittedConfirmed: () => [] };
+      return createRequire(path.join(__dirname, '..', 'script.js'))(name);
+    },
     console: { log() {}, warn() {}, error() {} }, process: { env: {} },
     ANTHROPIC_SONNET_MODEL: 'fixture', OPENAI_CONFIRMATION_MODEL: 'fixture',
     PUT_DELTA_RANGE: [-0.12, -0.02], PUT_EXPIRATION_RANGE: [45, 78], CALL_DELTA_RANGE: [0.04, 0.12], CALL_EXPIRATION_RANGE: [5, 12],

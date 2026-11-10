@@ -19,3 +19,6 @@ knowledge/.meta.json
 .derive-v3/
 .playwright-mcp/
 dashboard/.next-v3-testnet/
+
+# Authenticated operational probes stay local; publish sanitized summaries only.
+docs/evidence/

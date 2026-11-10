@@ -92,9 +92,9 @@ test('maintenance tick schedules a heartbeat without contacting the venue or rec
   let delay;
   const heartbeats = [];
   const runBot = vm.compileFunction(`${declaration(SCRIPT_SOURCE, 'runBot')}; return runBot;`,
-    ['DERIVE_CONFIG', 'setTimeout', 'runBotWithWatchdog', 'console', 'process'])(getDeriveConfig(env),
+    ['DERIVE_CONFIG', 'setTimeout', 'runBotWithWatchdog', 'console', 'process', 'getSpotAccumulationRuntime'])(getDeriveConfig(env),
     (_callback, ms) => { delay = ms; }, () => {}, { log() {} },
-    { connected: true, send: message => heartbeats.push(message) });
+    { connected: true, send: message => heartbeats.push(message) }, () => null);
   await runBot();
   assert.equal(delay, 60000);
   assert.equal(heartbeats.length, 1);
@@ -116,18 +116,21 @@ test('production V3 order signs the exact string nonce and wire amounts with the
   const wallet = ethers.Wallet.createRandom(), config = getDeriveConfig({ ...env, DERIVE_MAINTENANCE: 'false' });
   const encoder = new ethers.AbiCoder();
   const encodeSource = SCRIPT_SOURCE.slice(SCRIPT_SOURCE.indexOf('function encodeTradeData('), SCRIPT_SOURCE.indexOf('// Place order function'));
-  const encodeTradeData = vm.compileFunction(`${encodeSource}; return encodeTradeData;`, ['ethers', 'encoder', 'Buffer', 'console'])(ethers, encoder, Buffer, { log() {} });
+  const signing = require('../bot/derive-signing');
+  const encodeTradeData = vm.compileFunction(`${encodeSource}; return encodeTradeData;`, ['ethers', 'encoder', 'Buffer', 'console', 'encodeOrderData'])(ethers, encoder, Buffer, { log() {} }, signing.encodeTradeData);
   let sent;
   const { placeOrder } = loadProduction(['placeOrder'], { bindings: {
     DERIVE_CONFIG: config, SUBACCOUNT_ID: config.subaccountId, DERIVE_ACCOUNT_ADDRESS: owner,
     DOMAIN_SEPARATOR: config.domainSeparator, ethers, encoder, Buffer, encodeTradeData,
+    buildActionHashes: signing.buildActionHashes, assertSourceAccumulationClear() {},
+    TRADE_MODULE_ADDRESS: signing.TRADE_MODULE_ADDRESS,
     createWallet: () => wallet, signMessage: async (_wallet, timestamp) => wallet.signMessage(String(timestamp)),
     boundedSignatureExpirySec, sessionKeyExpirySec: async () => null,
     axios: { post: async (url, order, options) => { sent = { url, order, options }; return { data: { result: { order } } }; } },
     API_URL: { PLACE_ORDER: `${config.baseUrl}/private/order` }, console: { log() {}, error() {} },
   } });
-  await placeOrder('ETH-20261127-1600-P', 0.3, 'buy', 10, owner, '123', false, 'ioc', { tick_size: '0.1' });
-  assert.ok(sent);
+  const placed = await placeOrder('ETH-20261127-1600-P', 0.3, 'buy', 10, owner, '123', false, 'ioc', { tick_size: '0.1' });
+  assert.ok(sent, JSON.stringify(placed));
   const { order, options } = sent;
   assert.equal(typeof order.nonce, 'string');
   assert.equal(options.headers['X-DeriveWallet'], owner);
@@ -155,7 +158,7 @@ test('preflight never treats 503 or mismatched account evidence as readiness', a
 });
 
 test('collection mode appends observations and accounting without touching orders, decisions or advisory', async () => {
-  const writes = [], heartbeats = [], delays = [], assetPings = [];
+  const writes = [], heartbeats = [], delays = [], assetPings = [], accumulation = [];
   const instrument = { instrument_name: 'ETH-20261127-1600-P' };
   const forbidden = () => { throw new Error('Trading/advisory capability invoked during collection'); };
   const config = getDeriveConfig({ ...env, DERIVE_COLLECT_DATA: 'true' });
@@ -173,6 +176,8 @@ test('collection mode appends observations and accounting without touching order
     manageOpenOrders: forbidden, evaluateTradingRules: forbidden, confirmAndExecutePending: forbidden,
     maybeResetPutCycle: forbidden, generateTradingAdvisory: forbidden, sendTelegram: forbidden,
     syncEconomicEvidence: async () => writes.push('accounting'),
+    getSpotAccumulationRuntime: () => ({ recover: async () => accumulation.push('recovery') }),
+    advanceSpotAccumulation: async allowed => { assert.equal(allowed, false); accumulation.push('disabled'); },
     enrichCandidateFromTicker: () => ({ details: {} }), fetchSubaccount: async () => account,
     buildPortfolioObservation: a => { assert.equal(a, account); return { timestamp: new Date().toISOString() }; },
     determineCheckInterval: () => 60000, botData: {}, persistCycleState: () => writes.push('cycle'),
@@ -190,6 +195,7 @@ test('collection mode appends observations and accounting without touching order
   const run = vm.compileFunction(`${declaration(SCRIPT_SOURCE, 'runBot')}; return runBot;`, Object.keys(bindings))(...Object.values(bindings));
   await run();
   assert.deepEqual(writes, ['accounting', 'options', 'portfolio', 'tick', 'cycle']);
+  assert.deepEqual(accumulation, ['recovery', 'disabled']);
   assert.equal(assetPings.length, 1);
   assert.ok(Number.isFinite(Date.parse(assetPings[0])));
   assert.equal(heartbeats.length, 1);

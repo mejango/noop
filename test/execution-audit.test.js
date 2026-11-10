@@ -39,7 +39,7 @@ function declaration(name) {
 
 function production(names, dependencies = {}) {
   const imported = {};
-  for (const filename of ['order-pricing.js', 'trade-policy.js']) {
+  for (const filename of ['order-pricing.js', 'trade-policy.js', 'derive-errors.js']) {
     const modulePath = path.join(root, 'bot', filename);
     if (fs.existsSync(modulePath)) Object.assign(imported, require(modulePath));
   }
@@ -49,6 +49,7 @@ function production(names, dependencies = {}) {
     ...require('../bot/derive-config'),
     console: quiet,
     process: { env: {} },
+    assertSourceAccumulationClear: () => {},
     Date,
     ...dependencies,
   };
@@ -603,6 +604,7 @@ test('venue placement journals before sending, blocks persistence failures and c
     boundedSignatureExpirySec,
     sessionKeyExpirySec: async () => null,
     encodeTradeData: () => '0x00',
+    buildActionHashes: () => ({ typedDataHash: '0x00' }),
     encoder: { encode: () => '0x00' },
     ethers: { keccak256: () => '0x00' },
     SUBACCOUNT_ID: 1,
@@ -647,6 +649,9 @@ test('venue placement journals before sending, blocks persistence failures and c
   };
   const unknown = await state.placeOrder(putName, 5, 'buy', 10, 'fixture-asset', 'fixture-sub-id', false, 'gtc', instrument(), () => {});
   assert.equal(unknown.definitive_rejection, false, 'a transport failure leaves the outcome unknown');
+  state.assertSourceAccumulationClear = () => { throw new Error('Accumulation transfer unresolved'); };
+  state.axios.post = async () => { assert.fail('A reserved transfer must block source order submission'); };
+  await assert.rejects(state.placeOrder(putName, 5, 'buy', 10, 'fixture-asset', 'fixture-sub-id', false, 'ioc', instrument()), /transfer unresolved/);
 });
 
 for (const orderStatus of ['open', 'cancelled']) {
@@ -947,4 +952,102 @@ test('an unknown submission the venue never accepted self-heals; a known nonce o
   assert.equal(updates[0][0], 11388);
   assert.equal(updates[0][1].status, 'failed', 'the orphaned confirmed action is released');
   assert.equal(await accounting.resolveAbandonedSubmission(db, { venueHasNonce, now: created + 600000 }), null);
+});
+
+test('source-account nonce absence never releases a DRV submission', async t => {
+  const accounting = require('../bot/order-accounting');
+  const db = { db: new Database(':memory:') }; t.after(() => db.db.close());
+  const id = accounting.beginSubmission(db, null, { action: 'buy_drv', instrument_name: 'DRV-USDC',
+    nonce: '123', subaccount_id: 120934 });
+  const created = Date.parse(db.db.prepare('SELECT created_at FROM execution_submissions WHERE id=?').get(id).created_at);
+  let reads = 0;
+  assert.equal(await accounting.resolveAbandonedSubmission(db, { now: created + 600000,
+    venueHasNonce: async () => { reads++; return false; } }), null);
+  assert.equal(reads, 0);
+  assert.equal(db.db.prepare('SELECT status FROM execution_submissions WHERE id=?').get(id).status, 'unknown');
+  assert.throws(() => accounting.assertNoUnresolvedSubmission(db), /recovery/);
+});
+
+test('only inactive confirmed intents with no execution evidence are retired', t => {
+  const { retireInactiveUnsubmittedConfirmed } = require('../bot/order-accounting');
+  const sqlite = new Database(':memory:');
+  t.after(() => sqlite.close());
+  sqlite.exec(`CREATE TABLE pending_actions (id INTEGER PRIMARY KEY, rule_id INTEGER, status TEXT,
+    execution_result TEXT, executed_at TEXT, confirmation_reasoning TEXT);
+    CREATE TABLE orders (pending_action_id INTEGER, success INTEGER);
+    CREATE TABLE resting_orders (pending_action_id INTEGER, status TEXT);
+    CREATE TABLE execution_submissions (pending_action_id INTEGER, status TEXT);
+    CREATE TABLE trading_rules (id INTEGER PRIMARY KEY, active INTEGER);
+    INSERT INTO trading_rules VALUES (1,0),(2,1);
+    INSERT INTO pending_actions VALUES (1,1,'confirmed',NULL,NULL,'original review'),
+      (2,2,'confirmed',NULL,NULL,'active review'),
+      (3,1,'pending',NULL,NULL,NULL),
+      (4,1,'resting',NULL,NULL,NULL),
+      (5,1,'executed',NULL,NULL,NULL),
+      (6,1,'confirmed','',NULL,NULL),
+      (7,1,'confirmed',NULL,'2026-11-02T00:00:00Z',NULL),
+      (8,1,'confirmed',NULL,NULL,NULL),
+      (9,1,'confirmed',NULL,NULL,NULL),
+      (10,1,'confirmed',NULL,NULL,NULL),
+      (11,1,'confirmed',NULL,NULL,NULL),
+      (12,1,'confirmed',NULL,NULL,NULL),
+      (13,1,'confirmed',NULL,NULL,NULL),
+      (14,1,'confirmed',NULL,NULL,NULL);
+    INSERT INTO orders VALUES (8,0),(9,1);
+    INSERT INTO resting_orders VALUES (10,'cancelled');
+    INSERT INTO execution_submissions VALUES (11,'unknown'),(12,'acknowledged'),(13,'accounted'),(14,'rejected');`);
+  const db = { db: sqlite, getActiveRules: () => sqlite.prepare('SELECT id FROM trading_rules WHERE active=1').all() };
+  const before = sqlite.prepare('SELECT * FROM pending_actions WHERE id<>1 ORDER BY id').all();
+  assert.deepEqual(retireInactiveUnsubmittedConfirmed(db), [1]);
+  assert.deepEqual(sqlite.prepare('SELECT * FROM pending_actions WHERE id<>1 ORDER BY id').all(), before);
+  assert.deepEqual(sqlite.prepare('SELECT status,execution_result,confirmation_reasoning,executed_at FROM pending_actions WHERE id=1').get(), {
+    status: 'cancelled', execution_result: 'inactive_rule_unsubmitted', confirmation_reasoning: 'original review', executed_at: null,
+  });
+  assert.deepEqual(retireInactiveUnsubmittedConfirmed(db), []);
+});
+
+test('confirmed-intent retirement is atomic and does not create a missing submission journal', t => {
+  const { retireInactiveUnsubmittedConfirmed } = require('../bot/order-accounting');
+  const sqlite = new Database(':memory:');
+  t.after(() => sqlite.close());
+  sqlite.exec(`CREATE TABLE pending_actions (id INTEGER PRIMARY KEY, rule_id INTEGER, status TEXT, execution_result TEXT, executed_at TEXT);
+    CREATE TABLE orders (pending_action_id INTEGER);
+    CREATE TABLE resting_orders (pending_action_id INTEGER);
+    INSERT INTO pending_actions VALUES (1,99,'confirmed',NULL,NULL),(2,99,'confirmed',NULL,NULL);
+    CREATE TRIGGER fail_second_retirement BEFORE UPDATE ON pending_actions WHEN NEW.id=2
+      BEGIN SELECT RAISE(ABORT,'fixture persistence failure'); END;`);
+  const db = { db: sqlite, getActiveRules: () => [] };
+  assert.throws(() => retireInactiveUnsubmittedConfirmed(db), /fixture persistence failure/);
+  assert.deepEqual(sqlite.prepare('SELECT status,execution_result FROM pending_actions ORDER BY id').all(), [
+    { status: 'confirmed', execution_result: null }, { status: 'confirmed', execution_result: null },
+  ]);
+  assert.equal(sqlite.prepare("SELECT 1 FROM sqlite_master WHERE name='execution_submissions'").get(), undefined);
+});
+
+test('confirmation loop retires proven unsubmitted confirmed intents before its pending early return', async () => {
+  const calls = [];
+  const accounting = { retireInactiveUnsubmittedConfirmed: db => { assert.equal(db.marker, 'fixture'); calls.push('retire'); } };
+  const state = production(['confirmAndExecutePending'], {
+    require: name => { assert.equal(name, './bot/order-accounting'); return accounting; },
+    db: { marker: 'fixture', getPendingActions: status => { assert.equal(status, 'pending'); calls.push('pending'); return []; } },
+  });
+  await state.confirmAndExecutePending([], {}, 2000);
+  assert.deepEqual(calls, ['retire', 'pending']);
+});
+
+test('pending inactive-rule cancellation behavior remains unchanged', async () => {
+  const accounting = require('../bot/order-accounting');
+  const updates = [];
+  const action = { id: 1, rule_id: 99, status: 'pending', action: 'buyback_call' };
+  const state = production(['confirmAndExecutePending'], {
+    require: () => ({ ...accounting, retireInactiveUnsubmittedConfirmed: () => [] }),
+    db: { getPendingActions: () => [action], getActiveRules: () => [], updatePendingAction: (id, update) => updates.push({ id, update }) },
+    isReduceOnlyExitAction: () => true,
+  });
+  await state.confirmAndExecutePending([], {}, 2000);
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].id, 1);
+  assert.equal(updates[0].update.status, 'cancelled');
+  assert.equal(updates[0].update.execution_result, 'inactive_rule');
+  assert.equal(updates[0].update.confirmation_reasoning, 'Obsolete pending action: rule is inactive or changed');
 });

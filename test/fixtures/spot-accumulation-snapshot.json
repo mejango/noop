@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "synthetic": true,
+  "description": "Synthetic offline DRV-only replay fixture. Not production funds, quotes or trading permission.",
+  "network": "mainnet",
+  "account_id": 25923,
+  "activation_timestamp": "2026-11-09T16:24:37.000Z",
+  "history_complete": true,
+  "events": [
+    {
+      "event_id": "v2:25923:trade:synthetic-put-fill",
+      "account_id": "25923",
+      "event_type": "trade",
+      "timestamp": "2026-11-09T16:24:45.000Z",
+      "instrument_name": "ETH-20261127-1600-P",
+      "currency": "USD",
+      "amount": "2",
+      "cashflow_usd": "1000",
+      "realized_pnl_usd": null,
+      "fee_usd": "2",
+      "source": "derive-v2/private/get_trade_history",
+      "raw_json": "{\"trade_id\":\"synthetic-put-fill\",\"order_id\":\"synthetic-put-order\",\"subaccount_id\":25923,\"is_transfer\":false,\"batch_status\":\"Settled\",\"instrument_name\":\"ETH-20261127-1600-P\",\"direction\":\"sell\",\"trade_amount\":\"2\",\"trade_price\":\"500\",\"trade_fee\":\"2\",\"timestamp\":1794241485000}"
+    }
+  ],
+  "orders": [
+    {
+      "action": "sell_put",
+      "success": 1,
+      "instrument_name": "ETH-20261127-1600-P",
+      "raw_response": "{\"result\":{\"order\":{\"order_id\":\"synthetic-put-order\",\"subaccount_id\":25923,\"instrument_name\":\"ETH-20261127-1600-P\",\"direction\":\"sell\"}}}"
+    }
+  ],
+  "planner_input": {
+    "source": {
+      "subaccount_id": 25923,
+      "owner": "0x823b92d6a4b2AED4b15675c7917c9f922ea8ADAD",
+      "risk_universe_id": 1,
+      "received_at": 1794241487000,
+      "usdc_balance": "3000",
+      "committed_usdc": "100",
+      "cycle_budget_usdc": "100",
+      "is_under_liquidation": false
+    },
+    "destination": null,
+    "instruments": {
+      "DRV": {
+        "instrument_name": "DRV-USDC",
+        "instrument_type": "erc20",
+        "base_currency": "DRV",
+        "quote_currency": "USDC",
+        "risk_universe_id": 3,
+        "is_active": true,
+        "tick_size": "0.0001",
+        "amount_step": "1",
+        "minimum_amount": "10",
+        "maximum_amount": "1000000",
+        "base_asset_sub_id": "0"
+      }
+    },
+    "drvTicker": {
+      "a": "0.3",
+      "A": "1000",
+      "t": 1794241487000,
+      "received_at": 1794241487000
+    },
+    "fees": {
+      "DRV": {
+        "max_fee_per_unit": "0.01"
+      }
+    },
+    "keyExpirySec": 1794327887,
+    "transfer": {
+      "max_fee_usdc": "1.5"
+    },
+    "inflight": {
+      "DRV": false
+    }
+  }
+}

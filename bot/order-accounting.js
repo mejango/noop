@@ -9,6 +9,32 @@ const numeric = (value, name) => {
   return Number(value);
 };
 
+function findActiveRuleForAction(action, activeRules) {
+  return activeRules.find(rule => Number(rule.id) === Number(action.rule_id));
+}
+
+// A confirmed intent may survive a crash before submission. Retire only obsolete
+// intents with no execution evidence; expired instruments alone prove nothing
+// about previously submitted orders or fills.
+function retireInactiveUnsubmittedConfirmed(db) {
+  return db.db.transaction(() => {
+    const activeRules = db.getActiveRules();
+    const hasJournal = db.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_submissions'").get();
+    const noEvidence = `execution_result IS NULL AND executed_at IS NULL
+      AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.pending_action_id=pending_actions.id)
+      AND NOT EXISTS (SELECT 1 FROM resting_orders r WHERE r.pending_action_id=pending_actions.id)
+      ${hasJournal ? 'AND NOT EXISTS (SELECT 1 FROM execution_submissions s WHERE s.pending_action_id=pending_actions.id)' : ''}`;
+    const candidates = db.db.prepare(`SELECT id,rule_id FROM pending_actions WHERE status='confirmed' AND ${noEvidence}`).all();
+    const retire = db.db.prepare(`UPDATE pending_actions SET status='cancelled', execution_result='inactive_rule_unsubmitted'
+      WHERE id=? AND status='confirmed' AND ${noEvidence}`);
+    const retired = [];
+    for (const action of candidates) {
+      if (!findActiveRuleForAction(action, activeRules) && retire.run(action.id).changes === 1) retired.push(action.id);
+    }
+    return retired;
+  }).immediate();
+}
+
 function receiptState(record, expected) {
   if (!record?.order_id || (expected.order_id && record.order_id !== expected.order_id)
     || (record.instrument_name && record.instrument_name !== expected.instrument_name)
@@ -63,8 +89,11 @@ function assertNoUnresolvedSubmission(db) {
 // provably never accepted it. A nonce the venue does know still needs manual
 // fill accounting, so that case keeps throwing above.
 async function resolveAbandonedSubmission(db, { venueHasNonce, minAgeMs = 2 * 60 * 1000, now = Date.now() } = {}) {
-  const row = executionStore(db).prepare("SELECT id,nonce,created_at,status,pending_action_id FROM execution_submissions WHERE status='unknown' ORDER BY id LIMIT 1").get();
+  const row = executionStore(db).prepare("SELECT id,nonce,created_at,status,pending_action_id,request_json FROM execution_submissions WHERE status='unknown' ORDER BY id LIMIT 1").get();
   if (!row || now - Date.parse(row.created_at) < minAgeMs) return null;
+  // DRV belongs to a different subaccount. Source-only history absence cannot
+  // release its funds; the accumulation runtime requires affirmative evidence.
+  if (JSON.parse(row.request_json).action === 'buy_drv') return null;
   if (await venueHasNonce(row.nonce, Date.parse(row.created_at))) return null;
   return db.db.transaction(() => {
     const changed = executionStore(db).prepare(`UPDATE execution_submissions SET status='rejected',
@@ -234,4 +263,4 @@ function accountRestingObservation({ db, botData, tracked, live }) {
   return result;
 }
 
-module.exports = { accountInitialReceipt, accountRestingObservation, assertNoUnresolvedSubmission, beginSubmission, noteSubmission, resolveAbandonedSubmission };
+module.exports = { accountInitialReceipt, accountRestingObservation, assertNoUnresolvedSubmission, beginSubmission, noteSubmission, resolveAbandonedSubmission, findActiveRuleForAction, retireInactiveUnsubmittedConfirmed };

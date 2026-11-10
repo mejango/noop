@@ -117,6 +117,9 @@ const { fetchV3OnchainLiquidity } = require('./bot/v3-onchain-liquidity');
 const { refreshDexVolume, volumeSummary } = require('./bot/dex-volume');
 const { invalidDexReason, calculateValidatedLiquidityFlow, dexForAdvisor, LIQUIDITY_DATA_NOTICE } = require('./bot/liquidity-quality');
 const { getDeriveConfig, orderNonce, fetchInstruments } = require('./bot/derive-config');
+const { stringifyApiError, isDefinitiveVenueRejection, isIocNoLiquidityError } = require('./bot/derive-errors');
+const { getSpotAccumulationSettings, readSpotSourceHistory, readSpotPendingActions } = require('./bot/spot-accumulation-config');
+const { encodeTradeData: encodeOrderData, buildActionHashes, TRADE_MODULE_ADDRESS } = require('./bot/derive-signing');
 const DERIVE_CONFIG = getDeriveConfig();
 const { getInstrumentPriceStep, roundToStep, getStepDecimals, normalizePriceToStep, normalizeOrderPriceForVenue, avoidRoundNumberRestingPrice, computePostOnlyRetryPrice } = require('./bot/order-pricing');
 const { normalizeDesiredExitOrder, compareRestingExitOrder, resolveDesiredExitOrderType, getDesiredSellPutRemainingAmount } = require('./bot/resting-exit-plan');
@@ -130,7 +133,7 @@ const {
   validateFinalOrderPolicy,
 } = require('./bot/trade-policy');
 const { TIME_CONSTANTS, analyzeMomentum } = require('./bot/market-momentum');
-const { ethers, AbiCoder } = require('ethers');
+const { ethers } = require('ethers');
 const {
   SELL_CALL_EDGE_REFERENCE_DTE,
   SELL_CALL_EDGE_DTE_EXPONENT,
@@ -157,8 +160,6 @@ const { readAdvisoryMarketSnapshot } = require('./bot/advisory-market-snapshot')
 const { runReviewedPublication } = require('./bot/advisory-publication');
 const { pingAssetMarkets } = require('./bot/asset-market-workers');
 const { boundedSignatureExpirySec, createKeyExpiryLookup } = require('./bot/signature-expiry');
-
-const encoder = new AbiCoder();
 
 // SQLite database (loaded via bot/index.js or standalone)
 const db = global.__noopDb || null;
@@ -212,9 +213,6 @@ const assertGraphQLSuccess = (response) => {
 
 // Common configuration
 const DERIVE_ACCOUNT_ADDRESS = DERIVE_CONFIG.wallet;
-const ACTION_TYPEHASH = '0x4d7a9f27c403ff9c0f19bce61d76d82f9aa29f8d6d4b0c5474607d9770d1af17';
-const TRADE_MODULE_ADDRESS = '0xB8D20c2B7a1Ad2EE33Bc50eF10876eD3035b5e7b';
-const DOMAIN_SEPARATOR = DERIVE_CONFIG.domainSeparator;
 
 // Common trading parameters (single source of truth: bot/config.json)
 const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'config.json'), 'utf-8'));
@@ -2029,6 +2027,42 @@ const createWallet = () => {
   return new ethers.Wallet(loadPrivateKey());
 };
 
+const spotAccumulationSettings = getSpotAccumulationSettings({ env: process.env, derive: DERIVE_CONFIG, sqlite: db?.db });
+let spotAccumulationRuntime = null;
+const getSpotAccumulationRuntime = () => {
+  if (!spotAccumulationSettings.config) return null;
+  if (spotAccumulationRuntime) return spotAccumulationRuntime;
+  const mode = () => process.env.SPOT_ACCUMULATION_MODE || 'off';
+  const canSend = () => ['live', 'sample'].includes(mode()) && Boolean(spotAccumulationSettings.config.maxBatchUsdc)
+    && !DERIVE_CONFIG.maintenance && process.env.DRY_RUN !== '1';
+  const venue = require('./bot/spot-accumulation-venue').createSpotVenue({
+    config: { ...DERIVE_CONFIG, accountAddress: DERIVE_ACCOUNT_ADDRESS,
+      destinationSubaccountId: Number(spotAccumulationSettings.config.destinationAccountId) },
+    wallet: createWallet(), assertCanSend: () => { if (!canSend()) throw new Error('Accumulation sends disabled'); },
+  });
+  spotAccumulationRuntime = require('./bot/spot-accumulation-runtime').createSpotAccumulationRuntime({
+    db, config: spotAccumulationSettings.config, venue, mode, canSend,
+    notify: result => console.log(`DRV accumulation deferred: ${result.reason}`),
+  });
+  return spotAccumulationRuntime;
+};
+const assertSourceAccumulationClear = () => getSpotAccumulationRuntime()?.assertSourceClear();
+
+const advanceSpotAccumulation = async (optionsCycleSucceeded) => {
+  const runtime = getSpotAccumulationRuntime();
+  if (!runtime) return;
+  const sourceHistory = (process.env.SPOT_ACCUMULATION_MODE || 'off') === 'sample'
+    ? undefined : readSpotSourceHistory({ sqlite: db.db, config: spotAccumulationSettings.config });
+  const result = await runtime.advance({
+    cycleBudget: String(botData.putBudgetForCycle),
+    pendingActions: readSpotPendingActions({ sqlite: db.db }),
+    sourceHistory, optionsCycleSucceeded,
+  });
+  console.log(`DRV accumulation: ${JSON.stringify({ status: result.status, reason: result.reason,
+    total_net_usdc: result.credits?.total_net_usdc, operator_funding_usdc: result.operator_funding_usdc,
+    route: result.plan?.routes?.DRV })}`);
+};
+
 // Sign message
 const signMessage = async (wallet, timestamp) => {
   try {
@@ -2064,26 +2098,13 @@ function encodeTradeData(order, assetAddress, optionSubId) {
     "order_subaccount_id": order.subaccount_id, 
     "order_direction": order.direction === 'buy'
   });
-  let encoded_data = encoder.encode( // same as "encoded_data" in public/order_debug
-    ['address', 'uint','int', 'int', 'uint', 'uint', 'bool'],
-    [
-      assetAddress,
-      optionSubId,
-      ethers.parseUnits(order.limit_price.toString(), 18), 
-      ethers.parseUnits(order.amount.toString(), 18), 
-      ethers.parseUnits(order.max_fee.toString(), 18), 
-      order.subaccount_id, 
-      order.direction === 'buy'
-    ]);
-
-    let encoded_data_hashed = ethers.keccak256(Buffer.from(encoded_data.slice(2), 'hex')); 
-    // console.log({ encoded_data_hashed });
-    return encoded_data_hashed; // same as "encoded_data_hashed" in public/order_debug
+  return ethers.keccak256(encodeOrderData(order, assetAddress, optionSubId));
 }
 
 // Place order function
 const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, optionSubId, reduceOnly = true, timeInForce = 'ioc', instrument = null, beforeSend = null) => {
   if (DERIVE_CONFIG.maintenance) throw new Error('Derive maintenance: order placement disabled');
+  assertSourceAccumulationClear();
   let limitPriceString = String(price);
   try {
     const wallet = createWallet();
@@ -2117,32 +2138,12 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
         ...(timeInForce === 'post_only' ? { post_only: true } : {}),
     };
 
-    const tradeModuleData = encodeTradeData(order, assetAddress, optionSubId)
+    const { typedDataHash } = buildActionHashes({ config: DERIVE_CONFIG, owner: DERIVE_ACCOUNT_ADDRESS,
+      action: order, moduleAddress: TRADE_MODULE_ADDRESS,
+      encodedDataHash: encodeTradeData(order, assetAddress, optionSubId) });
+    order.signature = wallet.signingKey.sign(typedDataHash).serialized;
 
-    const actionHash = ethers.keccak256(
-        encoder.encode(
-          ['bytes32', 'uint256', 'uint256', 'address', 'bytes32', 'uint256', 'address', 'address'], 
-          [
-            ACTION_TYPEHASH, 
-            order.subaccount_id, 
-            order.nonce, 
-            TRADE_MODULE_ADDRESS, 
-            tradeModuleData, 
-            order.signature_expiry_sec, 
-            DERIVE_ACCOUNT_ADDRESS, 
-            order.signer
-          ]
-        )
-    );
-
-    order.signature = wallet.signingKey.sign(
-        ethers.keccak256(Buffer.concat([
-          Buffer.from("1901", "hex"), 
-          Buffer.from(DOMAIN_SEPARATOR.slice(2), "hex"), 
-          Buffer.from(actionHash.slice(2), "hex")
-        ]))
-    ).serialized;
-
+    assertSourceAccumulationClear();
     if (beforeSend) beforeSend(order);
     const response = await axios.post(
       API_URL.PLACE_ORDER,
@@ -2201,13 +2202,6 @@ const placeOrder = async (name, amount, direction = 'buy', price, assetAddress, 
 };
 
 // Fetch all open (resting) orders from Derive
-// Malformed-request codes and Derive's rate limiter (HTTP 500, -32000
-// "Rate limit exceeded ... Retry after N ms") both mean the order was never accepted.
-const isDefinitiveVenueRejection = (apiError) => (
-  // 14038: signature outlives the session key; the venue refused it outright.
-  [-32600, -32602, 14038].includes(Number(apiError?.code)) || /rate limit exceeded/i.test(String(apiError?.message || ''))
-);
-
 const venueHasNonce = async (nonce, sinceMs) => {
   const wanted = String(nonce);
   const open = await fetchOpenOrders({ throwOnError: true });
@@ -2288,24 +2282,6 @@ const extractOrderRecords = (payload) => {
   if (payload.result && typeof payload.result === 'object') return extractOrderRecords(payload.result);
   const single = extractOrderRecord(payload);
   return single ? [single] : [];
-};
-
-const stringifyApiError = (err) => {
-  if (!err) return 'unknown error';
-  if (typeof err === 'string') return err;
-  try {
-    return JSON.stringify(err);
-  } catch {
-    return String(err);
-  }
-};
-
-const isIocNoLiquidityError = (err) => {
-  const code = Number(err?.code ?? err?.error?.code);
-  if (code === 11009) return true;
-  const text = stringifyApiError(err).toLowerCase();
-  return text.includes('zero liquidity for market or ioc/fok order')
-    || text.includes('no liquidity within the provided limit price');
 };
 
 const getOrderTrades = (payload) => {
@@ -10396,10 +10372,15 @@ const executeOrder = async (action, instrumentName, amount, price, instruments, 
   const accounting = require('./bot/order-accounting');
   accounting.assertNoUnresolvedSubmission(db);
   let submissionId = null;
-  const beforeSend = (request) => { submissionId = accounting.beginSubmission(db, pendingActionId, { ...request,
-    account_address: DERIVE_ACCOUNT_ADDRESS, action,
-    exit_intent: getSyntheticExitIntent(action, executionContext.triggerData || {}, executionContext.ruleCriteria || {}),
-    approved_limit_price: approvedPrice }); };
+  const beforeSend = (request) => {
+    submissionId = db.db.transaction(() => {
+      assertSourceAccumulationClear();
+      return accounting.beginSubmission(db, pendingActionId, { ...request,
+        account_address: DERIVE_ACCOUNT_ADDRESS, action,
+        exit_intent: getSyntheticExitIntent(action, executionContext.triggerData || {}, executionContext.ruleCriteria || {}),
+        approved_limit_price: approvedPrice });
+    }).immediate();
+  };
   const observeSubmission = (receipt) => {
     const definitive = Boolean(receipt?.zero_fill_rejected || receipt?.rejected_post_only || receipt?.definitive_rejection);
     accounting.noteSubmission(db, submissionId, receipt, definitive);
@@ -10914,6 +10895,9 @@ const prepareExitOrderReplacement = async ({ action, reviewedOrders, desiredOrde
 const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
   if (!db) return;
 
+  const accounting = require('./bot/order-accounting');
+  accounting.retireInactiveUnsubmittedConfirmed(db);
+
   const pending = db.getPendingActions('pending');
   if (pending.length === 0) return;
 
@@ -10926,7 +10910,7 @@ const confirmAndExecutePending = async (instruments, tickerMap, spotPrice) => {
   const prioritizedPending = [...pending].sort((a, b) =>
     Number(isReduceOnlyExitAction(b.action)) - Number(isReduceOnlyExitAction(a.action)));
   for (const action of prioritizedPending.slice(0, 2)) { // Max 2 per tick
-    const activeRule = db.getActiveRules().find(rule => Number(rule.id) === Number(action.rule_id));
+    const activeRule = accounting.findActiveRuleForAction(action, db.getActiveRules());
     if (!activeRule || activeRule.action !== action.action
       || JSON.stringify(parseMaybeJsonObject(activeRule.criteria)) !== JSON.stringify(parseMaybeJsonObject(action.rule_criteria))) {
       db.updatePendingAction(action.id, { status: 'cancelled', confirmation_reasoning: 'Obsolete pending action: rule is inactive or changed', execution_result: 'inactive_rule' });
@@ -12964,7 +12948,8 @@ const generateTradingAdvisory = async ({ trigger = 'scheduled' } = {}) => {
 
 let lastEconomicSyncAt = 0;
 const syncEconomicEvidence = async (now = Date.now()) => {
-  if (!economicStore || now - lastEconomicSyncAt < 15 * 60 * 1000) return;
+  if (!economicStore) return { status: 'unavailable' };
+  if (now - lastEconomicSyncAt < 15 * 60 * 1000) return { status: 'throttled' };
   lastEconomicSyncAt = now;
 
   const lastCovered = economicStore.latestCoverage(SUBACCOUNT_ID, 'trades', ECONOMIC_TRACKING_START);
@@ -12972,7 +12957,7 @@ const syncEconomicEvidence = async (now = Date.now()) => {
   const boundary = DERIVE_CONFIG.historyFrom ? Date.parse(DERIVE_CONFIG.historyFrom) : 0;
   if (DERIVE_CONFIG.version === 'v3' && cursor < boundary) {
     console.log('Accounting evidence incomplete: V2 coverage has not reached cutover; preserving the existing cursor and pending history work');
-    return;
+    return { status: 'incomplete' };
   }
   const from = Math.max(Date.parse(ECONOMIC_TRACKING_START), cursor - 60000, boundary);
   try {
@@ -12992,8 +12977,10 @@ const syncEconomicEvidence = async (now = Date.now()) => {
       },
     });
     console.log(`Accounting evidence: reconciled ${result.count} venue trades (${result.inserted} new)`);
+    return { status: 'synced' };
   } catch (error) {
     console.log(`Accounting evidence incomplete: ${error.message}`);
+    return { status: 'incomplete' };
   }
 };
 
@@ -13011,6 +12998,10 @@ const schedulePausedAdvisory = (spotPrice, now = Date.now()) => {
 };
 
 const runBot = async () => {
+  // Recovery is read-only at the venue and must survive disabling new sends.
+  // Source-only option recovery never handles an ALT submission.
+  try { await getSpotAccumulationRuntime()?.recover(); }
+  catch (error) { console.log(`DRV accumulation recovery deferred: ${error.message}`); }
   if (DERIVE_CONFIG.maintenance && !DERIVE_CONFIG.collectData) {
     console.log('Derive maintenance: trading, account reconciliation and observations paused');
     if (process.connected && typeof process.send === 'function') {
@@ -13398,6 +13389,7 @@ const runBot = async () => {
 
     console.log(`📊 ${Object.keys(tickerMap).length} tickers | ${putCandidates.length} put + ${callCandidates.length} call candidates`);
 
+    let optionsCycleSucceeded = false;
     if (!DERIVE_CONFIG.maintenance) {
     // ── Put budget cycle management ───────────────────────────────
     if (spotPrice) {
@@ -13436,6 +13428,7 @@ const runBot = async () => {
       await manageOpenOrders(tickerMap, positions, instruments, spotPrice);
       await evaluateTradingRules(positions, instruments, tickerMap, spotPrice);
       await confirmAndExecutePending(instruments, tickerMap, spotPrice);
+      optionsCycleSucceeded = true;
     } catch (error) {
       console.error('❌ Trading system error:', error.message);
       sendTelegram(`❌ *Trading system error*: ${error.message}`);
@@ -13443,7 +13436,10 @@ const runBot = async () => {
 
     }
 
-    await syncEconomicEvidence(Date.now());
+    const economicSync = await syncEconomicEvidence(Date.now());
+    try { await advanceSpotAccumulation(optionsCycleSucceeded
+      && (process.env.SPOT_ACCUMULATION_MODE === 'sample' || economicSync?.status !== 'incomplete')); }
+    catch (error) { console.log(`DRV accumulation deferred: ${error.message}`); }
 
     // Persist the observation universe, independently of entry eligibility.
     if (db) {

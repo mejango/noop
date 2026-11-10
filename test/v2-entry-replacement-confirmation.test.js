@@ -12,6 +12,7 @@ const { loadProduction, declaration } = require('./helpers/load-production');
 const tradePolicy = require('../bot/trade-policy');
 const pricing = require('../bot/order-pricing');
 const entryPlan = require('../bot/resting-entry-plan');
+const accounting = require('../bot/order-accounting');
 const source = fs.readFileSync(path.join(__dirname, '..', 'script.js'), 'utf8');
 const now = Date.parse('2030-12-01T20:00:00Z');
 class Clock extends Date { constructor(...args) { super(...(args.length ? args : [now])); } static now() { return now; } }
@@ -58,6 +59,8 @@ async function confirmEntry(overrides = {}) {
   const ctx = {
     ...tradePolicy, ...pricing, ...helpers, Date: Clock, Math, Number, JSON,
     require(name) {
+      // Confirmed-intent retirement has real SQLite coverage in execution-audit.test.js.
+      if (name === './bot/order-accounting') return { ...accounting, retireInactiveUnsubmittedConfirmed: () => [] };
       if (name === './bot/resting-entry-plan') return { ...entryPlan,
         buildRestingEntryPlan: args => entryPlan.buildRestingEntryPlan({ ...args, nowMs: now }) };
       return createRequire(path.join(__dirname, '..', 'script.js'))(name);
