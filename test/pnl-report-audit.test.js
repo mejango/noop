@@ -80,7 +80,7 @@ function routeFixture({
   orders = [],
   spots = [],
   events = [],
-  exposureHistory,
+  protectedEth = 0,
   reporting = { config: null, rows: [], baseline: null, latest: null,
     coverage: { configured: false, historyPeriodMs: 900000, freshnessMs: 600000, latestStatus: 'unavailable' } },
   snapshots = [],
@@ -101,7 +101,6 @@ function routeFixture({
       events: events.filter(row => row.timestamp >= start && row.timestamp <= end),
       coverage: { trades: false, settlements: false, transfers: false },
       available: true,
-      exposureHistory,
     }),
     getSpotPricesAtOrBefore: (timestamps, maxAgeMs) => {
       spotQueries.push({ timestamps, maxAgeMs });
@@ -121,6 +120,7 @@ function routeFixture({
     '@/lib/expiry-settlement': settlement,
     '@/lib/response-cache': { cachedJsonRoute: (_request, _key, generate) => generate() },
     '@/lib/dashboard-ranges': { dashboardRangeMs: () => 30 * 24 * 60 * 60 * 1000 },
+    '@/lib/strategy-config': { BOT_CONFIG: { PUT_PROTECTED_ETH: protectedEth }, offDeriveEth: require('../bot/put-budget').offDeriveEth },
   }, env);
   const url = new URL('https://dashboard.test/api/pnl-report');
   url.searchParams.set('from', from);
@@ -236,11 +236,11 @@ test('deposit and withdrawal balance changes are not reported as performance', a
   }
 });
 
-test('current external ETH insurance settings cannot rewrite historical persisted balances', async () => {
+test('the protected ETH setting never rewrites Derive account values', async () => {
   const report = await routeFixture({
     baseline: snapshot('2026-02-28T23:59:00.000Z', 10_000, 2000),
     snapshots: [snapshot('2026-03-07T12:00:00.000Z', 10_000, 2500)],
-    env: { PUT_INSURED_EXTERNAL_ETH: '100' },
+    protectedEth: 100,
   }).report();
   assert.equal(report.summary.openingValue, 10_000);
   assert.equal(report.summary.closingValue, 10_000);
@@ -248,24 +248,24 @@ test('current external ETH insurance settings cannot rewrite historical persiste
   assert.deepEqual(report.series.portfolio.map(row => row.portfolioValue), [10_000, 10_000]);
   assert.equal(report.series.buckets[0].endPortfolioValue, 10_000);
   assert.equal(report.meta.valuationScope, 'derive_subaccount');
-  assert.equal(report.meta.insuredExternalEth, 0);
-  assert.match(report.meta.externalHoldingsUnavailableReason, /current insurance setting is not applied to historical balances/i);
+  assert.equal(report.meta.protectedEth, 100);
+  assert.match(report.meta.externalHoldingsUnavailableReason, /restated for all history as the protected ETH amount minus Derive ETH/i);
 });
 
-test('full portfolio adds recorded off-exchange ETH at each snapshot spot, backfilling before the first record', async () => {
+test('full portfolio tops Derive ETH up to the protected amount at every point, including history', async () => {
+  const withEth = (row, eth) => ({ ...row, eth_balance: eth });
   const report = await routeFixture({
-    baseline: snapshot('2026-02-28T23:59:00.000Z', 10_000, 2000),
-    snapshots: [snapshot('2026-03-02T12:00:00.000Z', 10_000, 2000), snapshot('2026-03-07T12:00:00.000Z', 10_000, 2500)],
-    exposureHistory: [
-      { effective_at: '2026-03-05T00:00:00.000Z', external_eth: '4', source: 'runtime-config' },
-      { effective_at: '2026-03-06T00:00:00.000Z', external_eth: '5', source: 'runtime-config' },
+    baseline: withEth(snapshot('2026-02-28T23:59:00.000Z', 10_000, 2000), 2),
+    snapshots: [
+      withEth(snapshot('2026-03-02T12:00:00.000Z', 10_000, 2000), 3),
+      withEth(snapshot('2026-03-07T12:00:00.000Z', 10_000, 2500), 7),
     ],
-    env: { PUT_INSURED_EXTERNAL_ETH: '100' },
+    protectedEth: 5,
   }).report();
   assert.deepEqual(report.series.portfolio.map(row => row.portfolioValue), [10_000, 10_000, 10_000]);
-  assert.deepEqual(report.series.portfolio.map(row => row.fullPortfolioValue), [18_000, 18_000, 22_500]);
-  assert.equal(report.meta.insuredExternalEth, 5);
-  assert.equal(report.meta.externalEthRecordedFrom, '2026-03-05T00:00:00.000Z');
+  // (5 - 2) x 2000, (5 - 3) x 2000, and no off-Derive ETH once Derive holds more than 5.
+  assert.deepEqual(report.series.portfolio.map(row => row.fullPortfolioValue), [16_000, 14_000, 10_000]);
+  assert.equal(report.meta.protectedEth, 5);
 });
 
 test('recorded settlement cashflow replaces estimates even with unknown filled amount', async (t) => {
@@ -565,7 +565,7 @@ test('paired reporting includes ALT assets and external ETH once while preservin
   const from = EXPIRY, to = isoAt(900000);
   const source = { from, to, baseline: snapshot(isoAt(-60000), 100), snapshots: [snapshot(to, 95)],
     orders: [order({ timestamp: isoAt(1000), action: 'sell_put', instrument_name: 'ETH-20260320-1800-P', total_value: 20 })],
-    spots: [quote(0, 2000), quote(900000, 2100)], exposureHistory: [{ effective_at: from, external_eth: '4' }] };
+    spots: [quote(0, 2000), quote(900000, 2100)], protectedEth: 4 };
   const legacy = await routeFixture(source).report();
   // A five dollar internal transfer cancels in combined NAV; the option sale
   // remains the same existing cashflow regardless of reporting holdings.
@@ -645,19 +645,22 @@ test('aligned historical closes take precedence at ties and zero or negative NAV
 test('full combined value needs a bounded historical ETH mark and never looks ahead', async () => {
   const reporting = reportingFixture([pairedPoint(EXPIRY, 100, 10), pairedPoint(isoAt(900000), 100, 10)]);
   const report = await routeFixture({ from: EXPIRY, to: isoAt(900000), reporting,
-    exposureHistory: [{ effective_at: EXPIRY, external_eth: '4' }], spots: [quote(1, 2000)],
+    baseline: snapshot(isoAt(-60000), 100), protectedEth: 4, spots: [quote(1, 2000)],
   }).report();
   assert.deepEqual(report.series.combinedPortfolio.map(row => row.portfolioValue), [110, 110]);
   assert.deepEqual(report.series.combinedPortfolio.map(row => row.fullPortfolioValue), [null, 8110]);
 });
 
-test('unknown external holdings do not produce a full combined total, while recorded zero holdings do', async () => {
-  const base = { from: EXPIRY, to: isoAt(900000), reporting: reportingFixture([pairedPoint(EXPIRY, 100, 10)]) };
+test('a full combined total needs a Derive ETH observation at or before the point, never a later one', async () => {
+  const base = { from: EXPIRY, to: isoAt(900000), protectedEth: 5, reporting: reportingFixture([pairedPoint(EXPIRY, 100, 10)]) };
   const unknown = await routeFixture(base).report();
   assert.equal(unknown.series.combinedPortfolio[0].portfolioValue, 110);
   assert.equal(unknown.series.combinedPortfolio[0].fullPortfolioValue, null);
-  const zero = await routeFixture({ ...base, exposureHistory: [{ effective_at: EXPIRY, external_eth: '0' }] }).report();
-  assert.equal(zero.series.combinedPortfolio[0].fullPortfolioValue, 110);
+  const later = await routeFixture({ ...base, snapshots: [{ ...snapshot(isoAt(60000), 100), eth_balance: 5 }] }).report();
+  assert.equal(later.series.combinedPortfolio[0].fullPortfolioValue, null);
+  // Derive already holds the protected 5 ETH, so nothing is added and no spot is needed.
+  const covered = await routeFixture({ ...base, baseline: { ...snapshot(isoAt(-60000), 100), eth_balance: 5 } }).report();
+  assert.equal(covered.series.combinedPortfolio[0].fullPortfolioValue, 110);
 });
 
 test('an expired closing observation inserts a gap at expiry so earlier hover points cannot carry it forward', async () => {

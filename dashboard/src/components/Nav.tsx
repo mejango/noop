@@ -5,7 +5,6 @@ import { usePolling, useLiveTimeAgo, useCountdown } from '@/lib/hooks';
 import { formatUSD } from '@/lib/format';
 import { ASSETS } from '@/lib/market-assets';
 
-const PUT_ANNUAL_RATE = 0.0333;
 const CYCLE_DAYS = 15;
 
 interface Budget {
@@ -21,7 +20,6 @@ interface NavStats {
   last_price_time: string;
   lyra_spot: number | null;
   margin_usage_pct: number | null;
-  put_insured_external_eth?: number;
   budget: Budget;
 }
 
@@ -35,17 +33,8 @@ interface AccountData {
 }
 
 const emptyBudget: Budget = { putTotalBudget: 0, putSpent: 0, putRemaining: 0, putDaysLeft: 0, cycleDays: CYCLE_DAYS };
-const emptyStats: NavStats = { last_price: 0, last_price_time: '', lyra_spot: null, margin_usage_pct: null, put_insured_external_eth: 0, budget: emptyBudget };
+const emptyStats: NavStats = { last_price: 0, last_price_time: '', lyra_spot: null, margin_usage_pct: null, budget: emptyBudget };
 const emptyAccount: AccountData = { collaterals: [] };
-
-function getPutBudgetPortfolioValue(
-  ethAmount: number | undefined,
-  usdcAmount: number | undefined,
-  spotPrice: number,
-  externalEthAmount: number | undefined,
-) {
-  return Number(usdcAmount || 0) + ((Number(ethAmount || 0) + Number(externalEthAmount || 0)) * spotPrice);
-}
 
 function EthStats() {
   const STATS_INTERVAL = 60_000;
@@ -58,17 +47,8 @@ function EthStats() {
   const usdc = account.collaterals.find(c => c.asset_name === 'USDC');
   const eth = account.collaterals.find(c => c.asset_name === 'ETH');
 
-  // Use API budget, fallback to client-side computation if DB hasn't set it yet
-  let putTotalBudget = b.putTotalBudget;
-  let putRemaining = b.putRemaining;
-  if (putTotalBudget === 0 && stats.last_price > 0) {
-    const portfolioValue = getPutBudgetPortfolioValue(eth?.amount, usdc?.amount, stats.last_price, stats.put_insured_external_eth);
-    if (portfolioValue > 0) {
-      const cyclesPerYear = 365 / (b.cycleDays || CYCLE_DAYS);
-      putTotalBudget = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
-      putRemaining = Math.max(0, putTotalBudget - (b.putSpent || 0));
-    }
-  }
+  // The API owns the budget, including its spot-based fallback (bot/put-budget.js).
+  const { putTotalBudget, putRemaining } = b;
 
   return (
     <div className="flex items-center gap-2 md:gap-4 text-xs md:text-sm flex-wrap justify-end">

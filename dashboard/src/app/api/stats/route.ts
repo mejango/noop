@@ -4,7 +4,6 @@ import { getSubaccount } from '@/lib/lyra';
 import { cachedJsonRoute } from '@/lib/response-cache';
 
 export const dynamic = 'force-dynamic';
-const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
 
 async function getStatsResponse() {
   try {
@@ -28,7 +27,6 @@ async function getStatsResponse() {
       margin_usage_pct,
       account_available,
       account_error,
-      put_insured_external_eth: PUT_INSURED_EXTERNAL_ETH,
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : 'Unknown error';

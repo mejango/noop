@@ -40,6 +40,7 @@ function loadProduction(names, { bindings = {}, source = SCRIPT_SOURCE } = {}) {
     ...require('../../bot/funding-rates'),
     ...require('../../bot/liquidity-quality'),
     ...require('../../bot/advisory-quotes'),
+    ...require('../../bot/put-budget'),
     ...Object.assign({}, ...policyModules.filter(file => fs.existsSync(file)).map(file => require(file))),
     botData: {},
     db: null,

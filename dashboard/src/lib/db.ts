@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { HISTORY_SQL } from '../../../bot/market-evidence';
 import { getDeriveConfig } from '../../../bot/derive-config';
 import path from 'path';
-import { BOT_CONFIG } from './strategy-config';
+import { BOT_CONFIG, putWindowBudgetUsd } from './strategy-config';
 import { getEconomicHistory as readEconomicHistory } from '../../../bot/economic-events';
 import { readReportingPortfolio } from '../../../bot/portfolio-reporting';
 import { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } from '../../../bot/open-interest';
@@ -15,9 +15,6 @@ const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'noop.db');
 
 // Bot constants (single source of truth: bot/config.json)
-// Budget is now dynamic (calculated per cycle in bot_state), not static config constants
-const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
-const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
 const PERIOD_MS = BOT_CONFIG.PERIOD_DAYS * 1000 * 60 * 60 * 24;
 // Dashboard image is built independently from the bot image; the production
 // parity test keeps these values aligned with bot/call-score.js.
@@ -46,15 +43,6 @@ function optionEntryPredicate(optionType: 'P' | 'C', alias = '') {
     AND ${optionDteSql(alias)} BETWEEN ${isPut ? BUY_PUT_EDGE_MIN_DTE : SELL_CALL_EDGE_MIN_DTE} AND ${isPut ? BUY_PUT_EDGE_MAX_DTE : SELL_CALL_EDGE_MAX_DTE}
     AND ${column}${isPut ? 'ask_price' : 'bid_price'} > 0
     AND ${column}${isPut ? 'ask_delta_value' : 'bid_delta_value'} > 0`;
-}
-
-function getPutBudgetPortfolioValue(snapshot: {
-  spot_price: number;
-  usdc_balance: number;
-  eth_balance: number;
-} | undefined) {
-  if (!snapshot) return 0;
-  return Number(snapshot.usdc_balance || 0) + ((Number(snapshot.eth_balance || 0) + PUT_INSURED_EXTERNAL_ETH) * Number(snapshot.spot_price || 0));
 }
 
 let db: Database.Database | null = null;
@@ -654,8 +642,6 @@ export type EconomicHistory = {
   events: EconomicEvent[];
   coverage: { trades: boolean; settlements: boolean; transfers: boolean };
   available: boolean;
-  exposureHistory: { effective_at: string; external_eth: string; source: string }[];
-  exposureKnown: boolean;
 };
 
 /** Shared, read-only ledger reader for the V2 subaccount. */
@@ -1406,20 +1392,12 @@ export function getBotBudget() {
 
     const now = Date.now();
 
-    // Use stored budget, or compute from portfolio value if not yet set
+    // Use stored budget, or compute it from the latest spot if not yet set
     let cycleBudget = row.put_budget_for_cycle || 0;
     if (cycleBudget === 0) {
       try {
-        const snap = getStmts().getLatestPortfolioSnapshot.get() as {
-          spot_price: number;
-          usdc_balance: number;
-          eth_balance: number;
-        } | undefined;
-        const insuredPortfolioValue = getPutBudgetPortfolioValue(snap);
-        if (insuredPortfolioValue > 0) {
-          const cyclesPerYear = 365 / (PERIOD_MS / (1000 * 60 * 60 * 24));
-          cycleBudget = insuredPortfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
-        }
+        const snap = getStmts().getLatestPortfolioSnapshot.get() as { spot_price: number } | undefined;
+        cycleBudget = putWindowBudgetUsd(BOT_CONFIG, snap?.spot_price);
       } catch { /* ok */ }
     }
     const putTotalBudget = cycleBudget + (row.put_unspent_buy_limit || 0);

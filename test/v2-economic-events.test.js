@@ -37,13 +37,6 @@ test('coverage must span the whole interval without gaps',()=>{
  assert.equal(coversRange([{complete:1,from_timestamp:from,to_timestamp:'2026-09-11T10:00:00.000Z'},{complete:1,from_timestamp:'2026-09-11T10:01:00.000Z',to_timestamp:to}],from,to),false);
  assert.equal(coversRange([{complete:1,from_timestamp:'2026-09-11T09:00:00.000Z',to_timestamp:'2026-09-11T10:00:00.000Z'},{complete:1,from_timestamp:'2026-09-11T10:00:00.000Z',to_timestamp:'2026-09-11T11:00:00.000Z'}],from,to),true);
 });
-test('external exposure changes are prospective and never rewrite old portfolio history',t=>{
- const {db,store}=harness(t);store.recordExposure(25923,'20',from);store.recordExposure(25923,'20','2026-09-11T09:30:00Z');store.recordExposure(25923,'30',to);
- assert.equal(db.prepare('select count(*) n from exposure_history').get().n,2);
- assert.equal(getEconomicHistory(db,25923,'2026-09-10',to).exposureKnown,false);
- assert.equal(getEconomicHistory(db,25923,from,to).exposureKnown,true);
-});
-
 test('repeated last pages and conflicting duplicate trades never establish coverage',async t=>{
  const {db,store}=harness(t);
  await assert.rejects(syncV2Trades({store,accountId:25923,from,to,pageSize:1,post:async()=>({subaccount_id:25923,trades:[trade()],num_pages:2})}),/repeated/);
@@ -53,11 +46,6 @@ test('repeated last pages and conflicting duplicate trades never establish cover
 test('failed or transfer records cannot be booked as executed option cashflow',()=>{
  assert.throws(()=>normalizeV2Trade({...trade(),is_transfer:true},25923),/Transfer/);
  assert.throws(()=>normalizeV2Trade({...trade(),tx_status:'reverted'},25923),/unresolved/);
-});
-test('external exposure is scoped to the operating account',t=>{
- const {db,store}=harness(t);store.recordExposure(25923,'20',from);
- assert.deepEqual(getEconomicHistory(db,999,from,to).exposureHistory,[]);
- assert.equal(getEconomicHistory(db,999,from,to).exposureKnown,false);
 });
 
 test('unsafe accounts are rejected before requests or empty coverage writes',async t=>{

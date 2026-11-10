@@ -31,7 +31,7 @@ function visit(node) {
         ts.forEachChild(child, dependency);
       }
       for (const span of node.templateSpans) dependency(span.expression);
-      const bindings = loadProduction([...names], { bindings: { PUT_INSURED_EXTERNAL_ETH: 20, path: undefined } });
+      const bindings = loadProduction([...names], { bindings: { path: undefined } });
       assert.equal(systems.has(match[0]), false, `Duplicate system template: ${match[0]}`);
       systems.set(match[0], vm.compileFunction(`return (${node.getText(source)});`, Object.keys(bindings))(...Object.values(bindings)));
     }
@@ -78,7 +78,7 @@ test('confirmation systems retain real call-margin and put-exit policy while sta
 test('Taleb verifier reviews against the same account model, call-margin policy and rule contract as the primary advisor', () => {
   const policies = loadProduction(
     ['getAdvisoryAccountModelPrompt', 'getAdvisoryRuleContractPrompt', 'getCallMarginDisciplinePrompt'],
-    { bindings: { PUT_INSURED_EXTERNAL_ETH: 20, path: undefined } },
+    { bindings: { path: undefined } },
   );
   for (const name of ['primary advisory', 'advisory verifier']) {
     for (const [policyName, policy] of Object.entries(policies)) {

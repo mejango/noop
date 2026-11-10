@@ -68,7 +68,7 @@
  * Sizing & Risk:
  * --------------
  *   • ETH-collateralized: puts bought on leverage, long puts offset ETH in margin engine
- *   • Put buying has arithmetic budget discipline (3.33% of insured base/yr in 15d cycles)
+ *   • Put buying has arithmetic budget discipline (0.75% of 5 protected ETH per 15d cycle, bot/config.json)
  *   • Margin state (initial/maintenance/liquidation) fetched from Derive's get_subaccount API
  *   • Sizing capped by both margin health AND put budget discipline; amount quantized to venue step
  *
@@ -217,11 +217,10 @@ const DERIVE_ACCOUNT_ADDRESS = DERIVE_CONFIG.wallet;
 // Common trading parameters (single source of truth: bot/config.json)
 const BOT_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'bot', 'config.json'), 'utf-8'));
 const STRATEGY_FACTS = require('./bot/strategy-facts.json');
-// Arithmetic discipline: spend 3.33% of insured base per year on puts,
-// allocated in PERIOD_DAYS windows. Budget recalculated at each cycle start.
-// Formula: insuredBaseValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
-const PUT_ANNUAL_RATE = BOT_CONFIG.PUT_ANNUAL_RATE || 0.0333;
-const PUT_INSURED_EXTERNAL_ETH = Math.max(0, Number(process.env.PUT_INSURED_EXTERNAL_ETH || 0));
+// Put budget discipline: each PERIOD_DAYS window buys PUT_WINDOW_RATE of the
+// fixed PUT_PROTECTED_ETH at spot. The rule lives in bot/put-budget.js.
+const { assertPutBudgetConfig, putWindowBudgetUsd, protectedValueUsd, describePutBudget } = require('./bot/put-budget');
+assertPutBudgetConfig(BOT_CONFIG);
 // Call exposure discipline: target 45% displayed margin utilization. The
 // buffer is last-mile safety for estimate drift, not planned entry headroom.
 const CALL_EXPOSURE_CAP_PCT = BOT_CONFIG.CALL_EXPOSURE_CAP_PCT || 0.45;
@@ -466,9 +465,6 @@ let botData = {
     lastSpotPrice: null,
     lastSpotPriceTimestamp: null,
 
-    // Account balance (refreshed each tick for call exposure cap)
-    ethBalance: 0,
-
     // Put budget discipline (arithmetic cost commitment per cycle)
     putCycleStart: null,
     putBudgetForCycle: 0,      // USD budget for current cycle (set dynamically at cycle start)
@@ -534,35 +530,10 @@ const persistCycleState = () => {
   catch (e) { console.error('Failed to persist cycle state:', e.message); }
 };
 
-const getPutBudgetPortfolioValue = (ethBalance, usdcBalance, spotPrice) => {
-  const insuredEth = Number(ethBalance || 0) + PUT_INSURED_EXTERNAL_ETH;
-  const ethValue = insuredEth * Number(spotPrice || 0);
-  const usdcValue = Number(usdcBalance || 0);
-  return usdcValue + ethValue;
-};
-
-const getFallbackPutBudgetPortfolioValue = (spotPrice) => {
-  if (!db?.getLatestPortfolioSnapshot) return { value: 0, source: null, error: null };
-  try {
-    const snap = db.getLatestPortfolioSnapshot();
-    if (!snap) return { value: 0, source: null, error: null };
-    const value = getPutBudgetPortfolioValue(
-      Number(snap.eth_balance || 0),
-      Number(snap.usdc_balance || 0),
-      Number(spotPrice || snap.spot_price || 0)
-    );
-    return value > 0
-      ? { value, source: 'latest_portfolio_snapshot', error: null }
-      : { value: 0, source: null, error: 'latest portfolio snapshot has no positive insured value' };
-  } catch (e) {
-    return { value: 0, source: null, error: e.message };
-  }
-};
-
 // Recalculate put budget at cycle boundaries.
-// Budget = insuredBaseValue * PUT_ANNUAL_RATE / (365 / PERIOD_DAYS)
+// Budget = PUT_WINDOW_RATE * PUT_PROTECTED_ETH * spot (bot/put-budget.js)
 // Called each tick — resets cycle when PERIOD elapses.
-const maybeResetPutCycle = (portfolioValue, options = {}) => {
+const maybeResetPutCycle = (spotPrice) => {
   const now = Date.now();
   const cycleExpired = botData.putCycleStart && (now - botData.putCycleStart) >= PERIOD;
   const noCycle = !botData.putCycleStart;
@@ -574,36 +545,26 @@ const maybeResetPutCycle = (portfolioValue, options = {}) => {
       botData.putUnspentBuyLimit = prevRemaining;
     }
 
-    const cyclesPerYear = 365 / BOT_CONFIG.PERIOD_DAYS;
-    const numericPortfolioValue = Number(portfolioValue) || 0;
-    const canUsePortfolioValue = numericPortfolioValue > 0;
+    const spotBudget = putWindowBudgetUsd(BOT_CONFIG, spotPrice);
     const canReusePreviousBudget = cycleExpired && Number(botData.putBudgetForCycle) > 0;
-    if (!canUsePortfolioValue && !canReusePreviousBudget) {
-      const skipReason = options.skipReason ? ` (${options.skipReason})` : '';
-      console.log(`📋 Put cycle ${noCycle ? 'start' : 'reset'} skipped: no positive insured portfolio value available${skipReason}`);
+    if (!(spotBudget > 0) && !canReusePreviousBudget) {
+      console.log(`📋 Put cycle ${noCycle ? 'start' : 'reset'} skipped: no positive spot price available`);
       return false;
     }
 
-    // Calculate new cycle budget from current portfolio value, or reuse the previous
-    // budget if live account reads are temporarily unavailable. Avoid leaving cycles
-    // stuck at "ended" because one collateral fetch returned empty.
-    const newBudget = canUsePortfolioValue
-      ? numericPortfolioValue * PUT_ANNUAL_RATE / cyclesPerYear
-      : Number(botData.putBudgetForCycle);
+    // Budget from spot, or reuse the previous budget if spot is temporarily
+    // unavailable, so cycles never stay stuck at "ended".
+    const newBudget = spotBudget > 0 ? spotBudget : Number(botData.putBudgetForCycle);
 
     botData.putCycleStart = now;
     botData.putBudgetForCycle = newBudget;
     botData.putNetBought = 0;
     persistCycleState();
 
-    const insuredBasisNote = PUT_INSURED_EXTERNAL_ETH > 0
-      ? ` | +${PUT_INSURED_EXTERNAL_ETH.toFixed(4)} external ETH insured`
-      : '';
-    const basisText = canUsePortfolioValue
-      ? `$${numericPortfolioValue.toFixed(0)} insured base`
+    const basisText = spotBudget > 0
+      ? `${(BOT_CONFIG.PUT_WINDOW_RATE * 100).toFixed(2)}% of ${BOT_CONFIG.PUT_PROTECTED_ETH} protected ETH = $${protectedValueUsd(BOT_CONFIG, spotPrice).toFixed(0)}`
       : `previous $${newBudget.toFixed(2)} cycle budget fallback`;
-    const sourceText = options.source ? ` via ${options.source}` : '';
-    console.log(`📋 Put cycle ${noCycle ? 'started' : 'reset'}: $${newBudget.toFixed(2)} budget (${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of ${basisText} / ${cyclesPerYear.toFixed(1)} cycles/yr)${botData.putUnspentBuyLimit > 0 ? ` + $${botData.putUnspentBuyLimit.toFixed(2)} rollover` : ''}${insuredBasisNote}${sourceText}`);
+    console.log(`📋 Put cycle ${noCycle ? 'started' : 'reset'}: $${newBudget.toFixed(2)} budget (${basisText})${botData.putUnspentBuyLimit > 0 ? ` + $${botData.putUnspentBuyLimit.toFixed(2)} rollover` : ''}`);
     return true;
   }
   return false;
@@ -10071,7 +10032,7 @@ The account is ETH-collateralized. Puts are bought on leverage against ETH. Deri
 
 There are TWO constraints on put buying:
 1. **Margin**: initial_margin must stay positive. maintenance_margin at zero = liquidation.
-2. **Budget discipline**: We commit to spending 3.33% of insured base per year on puts, allocated in 15-day budget windows. The insured base is Derive USDC plus total insured ETH marked at spot, where off-platform insured ETH is fixed at ${PUT_INSURED_EXTERNAL_ETH.toFixed(4)}. Spend predictably across the cycle. Don't front-load. Don't impulse buy. If nothing is well-priced, let the budget roll over.`;
+2. **Budget discipline**: ${describePutBudget(BOT_CONFIG)} Spend predictably across the cycle. Don't front-load. Don't impulse buy. If nothing is well-priced, let the budget roll over.`;
 
 const getAdvisoryRuleContractPrompt = () => `CRITICAL: criteria must be a JSON OBJECT (not a string). Entry criteria uses: option_type, delta_range, dte_range, max_strike_pct, min_score, target_score, value_signal, min_bid, market_conditions. Do not emit min_edge_score. Exit criteria uses typed intents plus conditions. sell_put criteria must include put_exit_intent. buyback_call criteria must include buyback_intent.
 
@@ -11957,8 +11918,6 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
   const putBudgetRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
   const effectiveCallCapPct = getEffectiveCallExposureCapPct(positions, spotPrice);
   const breakoutAddWindow = effectiveCallCapPct > CALL_EXPOSURE_CAP_PCT;
-  const insuredPortfolioBaseUsd = getPutBudgetPortfolioValue(ethBalance, usdcBalance, spotPrice);
-
   const accountHealth = {
     margin_as_of: new Date().toISOString(),
     crash_survival_assessment: 'not_performed',
@@ -11993,15 +11952,15 @@ const buildTradingAdvisoryDraft = async (snapshot, advisoryId) => {
         : 0,
     } : null,
     putBudgetDiscipline: {
-      annualRate: PUT_ANNUAL_RATE,
+      windowRate: BOT_CONFIG.PUT_WINDOW_RATE,
+      protectedEth: BOT_CONFIG.PUT_PROTECTED_ETH,
+      protectedValueUsd: +protectedValueUsd(BOT_CONFIG, spotPrice).toFixed(2),
       budgetThisCycle: botData.putBudgetForCycle,
       spent: botData.putNetBought,
       remaining: putBudgetRemaining,
       rollover: botData.putUnspentBuyLimit,
       cycleDays: BOT_CONFIG.PERIOD_DAYS,
-      insuredPortfolioBaseUsd: +insuredPortfolioBaseUsd.toFixed(2),
-      insuredExternalEth: PUT_INSURED_EXTERNAL_ETH,
-      note: `Arithmetic commitment: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of insured base per year, allocated in ${BOT_CONFIG.PERIOD_DAYS}-day windows. Budget base = Derive USDC plus total insured ETH marked at spot, where external insured ETH is fixed at ${PUT_INSURED_EXTERNAL_ETH.toFixed(4)}. Funded via leverage on ETH collateral. Spend predictably across the cycle — not all at once. Selling puts realizes cash but does not replenish this cycle's put-buying budget.`,
+      note: `Arithmetic commitment: ${describePutBudget(BOT_CONFIG)} Spend predictably across the cycle — not all at once. Selling puts realizes cash but does not replenish this cycle's put-buying budget.`,
     },
     note: 'These fields describe current margin headroom; they do not establish severe-crash survival or a modeled liquidation path. Account is ETH-collateralized on Derive. buying_power = available initial margin for new trades. margin_usage_pct mirrors the Derive display metric. Projected trade sizing still uses the bot internal margin estimate. Sizing must respect buying power, put budget discipline, and the active call margin-utilization cap, which can widen during an upside breakout when the bot already has short calls on.',
   };
@@ -12974,7 +12933,6 @@ const syncEconomicEvidence = async (now = Date.now()) => {
   }
   const from = Math.max(Date.parse(ECONOMIC_TRACKING_START), cursor - 60000, boundary);
   try {
-    economicStore.recordExposure(SUBACCOUNT_ID, String(PUT_INSURED_EXTERNAL_ETH), now);
     const result = await syncV2TradesProgressively({
       store: economicStore, accountId: SUBACCOUNT_ID, from, to: now, version: DERIVE_CONFIG.version,
       post: async (body) => {
@@ -13406,34 +13364,7 @@ const runBot = async () => {
     if (!DERIVE_CONFIG.maintenance) {
     // ── Put budget cycle management ───────────────────────────────
     if (spotPrice) {
-      try {
-        let insuredPortfolioValue = 0;
-        let budgetSource = 'live_collateral';
-        let skipReason = null;
-
-        try {
-          const balances = await fetchCollaterals();
-          const ethBal = Number(balances.find(b => b.asset_name === 'ETH')?.amount || 0);
-          const usdcBal = Number(balances.find(b => b.asset_name === 'USDC')?.amount || 0);
-          botData.ethBalance = ethBal;
-          insuredPortfolioValue = getPutBudgetPortfolioValue(ethBal, usdcBal, spotPrice);
-          if (!(insuredPortfolioValue > 0)) skipReason = 'live collateral returned no positive insured value';
-        } catch (e) {
-          skipReason = `live collateral fetch failed: ${e.message}`;
-        }
-
-        if (!(insuredPortfolioValue > 0)) {
-          const fallback = getFallbackPutBudgetPortfolioValue(spotPrice);
-          if (fallback.value > 0) {
-            insuredPortfolioValue = fallback.value;
-            budgetSource = fallback.source;
-          } else if (fallback.error) {
-            skipReason = skipReason ? `${skipReason}; ${fallback.error}` : fallback.error;
-          }
-        }
-
-        maybeResetPutCycle(insuredPortfolioValue, { source: budgetSource, skipReason });
-      } catch (e) { console.log('📋 Cycle check failed:', e.message); }
+      try { maybeResetPutCycle(spotPrice); } catch (e) { console.log('📋 Cycle check failed:', e.message); }
     }
 
     // ── LLM-Driven Trading ─────────────────────────────────────────
@@ -13847,7 +13778,7 @@ console.log('='.repeat(70));
 console.log(`🥱 NO OPERATION`);
 console.log(' ');
 console.log("Welcome. Let's begin...");
-console.log(`ETH-collateralized. Put budget: ${(PUT_ANNUAL_RATE * 100).toFixed(2)}% of insured base/yr in ${BOT_CONFIG.PERIOD_DAYS}d cycles${PUT_INSURED_EXTERNAL_ETH > 0 ? ` (+${PUT_INSURED_EXTERNAL_ETH.toFixed(4)} external ETH insured)` : ''}. Calls sized by margin.`);
+console.log(`ETH-collateralized. Put budget: ${describePutBudget(BOT_CONFIG)} Calls sized by margin.`);
 console.log('='.repeat(70));
 console.log(' ');
 loadData();

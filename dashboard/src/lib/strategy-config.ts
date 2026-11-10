@@ -1,8 +1,12 @@
 import fs from 'fs';
 import path from 'path';
+import { describePutBudget } from '../../../bot/put-budget';
+
+export { putWindowBudgetUsd, offDeriveEth } from '../../../bot/put-budget';
 
 export type StrategyBudgetConfig = {
-  PUT_ANNUAL_RATE: number;
+  PUT_PROTECTED_ETH: number;
+  PUT_WINDOW_RATE: number;
   PERIOD_DAYS: number;
   CALL_EXPOSURE_CAP_PCT: number;
   CALL_EXPOSURE_BUFFER_PCT: number;
@@ -29,7 +33,7 @@ export const STRATEGY_FACTS: StrategyFacts = JSON.parse(fs.readFileSync(path.joi
 export function describeStrategy(config = BOT_CONFIG, facts = STRATEGY_FACTS): string {
   return `Current configured strategy (these parameters govern the bot):
 - Put buying: delta ${facts.put_delta_range.join(' to ')}, ${facts.put_dte_range.join('–')} DTE.
-- Insurance spending allowance: ${(config.PUT_ANNUAL_RATE * 100).toFixed(2)}% annualized, allocated in ${config.PERIOD_DAYS}-day cycles. Unspent capacity and current hedge holdings are separate quantities.
+- Insurance spending allowance: ${describePutBudget(config)} Unspent capacity and current hedge holdings are separate quantities.
 - Put roll consideration: ${facts.put_roll_dte_threshold} DTE or less, subject to the live replacement-protection and execution checks. No calendar-only roll recommendation.
 - Put monetization: profit threshold ${facts.put_monetization_profit_threshold_pct}%, maximum tranche ${(facts.put_monetization_max_tranche_fraction * 100).toFixed(0)}%, subject to remaining protection and live checks.
 - Call selling: delta ${facts.call_delta_range.join(' to ')}, ${facts.call_dte_range.join('–')} DTE; fallback watcher bid at least $${facts.sell_call_fallback_min_bid}, normalized CALL EDGE at least ${facts.sell_call_fallback_min_score}.

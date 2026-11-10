@@ -3,6 +3,7 @@ import { getEconomicHistory, getOrderCashflowTotalsBefore, getOrdersInRange, get
 import { deriveExpirySettlementReport, getExpiredExposures, parseInstrument, SETTLEMENT_SPOT_MAX_AGE_MS } from '@/lib/expiry-settlement';
 import { cachedJsonRoute } from '@/lib/response-cache';
 import { dashboardRangeMs } from '@/lib/dashboard-ranges';
+import { BOT_CONFIG, offDeriveEth } from '@/lib/strategy-config';
 
 export const dynamic = 'force-dynamic';
 
@@ -268,26 +269,18 @@ function getPnlResponse(req: NextRequest) {
     const opening = baseline ?? rawSnapshots[0] ?? null;
     const closing = rawSnapshots[rawSnapshots.length - 1] ?? opening;
 
-    // Off-exchange ETH as the bot recorded it over time. Points before the first record reuse the
-    // earliest recorded amount (flagged in meta) so the full-portfolio line spans the whole window.
-    const exposure = (economicHistory.exposureHistory ?? [])
-      .map((r) => ({ ts: Date.parse(r.effective_at), eth: Number(r.external_eth) }))
-      .filter((r) => Number.isFinite(r.ts) && Number.isFinite(r.eth));
-    const externalEthAt = (ts: number) => {
-      let eth = exposure[0]?.eth ?? 0;
-      for (const r of exposure) if (r.ts <= ts) eth = r.eth; else break;
-      return eth;
-    };
-    const fullPortfolioValue = (row: SnapshotRow, ts: number) => {
+    // Off-Derive ETH is restated for the whole history from the current protection
+    // assumption: Derive ETH plus off-Derive ETH equals PUT_PROTECTED_ETH at every point.
+    const fullPortfolioValue = (row: SnapshotRow) => {
       const spot = Number(row.spot_price ?? 0);
-      return spot > 0 ? portfolioValue(row) + externalEthAt(ts) * spot : null;
+      return spot > 0 ? portfolioValue(row) + offDeriveEth(BOT_CONFIG, row.eth_balance) * spot : null;
     };
 
     const portfolioSeries = rawSnapshots.map((row) => ({
       timestamp: row.timestamp,
       ts: new Date(row.timestamp).getTime(),
       portfolioValue: portfolioValue(row),
-      fullPortfolioValue: fullPortfolioValue(row, new Date(row.timestamp).getTime()),
+      fullPortfolioValue: fullPortfolioValue(row),
       unrealizedPnl: Number(row.total_unrealized_pnl ?? 0),
       spotPrice: Number(row.spot_price ?? 0),
       usdcBalance: Number(row.usdc_balance ?? 0),
@@ -299,7 +292,7 @@ function getPnlResponse(req: NextRequest) {
           timestamp: fromIso,
           ts: from.getTime(),
           portfolioValue: portfolioValue(opening),
-          fullPortfolioValue: fullPortfolioValue(opening, from.getTime()),
+          fullPortfolioValue: fullPortfolioValue(opening),
           unrealizedPnl: Number(opening.total_unrealized_pnl ?? 0),
           spotPrice: Number(opening.spot_price ?? 0),
           usdcBalance: Number(opening.usdc_balance ?? 0),
@@ -353,11 +346,18 @@ function getPnlResponse(req: NextRequest) {
     const combinedSpots = combinedTimestamps.length ? getSpotPricesAtOrBefore(combinedTimestamps, SETTLEMENT_SPOT_MAX_AGE_MS) : [];
     let spotIndex = 0;
     let combinedSpot: { timestamp: string; price: number } | undefined;
+    // Only the source account holds ETH; use its latest snapshot at or before each combined point.
+    const ethSnapshots = opening ? [opening, ...rawSnapshots] : rawSnapshots;
+    let ethIndex = 0;
+    let ethSnapshot: SnapshotRow | undefined;
     const combinedPortfolio = displayedCombined.map(row => {
       while (spotIndex < combinedSpots.length && Date.parse(combinedSpots[spotIndex].timestamp) <= row.ts) {
         combinedSpot = combinedSpots[spotIndex++];
       }
-      const eth = exposure.length ? externalEthAt(row.ts) : null;
+      while (ethIndex < ethSnapshots.length && Date.parse(ethSnapshots[ethIndex].timestamp) <= row.ts) {
+        ethSnapshot = ethSnapshots[ethIndex++];
+      }
+      const eth = ethSnapshot ? offDeriveEth(BOT_CONFIG, ethSnapshot.eth_balance) : null;
       const price = combinedSpot && row.ts - Date.parse(combinedSpot.timestamp) <= SETTLEMENT_SPOT_MAX_AGE_MS
         ? Number(combinedSpot.price) : null;
       return { timestamp: row.timestamp, ts: row.ts, portfolioValue: row.combinedValue,
@@ -509,14 +509,13 @@ function getPnlResponse(req: NextRequest) {
         orderCount: orders.length,
         hasBaseline: Boolean(opening),
         bucketMs,
-        insuredExternalEth: exposure.length ? exposure[exposure.length - 1].eth : 0,
+        protectedEth: BOT_CONFIG.PUT_PROTECTED_ETH,
         // Legacy portfolio[] remains source-only; combinedPortfolio[] has the
         // explicit two-account scope. Each full value adds external ETH once.
         valuationScope: 'derive_subaccount',
         combinedAccounts: { ...reporting.coverage, sourceAccountId: reporting.config?.accountId ?? null,
           destinationAccountId: reporting.config?.destinationAccountId ?? null },
-        externalHoldingsUnavailableReason: 'Off-exchange ETH is excluded from this account report\'s balances, and the current insurance setting is not applied to historical balances. The full-portfolio series adds it from the recorded exposure history.',
-        externalEthRecordedFrom: exposure.length ? new Date(exposure[0].ts).toISOString() : null,
+        externalHoldingsUnavailableReason: 'Off-Derive ETH is excluded from this account report\'s balances. The full-portfolio series adds it at spot, restated for all history as the protected ETH amount minus Derive ETH at each point.',
         performanceAvailable: false,
         performanceUnavailableReason: PERFORMANCE_UNAVAILABLE_REASON,
         settlementEstimateCount: settlementEstimates.length,

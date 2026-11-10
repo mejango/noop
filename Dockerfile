@@ -7,7 +7,7 @@ COPY dashboard/package.json dashboard/package-lock.json ./
 RUN npm ci
 COPY dashboard/ ./
 COPY bot/config.json bot/strategy-facts.json bot/market-assets.json bot/call-score.js bot/put-score.js bot/economic-events.js bot/open-interest.js bot/funding-rates.js bot/derive-config.js bot/liquidity-quality.js bot/market-evidence.js bot/vol-surface.js bot/correlation.js bot/dex-volume.js /bot/
-COPY bot/portfolio-reporting.js bot/portfolio-observation.js bot/spot-accumulation-identity.js /bot/
+COPY bot/portfolio-reporting.js bot/portfolio-observation.js bot/spot-accumulation-identity.js bot/put-budget.js /bot/
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV BOT_CONFIG_PATH=/bot/config.json
 RUN npm run build

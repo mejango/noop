@@ -3782,201 +3782,49 @@ describe('Spot price sourcing helpers', () => {
 });
 
 // ============================================================================
-// 29. Dynamic put budget calculation
+// 29-30. Put budget cycle (production maybeResetPutCycle; rule in bot/put-budget.js)
 // ============================================================================
+describe('Put budget cycle: window budget from protected ETH at spot', () => {
+  const PERIOD = 15 * 86400000;
+  const load = (botData) => loadProduction(['maybeResetPutCycle'], {
+    bindings: { botData, PERIOD, persistCycleState: () => {}, console: { log() {} }, Date,
+      BOT_CONFIG: { PUT_PROTECTED_ETH: 5, PUT_WINDOW_RATE: 0.0075, PERIOD_DAYS: 15 } },
+  }).maybeResetPutCycle;
+  const fresh = () => ({ putCycleStart: null, putBudgetForCycle: 0, putNetBought: 0, putUnspentBuyLimit: 0 });
 
-describe('Dynamic put budget: formula', () => {
-  const PUT_ANNUAL_RATE = 0.0333;
-  const PERIOD_DAYS = 15;
-  const cyclesPerYear = 365 / PERIOD_DAYS;
-
-  test('$10,000 portfolio → correct per-cycle budget', () => {
-    const portfolioValue = 10000;
-    const budget = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
-    // 10000 * 0.0333 / 24.333 = ~13.69
-    assert.ok(budget > 13.0 && budget < 14.0, `Expected ~$13.69, got $${budget.toFixed(2)}`);
-  });
-
-  test('$100,000 portfolio → budget scales linearly', () => {
-    const small = 10000 * PUT_ANNUAL_RATE / cyclesPerYear;
-    const large = 100000 * PUT_ANNUAL_RATE / cyclesPerYear;
-    assert.ok(Math.abs(large / small - 10) < 0.01, 'Should be exactly 10x');
-  });
-
-  test('$0 portfolio → $0 budget', () => {
-    const budget = 0 * PUT_ANNUAL_RATE / cyclesPerYear;
-    assert.strictEqual(budget, 0);
-  });
-
-  test('annual spend = 3.33% of portfolio', () => {
-    const portfolioValue = 50000;
-    const perCycle = portfolioValue * PUT_ANNUAL_RATE / cyclesPerYear;
-    const annualSpend = perCycle * cyclesPerYear;
-    assert.ok(Math.abs(annualSpend - portfolioValue * PUT_ANNUAL_RATE) < 0.01,
-      `Annual spend $${annualSpend.toFixed(2)} should equal ${portfolioValue * PUT_ANNUAL_RATE}`);
-  });
-
-  test('24.33 cycles per year (365/15)', () => {
-    assert.ok(Math.abs(cyclesPerYear - 24.333) < 0.01, `Got ${cyclesPerYear}`);
-  });
-
-  test('insured base adds fixed external ETH without multiplying USDC', () => {
-    const spotPrice = 2000;
-    const ethBalance = 2;
-    const externalEth = 9;
-    const usdcBalance = 1000;
-    const insuredBase = usdcBalance + ((ethBalance + externalEth) * spotPrice);
-    assert.strictEqual(insuredBase, 23000);
-
-    const budget = insuredBase * PUT_ANNUAL_RATE / cyclesPerYear;
-    assert.ok(budget > 31 && budget < 32, `Expected ~$31.48, got $${budget.toFixed(2)}`);
-  });
-});
-
-// ============================================================================
-// 30. Put cycle management (maybeResetPutCycle logic)
-// ============================================================================
-
-describe('Dynamic put budget: cycle management', () => {
-  const PUT_ANNUAL_RATE = 0.0333;
-  const PERIOD_DAYS = 15;
-  const PERIOD_MS = PERIOD_DAYS * 24 * 60 * 60 * 1000;
-  const cyclesPerYear = 365 / PERIOD_DAYS;
-
-  // Simulate maybeResetPutCycle with a local botData
-  const maybeResetPutCycle = (botData, portfolioValue, now) => {
-    const cycleExpired = botData.putCycleStart && (now - botData.putCycleStart) >= PERIOD_MS;
-    const noCycle = !botData.putCycleStart;
-
-    if (noCycle || cycleExpired) {
-      if (cycleExpired) {
-        const prevRemaining = Math.max(0, botData.putBudgetForCycle + botData.putUnspentBuyLimit - botData.putNetBought);
-        botData.putUnspentBuyLimit = prevRemaining;
-      }
-      const numericPortfolioValue = Number(portfolioValue) || 0;
-      const canUsePortfolioValue = numericPortfolioValue > 0;
-      const canReusePreviousBudget = cycleExpired && Number(botData.putBudgetForCycle) > 0;
-      if (!canUsePortfolioValue && !canReusePreviousBudget) return false;
-
-      const newBudget = canUsePortfolioValue
-        ? numericPortfolioValue * PUT_ANNUAL_RATE / cyclesPerYear
-        : Number(botData.putBudgetForCycle);
-      botData.putCycleStart = now;
-      botData.putBudgetForCycle = newBudget;
-      botData.putNetBought = 0;
-      return true; // cycle was reset
-    }
-    return false; // no reset
-  };
-
-  test('first call with no cycle → starts new cycle', () => {
-    const bd = { putCycleStart: null, putBudgetForCycle: 0, putNetBought: 0, putUnspentBuyLimit: 0 };
-    const now = Date.now();
-    const reset = maybeResetPutCycle(bd, 10000, now);
-    assert.strictEqual(reset, true);
-    assert.strictEqual(bd.putCycleStart, now);
-    assert.ok(bd.putBudgetForCycle > 13 && bd.putBudgetForCycle < 14);
+  test('first cycle budgets 0.75% of 5 ETH at spot', () => {
+    const bd = fresh();
+    assert.strictEqual(load(bd)(2000), true);
+    assert.ok(Math.abs(bd.putBudgetForCycle - 75) < 1e-9);
     assert.strictEqual(bd.putNetBought, 0);
   });
 
-  test('first call with no cycle and zero portfolio → does not start', () => {
-    const bd = { putCycleStart: null, putBudgetForCycle: 0, putNetBought: 0, putUnspentBuyLimit: 0 };
-    const now = Date.now();
-    const reset = maybeResetPutCycle(bd, 0, now);
-    assert.strictEqual(reset, false);
+  test('no cycle starts without a positive spot', () => {
+    const bd = fresh();
+    assert.strictEqual(load(bd)(0), false);
     assert.strictEqual(bd.putCycleStart, null);
-    assert.strictEqual(bd.putBudgetForCycle, 0);
   });
 
-  test('mid-cycle call → no reset', () => {
-    const now = Date.now();
-    const bd = { putCycleStart: now - 5 * 24 * 60 * 60 * 1000, putBudgetForCycle: 13.69, putNetBought: 5, putUnspentBuyLimit: 0 };
-    const reset = maybeResetPutCycle(bd, 10000, now);
-    assert.strictEqual(reset, false);
-    assert.strictEqual(bd.putNetBought, 5); // unchanged
-    assert.strictEqual(bd.putBudgetForCycle, 13.69); // unchanged
+  test('an active cycle is left alone', () => {
+    const bd = { ...fresh(), putCycleStart: Date.now() - 1000, putBudgetForCycle: 75, putNetBought: 20 };
+    assert.strictEqual(load(bd)(3000), false);
+    assert.strictEqual(bd.putBudgetForCycle, 75);
+    assert.strictEqual(bd.putNetBought, 20);
   });
 
-  test('expired cycle → resets, rolls over unspent', () => {
-    const now = Date.now();
-    const bd = {
-      putCycleStart: now - PERIOD_MS - 1000, // just expired
-      putBudgetForCycle: 14.00,
-      putNetBought: 4.00,
-      putUnspentBuyLimit: 0,
-    };
-    const reset = maybeResetPutCycle(bd, 10000, now);
-    assert.strictEqual(reset, true);
-    // Unspent: 14.00 + 0 - 4.00 = 10.00 rolled over
-    assert.strictEqual(bd.putUnspentBuyLimit, 10.00);
-    assert.strictEqual(bd.putNetBought, 0); // reset for new cycle
-    assert.ok(bd.putBudgetForCycle > 13 && bd.putBudgetForCycle < 14); // recalculated
-  });
-
-  test('expired cycle with zero live portfolio → reuses previous budget and rolls over', () => {
-    const now = Date.now();
-    const bd = {
-      putCycleStart: now - PERIOD_MS - 1000,
-      putBudgetForCycle: 187.17,
-      putNetBought: 187.11,
-      putUnspentBuyLimit: 0,
-    };
-    const reset = maybeResetPutCycle(bd, 0, now);
-    assert.strictEqual(reset, true);
-    assert.strictEqual(bd.putCycleStart, now);
-    assert.strictEqual(bd.putBudgetForCycle, 187.17);
-    assert.ok(Math.abs(bd.putUnspentBuyLimit - 0.06) < 0.001);
+  test('an expired cycle rolls over unspent budget and rebudgets from the new spot', () => {
+    const bd = { ...fresh(), putCycleStart: Date.now() - PERIOD - 1, putBudgetForCycle: 75, putNetBought: 50, putUnspentBuyLimit: 10 };
+    assert.strictEqual(load(bd)(3000), true);
+    assert.ok(Math.abs(bd.putUnspentBuyLimit - 35) < 1e-9);
+    assert.ok(Math.abs(bd.putBudgetForCycle - 112.5) < 1e-9);
     assert.strictEqual(bd.putNetBought, 0);
   });
 
-  test('expired cycle with full spend → zero rollover', () => {
-    const now = Date.now();
-    const bd = {
-      putCycleStart: now - PERIOD_MS - 1000,
-      putBudgetForCycle: 14.00,
-      putNetBought: 14.00, // fully spent
-      putUnspentBuyLimit: 0,
-    };
-    const reset = maybeResetPutCycle(bd, 10000, now);
-    assert.strictEqual(reset, true);
-    assert.strictEqual(bd.putUnspentBuyLimit, 0); // nothing to roll over
-  });
-
-  test('expired cycle with overspend → zero rollover (no negative)', () => {
-    const now = Date.now();
-    const bd = {
-      putCycleStart: now - PERIOD_MS - 1000,
-      putBudgetForCycle: 14.00,
-      putNetBought: 20.00, // overspent
-      putUnspentBuyLimit: 0,
-    };
-    const reset = maybeResetPutCycle(bd, 10000, now);
-    assert.strictEqual(reset, true);
-    assert.strictEqual(bd.putUnspentBuyLimit, 0); // Math.max(0, ...) prevents negative
-  });
-
-  test('expired cycle with existing rollover → compound rollover', () => {
-    const now = Date.now();
-    const bd = {
-      putCycleStart: now - PERIOD_MS - 1000,
-      putBudgetForCycle: 14.00,
-      putNetBought: 4.00,
-      putUnspentBuyLimit: 5.00, // existing rollover from cycle before that
-    };
-    const reset = maybeResetPutCycle(bd, 10000, now);
-    assert.strictEqual(reset, true);
-    // prevRemaining = max(0, 14 + 5 - 4) = 15.00
-    assert.strictEqual(bd.putUnspentBuyLimit, 15.00);
-  });
-
-  test('budget scales with portfolio value at cycle reset', () => {
-    const now = Date.now();
-    const bd1 = { putCycleStart: null, putBudgetForCycle: 0, putNetBought: 0, putUnspentBuyLimit: 0 };
-    const bd2 = { putCycleStart: null, putBudgetForCycle: 0, putNetBought: 0, putUnspentBuyLimit: 0 };
-    maybeResetPutCycle(bd1, 10000, now);
-    maybeResetPutCycle(bd2, 50000, now);
-    assert.ok(Math.abs(bd2.putBudgetForCycle / bd1.putBudgetForCycle - 5) < 0.01,
-      'Budget should be 5x for 5x portfolio');
+  test('an expired cycle reuses the previous budget when spot is unavailable', () => {
+    const bd = { ...fresh(), putCycleStart: Date.now() - PERIOD - 1, putBudgetForCycle: 75, putNetBought: 75 };
+    assert.strictEqual(load(bd)(0), true);
+    assert.strictEqual(bd.putBudgetForCycle, 75);
+    assert.strictEqual(bd.putUnspentBuyLimit, 0);
   });
 });
 
@@ -4348,7 +4196,7 @@ describe('accountHealth structure', () => {
         margin_usage_pct: 60.0,
       },
       putBudgetDiscipline: {
-        annualRate: 0.0333,
+        windowRate: 0.0075,
         budgetThisCycle: 13.69,
         spent: 5.00,
         remaining: 8.69,
@@ -4362,7 +4210,7 @@ describe('accountHealth structure', () => {
     assert.ok(accountHealth.margin);
     assert.ok(accountHealth.putBudgetDiscipline);
     assert.strictEqual(accountHealth.margin.is_under_liquidation, false);
-    assert.strictEqual(accountHealth.putBudgetDiscipline.annualRate, 0.0333);
+    assert.strictEqual(accountHealth.putBudgetDiscipline.windowRate, 0.0075);
     assert.strictEqual(accountHealth.putBudgetDiscipline.remaining, 8.69);
     // Negative USDC = margin debt, which is expected with ETH collateral
     assert.strictEqual(accountHealth.usdcBalance, -200);

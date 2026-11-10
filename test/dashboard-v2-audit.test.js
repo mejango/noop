@@ -67,6 +67,7 @@ function loadTs(file, overrides = {}, globals = {}) {
       if (name === '../../../bot/correlation') return require('../bot/correlation');
       if (name === '../../../bot/market-evidence') return require('../bot/market-evidence');
       if (name === '../../../bot/liquidity-quality') return require('../bot/liquidity-quality');
+      if (name === '../../../bot/put-budget') return require('../bot/put-budget');
       return require(name);
     },
     ...globals,
@@ -149,9 +150,9 @@ test('advisor parameters render from supplied runtime facts and budget configura
   const config = require('../bot/config.json');
   const facts = require('../bot/strategy-facts.json');
   const strategy = loadTs('dashboard/src/lib/strategy-config.ts', {}, { process: { env: { BOT_CONFIG_PATH: path.join(root, 'bot/config.json') }, cwd: () => root } });
-  const rendered = strategy.describeStrategy({ ...config, PERIOD_DAYS: 17, PUT_ANNUAL_RATE: 0.04 }, { ...facts, put_dte_range: [50, 70] });
-  assert.match(rendered, /17-day cycles/);
-  assert.match(rendered, /4\.00%/);
+  const rendered = strategy.describeStrategy({ ...config, PERIOD_DAYS: 17, PUT_PROTECTED_ETH: 7, PUT_WINDOW_RATE: 0.01 }, { ...facts, put_dte_range: [50, 70] });
+  assert.match(rendered, /7 ETH protected/);
+  assert.match(rendered, /Each 17-day window may buy puts costing 1\.00%/);
   assert.match(rendered, /50–70 DTE/);
   assert.match(rendered, /Spending the put budget does not mean protection is absent/);
 });

@@ -92,10 +92,6 @@ function createEconomicStore(db) {
     complete INTEGER NOT NULL, error TEXT, evidence_reference TEXT,
     PRIMARY KEY(account_id,dataset,from_timestamp,to_timestamp)
   );
-  CREATE TABLE IF NOT EXISTS exposure_history (
-    account_id TEXT NOT NULL, effective_at TEXT NOT NULL, external_eth TEXT NOT NULL, source TEXT NOT NULL,
-    PRIMARY KEY(account_id,effective_at)
-  );
   CREATE TABLE IF NOT EXISTS economic_trade_sync_work (
     account_id TEXT PRIMARY KEY, to_timestamp TEXT NOT NULL, windows_json TEXT NOT NULL
   );`);
@@ -148,13 +144,6 @@ function createEconomicStore(db) {
       complete:evidence.complete === true ? 1 : 0,error:evidence.error || null,evidence_reference:reference});
     return inserted;
   });
-  function recordExposure(accountId, externalEth, effectiveAt, source = 'runtime-config') {
-    accountId = accountIdentity(accountId);
-    const amount = decimal(externalEth);
-    if (amount.startsWith('-')) throw new Error('External exposure cannot be negative');
-    const last = db.prepare('SELECT external_eth FROM exposure_history WHERE account_id=? ORDER BY effective_at DESC LIMIT 1').get(String(accountId));
-    if (last?.external_eth !== amount) db.prepare('INSERT INTO exposure_history VALUES (?,?,?,?)').run(String(accountId),iso(effectiveAt),amount,source);
-  }
   function latestCoverage(accountId, dataset, from = 0) {
     const start = iso(from);
     let cursor = start;
@@ -183,7 +172,7 @@ function createEconomicStore(db) {
     return coversRange(db.prepare(`SELECT * FROM economic_coverage WHERE account_id=? AND dataset='trades'
       AND complete=1 AND from_timestamp<=? AND to_timestamp>=?`).all(accountIdentity(accountId),iso(to),iso(from)),from,to);
   }
-  return { recordEvents, recordBatch, recordExposure, startTracking, latestCoverage, getTradeSyncWork, saveTradeSyncWork, tradeRangeCovered };
+  return { recordEvents, recordBatch, startTracking, latestCoverage, getTradeSyncWork, saveTradeSyncWork, tradeRangeCovered };
 }
 function paginationInteger(value, field) {
   if ((typeof value !== 'number' && (typeof value !== 'string' || !/^\d+$/.test(value)))
@@ -301,17 +290,12 @@ function coversRange(rows, from, to) {
 }
 function getEconomicHistory(db, accountId, from, to) {
   const start = iso(from), end = iso(to), account = String(accountId);
-  const empty = {events:[],coverage:{trades:false,settlements:false,transfers:false},available:false,exposureHistory:[],exposureKnown:false};
+  const empty = {events:[],coverage:{trades:false,settlements:false,transfers:false},available:false};
   const tableExists = name => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
   if (!tableExists('economic_events') || !tableExists('economic_coverage')) return empty;
   const events = db.prepare('SELECT * FROM economic_events WHERE account_id=? AND timestamp>=? AND timestamp<=? ORDER BY timestamp,event_id').all(account,start,end);
   const coverageRows = db.prepare('SELECT * FROM economic_coverage WHERE account_id=? AND to_timestamp>=? AND from_timestamp<=?').all(account,start,end);
   const coverage = Object.fromEntries([...DATASETS].map(dataset => [dataset,coversRange(coverageRows.filter(r => r.dataset === dataset),start,end)]));
-  let exposureHistory = [];
-  if (tableExists('exposure_history')) {
-    const prior = db.prepare('SELECT * FROM exposure_history WHERE account_id=? AND effective_at<=? ORDER BY effective_at DESC LIMIT 1').get(account,start);
-    exposureHistory = [...(prior ? [prior] : []),...db.prepare('SELECT * FROM exposure_history WHERE account_id=? AND effective_at>? AND effective_at<=? ORDER BY effective_at').all(account,start,end)];
-  }
-  return {events,coverage,available:true,exposureHistory,exposureKnown:Boolean(exposureHistory[0]?.effective_at <= start)};
+  return {events,coverage,available:true};
 }
 module.exports = { createEconomicStore, normalizeEvent, normalizeV2Trade, syncV2Trades, syncV2TradesProgressively, decimal, multiply, coversRange, getEconomicHistory };

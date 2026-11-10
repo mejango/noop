@@ -65,7 +65,6 @@ interface Stats {
   last_price: number;
   last_price_time: string;
   lyra_spot?: number | null;
-  put_insured_external_eth?: number;
   short_momentum: string;
   short_derivative: string;
   medium_momentum: string;
@@ -338,8 +337,7 @@ interface PnlReportData {
     orderCount: number;
     hasBaseline: boolean;
     bucketMs: number;
-    insuredExternalEth?: number;
-    externalEthRecordedFrom?: string | null;
+    protectedEth?: number;
     missingSettlementEstimateCount?: number;
     unvaluedRecordedSettlementCount?: number;
     openingMissingSettlementEstimateCount?: number;
@@ -423,7 +421,6 @@ const emptyStats: Stats = {
   medium_momentum: '', medium_derivative: '', three_day_high: 0, three_day_low: 0,
   seven_day_high: 0, seven_day_low: 0,
   lyra_spot: null,
-  put_insured_external_eth: 0,
   budget: emptyBudget,
 };
 
@@ -929,7 +926,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
   const pnlPortfolioSeries = useMemo(() => pnlReport.series.portfolio
     .map((row) => ({ ts: row.ts, portfolioValueUsd: row.portfolioValue, fullPortfolioValueUsd: row.fullPortfolioValue ?? null }))
     .filter((row) => Number.isFinite(row.ts) && Number.isFinite(row.portfolioValueUsd)), [pnlReport]);
-  const pnlShowFullPortfolio = Number(pnlReport.meta.insuredExternalEth ?? 0) > 0;
+  const pnlShowFullPortfolio = Number(pnlReport.meta.protectedEth ?? 0) > 0;
   const pnlCombinedConfigured = pnlReport.meta.combinedAccounts?.configured === true;
   const pnlCombinedSeries = useMemo(() => buildCombinedPortfolioChart(pnlReport.series.combinedPortfolio), [pnlReport]);
   const pnlCombinedLatest = pnlReport.latestCombinedPortfolio;
@@ -1851,7 +1848,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
       {/* P&L */}
       {pnlChartData.length > 0 && (
         <Card title="Options Result, Cashflow & Account Value" subtitle={pnlCoverageLabel ?? `${pnlRange} options activity`}>
-          <p className="text-xs text-gray-500 mb-3">The result includes call expiry costs and put expiry proceeds, using estimates when exchange records are unavailable. Fees and open-position P&amp;L are excluded. Account value includes deposits and withdrawals.{pnlCombinedConfigured && <> Combined Derive value covers NOOP and DRV-NOOP, including DRV and USDC holdings.</>}{pnlShowFullPortfolio && <> Full portfolio adds off-exchange ETH at spot{pnlReport.meta.externalEthRecordedFrom ? `, using the earliest recorded amount before ${new Date(pnlReport.meta.externalEthRecordedFrom).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : ''}.</>}</p>
+          <p className="text-xs text-gray-500 mb-3">The result includes call expiry costs and put expiry proceeds, using estimates when exchange records are unavailable. Fees and open-position P&amp;L are excluded. Account value includes deposits and withdrawals.{pnlCombinedConfigured && <> Combined Derive value covers NOOP and DRV-NOOP, including DRV and USDC holdings.</>}{pnlShowFullPortfolio && <> Full portfolio adds off-Derive ETH at spot so that Derive ETH plus off-Derive ETH equals the {Number(pnlReport.meta.protectedEth)} ETH protected, applied to all history.</>}</p>
           {pnlCombinedConfigured && <div className="mb-3 space-y-2 text-xs">
             <div className="flex flex-wrap gap-x-6 gap-y-2">
               <div><span className="text-gray-400">Combined Derive </span><span className="text-sky-200">{pnlCombinedLatest?.combinedValue != null ? formatUSD(pnlCombinedLatest.combinedValue) : 'Unavailable'}</span></div>
@@ -1923,9 +1920,9 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
                     periodCallSettlements: 'Call Expiry Costs (est.)',
                     periodPutSettlements: 'Put Expiry Proceeds (est.)',
                     portfolioValueUsd: 'NOOP source USD (period end)',
-                    fullPortfolioValueUsd: 'NOOP source + off-exchange ETH (period end)',
+                    fullPortfolioValueUsd: 'NOOP source + off-Derive ETH (period end)',
                     combinedPortfolioValueUsd: 'Combined Derive USD (period end)',
-                    combinedFullPortfolioValueUsd: `Full portfolio USD, period end (both accounts + ${Number(pnlReport.meta.insuredExternalEth ?? 0).toFixed(4)} off-exchange ETH)`,
+                    combinedFullPortfolioValueUsd: `Full portfolio USD, period end (both accounts + off-Derive ETH, ${Number(pnlReport.meta.protectedEth ?? 0)} ETH protected in total)`,
                   };
                   const numericValue = typeof value === 'number' ? value : Number(value);
                   const key = name ?? '';
@@ -1954,7 +1951,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
                      value === 'periodCallSettlements' ? 'call expiry (est.)' :
                      value === 'periodPutSettlements' ? 'put expiry (est.)' :
                      value === 'portfolioValueUsd' ? 'NOOP source USD' :
-                     value === 'fullPortfolioValueUsd' ? 'source + off-exchange ETH (own scale)' :
+                     value === 'fullPortfolioValueUsd' ? 'source + off-Derive ETH (own scale)' :
                      value === 'combinedPortfolioValueUsd' ? 'combined Derive USD' :
                      value === 'combinedFullPortfolioValueUsd' ? `full portfolio USD (own scale${pnlDeriveShare != null ? `, Derive ${(pnlDeriveShare * 100).toFixed(1)}%` : ''})` : value}
                   </span>
