@@ -123,7 +123,7 @@ function routeFixture({
     '@/lib/strategy-config': { BOT_CONFIG: { PUT_PROTECTED_ETH: protectedEth }, offDeriveEth: require('../bot/put-budget').offDeriveEth },
   }, env);
   const url = new URL('https://dashboard.test/api/pnl-report');
-  url.searchParams.set('from', from);
+  if (from != null) url.searchParams.set('from', from);
   url.searchParams.set('to', to);
   return {
     spotQueries,
@@ -462,6 +462,13 @@ test('missing estimates and unvalued recorded settlements are reported separatel
   assert.equal(report.settlementEstimates.length, 0);
   assert.equal(report.meta.orderCount, 2);
   assert.equal(report.series.buckets.reduce((sum, row) => sum + row.estimateCount, 0), 0);
+});
+
+test('a named range starts at its bucket boundary so no sliver bucket narrows the bars', async () => {
+  const report = await routeFixture({ from: null, to: '2026-03-15T22:38:00.000Z' }).report();
+  // The fixture range is 30 days, bucketed daily: start at UTC midnight, not 22:38.
+  assert.equal(report.meta.from, '2026-02-13T00:00:00.000Z');
+  assert.equal(report.meta.bucketMs, 24 * 60 * 60 * 1000);
 });
 
 test('a custom window clamps its first partial bucket without losing recorded or estimated cashflow', async () => {

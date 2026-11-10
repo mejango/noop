@@ -68,9 +68,11 @@ function resolveWindow(req: NextRequest) {
   const now = Date.now();
   const to = parseDateParam(searchParams.get('to'), now);
   const durationMs = dashboardRangeMs(range, '30d');
+  // A named range starts on a bucket boundary so the first bucket is never a sliver; a sliver
+  // sets the minimum x gap and shrinks every bar. Explicit custom windows keep their exact start.
   const from = searchParams.get('from')
     ? parseDateParam(searchParams.get('from'), to.getTime() - durationMs)
-    : new Date(to.getTime() - durationMs);
+    : new Date(bucketKey(to.getTime() - durationMs, chooseBucketMs(durationMs)));
   if (from > to) return { range, from: to, to: from };
   return { range, from, to };
 }
