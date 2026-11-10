@@ -928,6 +928,11 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
     .filter((row) => Number.isFinite(row.ts) && Number.isFinite(row.portfolioValueUsd)), [pnlReport]);
   const pnlShowFullPortfolio = Number(pnlReport.meta.protectedEth ?? 0) > 0;
   const pnlCombinedConfigured = pnlReport.meta.combinedAccounts?.configured === true;
+  const pnlCombinedStartTs = pnlCombinedConfigured && pnlReport.meta.combinedAccounts?.firstTimestamp
+    ? Date.parse(pnlReport.meta.combinedAccounts.firstTimestamp) : null;
+  // Drawn NOOP-only history stops where the combined lines take over (same colors).
+  const pnlPortfolioHistory = useMemo(() => pnlCombinedStartTs == null ? pnlPortfolioSeries
+    : pnlPortfolioSeries.filter(row => row.ts <= pnlCombinedStartTs), [pnlPortfolioSeries, pnlCombinedStartTs]);
   const pnlCombinedSeries = useMemo(() => buildCombinedPortfolioChart(pnlReport.series.combinedPortfolio), [pnlReport]);
   const pnlCombinedLatest = pnlReport.latestCombinedPortfolio;
   const pnlCombinedAvailability = combinedAvailabilityMessage(pnlReport.meta.combinedAccounts);
@@ -1952,7 +1957,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
                      value === 'periodPutSettlements' ? 'put expiry (est.)' :
                      value === 'portfolioValueUsd' ? 'NOOP source USD' :
                      value === 'fullPortfolioValueUsd' ? 'source + off-Derive ETH (own scale)' :
-                     value === 'combinedPortfolioValueUsd' ? 'combined Derive USD' :
+                     value === 'combinedPortfolioValueUsd' ? 'Derive USD' :
                      value === 'combinedFullPortfolioValueUsd' ? `full portfolio USD (own scale${pnlDeriveShare != null ? `, Derive ${(pnlDeriveShare * 100).toFixed(1)}%` : ''})` : value}
                   </span>
                 )}
@@ -1972,8 +1977,12 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
               {/* Invisible bucket-end copies so the tooltip lists account values. */}
               <Line yAxisId="portfolio" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />
               {pnlShowFullPortfolio && <Line yAxisId="fullPortfolio" dataKey="fullPortfolioValueUsd" name="fullPortfolioValueUsd" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />}
-              <Line yAxisId="portfolio" xAxisId="portfolio" data={pnlPortfolioSeries} type="linear" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke={pnlCombinedConfigured ? '#64748b' : '#7dd3fc'} strokeWidth={1.75} dot={false} strokeDasharray="5 4" tooltipType="none" isAnimationActive={false} />
-              {pnlShowFullPortfolio && <Line yAxisId="fullPortfolio" xAxisId="portfolio" data={pnlPortfolioSeries} type="linear" dataKey="fullPortfolioValueUsd" name="fullPortfolioValueUsd" stroke={pnlCombinedConfigured ? '#94a3b8' : '#e0f2fe'} strokeWidth={1.75} strokeDasharray={pnlCombinedConfigured ? '3 3' : undefined} dot={false} connectNulls={false} tooltipType="none" isAnimationActive={false} />}
+              <Line yAxisId="portfolio" xAxisId="portfolio" data={pnlPortfolioHistory} type="linear" dataKey="portfolioValueUsd" name="portfolioValueUsd" stroke="#7dd3fc" strokeWidth={pnlCombinedConfigured ? 2.5 : 1.75} dot={false} strokeDasharray={pnlCombinedConfigured ? undefined : '5 4'} legendType={pnlCombinedConfigured ? 'none' : undefined} tooltipType="none" isAnimationActive={false} />
+              {pnlShowFullPortfolio && <Line yAxisId="fullPortfolio" xAxisId="portfolio" data={pnlPortfolioHistory} type="linear" dataKey="fullPortfolioValueUsd" name="fullPortfolioValueUsd" stroke="#e0f2fe" strokeWidth={pnlCombinedConfigured ? 2.5 : 1.75} legendType={pnlCombinedConfigured ? 'none' : undefined} dot={false} connectNulls={false} tooltipType="none" isAnimationActive={false} />}
+              {pnlCombinedStartTs != null && pnlCombinedStartTs > pnlXDomain[0] && pnlCombinedStartTs < pnlXDomain[1] && (
+                <ReferenceLine xAxisId="portfolio" yAxisId="portfolio" x={pnlCombinedStartTs} stroke="#94a3b8" strokeDasharray="3 3"
+                  label={{ value: 'both accounts from here →', position: 'insideTopRight', fill: '#94a3b8', fontSize: 11 }} />
+              )}
               {pnlCombinedConfigured && <>
                 <Line yAxisId="portfolio" dataKey="combinedPortfolioValueUsd" name="combinedPortfolioValueUsd" stroke="none" dot={false} activeDot={false} legendType="none" isAnimationActive={false} />
                 <Line yAxisId="portfolio" xAxisId="portfolio" data={pnlCombinedSeries} type="linear" dataKey="combinedPortfolioValueUsd" name="combinedPortfolioValueUsd" stroke="#7dd3fc" strokeWidth={2.5} dot={pnlSingleCombinedPoint ? { r: 3 } : false} connectNulls={false} tooltipType="none" isAnimationActive={false} />
