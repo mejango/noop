@@ -2353,7 +2353,7 @@ const getDecisionOutcomeCompleteness = () => db.prepare(`
   SELECT c.option_type, o.horizon_hours, o.status,
     CASE WHEN c.dte IS NULL THEN 'unknown' WHEN c.dte < 5 THEN '<5'
       WHEN c.dte <= 12 THEN '5-12' WHEN c.dte < 45 THEN '12-45'
-      WHEN c.dte <= 78 THEN '45-78' ELSE '>78' END AS entry_dte_bucket,
+      WHEN c.dte <= 81 THEN '45-81' ELSE '>81' END AS entry_dte_bucket,
     CASE WHEN o.future_spot IS NULL OR c.strike IS NULL THEN 'unknown'
       WHEN (c.option_type IN ('P', 'put') AND o.future_spot < c.strike)
         OR (c.option_type IN ('C', 'call') AND o.future_spot > c.strike) THEN 'ITM'

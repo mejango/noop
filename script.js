@@ -13,7 +13,7 @@
  * (1) Put Accumulation (Long Puts)
  *   • Targets: out-of-the-money ETH puts
  *     – Delta between -0.08 and -0.02
- *     – 45–78 days to expiry
+ *     – put_dte_range days to expiry (bot/strategy-facts.json)
  *     – Strike < 0.8 × current index price
  *   • Entry Conditions:
  *     – Standard Entry: buy best option if medium-term ≠ upward AND short-term ≠ upward
@@ -1320,7 +1320,7 @@ const classifyBuyPutEdge = ({ score, rawScore = null, dte, strike, spotPrice,
     ? (Number(askPrice) - Number(bidPrice)) / Number(markPrice) : null;
   return {
     recommendation: edgeScore > 0 ? 'scored' : 'unavailable',
-    dte_bucket: 'strategy_45_78_dte',
+    dte_bucket: `strategy_${BUY_PUT_EDGE_MIN_DTE}_${BUY_PUT_EDGE_MAX_DTE}_dte`,
     score_band: 'continuous_put_edge',
     selection_metric: 'put_edge_v1',
     selection_multiplier: normalizationFactor,
@@ -10040,7 +10040,7 @@ Rules:
 - Entry criteria MUST include: option_type ("P" or "C"), delta_range [min, max], dte_range [min, max]. Optional: max_strike_pct, min_score, target_score (for buy_put limit pricing), value_signal (for dynamic buy_put value watchers), min_bid (for sell_call), market_conditions. For sell_call, include min_score as the CALL EDGE gate and min_bid as the executable premium floor. For buy_put, rank directly by PUT EDGE and use min_score/target_score for price discipline. Do not emit min_edge_score for either action; legacy min_edge_score on saved buy_put rules is ignored. Do not add spread/single-contract IV/skew/OI/shock-payoff gates. market_conditions fields are spot_price, put_10d_iv_pctl and call_10d_iv_pctl only; translate other selectivity into min_score, min_bid, priority, delta_range, or dte_range instead.
 - Exit criteria MUST include: conditions (array of {field, op, value}) and condition_logic ("any" or "all"). Fields: dte, delta, unrealized_pnl_pct, iv, theta, spot_price. Ops: gt, lt, gte, lte. Do not use mark_price as a strategy trigger. For sell_put, include put_exit_intent. For monetize_tail_win, also include min_exit_price or limit_price. For buyback_call, include buyback_intent; set allow_below_profit_floor true only for threat_management.
 - Entry rules may use preferred_order_type ${formatOrderTypeList(ENTRY_ALLOWED_ORDER_TYPES)}. For exits: roll_protection sell_put and threat_management buyback_call should use preferred_order_type "ioc". Patient monetize_tail_win sell_put and profit_capture buyback_call may use "gtc" or "post_only" as synthetic reduce-only resting exits, with limit_price/min_exit_price/max_buyback_price carrying the price discipline.
-- For buy_put: set option_type "P", negative delta_range (e.g. [-0.12, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. Raw score is abs(delta)/ask. PUT EDGE = raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}; normalize every eligible candidate before ranking directly by PUT EDGE. It measures DTE-normalized delta per premium dollar, not literal crash payoff. Keep 30/40/50% drawdown payoff scenarios as descriptive intrinsic-value/premium illustrations, excluding fees; do not use spread, IV/skew, OI, or shock scenarios as another ranking multiplier or standalone veto. DTE DISCIPLINE: buy puts at 45-78 DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [45, 78].
+- For buy_put: set option_type "P", negative delta_range (e.g. [-0.12, -0.02]). Do not use max_cost/per-contract ask caps; use budget_limit as the total USD spend cap, with min_score/target_score/value_signal for price discipline. Raw score is abs(delta)/ask. PUT EDGE = raw_score * (DTE / ${BUY_PUT_EDGE_REFERENCE_DTE})^${BUY_PUT_EDGE_DTE_EXPONENT}; normalize every eligible candidate before ranking directly by PUT EDGE. It measures DTE-normalized delta per premium dollar, not literal crash payoff. Keep 30/40/50% drawdown payoff scenarios as descriptive intrinsic-value/premium illustrations, excluding fees; do not use spread, IV/skew, OI, or shock scenarios as another ranking multiplier or standalone veto. DTE DISCIPLINE: buy puts at ${PUT_EXPIRATION_RANGE.join('-')} DTE. Never buy puts below 35 DTE — short-dated puts bleed theta too fast for tail insurance. dte_range must be within [${PUT_EXPIRATION_RANGE.join(', ')}].
 ${getFreshBestBuyPutDisciplinePrompt()}
 ${getStandingRulebookDisciplinePrompt()}
 - For sell_put exits (rolling): roll long puts when DTE reaches ~${PUT_ROLL_DTE_THRESHOLD} only if the book already holds longer-dated long puts. Use put_exit_intent="roll_protection", requires_longer_dated_protection=true, condition dte lte ${PUT_ROLL_DTE_THRESHOLD}. This roll trigger is independent of the ${PUT_MONETIZATION_PROFIT_THRESHOLD}% monetization threshold.
