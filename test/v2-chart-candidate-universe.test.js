@@ -31,7 +31,7 @@ function loadTs(file, dependencies) {
   return module.exports;
 }
 
-function fixture(t) {
+function fixture(t, putDteRange = require('../bot/strategy-facts.json').put_dte_range) {
   const db = new Database(':memory:');
   t.after(() => db.close());
   db.exec(`CREATE TABLE options_snapshots (
@@ -60,7 +60,7 @@ function fixture(t) {
   };
   const api = loadTs('dashboard/src/lib/db.ts', {
     'better-sqlite3': function () { return connection; }, path,
-    './strategy-config': { BOT_CONFIG: {} },
+    './strategy-config': { STRATEGY_FACTS: { ...require('../bot/strategy-facts.json'), put_dte_range: putDteRange }, BOT_CONFIG: {} },
     '../../../bot/derive-config': require('../bot/derive-config'),
     '../../../bot/portfolio-reporting': require('../bot/portfolio-reporting'),
     '../../../bot/liquidity-quality': require('../bot/liquidity-quality'),
@@ -103,7 +103,7 @@ test('RAW retains eligible runners-up when higher RAW contracts are outside eith
   const put = f.option('P', { ask_delta_value: 0.004 });
   const call = f.option('C', { bid_delta_value: 90 });
   f.option('P', { dte: 25, ask_delta_value: 99 });
-  f.option('P', { dte: 79, ask_delta_value: 99 });
+  f.option('P', { dte: 82, ask_delta_value: 99 });
   f.option('C', { dte: 2, bid_delta_value: 99999 });
   f.option('C', { dte: 13, bid_delta_value: 99999 });
   assert.deepEqual(values(f.api.getBestOptionsOverTime(SINCE)[0]), [0.004, 90]);
@@ -115,7 +115,7 @@ test('RAW retains eligible runners-up when higher RAW contracts are outside eith
 test('historical quote-time DTE and delta endpoints are inclusive for PUT and CALL', t => {
   const f = fixture(t);
   const included = [];
-  for (const [side, dtes, deltas] of [['P', [45, 78], [-0.12, -0.02]], ['C', [5, 12], [0.04, 0.12]]]) {
+  for (const [side, dtes, deltas] of [['P', [45, 81], [-0.12, -0.02]], ['C', [5, 12], [0.04, 0.12]]]) {
     for (const dte of dtes) for (const delta of deltas) included.push(f.option(side, { dte, delta }));
     for (const dte of [dtes[0] - 1 / 86400, dtes[1] + 1 / 86400]) f.option(side, { dte });
     for (const delta of [deltas[0] - 0.00001, deltas[1] + 0.00001]) f.option(side, { delta });
@@ -178,12 +178,12 @@ test('RAW and EDGE independently choose their maxima from the same eligible PUT 
   const f = fixture(t);
   for (const row of [
     f.option('P', { dte: 45, ask_price: 10, ask_delta_value: 0.005 }),
-    f.option('P', { dte: 78, ask_price: 0.05 / 0.0045, ask_delta_value: 0.0045 }),
+    f.option('P', { dte: 81, ask_price: 0.05 / 0.0045, ask_delta_value: 0.0045 }),
     f.option('C', { dte: 12, bid_price: 5, bid_delta_value: 100 }),
     f.option('C', { dte: 5, bid_price: 4.75, bid_delta_value: 95 }),
   ]) f.legacyEdge(row);
   assert.deepEqual(values(f.api.getBestOptionsOverTime(SINCE)[0]), [0.005, 100]);
-  close(f.api.getBuyPutEdgeOverTime(SINCE)[0].edge_score, 0.0045 * (78 / 60) ** 0.8);
+  close(f.api.getBuyPutEdgeOverTime(SINCE)[0].edge_score, 0.0045 * (81 / 60) ** 0.8);
   close(f.api.getSellCallEdgeOverTime(SINCE)[0].edge_score, 95 * (8.5 / 5) ** SELL_CALL_EDGE_DTE_EXPONENT);
   assert.equal(f.api.getOptionsHeatmap(SINCE).length, 4);
 });
@@ -226,4 +226,14 @@ test('90d, 365d and all chart responses use the hourly rollup and filter only th
     assert.deepEqual(values(response.body.options[0]), [0.004, 90], range);
     assert.deepEqual(values(response.body.options[1]), [0.002, null], `${range} raw tail`);
   }
+});
+
+test('RAW and heatmap follow a configured 81-day put ceiling', t => {
+  const f = fixture(t, [45, 81]);
+  const included = [79, 80, 81].map(dte => f.option('P', { dte }));
+  f.option('P', { dte: 81.0001, ask_delta_value: 99 });
+  assert.deepEqual(names(f.api.getOptionsHeatmap(SINCE)), names(included));
+  assert.deepEqual(names(f.api.getOptionsHeatmap(SINCE, 12000, HOUR)), names(included));
+  assert.equal(f.api.getBestOptionsOverTime(SINCE)[0].best_put_value, 0.005);
+  assert.equal(f.api.getBestOptionsBucketed(SINCE, HOUR)[0].best_put_value, 0.005);
 });

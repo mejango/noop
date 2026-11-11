@@ -1,3 +1,4 @@
+const { put_dte_range } = require('./strategy-facts.json');
 const DEFAULT_HORIZONS_HOURS = [1, 6, 12, 24, 48, 72, 168];
 const DEFAULT_LOOKBACK_HOURS = [1, 6, 24];
 const DEFAULT_MIN_SAMPLES = 30;
@@ -24,8 +25,8 @@ const ACTION_CONFIG = {
     optionType: 'P',
     minDelta: -0.12,
     maxDelta: -0.02,
-    minDte: 45,
-    maxDte: 78,
+    minDte: put_dte_range[0],
+    maxDte: put_dte_range[1],
     scoreColumn: 'ask_delta_value',
     entryPriceField: 'ask_price',
     exitPriceField: 'bid_price',

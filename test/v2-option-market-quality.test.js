@@ -125,7 +125,7 @@ test('both market selectors normalize every option before choosing the winner', 
   const api = productionContext();
   const puts = [
     [nameAt(45, 1900, 'P'), ticker(20, 19, -0.074)], // RAW .0037
-    [nameAt(78, 1800, 'P'), ticker(20, 19, -0.064)], // RAW .0032, higher EDGE
+    [nameAt(81, 1800, 'P'), ticker(20, 19, -0.064)], // RAW .0032, higher EDGE
   ];
   const calls = [
     [nameAt(12, 3000, 'C'), ticker(8, 7.2, 0.06)], // RAW 120
@@ -134,7 +134,7 @@ test('both market selectors normalize every option before choosing the winner', 
   for (const entries of [puts, [...puts].reverse()]) {
     const winner = api.getBestCurrentBuyPutEdgeCandidate(Object.fromEntries(entries), nowMs);
     assert.equal(winner.instrument, puts[1][0]);
-    closeTo(winner.edge_score, putScore.normalizeBuyPutScore(0.0032, 78));
+    closeTo(winner.edge_score, putScore.normalizeBuyPutScore(0.0032, 81));
     const selected = api.getBestCurrentBuyPutCandidate(Object.fromEntries(entries), nowMs, null, 2500);
     assert.equal(selected.instrument, winner.instrument);
     closeTo(selected.selection_score, winner.edge_score);
@@ -243,7 +243,7 @@ test('wide spread, elevated IV, negative OI trend and weak shock diagnostics can
 test('PUT selection preserves fractional EDGE precision without adding a second normalization or multiplier', () => {
   const api = productionContext();
   const score = 0.00323456789123;
-  for (const dte of [45, 60, 78]) {
+  for (const dte of [45, 60, 81]) {
     const result = api.classifyBuyPutEdge({ score, rawScore: 0.003, dte, strike: 1600,
       spotPrice: 2500, entryPrice: 10, askPrice: 10, bidPrice: 1, markPrice: 9, impliedVol: 2,
       marketContext: { market_skew: 1, market_oi_delta_24h_pct: -99 } });

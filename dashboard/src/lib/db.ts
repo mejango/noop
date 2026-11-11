@@ -4,7 +4,7 @@ import Database from 'better-sqlite3';
 import { HISTORY_SQL } from '../../../bot/market-evidence';
 import { getDeriveConfig } from '../../../bot/derive-config';
 import path from 'path';
-import { BOT_CONFIG, putWindowBudgetUsd } from './strategy-config';
+import { BOT_CONFIG, STRATEGY_FACTS, putWindowBudgetUsd } from './strategy-config';
 import { getEconomicHistory as readEconomicHistory } from '../../../bot/economic-events';
 import { readReportingPortfolio } from '../../../bot/portfolio-reporting';
 import { HOURLY_OPEN_INTEREST_SQL, openInterestHourBounds } from '../../../bot/open-interest';
@@ -22,8 +22,7 @@ const SELL_CALL_EDGE_REFERENCE_DTE = 8.5;
 const SELL_CALL_EDGE_DTE_EXPONENT = 0.6; // keep in sync with bot/call-score.js
 const BUY_PUT_EDGE_REFERENCE_DTE = 60;
 const BUY_PUT_EDGE_DTE_EXPONENT = 0.8;
-const BUY_PUT_EDGE_MIN_DTE = 45;
-const BUY_PUT_EDGE_MAX_DTE = 78;
+const [BUY_PUT_EDGE_MIN_DTE, BUY_PUT_EDGE_MAX_DTE] = STRATEGY_FACTS.put_dte_range;
 const SELL_CALL_EDGE_MIN_DTE = 5;
 const SELL_CALL_EDGE_MAX_DTE = 12;
 

@@ -14,7 +14,7 @@ const {
 
 const now = Date.parse('2026-09-01T20:00:00Z');
 const policy = {
-  putDeltaRange: [-0.12, -0.02], putDteRange: [45, 78],
+  putDeltaRange: [-0.12, -0.02], putDteRange: [45, 81],
   callDeltaRange: [0.04, 0.12], callDteRange: [5, 12],
   sellCallMinScore: 65, sellCallMinBid: 4,
   callCapturePct: 80, putRollDte: 25,
@@ -49,7 +49,7 @@ function putOrder(overrides = {}) {
   return {
     action: 'buy_put', instrumentName: putName, instrument: instrument(putName),
     price: 12, amount: 2, orderType: 'post_only',
-    criteria: { min_score: 0.004, target_score: 0.0045, delta_range: [-0.12, -0.02], dte_range: [45, 78] },
+    criteria: { min_score: 0.004, target_score: 0.0045, delta_range: [-0.12, -0.02], dte_range: [45, 81] },
     triggerData: { advisor_limit_price: 12 },
     ticker: { b: 12, a: 14, M: 13, option_pricing: { d: -0.06 } },
     spotPrice: 2500, marginState, putBudgetRemaining: 100, ruleBudgetLimit: 100,

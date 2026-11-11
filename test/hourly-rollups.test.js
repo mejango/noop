@@ -273,3 +273,15 @@ test('hourly option winners ignore contracts outside the entry DTE window and re
   assert.equal(rollups.rebuildIfOutdated().algorithmVersion, 2);
   assert.equal(rollups.rebuildIfOutdated(), null, 'a current full rebuild is not repeated');
 });
+
+test('put hourly aggregation includes 81 DTE and rejects quotes above the shared ceiling', () => {
+  const timestamp = '2026-09-11T10:00:00.000Z';
+  const expiryAt = dte => Date.parse(timestamp) / 1000 + dte * 86400;
+  production.insertOptionsSnapshotBatch([
+    option('BOUNDARY-P', { delta: -0.05, askDeltaValue: 10 }, { expiry: expiryAt(81) }),
+    option('OUTSIDE-P', { delta: -0.05, askDeltaValue: 99 }, { expiry: expiryAt(81 + 1 / 86400) }),
+  ], timestamp);
+  assert.equal(db.prepare('SELECT best_put_dv FROM options_hourly').get().best_put_dv, 10);
+  rollups.rebuild();
+  assert.equal(db.prepare('SELECT best_put_dv FROM options_hourly').get().best_put_dv, 10);
+});

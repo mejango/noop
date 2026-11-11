@@ -8,7 +8,7 @@ Both PUT and CALL charts now apply the existing entry windows to each quote at i
 
 | Side | Delta | DTE | Required quote and RAW value |
 | --- | --- | --- | --- |
-| PUT | −0.12 to −0.02 | 45 to 78 | Positive ask and ask delta value |
+| PUT | −0.12 to −0.02 | 45 to 81 | Positive ask and ask delta value |
 | CALL | 0.04 to 0.12 | 5 to 12 | Positive bid and bid delta value |
 
 Bounds are inclusive. Missing expiry and invalid quotes cannot supply a winning value. Fractional seconds are retained when checking the DTE boundary. A sample without an eligible contract produces a null value for that side.

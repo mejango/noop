@@ -61,7 +61,7 @@ function recoveryRuntime(t) {
       },
       console: { ...quiet, error: (...args) => state.errors.push(args.join(' ')) }, process: { env: {} },
       ANTHROPIC_SONNET_MODEL: 'fixture', OPENAI_CONFIRMATION_MODEL: 'fixture',
-      PUT_DELTA_RANGE: [-0.12, -0.02], PUT_EXPIRATION_RANGE: [45, 78],
+      PUT_DELTA_RANGE: [-0.12, -0.02], PUT_EXPIRATION_RANGE: [45, 81],
       CALL_DELTA_RANGE: [0.04, 0.12], CALL_EXPIRATION_RANGE: [5, 12],
       SELL_CALL_FALLBACK_MIN_SCORE: 65, SELL_CALL_FALLBACK_MIN_BID: 4,
       CALL_BUYBACK_PROFIT_THRESHOLD: 80, PUT_ROLL_DTE_THRESHOLD: 25,
@@ -142,7 +142,7 @@ function recoveryRuntime(t) {
   state.db.saveBotState(state.botData);
   state.db.replaceActiveRules(null, [{ rule_type: 'entry', action: 'buy_put', instrument_name: instrumentName,
     preferred_order_type: 'post_only', criteria: { option_type: 'P', delta_range: [-0.12, -0.02],
-      dte_range: [45, 78], min_score: 0.004, target_score: 0.005 } }]);
+      dte_range: [45, 81], min_score: 0.004, target_score: 0.005 } }]);
   const ruleId = state.db.getActiveRules()[0].id;
   const originalId = Number(state.db.insertPendingAction({ rule_id: ruleId, action: 'buy_put',
     instrument_name: instrumentName, amount: 5, price: 8 }).lastInsertRowid);

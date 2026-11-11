@@ -173,7 +173,7 @@ test('actual dashboard DB getters use C quotes and bounded historical observatio
     '../../../bot/economic-events': require('../bot/economic-events'),
     '../../../bot/open-interest': require('../bot/open-interest'),
     '../../../bot/funding-rates': require('../bot/funding-rates'),
-    './strategy-config': { BOT_CONFIG: require('../bot/config.json'), CONFIG_PATH: path.join(root, 'bot/config.json') },
+    './strategy-config': { STRATEGY_FACTS: require('../bot/strategy-facts.json'), BOT_CONFIG: require('../bot/config.json'), CONFIG_PATH: path.join(root, 'bot/config.json') },
   }, { process: { env: { DATA_DIR: fixtureDir }, cwd: () => root } });
   assert.equal(dashboard.getAvgCallPremium7d()[0].avg_premium, 12.5);
   assert.equal(dashboard.getSpotPricesAtOrBefore(['2026-03-06T08:00:00.000Z'], 15 * 60_000)[0].price, 2500);

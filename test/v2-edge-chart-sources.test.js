@@ -16,7 +16,7 @@ const EPOCH = Date.parse('2026-09-14T12:00:00.000Z');
 const iso = (offsetMs = 0) => new Date(EPOCH + offsetMs).toISOString();
 const SINCE = iso(-60_000);
 
-function fixture(t, { putTable = true, callTable = true } = {}) {
+function fixture(t, { putTable = true, callTable = true, putDteRange = require('../bot/strategy-facts.json').put_dte_range } = {}) {
   const db = new Database(':memory:');
   t.after(() => db.close());
   for (const [side, present] of [['buy_put', putTable], ['sell_call', callTable]]) {
@@ -30,7 +30,7 @@ function fixture(t, { putTable = true, callTable = true } = {}) {
   )`);
   const dependencies = {
     'better-sqlite3': function () { return db; }, path,
-    './strategy-config': { BOT_CONFIG: {} },
+    './strategy-config': { STRATEGY_FACTS: { ...require('../bot/strategy-facts.json'), put_dte_range: putDteRange }, BOT_CONFIG: {} },
     '../../../bot/derive-config': require('../bot/derive-config'),
     '../../../bot/portfolio-reporting': require('../bot/portfolio-reporting'),
     '../../../bot/liquidity-quality': require('../bot/liquidity-quality'),
@@ -54,9 +54,9 @@ function fixture(t, { putTable = true, callTable = true } = {}) {
     db.prepare('INSERT INTO candidate_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(row.timestamp, side, row.raw, row.dte, row.delta, row.ask, row.bid, row.metadata);
   };
-  const dedicated = (side, timestamp = iso(), raw = side === 'buy_put' ? 0.0032 : 100) => {
+  const dedicated = (side, timestamp = iso(), raw = side === 'buy_put' ? 0.0032 : 100, dte = side === 'buy_put' ? 60 : 8.5) => {
     db.prepare(`INSERT INTO ${side}_edge_snapshots VALUES (?, ?, ?, ?, ?, ?)`).run(
-      timestamp, 'recorded-market-winner', raw, raw, side === 'buy_put' ? 60 : 8.5, side === 'buy_put' ? -0.05 : 0.05,
+      timestamp, 'recorded-market-winner', raw, raw, dte, side === 'buy_put' ? -0.05 : 0.05,
     );
   };
   const get = (side, since = SINCE, bucketMs = 0) => side === 'buy_put'
@@ -121,10 +121,10 @@ test('absent and empty dedicated tables independently allow legacy live-quote re
 test('legacy PUT quotes are individually normalized before choosing the maximum, ignoring stored planned RAW', t => {
   const f = fixture(t);
   f.candidate('buy_put', { dte: 45, ask: 10, raw: 99 }); // RAW .005, EDGE .003972...
-  f.candidate('buy_put', { dte: 78, ask: 0.05 / 0.0045, raw: 1 }); // Lower RAW, higher EDGE.
+  f.candidate('buy_put', { dte: 81, ask: 0.05 / 0.0045, raw: 1 }); // Lower RAW, higher EDGE.
   const rows = f.get('buy_put');
   assert.equal(rows.length, 1);
-  close(rows[0].edge_score, 0.0045 * Math.pow(78 / 60, 0.8));
+  close(rows[0].edge_score, 0.0045 * Math.pow(81 / 60, 0.8));
   assert.ok(rows[0].edge_score > 0.005 * Math.pow(45 / 60, 0.8));
 });
 
@@ -145,7 +145,7 @@ test('missing or nonpositive executable quotes and out-of-policy deltas or DTE d
     for (const delta of side === 'buy_put' ? [null, 0, 0.05, -0.01, -0.13] : [null, 0, -0.05, 0.03, 0.13]) {
       f.candidate(side, { delta });
     }
-    for (const dte of side === 'buy_put' ? [null, 44, 79] : [null, 4, 13]) f.candidate(side, { dte });
+    for (const dte of side === 'buy_put' ? [null, 44, 82] : [null, 4, 13]) f.candidate(side, { dte });
     assert.deepEqual(f.get(side), [], `${side} must not fall back to planned RAW or metadata when its quote is unavailable`);
   }
 });
@@ -163,5 +163,19 @@ test('time buckets average per-evaluation maximum EDGE rather than all candidate
     assert.equal(rows.length, 1);
     assert.equal(rows[0].timestamp, '2026-09-14T12:00:00Z');
     close(rows[0].edge_score, expected);
+  }
+});
+
+test('PUT EDGE honors configured 81-day ceiling for dedicated and legacy sources', t => {
+  for (const putTable of [true, false]) {
+    const f = fixture(t, { putTable, putDteRange: [45, 81] });
+    for (const [i, dte] of [79, 80, 81, 81.0001].entries()) {
+      if (putTable) f.dedicated('buy_put', iso(i * 60_000), 0.005, dte);
+      else f.candidate('buy_put', { timestamp: iso(i * 60_000), dte });
+    }
+    const rows = f.get('buy_put');
+    assert.equal(rows.length, 3);
+    rows.forEach((row, i) => close(row.edge_score, 0.005 * ((79 + i) / 60) ** 0.8));
+    assert.equal(f.get('buy_put', SINCE, 60_000).length, 3);
   }
 });

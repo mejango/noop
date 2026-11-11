@@ -118,8 +118,8 @@ test('screenshot scenario supplies a cheaper maker bid within the approved cap',
   assert.ok(3.38 * plan.retryPrice < 45);
   assert.ok(Math.abs(plan.retryPrice * 10 - Math.round(plan.retryPrice * 10)) < 1e-9);
   const prompt = api.formatBuyPutConfirmationContext({
-    action: { action: 'buy_put', instrument_name: 'ETH-20261127-1600-P', amount: 3.38, rule_criteria: { min_score: 0.001 } },
-    triggerData: { delta: -0.1, dte: 78, target_score: 0.001 },
+    action: { action: 'buy_put', instrument_name: 'ETH-20261130-1600-P', amount: 3.38, rule_criteria: { min_score: 0.001 } },
+    triggerData: { delta: -0.1, dte: 81, target_score: 0.001 },
     ticker, currentPrice: 13.28, advisorLimitPrice: 13.28, instrument,
   });
   assert.ok(prompt.includes(`Computed post_only bid on this book: $${plan.retryPrice.toFixed(4)}`));
@@ -143,21 +143,21 @@ test('confirmation economics use the proposed maker price, not the reference cap
   const plan = api.computePostOnlyRetryPrice('buy', ticker, instrument, 13.56);
   const normalizeScore = require('../bot/put-score').normalizeBuyPutScore;
   const prompt = api.formatBuyPutConfirmationContext({
-    action: { action: 'buy_put', instrument_name: 'ETH-20261127-1600-P', amount: 3, rule_criteria: { min_score: 0.001 } },
-    triggerData: { delta: -0.1, dte: 78, target_score: 0.001 },
+    action: { action: 'buy_put', instrument_name: 'ETH-20261130-1600-P', amount: 3, rule_criteria: { min_score: 0.001 } },
+    triggerData: { delta: -0.1, dte: 81, target_score: 0.001 },
     ticker, currentPrice: 13.56, advisorLimitPrice: 13.56, instrument,
   });
   assert.ok(prompt.includes(`Planned execution limit: $${plan.retryPrice.toFixed(4)}`));
   assert.ok(prompt.includes('capped by advisor_limit_price=$13.5600'));
-  assert.ok(prompt.includes(`planned PUT_EDGE=${normalizeScore(0.1 / plan.retryPrice, 78).toFixed(6)}`));
+  assert.ok(prompt.includes(`planned PUT_EDGE=${normalizeScore(0.1 / plan.retryPrice, 81).toFixed(6)}`));
   assert.ok(prompt.includes(`Planned premium outlay (excluding fees): $${(3 * plan.retryPrice).toFixed(4)}`));
 });
 
 test('missing maker book is explicitly identified as reference-only economics', () => {
   const api = loadMakerHelpers();
   const prompt = api.formatBuyPutConfirmationContext({
-    action: { action: 'buy_put', instrument_name: 'ETH-20261127-1600-P', amount: 3 },
-    triggerData: { delta: -0.1, dte: 78 },
+    action: { action: 'buy_put', instrument_name: 'ETH-20261130-1600-P', amount: 3 },
+    triggerData: { delta: -0.1, dte: 81 },
     ticker: {}, currentPrice: 13.56, advisorLimitPrice: 13.56,
     instrument: { price_step: 0.1 },
   });

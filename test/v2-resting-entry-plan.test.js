@@ -13,7 +13,7 @@ function fixture(action = 'buy_put') {
       amount: 2.5, filled_amount: 0, limit_price: put ? 9.9 : 10.1, time_in_force: 'post_only' },
     rule: { id: 11, rule_type: 'entry', action, is_active: 1, preferred_order_type: 'post_only', budget_limit: 100,
       criteria: { option_type: put ? 'P' : 'C', delta_range: put ? [-0.12, -0.02] : [0.04, 0.12],
-        dte_range: put ? [45, 78] : [5, 12], min_score: put ? 0.005 : 65, ...(put ? {} : { min_bid: 4 }) } },
+        dte_range: put ? [45, 81] : [5, 12], min_score: put ? 0.005 : 65, ...(put ? {} : { min_bid: 4 }) } },
     instrument: { instrument_name: name, price_step: 0.1, options: { amount_step: 0.01 },
       option_details: { option_type: put ? 'P' : 'C', strike: put ? 1800 : 3000 } },
     ticker: { b: put ? 9.9 : 10, a: put ? 20 : 11, I: 2500, option_pricing: { d: put ? -0.05 : 0.1 } },

@@ -87,7 +87,7 @@ test('dashboard DB getter reads only the selected asset and its captured quotes'
       'better-sqlite3': Database, '../../../bot/market-evidence': { HISTORY_SQL: {} },
       '../../../bot/derive-config': {}, path,
       '../../../bot/portfolio-reporting': require('../bot/portfolio-reporting'),
-      './strategy-config': { BOT_CONFIG: { PUT_PROTECTED_ETH: 5, PUT_WINDOW_RATE: 0.0075, PERIOD_DAYS: 15 } },
+      './strategy-config': { STRATEGY_FACTS: require('../bot/strategy-facts.json'), BOT_CONFIG: { PUT_PROTECTED_ETH: 5, PUT_WINDOW_RATE: 0.0075, PERIOD_DAYS: 15 } },
       '../../../bot/economic-events': {}, '../../../bot/open-interest': {},
       '../../../bot/funding-rates': {}, '../../../bot/liquidity-quality': {},
     }, { env: { DATA_DIR: directory } });

@@ -10,7 +10,7 @@ const {
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const NOW = Date.parse('2026-09-26T12:00:00Z');
-const zones = { call_dte_range: [5, 12], put_dte_range: [45, 78] };
+const zones = { call_dte_range: [5, 12], put_dte_range: [45, 81] };
 const callExpiry = (NOW + 6 * DAY) / 1000;
 const putExpiry = (NOW + 60 * DAY) / 1000;
 
@@ -87,7 +87,7 @@ test('surface compares live zones against their own hourly history and realized 
 });
 
 test('percentiles rank against all recorded history, and wings reach further back than ATM', () => {
-  // 15 days of history (the put expiry stays inside the 45-78 DTE zone) with put 10Δ IV stepping
+  // 15 days of history (the put expiry stays inside the 45-81 DTE zone) with put 10Δ IV stepping
   // 60 → 74 a day at a time; only the last 8 days also carry an ATM quote, as smiles do.
   const rows = [];
   for (let h = 15 * 24; h >= 1; h--) {

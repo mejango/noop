@@ -260,8 +260,8 @@ const filterAdvisoryBuyPutCandidates = (candidates) => candidates.filter((candid
   candidate.option_type === 'P'
   && candidate.delta >= -0.12
   && candidate.delta <= -0.02
-  && candidate.dte >= 45
-  && candidate.dte <= 75
+  && candidate.dte >= BUY_PUT_EDGE_MIN_DTE
+  && candidate.dte <= BUY_PUT_EDGE_MAX_DTE
   && candidate.ask_price > 0
 ));
 
@@ -392,17 +392,17 @@ describe('finiteOrNull', () => {
   test('buy-put edge removes the expiry-roll bias from raw delta per dollar', () => {
     assert.strictEqual(normalizeBuyPutScore(0.004, BUY_PUT_EDGE_REFERENCE_DTE), 0.004);
     assert.ok(normalizeBuyPutScore(0.004, 45) < 0.004);
-    assert.ok(normalizeBuyPutScore(0.004, 78) > 0.004);
+    assert.ok(normalizeBuyPutScore(0.004, 81) > 0.004);
     assert.strictEqual(normalizeBuyPutScore(0, 60), 0);
     assert.strictEqual(normalizeBuyPutScore(0.004, 0), 0);
     assert.ok(Math.abs(
-      getBuyPutDteNormalizationFactor(78)
-      - Math.pow(78 / BUY_PUT_EDGE_REFERENCE_DTE, BUY_PUT_EDGE_DTE_EXPONENT)
+      getBuyPutDteNormalizationFactor(81)
+      - Math.pow(81 / BUY_PUT_EDGE_REFERENCE_DTE, BUY_PUT_EDGE_DTE_EXPONENT)
     ) < 1e-12);
   });
 
   test('buy-put edge target price is the exact inverse of normalized score', () => {
-    for (const dte of [45, 60, 78]) {
+    for (const dte of [45, 60, 81]) {
       const delta = 0.08;
       const targetEdge = 0.0045;
       const price = getBuyPutPriceForEdgeScore(delta, targetEdge, dte);
@@ -683,16 +683,18 @@ describe('Buy-put advisory value review', () => {
     assert.strictEqual(working.requiresDecision, false);
   });
 
-  test('advisory candidate filter enforces 45-78 DTE buy-put discipline', () => {
+  test('advisory candidate filter enforces 45-81 DTE buy-put discipline', () => {
     const filtered = filterAdvisoryBuyPutCandidates([
       { option_type: 'P', delta: -0.08, dte: 60, ask_price: 20 },
+      { option_type: 'P', delta: -0.08, dte: 81, ask_price: 20 },
+      { option_type: 'P', delta: -0.08, dte: 81.001, ask_price: 20 },
       { option_type: 'P', delta: -0.08, dte: 20, ask_price: 2 },
       { option_type: 'P', delta: -0.08, dte: 90, ask_price: 30 },
       { option_type: 'P', delta: -0.2, dte: 60, ask_price: 20 },
       { option_type: 'C', delta: 0.08, dte: 60, ask_price: 20 },
     ]);
 
-    assert.strictEqual(filtered.length, 1);
+    assert.deepStrictEqual(filtered.map(row => row.dte), [60, 81]);
     assert.strictEqual(filtered[0].dte, 60);
   });
 
@@ -5162,7 +5164,7 @@ describe('Entry candidate filtering: all criteria enforced', () => {
   });
 
   test('DTE out of range → rejected', () => {
-    const dte = 30; // Too short (strategy range is 45-78)
+    const dte = 30; // Too short (strategy range is 45-81)
     const range = [45, 75];
     const inRange = dte >= range[0] && dte <= range[1];
     assert.strictEqual(inRange, false, `DTE ${dte} should be out of range [${range}]`);
@@ -6890,7 +6892,7 @@ describe('Buy-put DTE-normalized edge chart', () => {
     assert.ok(overviewSource.includes('NO ELIGIBLE'));
   });
 
-  test('keeps put edge sparse when no eligible 45-78 DTE quote exists', () => {
+  test('keeps put edge sparse when no eligible 45-81 DTE quote exists', () => {
     const edgeFunction = chartDbSource.slice(
       chartDbSource.indexOf('export function getBuyPutEdgeOverTime'),
       chartDbSource.indexOf('export function getSellCallEdgeOverTime'),

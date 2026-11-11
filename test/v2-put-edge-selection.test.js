@@ -22,7 +22,7 @@ function fixture({ reverse = false, criteria = {}, failures = {}, rejections = {
   const inserted = [], decisions = [], frames = [], logs = [];
   const botData = { putBudgetForCycle: 100, putUnspentBuyLimit: 0, putNetBought: 0, ...budget };
   const rule = { id: 71, action: 'buy_put', rule_type: 'entry', preferred_order_type: 'post_only', budget_limit: 100,
-    criteria: { option_type: 'P', delta_range: [-0.12, -0.02], dte_range: [45, 78],
+    criteria: { option_type: 'P', delta_range: [-0.12, -0.02], dte_range: [45, 81],
       min_score: 0.001, target_score: target, ...criteria } };
   const db = {
     getActiveRulesByType: type => type === 'entry' ? [rule] : [],

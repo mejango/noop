@@ -12,6 +12,7 @@
 // 2: best_put_dv / best_call_dv restricted to the entry DTE windows, so the
 // dashboard can read this table for long ranges instead of scanning raw quotes.
 const { invalidDexReason, liquidityChartSeries } = require('./liquidity-quality');
+const { put_dte_range } = require('./strategy-facts.json');
 const ALGORITHM_VERSION = 2;
 const HOUR_MS = 60 * 60 * 1000;
 const RAW_TABLES = {
@@ -70,7 +71,7 @@ function createHourlyRollups(db) {
     SELECT
       MAX(CASE WHEN (option_type = 'P' OR instrument_name LIKE '%-P')
         AND delta BETWEEN -0.12 AND -0.02
-        AND (expiry - unixepoch(timestamp, 'subsec')) / 86400.0 BETWEEN 45 AND 78 THEN ask_delta_value END) AS best_put_dv,
+        AND (expiry - unixepoch(timestamp, 'subsec')) / 86400.0 BETWEEN ${put_dte_range[0]} AND ${put_dte_range[1]} THEN ask_delta_value END) AS best_put_dv,
       MAX(CASE WHEN (option_type = 'C' OR instrument_name LIKE '%-C')
         AND delta BETWEEN 0.04 AND 0.12
         AND (expiry - unixepoch(timestamp, 'subsec')) / 86400.0 BETWEEN 5 AND 12 THEN bid_delta_value END) AS best_call_dv,

@@ -72,7 +72,7 @@ function dashboardDatabase(sqlite) {
         assert.equal(options.readonly, true);
         return sqlite;
       };
-      if (name === './strategy-config') return { BOT_CONFIG: require('../bot/config.json') };
+      if (name === './strategy-config') return { STRATEGY_FACTS: require('../bot/strategy-facts.json'), BOT_CONFIG: require('../bot/config.json') };
       return localRequire(name);
     },
   }, { filename });
