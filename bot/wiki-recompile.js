@@ -205,18 +205,20 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
     saveProgress();
     log(`period ${step.label} folded (${progress.done.length}/${steps.length}), ${updated} page(s) updated`);
   }
-  // Replay each page-and-period a rejection dropped. The gap leaves progress.json only after its
-  // replay ran, so a restart mid-replay tries it again; a replay that fails is recorded again.
-  const doneFile = path.join(stagingDir, 'done.json');
-  for (const gap of fs.existsSync(doneFile) ? [] : [...progress.rejected]) {
+  // Replay each page-and-period a rejection dropped, once. The gap leaves progress.json only after
+  // its replay ran, so a restart mid-replay tries it again; a replay that fails is recorded as
+  // replayed and is not tried a third time.
+  for (const gap of progress.rejected.filter((item) => !item.replayed)) {
     const step = steps.find((candidate) => candidate.label === gap.period);
     progress.rejected.splice(progress.rejected.indexOf(gap), 1);
     const updated = step ? await foldStep(step, [[gap.pagePath]]) : 0;
+    if (!updated && !progress.rejected.some((item) => item.period === gap.period && item.pagePath === gap.pagePath)) progress.rejected.push(gap);
+    for (const item of progress.rejected) if (item.period === gap.period && item.pagePath === gap.pagePath) item.replayed = true;
     saveProgress();
     log(`gap ${gap.period} ${gap.pagePath}: ${updated ? 'folded' : 'still missing'}`);
   }
   const summary = { completed_at: new Date().toISOString(), periods: steps.map((step) => step.label), rejected: progress.rejected };
-  fs.writeFileSync(doneFile, JSON.stringify(summary, null, 2));
+  fs.writeFileSync(path.join(stagingDir, 'done.json'), JSON.stringify(summary, null, 2));
   return summary;
 }
 
@@ -224,6 +226,9 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
  * Which staged drafts may replace their live page. A draft still holding the skeleton,
  * breaking a page rule, or citing a marker the live wiki and reviews do not contain is skipped.
  */
+// A finished run still has work when a dropped page-and-period was never replayed.
+const hasUnreplayedGaps = (summary) => (summary?.rejected || []).some((item) => !item.replayed);
+
 function selectRecompileApplicable({ staged, live, allowedMarkers, getMarkers }) {
   const apply = [];
   const skipped = [];
@@ -250,5 +255,6 @@ module.exports = {
   parseUpdates,
   readDrafts,
   runWikiRecompile,
+  hasUnreplayedGaps,
   selectRecompileApplicable,
 };

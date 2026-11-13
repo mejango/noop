@@ -71,6 +71,7 @@ test('a run folds each period, keeps a draft when an update breaks a rule, and r
   assert.deepEqual(summary.periods, ['2026-04-a', '2026-05-a', recompile.CURRENT_PAGES_PERIOD]);
   assert.equal(summary.rejected.length, 1);
   assert.match(summary.rejected[0].reason, /missing sections: Patterns/);
+  assert.equal(summary.rejected[0].replayed, true);
   assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /2 episodes/);
   // A completed run is not repeated.
   await recompile.runWikiRecompile({ ...args, callModel: async () => { throw new Error('must not be called'); } });
@@ -157,5 +158,9 @@ test('a page-and-period dropped by an earlier rejection is replayed once the per
   const summary = await recompile.runWikiRecompile({ stagingDir, sources: [entry('2026-04-10T00:00:00Z', 'note')], currentPages: {}, schema: 'S', callModel });
   assert.deepEqual(summary.rejected, []);
   assert.equal(calls.filter((period) => period === '2026-04-a').length, 1);
+  assert.equal(recompile.hasUnreplayedGaps(summary), false);
+  // A finished run that still lists a dropped period is picked up again, once.
+  assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md' }] }), true);
+  assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md', replayed: true }] }), false);
   assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /April folded on replay/);
 });

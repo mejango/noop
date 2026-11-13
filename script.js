@@ -4034,8 +4034,10 @@ const maybeStageWikiRecompile = async () => {
   if (!runId || !db || !process.env.ANTHROPIC_API_KEY) return;
   if (!isSafeRecompileRunId(runId)) return console.log('📚 Wiki recompile: invalid WIKI_RECOMPILE_RUN id');
   const stagingDir = path.join(WIKI_RECOMPILE_DIR, runId);
-  if (fs.existsSync(path.join(stagingDir, 'done.json'))) return;
   const recompile = require('./bot/wiki-recompile');
+  let finished = null;
+  try { finished = JSON.parse(fs.readFileSync(path.join(stagingDir, 'done.json'), 'utf8')); } catch { /* not finished */ }
+  if (finished && !recompile.hasUnreplayedGaps(finished)) return;
   try {
     // Trade reviews join the analyst notes as dated sources and carry their [review:#ID] marker.
     const reviews = (db.getRecentTradeReviews(100000) || []).map((review) => ({
