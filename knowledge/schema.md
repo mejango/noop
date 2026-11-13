@@ -2,6 +2,19 @@
 
 This file defines the structure, update rules, and format conventions for the NOOP-C knowledge wiki.
 
+## What Belongs in the Wiki
+
+Three layers, each with one job:
+
+- **Raw evidence** (`raw/evidence/` and the tick and order history) keeps the chronology: every snapshot, as it happened.
+- **The wiki** holds what that evidence means: conclusions compiled from all of it and kept current.
+- **This schema** says how the wiki is maintained.
+
+Advisors read every page in full, next to live market data. A page earns its words only by saying what live data cannot: what history shows, and how the present compares with it. Pages carry two kinds of content:
+
+- **Assessment** (TLDR, Current, Active, Classification and Assessment sections): the present verdict, the few readings that decide it, the compiled patterns it rests on, and what would falsify it. Superseded state is replaced and dropped, not archived.
+- **Knowledge** (Historical, Patterns, Indicator, Correlation and Episode sections): compiled claims, one entry per pattern or per episode (a regime, a window or a divergence, from open to resolution), each with its sample, period and outcome. Never one entry per update pass.
+
 ## System-Owned Files
 
 ### index.md
@@ -150,14 +163,14 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 3. **Revise transparently** — when evidence overturns a claim, say so once in "Previously: X. Updated [YYYY-MM-DD]: Y" format, then fold it into the claim on the next revision
 4. **Word budget** — each page has a budget of 2,500 words, enforced in code: a rewrite that grows a page past it is rejected. Advisors read every page in full, so the budget is what keeps their context from growing. Make room by compiling: several entries about one pattern merge into a single claim with its count, range and outcome, and today's tick-by-tick narration shrinks to its conclusion
 4a. **Weigh all history** — a conclusion reflects every episode behind it, not the latest packet. One new observation moves a pattern built on many by its share of the sample; it does not replace it. State a pattern as general only with its sample and period, and never make room by dropping what older evidence established
-5. **Bold TLDR** — a page may begin with one H1 title; the next content must be a bold one-line summary of current state
+5. **Bold TLDR** — a page may begin with one H1 title; the next content must be a bold summary of the page's conclusion in at most 40 words. On pages about history, patterns, indicators or correlations it states what history shows, not today's readings
 6. **Evidence required** — claims must reference specific data values (IV levels, percentages, dates)
 7. **Falsification criteria** — regime assessments and hypotheses include what would disprove them
 8. **No speculation without evidence** — wiki captures confirmed patterns, not guesses
 9. **Truthful freshness** — distinguish when a page was checked, when new evidence changed it, and when it was validated
 10. **Canonical strategy ownership** — execution guidance must remain traceable to Learning
-11. **Current means current** — replace superseded claims in TLDR, Current, and Active sections; move useful prior state into the matching Historical section
-12. **One live snapshot** — regime, protection, and revenue current-state pages must reconcile against the same latest evidence packet
+11. **Current means current** — replace superseded claims in TLDR, Current, and Active sections and drop the superseded state; do not archive it as a snapshot. If it completed or extended an episode or changed a pattern's sample, update that compiled entry
+12. **One live snapshot** — regime, protection, and revenue current-state pages must reconcile against the same latest evidence packet. Current spot, IV, skew, percentile and term readings are stated once, on regimes/current.md, protection/pricing.md and revenue/pricing.md; every other page gives its verdict with the one or two readings that decide it and refers to those pages for the rest
 13. **Durable strategy views** — Learning-owned strategy pages express conditional `[lesson:key]` rules and must not embed current spot, skew, score, budget, gate state, or other live snapshot values
 
 ## Format Conventions

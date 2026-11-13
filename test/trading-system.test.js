@@ -6745,7 +6745,7 @@ describe('Wiki knowledge discipline', () => {
   test('wiki ingest prevents partial live-state drift and invalid provenance', () => {
     assert.ok(SCRIPT_SOURCE.includes('const WIKI_LIVE_RESEARCH_PAGES'));
     assert.ok(SCRIPT_SOURCE.includes('Reconcile every allowed live-state research page against the same raw evidence packet'));
-    assert.ok(SCRIPT_SOURCE.includes('replace superseded state instead of appending it'));
+    assert.ok(SCRIPT_SOURCE.includes('replace superseded state and drop it; do not archive it'));
     assert.ok(SCRIPT_SOURCE.includes('live state lacks an exact marker from the latest tick packet'));
     assert.ok(SCRIPT_SOURCE.includes('Learning-owned page lacks a canonical lesson marker'));
     assert.ok(SCRIPT_SOURCE.includes('last_reviewed_at: null'));

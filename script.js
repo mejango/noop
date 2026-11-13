@@ -3607,7 +3607,6 @@ const WIKI_LIVE_RESEARCH_PAGES = [
   'protection/convexity.md',
   'revenue/pricing.md',
   'revenue/windows.md',
-  'indicators/leading.md',
 ];
 
 const WIKI_STRATEGY_PAGES = new Set([
@@ -4010,6 +4009,8 @@ const getWikiPagesNeedingSeed = () => {
 const WIKI_OPTIONAL_INGEST_PAGES = {
   'regimes/history.md': 'a regime transition, or a recurring pattern across past regimes',
   'revenue/efficiency.md': 'premium captured per unit of risk on short calls, strike-selection outcomes, or buyback decisions',
+  // Durable knowledge: forcing it to cite the latest ticks every pass turned each indicator into a diary of "Updated" lines.
+  'indicators/leading.md': 'a signal that preceded a change in protection cost or premium, or evidence that confirms, weakens or refutes a leading indicator',
   'indicators/correlations.md': 'a strong, weakening, or new correlation between market series',
   'indicators/divergences.md': 'an active or historical divergence between an indicator and price',
 };
@@ -4415,11 +4416,11 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 ## Instructions
 1. Fix the Outstanding Validation Findings above first. Each one names a page and a concrete defect a prior audit confirmed; return an updated page that resolves it, correcting or relocating the offending claim rather than restating it. A finding that the supplied evidence genuinely cannot resolve may be left, but prefer fixing it
 2. Reconcile every allowed live-state research page against the same raw evidence packet. Return an update for each page whose TLDR, Current, or Active section disagrees with newer evidence; do not omit a stale dependent page merely to minimize the update set
-3. Preserve accurate durable and historical content. In TLDR, Current, and Active sections, replace superseded state instead of appending it; move useful prior observations into the matching Historical section.. Compile, do not append: when new evidence bears on a pattern the page already holds, revise that claim in place (strengthen, weaken or overturn it, and update its sample: how many episodes, over what period, with what outcome) instead of adding another dated entry beside it. Weigh all history: one new observation moves a pattern built on many by its share of the sample and does not replace it
+3. Compile, do not append. Each page is the current synthesis, not a diary: the evidence packets and the log already keep the chronology. In TLDR, Current, and Active sections, replace superseded state and drop it; do not archive it as a prior or historical snapshot, and remove snapshot trails a page already has (per-pass "archived" or "prior snapshot" lists). Keep only what the superseded state teaches: when it completes or extends an episode, or adds to a pattern's sample, revise that one compiled entry in place (strengthen, weaken or overturn it; update how many episodes, over what period, with what outcome). Weigh all history: one new observation moves a pattern built on many by its share of the sample and does not replace it
 4. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
 5. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" only in historical context—never leave the obsolete value in the current TLDR or Active section
 6. Each page has a budget of ${WIKI_PAGE_WORD_BUDGET} words; a rewrite that grows a page past it is rejected. Make room by compiling: several entries about the same pattern merge into one claim with its count, range and outcome, and today's tick-by-tick narration shrinks to its conclusion. Never make room by dropping what older evidence established
-7. Each page may start with one H1 title; place a bold TLDR line reflecting current state immediately after that optional title
+7. Each page may start with one H1 title; place a bold TLDR line immediately after that optional title. It states the page's conclusion in at most 40 words; on pages about history, patterns, indicators or correlations it says what history shows, not today's readings
 8. Prefer a compact update set only after every live-state page has been checked for cross-page consistency
 9. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
 10. If evidence is thin or mixed, say so explicitly instead of over-asserting
@@ -4431,6 +4432,9 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 16. Research pages describe the market, not the bot's book. Keep open positions, campaign status, fills, buyback attempts and budget state out of pricing, skew, term-structure and regime sections; remove any already there. A past trade may appear only as a dated example in a Historical section, where it illustrates a pricing observation
 17. Term Structure sections read the packet's Term Curve: the curve's shape across expiries, and how its fixed-maturity history moved (steepening, flattening, inverting; front-only or whole-curve moves)
 18. The schema's Reference-only sections must read exactly as the schema gives them; replace any other wording there, including older canonical text
+19. Current spot, IV, skew, percentile and term readings are stated once: on regimes/current.md, protection/pricing.md and revenue/pricing.md. Every other page gives its own verdict (for example whether a window is open) with the one or two readings that decide it, and refers to those pages for the rest
+20. Historical, Patterns, Indicator, Correlation and Episode sections hold one entry per pattern or per episode (a regime, a window or a divergence, from open to resolution), never one entry per update pass. Do not add an "Updated [date]" line under an entry each pass; change an entry only when the evidence changes its sample, range, outcome or status
+21. A page holds knowledge about the market, not notes about the wiki: leave out labelling notes and correction notes about this or other pages
 
 Output your updates as XML blocks. Only include pages that need changes:
 
@@ -4838,7 +4842,7 @@ ${pagesToReview.flatMap((pagePath) => getWikiPageIssueTexts(storedPageMeta[pageP
 6. **Provenance**: Are material claims linked to supplied source, review, or canonical lesson markers where available?
 7. **Ownership**: Do strategy pages faithfully summarize canonical [lesson:key] records without inventing a competing playbook?
 8. **Live-state boundaries**: Do strategy pages avoid embedding current spot, skew, score, budget, or gate values that belong in research/advisory state?
-9. **Recency**: Does a durable pattern, indicator or rule rest only on the latest days while the page states it as general, or has a conclusion older evidence established been displaced by the newest packet? Report it as quality.
+9. **Recency**: Does a durable pattern, indicator or rule rest only on the latest days while the page states it as general, or has a conclusion older evidence established been displaced by the newest packet? Does a section accumulate per-pass snapshots or "Updated" lines where one compiled entry per pattern or episode belongs? Report it as quality.
 
 ## Materiality Bar
 Report only issues that would mislead a trading decision or misstate current or historical fact: contradictions, wrong numbers or units, stale live state, unsupported material claims, a general pattern drawn from the latest days alone, or strategy pages inventing rules. Do not report formatting, column consistency, wording, epistemic tone, caveat placement, sub-1% rounding, or cross-reference tidiness. Values that agree at their stated precision are consistent: timestamps within 5 minutes (01:31 and 01:32 both describe 01:31:58), approximate '~' figures such as DTE on rows hours apart, and rounded totals. Flag them only when they differ beyond that precision. Every rewrite is re-audited, so nitpicks keep sound pages flagged forever. A sound page returns no issues; do not search for something to report. Cite a rule only if it is written in the Wiki Schema above; never infer one. A classification or hold the page states a reason for (for example "awaiting cross-cycle confirmation") is a judgment call, not a defect.
