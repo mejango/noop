@@ -50,8 +50,8 @@ test('a run folds each period, keeps a draft when an update breaks a rule, and r
   let failMay = true;
   const callModel = async (prompt) => {
     const period = /## Sources: period (\S+)/.exec(prompt)?.[1] || recompile.CURRENT_PAGES_PERIOD;
-    const first = prompt.includes('\n- regimes/history.md\n');
-    if (first) seen.push(period);
+    const first = prompt.includes('\n- regimes/history.md (draft is ');
+    if (first && !prompt.includes('## Your previous update was rejected')) seen.push(period);
     if (period === '2026-05-a' && failMay) throw new Error('529 overloaded');
     if (!first) return { text: '<no_updates/>', truncated: false };
     if (period === '2026-04-a') return { text: update('regimes/history.md', 'Fear to transition, 1 episode [2026-04-10].'), truncated: false };
@@ -107,7 +107,7 @@ test('a cut-off response asks again, one page per call, for the pages it lost', 
   const stagingDir = tmp();
   const calls = [];
   const callModel = async (prompt) => {
-    const pages = recompile.RECOMPILE_PAGES.filter((page) => prompt.includes(`\n- ${page}\n`));
+    const pages = recompile.RECOMPILE_PAGES.filter((page) => prompt.includes(`\n- ${page} (draft is `));
     calls.push(pages);
     if (pages.length === 2 && pages[0] === 'regimes/history.md') return { text: update(pages[0], 'First page arrived [2026-04-10].'), truncated: true };
     if (pages.length === 1) return { text: update(pages[0], 'Recovered alone [2026-04-10].'), truncated: false };
@@ -119,4 +119,23 @@ test('a cut-off response asks again, one page per call, for the pages it lost', 
   assert.match(drafts[recompile.RECOMPILE_PAGES[1]], /Recovered alone/);
   // The page that arrived was not asked for again.
   assert.equal(calls.filter((pages) => pages.length === 1 && pages[0] === 'regimes/history.md').length, 0);
+});
+
+test('a rejected update gets one corrected attempt with the reason before the period is dropped from the page', async () => {
+  const stagingDir = tmp();
+  const prompts = [];
+  const callModel = async (prompt) => {
+    if (!prompt.includes('\n- regimes/history.md (draft is ')) return { text: '<no_updates/>', truncated: false };
+    prompts.push(prompt);
+    if (prompt.includes('## Sources: the current live pages')) return { text: '<no_updates/>', truncated: false };
+    if (!prompt.includes('## Your previous update was rejected')) {
+      return { text: `<wiki_update path="regimes/history.md">\n**TLDR**\n## Regime Transitions\nA long enough body that only lacks the Patterns section.\n</wiki_update>`, truncated: false };
+    }
+    return { text: update('regimes/history.md', 'Corrected with both sections [2026-04-10].'), truncated: false };
+  };
+  const summary = await recompile.runWikiRecompile({ stagingDir, sources: [entry('2026-04-10T00:00:00Z', 'note')], currentPages: {}, schema: 'S', callModel });
+  assert.equal(summary.rejected.length, 0);
+  assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /Corrected with both sections/);
+  assert.match(prompts[1], /regimes\/history\.md: Replacement is missing sections: Patterns/);
+  assert.match(prompts[0], /draft is \d+ of 2500 words/);
 });

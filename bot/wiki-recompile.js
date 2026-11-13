@@ -15,7 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { WIKI_EXPECTED_HEADERS, REFERENCE_ONLY_SECTIONS, getWikiPageRuleErrors } = require('./wiki-rules');
+const { WIKI_EXPECTED_HEADERS, REFERENCE_ONLY_SECTIONS, WIKI_PAGE_WORD_BUDGET, countWikiWords, getWikiPageRuleErrors } = require('./wiki-rules');
 
 // Assessment pages (regimes/current, the two pricing pages) describe the present,
 // and strategy pages are views of Learning's canonical lessons: neither has
@@ -79,7 +79,7 @@ const chunkSources = (sources = [], maxChars = MAX_PERIOD_CHARS) => {
   return chunks;
 };
 
-const buildPrompt = ({ schema, drafts, batchPages, period, sourcesText }) => {
+const buildPrompt = ({ schema, drafts, batchPages, period, sourcesText, feedback = '' }) => {
   const foldingCurrent = period === CURRENT_PAGES_PERIOD;
   return `You are recompiling the knowledge pages of an ETH options trading bot's wiki from its full history, one period at a time, oldest first. Earlier periods are already compiled into the drafts below. Fold in the sources for this step.
 
@@ -90,8 +90,8 @@ ${schema}
 ${RECOMPILE_PAGES.map((page) => `--- ${page} ---\n${drafts[page]}`).join('\n\n')}
 
 ## Pages you may update in this call
-${batchPages.map((page) => `- ${page}`).join('\n')}
-
+${batchPages.map((page) => `- ${page} (draft is ${countWikiWords(drafts[page])} of ${WIKI_PAGE_WORD_BUDGET} words)`).join('\n')}
+${feedback ? `\n## Your previous update was rejected\n${feedback}\nReturn a corrected full page. If the page is at its budget, make room by merging entries about one pattern, not by leaving this period out.\n` : ''}
 ## Sources: ${foldingCurrent ? 'the current live pages (the last step)' : `period ${period}`}
 ${foldingCurrent
     ? 'These are the live versions of the same pages. They cover the most recent weeks in detail and carry cited evidence markers. Merge what they establish into the drafts; keep their source markers exactly, and do not copy their per-pass snapshot lists.'
@@ -165,21 +165,32 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
     };
     const updates = [];
     for (const batchPages of batches) updates.push(...await foldBatch(batchPages));
+    const ruleErrors = (pagePath, content) => (content.length < 50
+      ? ['too short']
+      : getWikiPageRuleErrors({ pagePath, previousContent: drafts[pagePath] === skeletonPage(pagePath) ? '' : drafts[pagePath], replacementContent: content }));
     let updated = 0;
-    updates.forEach(({ pagePath, content }) => {
-      const previous = drafts[pagePath];
-      const errors = content.length < 50
-        ? ['too short']
-        : getWikiPageRuleErrors({ pagePath, previousContent: previous === skeletonPage(pagePath) ? '' : previous, replacementContent: content });
+    for (let { pagePath, content } of updates) {
+      let errors = ruleErrors(pagePath, content);
+      if (errors.length > 0) {
+        // One corrected attempt with the reason; a plain rejection would drop this period from the page.
+        const retry = await callModel(buildPrompt({
+          schema, drafts, batchPages: [pagePath], period: step.label, sourcesText: step.text, feedback: `${pagePath}: ${errors.join('; ')}`,
+        }));
+        const corrected = parseUpdates(retry.text).find((update) => update.pagePath === pagePath);
+        if (corrected && ruleErrors(pagePath, corrected.content).length === 0) {
+          content = corrected.content;
+          errors = [];
+        }
+      }
       if (errors.length > 0) {
         progress.rejected.push({ period: step.label, pagePath, reason: errors.join('; ') });
         log(`rejected ${pagePath} for ${step.label}: ${errors.join('; ')}`);
-        return;
+        continue;
       }
       fs.mkdirSync(path.dirname(draftPath(stagingDir, pagePath)), { recursive: true });
       fs.writeFileSync(draftPath(stagingDir, pagePath), `${content}\n`);
       updated++;
-    });
+    }
     progress.done.push(step.label);
     fs.writeFileSync(progressFile, JSON.stringify(progress, null, 2));
     log(`period ${step.label} folded (${progress.done.length}/${steps.length}), ${updated} page(s) updated`);
