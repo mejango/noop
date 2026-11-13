@@ -94,9 +94,11 @@ test('apply takes only complete, rule-abiding drafts whose markers exist', () =>
 test('the bot stages in the background and applies only on its own explicit trigger', () => {
   const script = fs.readFileSync(path.join(root, 'script.js'), 'utf8');
   const stage = script.slice(script.indexOf('const maybeStageWikiRecompile'), script.indexOf('const maybeApplyWikiRecompile'));
-  assert.ok(stage.includes('process.env.WIKI_RECOMPILE_RUN'));
+  assert.ok(stage.includes('const runId = WIKI_RECOMPILE_RUN;'));
   assert.ok(!/writeFileSync\(path\.join\(WIKI_DIR/.test(stage), 'staging never writes a live page');
   const apply = script.slice(script.indexOf('const maybeApplyWikiRecompile'), script.indexOf('const saveWikiHistory'));
-  assert.ok(apply.includes('process.env.WIKI_RECOMPILE_APPLY'));
+  assert.ok(apply.includes('const runId = WIKI_RECOMPILE_APPLY;'));
+  // Nothing is applied until a later commit names the run.
+  assert.ok(script.includes("const WIKI_RECOMPILE_APPLY = process.env.WIKI_RECOMPILE_APPLY || '';"));
   assert.ok(apply.indexOf('saveWikiHistory(pagePath') < apply.indexOf('fs.writeFileSync(path.join(WIKI_DIR, pagePath)'), 'history is saved before a page is replaced');
 });

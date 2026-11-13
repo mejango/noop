@@ -3998,6 +3998,10 @@ const queryWikiContext = () => {
 
 // ─── One-off recompile of the knowledge pages from full history (bot/wiki-recompile.js) ───
 const WIKI_RECOMPILE_DIR = path.join(WIKI_DIR, '.recompile');
+// Each id runs once (the staging folder records completion), so these stay set safely.
+// The run to stage starts on deploy; the run to apply is set in a later, reviewed commit.
+const WIKI_RECOMPILE_RUN = process.env.WIKI_RECOMPILE_RUN || 'full-history-2026-11-13';
+const WIKI_RECOMPILE_APPLY = process.env.WIKI_RECOMPILE_APPLY || '';
 const isSafeRecompileRunId = (runId) => /^[A-Za-z0-9_-]{1,40}$/.test(String(runId || ''));
 
 const callWikiRecompileModel = async (prompt, attempt = 1) => {
@@ -4024,7 +4028,7 @@ const callWikiRecompileModel = async (prompt, attempt = 1) => {
 
 // Stage a recompile in the background. It never writes a live page.
 const maybeStageWikiRecompile = async () => {
-  const runId = process.env.WIKI_RECOMPILE_RUN;
+  const runId = WIKI_RECOMPILE_RUN;
   if (!runId || !db || !process.env.ANTHROPIC_API_KEY) return;
   if (!isSafeRecompileRunId(runId)) return console.log('📚 Wiki recompile: invalid WIKI_RECOMPILE_RUN id');
   const stagingDir = path.join(WIKI_RECOMPILE_DIR, runId);
@@ -4058,7 +4062,7 @@ const maybeStageWikiRecompile = async () => {
 
 // Copy a staged run's drafts over the live knowledge pages, once per run id.
 const maybeApplyWikiRecompile = () => {
-  const runId = process.env.WIKI_RECOMPILE_APPLY;
+  const runId = WIKI_RECOMPILE_APPLY;
   if (!runId || !db) return;
   if (!isSafeRecompileRunId(runId)) return console.log('📚 Wiki recompile: invalid WIKI_RECOMPILE_APPLY id');
   const stagingDir = path.join(WIKI_RECOMPILE_DIR, runId);

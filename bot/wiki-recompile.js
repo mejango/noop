@@ -10,8 +10,8 @@
 // and progress is saved after every period, because the bot restarts on every
 // deploy. Applying staged drafts is a separate, explicit step in script.js.
 //
-//   WIKI_RECOMPILE_RUN=<id>    stage a run (once per id)
-//   WIKI_RECOMPILE_APPLY=<id>  copy that run's drafts over the live pages (once per id)
+// The run ids are the WIKI_RECOMPILE_RUN and WIKI_RECOMPILE_APPLY constants in
+// script.js (environment variables of the same names override them); each id runs once.
 
 const fs = require('fs');
 const path = require('path');
