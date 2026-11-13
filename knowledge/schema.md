@@ -148,7 +148,8 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 1. **Preserve accurate content** — never delete observations that are still valid
 2. **Add with dates** — new observations include `[YYYY-MM-DD]` date stamps
 3. **Revise transparently** — when updating, use "Previously: X. Updated [YYYY-MM-DD]: Y" format
-4. **Word limit** — each page should stay under 2000 words. If approaching limit, consolidate older entries
+4. **Word budget** — each page has a budget of 2,500 words, enforced in code: a rewrite that grows a page past it is rejected. Advisors read every page in full, so the budget is what keeps their context from growing. Make room by compressing, not deleting, and compress the newest material first: today's tick-by-tick narration shrinks to its conclusion, and several dated entries about one pattern merge into a single dated pattern line with its count, range and outcome
+4a. **History stays** — history is as valuable as today. A page must keep at least one dated `[YYYY-MM-DD]` entry for every calendar month it has covered; a rewrite that drops a month is rejected. Never make room by removing the oldest entries
 5. **Bold TLDR** — a page may begin with one H1 title; the next content must be a bold one-line summary of current state
 6. **Evidence required** — claims must reference specific data values (IV levels, percentages, dates)
 7. **Falsification criteria** — regime assessments and hypotheses include what would disprove them

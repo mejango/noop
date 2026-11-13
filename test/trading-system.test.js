@@ -6673,11 +6673,9 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiRepairRouteSource.includes('last_reviewed_at: appliedAt'));
     assert.ok(wikiLibSource.includes('Replacement invents source markers'));
     assert.ok(wikiLibSource.includes('Replacement drops newest tick evidence'));
-    assert.ok(wikiLibSource.includes('const permittedWordCount = Math.max(2_050, previousWordCount)'));
-    assert.ok(wikiLibSource.includes('Oversized page grows during repair'));
     assert.ok(wikiLibSource.includes('Replacement invents a consecutive-tick gate rule'));
-    assert.ok(wikiLibSource.includes('REFERENCE_ONLY_SECTIONS'));
-    assert.ok(wikiLibSource.includes('${heading} section must contain only: ${canonicalBody}'));
+    // Sections, reference-only text, word budget, history and strategy ticks: test/v2-wiki-rules.test.js.
+    assert.ok(wikiLibSource.includes('errors.push(...getWikiPageRuleErrors('));
     assert.ok(wikiLibSource.includes('Premium Per Unit Risk repeats campaign rows'));
     assert.ok(wikiLibSource.includes('Premium Per Unit Risk repeats the Call Score Context note'));
     assert.ok(wikiLibSource.includes('Current Cycle Status repeats active campaigns'));
@@ -6692,7 +6690,6 @@ describe('Wiki knowledge discipline', () => {
     assert.ok(wikiLibSource.includes('Replacement classifies outcomes without recorded resolution as failed'));
     assert.ok(wikiLibSource.includes('Unresolved episodes remain as rows in Confirmed Leading Indicators'));
     assert.ok(wikiLibSource.includes('Unresolved episodes must be classified under Experimental Indicators'));
-    assert.ok(wikiLibSource.includes('Learning-owned strategy page adds perishable tick evidence'));
     assert.ok(wikiLibSource.includes('Learning-owned strategy page retains expired live tick evidence'));
     assert.ok(wikiLibSource.includes('judgeWikiReplacement'));
     assert.ok(wikiLibSource.includes('Learning-owned strategy page adds perishable live-state claims'));

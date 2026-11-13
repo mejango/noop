@@ -19,7 +19,7 @@ const sdk = {
   TypeSafeClient: class { systemOne() { return outage ? Promise.reject(new Error('503')) : Promise.resolve(canned); } },
 };
 const wikiCatalog = load('wikiCatalog.ts', {});
-const wiki = load('wiki.ts', { '@/lib/wikiCatalog': wikiCatalog, '@typesafe-ai/sdk': sdk });
+const wiki = load('wiki.ts', { '@/lib/wikiCatalog': wikiCatalog, '@typesafe-ai/sdk': sdk, '../../../bot/wiki-rules': require('../../bot/wiki-rules') });
 
 (async () => {
   const page = '**TLDR** [tick:#10] [tick:#12]\n\n## Core Rules\n- keep\n## Regime-Specific Actions\n## Sizing Guidelines\n## Timing Rules\n';

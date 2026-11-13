@@ -4,6 +4,10 @@ import crypto from 'crypto';
 import { noul, TypeSafeClient } from '@typesafe-ai/sdk';
 
 import { countWikiEvidenceReferences, extractWikiTldr, WIKI_PAGES } from '@/lib/wikiCatalog';
+// The page rules live in one module that the bot's automatic ingest also calls.
+import { WIKI_EXPECTED_HEADERS, getH2Body, getTickIds, getWikiPageRuleErrors } from '../../../bot/wiki-rules';
+
+export { WIKI_EXPECTED_HEADERS };
 
 export function resolveWikiDir(): string {
   if (process.env.WIKI_DIR) return process.env.WIKI_DIR;
@@ -16,23 +20,6 @@ export function resolveWikiDir(): string {
 }
 
 export const WIKI_PAGE_PATHS = WIKI_PAGES.map((page) => page.path);
-
-export const WIKI_EXPECTED_HEADERS: Record<string, string[]> = {
-  'regimes/current.md': ['Classification', 'Evidence', 'Falsification', 'Confidence'],
-  'regimes/history.md': ['Regime Transitions', 'Patterns'],
-  'protection/pricing.md': ['Current IV Environment', 'Skew Analysis', 'Term Structure', 'Cost Assessment'],
-  'protection/windows.md': ['Active Windows', 'Historical Windows', 'Window Indicators'],
-  'protection/convexity.md': ['Current Convexity Map', 'Strike-Delta Sweet Spots', 'Convexity Shifts'],
-  'revenue/pricing.md': ['Current Premium Environment', 'Skew & IV Context', 'Premium Assessment'],
-  'revenue/windows.md': ['Active Windows', 'Historical Windows', 'Window Indicators'],
-  'revenue/efficiency.md': ['Premium Per Unit Risk', 'Strike Selection Patterns', 'Buyback Patterns'],
-  'indicators/leading.md': ['Confirmed Leading Indicators', 'Experimental Indicators', 'Failed Indicators'],
-  'indicators/correlations.md': ['Strong Correlations', 'Weakening Correlations', 'New Correlations'],
-  'indicators/divergences.md': ['Active Divergences', 'Historical Divergence Episodes', 'Divergence Playbook'],
-  'strategy/lessons.md': ['Active Lessons', 'Archived Lessons', 'Evidence Tracker'],
-  'strategy/mistakes.md': ['Costly Patterns', 'Near Misses', 'Anti-Patterns'],
-  'strategy/playbook.md': ['Core Rules', 'Regime-Specific Actions', 'Sizing Guidelines', 'Timing Rules'],
-};
 
 export function hashWikiContent(content: string): string {
   return crypto.createHash('sha256').update(content).digest('hex');
@@ -104,25 +91,10 @@ export function getStructuredWikiMarkers(content: string): Set<string> {
   );
 }
 
-function getTickIds(content: string): number[] {
-  return Array.from(content.matchAll(/\[tick:#(\d+)\]/gi), (match) => Number(match[1]))
-    .filter(Number.isFinite);
-}
-
 function latestTickId(content: string): number | null {
   const tickIds = getTickIds(content);
   return tickIds.length > 0 ? Math.max(...tickIds) : null;
 }
-
-const REFERENCE_ONLY_SECTIONS: Record<string, Record<string, string>> = {
-  'revenue/pricing.md': {
-    'Skew & IV Context': 'Current skew and IV readings are perishable. Consult protection/pricing.md and regimes/current.md for current values.',
-  },
-  'revenue/efficiency.md': {
-    'Strike Selection Patterns': 'Strikes 11–22% OTM have produced consistent disciplined wins; select strike distance by the OTM buffer tolerable if spot touches the top of the expected range. See [lesson:short_call.strike_and_sizing].',
-    'Buyback Patterns': 'A buyback is insurance, not a rescue: once most of the premium has decayed, buying back below strike is a disciplined exit when its certain cost is smaller than the risk it removes, and spot later staying below strike does not make it a mistake. Assess strike distance, DTE, IV trend, and momentum before any buyback. See [lesson:short_call.exit_insurance] and [lesson:process.decision_quality].',
-  },
-};
 
 const SUPPORTED_NUMERIC_MARKER_TYPES = new Set(['tick', 'order', 'review']);
 
@@ -142,25 +114,6 @@ function getPlaceholderMarkerTypes(content: string): Set<string> {
 export function isUnsupportedStructuredMarkerIssue(issue: string): boolean {
   return getUnsupportedNumericMarkerTypes(issue).size > 0
     && /(?:schema|marker|evidence|required|compliant|enforce)/i.test(issue);
-}
-
-function hasH2(content: string, heading: string): boolean {
-  return content.split('\n').some((line) => line.trim() === `## ${heading}`);
-}
-
-function getH2Body(content: string, heading: string): string | null {
-  const lines = content.split('\n');
-  const headingIndex = lines.findIndex((line) => line.trim() === `## ${heading}`);
-  if (headingIndex < 0) return null;
-  const nextHeadingOffset = lines
-    .slice(headingIndex + 1)
-    .findIndex((line) => /^##\s+/.test(line.trim()));
-  const endIndex = nextHeadingOffset < 0 ? lines.length : headingIndex + 1 + nextHeadingOffset;
-  return lines.slice(headingIndex + 1, endIndex).join('\n').trim();
-}
-
-function normalizeProse(content: string): string {
-  return content.replace(/\s+/g, ' ').trim();
 }
 
 function getDuplicateMatches(content: string, pattern: RegExp): string[] {
@@ -219,33 +172,10 @@ export function validateWikiReplacement(args: {
   if (previousContent.length > 100 && replacement.length < previousContent.length * 0.5) {
     errors.push('Replacement shrinks the page by more than 50%');
   }
-  const previousWordCount = previousContent.trim().split(/\s+/).filter(Boolean).length;
-  const replacementWordCount = replacement.split(/\s+/).filter(Boolean).length;
-  // 2,000 words is a maintenance target, not a safety boundary. Allow a small
-  // tokenizer/editing margin so a human-reviewed repair is not rejected for a
-  // handful of words, while preventing meaningful growth of long pages.
-  const permittedWordCount = Math.max(2_050, previousWordCount);
-  if (replacementWordCount > permittedWordCount) {
-    errors.push(
-      previousWordCount > 2_050
-        ? `Oversized page grows during repair (${previousWordCount} → ${replacementWordCount} words); preserve or reduce its length`
-        : `Replacement exceeds the 2050-word repair ceiling (${replacementWordCount})`,
-    );
-  }
   if (!/^\s*(?:#(?!#)[^\n]*\n+\s*)?\*\*[^\n]+\*\*/.test(replacement)) {
     errors.push('Replacement must keep a bold TLDR immediately after the optional H1');
   }
-  const missingHeaders = (WIKI_EXPECTED_HEADERS[pagePath] || [])
-    .filter((heading) => !hasH2(replacement, heading));
-  if (missingHeaders.length > 0) errors.push(`Replacement is missing sections: ${missingHeaders.join(', ')}`);
-
-  const referenceOnlySections = REFERENCE_ONLY_SECTIONS[pagePath] || {};
-  Object.entries(referenceOnlySections).forEach(([heading, canonicalBody]) => {
-    const replacementBody = getH2Body(replacement, heading);
-    if (replacementBody != null && normalizeProse(replacementBody) !== normalizeProse(canonicalBody)) {
-      errors.push(`${heading} section must contain only: ${canonicalBody}`);
-    }
-  });
+  errors.push(...getWikiPageRuleErrors({ pagePath, previousContent, replacementContent: replacement }));
 
   if (pagePath === 'revenue/efficiency.md') {
     const premiumRiskBody = getH2Body(replacement, 'Premium Per Unit Risk') || '';
@@ -306,13 +236,6 @@ export function validateWikiReplacement(args: {
   }
 
   if (pagePath.startsWith('strategy/')) {
-    const previousTickIds = new Set(getTickIds(previousContent));
-    const addedTickIds = getTickIds(replacement).filter((tickId) => !previousTickIds.has(tickId));
-    if (addedTickIds.length > 0) {
-      errors.push(
-        `Learning-owned strategy page adds perishable tick evidence: ${Array.from(new Set(addedTickIds)).map((tickId) => `[tick:#${tickId}]`).join(', ')}`,
-      );
-    }
     const retainedExpiredTickIds = Array.from(expiredTickIds)
       .filter((tickId) => getTickIds(replacement).includes(tickId));
     if (retainedExpiredTickIds.length > 0) {

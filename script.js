@@ -117,6 +117,7 @@ const { fetchV3OnchainLiquidity } = require('./bot/v3-onchain-liquidity');
 const { refreshDexVolume, volumeSummary } = require('./bot/dex-volume');
 const { invalidDexReason, calculateValidatedLiquidityFlow, dexForAdvisor, LIQUIDITY_DATA_NOTICE } = require('./bot/liquidity-quality');
 const { getDeriveConfig, orderNonce, fetchInstruments } = require('./bot/derive-config');
+const { WIKI_PAGE_WORD_BUDGET, getWikiPageRuleErrors } = require('./bot/wiki-rules');
 const { stringifyApiError, isDefinitiveVenueRejection, isIocNoLiquidityError } = require('./bot/derive-errors');
 const { getSpotAccumulationSettings, readSpotSourceHistory, readSpotPendingActions } = require('./bot/spot-accumulation-config');
 const { encodeTradeData: encodeOrderData, buildActionHashes, TRADE_MODULE_ADDRESS } = require('./bot/derive-signing');
@@ -3597,16 +3598,6 @@ for (const sub of ['regimes', 'protection', 'revenue', 'indicators', 'strategy',
   fs.mkdirSync(path.join(WIKI_DIR, sub), { recursive: true });
 }
 
-const WIKI_KEY_PAGES = [
-  'regimes/current.md',
-  'protection/pricing.md',
-  'protection/windows.md',
-  'revenue/pricing.md',
-  'indicators/leading.md',
-  'strategy/lessons.md',
-  'strategy/playbook.md',
-];
-
 // These pages make live-state claims and must be reconciled against the same
 // evidence packet. Updating only some of them creates contradictory snapshots.
 const WIKI_LIVE_RESEARCH_PAGES = [
@@ -3624,23 +3615,6 @@ const WIKI_STRATEGY_PAGES = new Set([
   'strategy/mistakes.md',
   'strategy/playbook.md',
 ]);
-
-const WIKI_EXPECTED_HEADERS = {
-  'regimes/current.md': ['Classification', 'Evidence'],
-  'regimes/history.md': ['Regime Transitions'],
-  'protection/pricing.md': ['Current IV Environment', 'Cost Assessment'],
-  'protection/windows.md': ['Active Windows', 'Historical Windows'],
-  'protection/convexity.md': ['Current Convexity Map'],
-  'revenue/pricing.md': ['Current Premium Environment', 'Premium Assessment'],
-  'revenue/windows.md': ['Active Windows', 'Historical Windows'],
-  'revenue/efficiency.md': ['Premium Per Unit Risk'],
-  'indicators/leading.md': ['Confirmed Leading Indicators'],
-  'indicators/correlations.md': ['Strong Correlations'],
-  'indicators/divergences.md': ['Active Divergences'],
-  'strategy/lessons.md': ['Active Lessons'],
-  'strategy/mistakes.md': ['Costly Patterns'],
-  'strategy/playbook.md': ['Core Rules'],
-};
 
 const WIKI_ALL_PAGES = [
   'regimes/current.md',
@@ -3991,33 +3965,14 @@ const writeRawEvidencePacket = (journalEntries = []) => {
   return { relativePath, content };
 };
 
-const truncateWikiContextAtBoundary = (content, maxChars) => {
-  if (content.length <= maxChars) return content;
-  const slice = content.slice(0, maxChars);
-  const boundary = Math.max(slice.lastIndexOf('\n'), slice.lastIndexOf('. '));
-  return `${slice.slice(0, boundary > maxChars * 0.6 ? boundary : maxChars).trim()}\n...[truncated]`;
-};
-
-const buildWikiAdvisorExcerpt = (content, maxChars = 1800) => {
-  const chunks = String(content).split(/(?=^##\s+)/m);
-  const preamble = chunks[0] || '';
-  const priority = /##\s*(Classification|Evidence|Confidence|Current|Active|Cost Assessment|Premium Assessment|Core Rules|Falsification)/i;
-  const selected = [preamble, ...chunks.slice(1).filter((chunk) => priority.test(chunk))].join('\n').trim();
-  return truncateWikiContextAtBoundary(selected || content, maxChars);
-};
-
+// Advisors read every page in full. Excerpts hid most of each page (about a
+// sixth reached the prompt) and half the pages never reached it at all. Size is
+// bounded on the write side: WIKI_PAGE_WORD_BUDGET per page in bot/wiki-rules.js.
 const queryWikiContext = () => {
-  const sections = [];
-  const meta = readWikiMeta();
-  const pageMeta = getWikiPageMetaMap(meta);
-  const indexContent = readWikiPage(WIKI_INDEX_PAGE);
-  if (indexContent) {
-    const truncatedIndex = indexContent.length > 1200 ? indexContent.slice(0, 1200) + '\n...[truncated]' : indexContent;
-    sections.push(`--- ${WIKI_INDEX_PAGE} ---\n${truncatedIndex}`);
-  }
-  for (const page of WIKI_KEY_PAGES) {
+  const pageMeta = getWikiPageMetaMap(readWikiMeta());
+  return WIKI_ALL_PAGES.flatMap((page) => {
     const content = readWikiPage(page);
-    if (!content || content.includes('Awaiting initial assessment')) continue;
+    if (isPlaceholderWikiPage(content)) return [];
     const stored = pageMeta[page] || {};
     const freshness = [
       `changed=${stored.last_changed_at || 'unknown'}`,
@@ -4026,9 +3981,8 @@ const queryWikiContext = () => {
       `issues=${Array.isArray(stored.issues) ? stored.issues.length : 0}`,
       WIKI_STRATEGY_PAGES.has(page) ? 'owner=canonical-learning' : 'owner=wiki-research',
     ].join(' | ');
-    sections.push(`--- ${page} ---\nMetadata: ${freshness}\n${buildWikiAdvisorExcerpt(content)}`);
-  }
-  return sections.length > 0 ? sections.join('\n\n') : '';
+    return [`--- ${page} ---\nMetadata: ${freshness}\n${content.trim()}`];
+  }).join('\n\n');
 };
 
 const saveWikiHistory = (pagePath, content) => {
@@ -4461,10 +4415,10 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 ## Instructions
 1. Fix the Outstanding Validation Findings above first. Each one names a page and a concrete defect a prior audit confirmed; return an updated page that resolves it, correcting or relocating the offending claim rather than restating it. A finding that the supplied evidence genuinely cannot resolve may be left, but prefer fixing it
 2. Reconcile every allowed live-state research page against the same raw evidence packet. Return an update for each page whose TLDR, Current, or Active section disagrees with newer evidence; do not omit a stale dependent page merely to minimize the update set
-3. Preserve accurate durable and historical content. In TLDR, Current, and Active sections, replace superseded state instead of appending it; move useful prior observations into the matching Historical section
+3. Preserve accurate durable and historical content. In TLDR, Current, and Active sections, replace superseded state instead of appending it; move useful prior observations into the matching Historical section. Advisors read every page in full, so history is as visible as today: keep at least one dated [YYYY-MM-DD] entry for every month the page already covers. A rewrite that drops a month is rejected
 4. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
 5. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" only in historical context—never leave the obsolete value in the current TLDR or Active section
-6. Keep each page under 2000 words — consolidate older entries if approaching limit
+6. Each page has a budget of ${WIKI_PAGE_WORD_BUDGET} words; a rewrite that grows a page past it is rejected. Make room by compressing, not deleting, and compress the newest material first: today's tick-by-tick narration shrinks to its conclusion, and several dated entries about the same pattern merge into one dated pattern line with its count, range and outcome. Never make room by removing the oldest history
 7. Each page may start with one H1 title; place a bold TLDR line reflecting current state immediately after that optional title
 8. Prefer a compact update set only after every live-state page has been checked for cross-page consistency
 9. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
@@ -4575,11 +4529,15 @@ If no pages need updating, output: <no_updates/>`;
           continue;
         }
 
-        // Safety: check expected section headers from schema
-        const required = WIKI_EXPECTED_HEADERS[pagePath] || [];
-        const missingHeaders = required.filter(h => !newContent.includes(h));
-        if (missingHeaders.length > 0) {
-          reject(pagePath, `missing sections: ${missingHeaders.join(', ')}`);
+        // Sections, reference-only text, word budget, history coverage and strategy
+        // tick evidence: the same rules the dashboard's manual repair applies.
+        const ruleErrors = getWikiPageRuleErrors({
+          pagePath,
+          previousContent: isPlaceholderWikiPage(existingContent) ? '' : existingContent,
+          replacementContent: newContent,
+        });
+        if (ruleErrors.length > 0) {
+          reject(pagePath, ruleErrors.join('; '));
           continue;
         }
 
