@@ -32,6 +32,9 @@ const RECOMPILE_PAGES = [
 ];
 // Two pages keep a call's output well under the model's limit; four overran it once pages filled up.
 const PAGES_PER_CALL = 2;
+// Working target below the hard budget, so a page has room to take the next period.
+const RECOMPILE_TARGET_WORDS = 2100;
+const MAX_CORRECTIONS = 2;
 // ponytail: ~60k tokens of sources per call next to ~35k of drafts; a busier journal just yields more parts.
 const MAX_PERIOD_CHARS = 240000;
 const CURRENT_PAGES_PERIOD = 'current-pages';
@@ -90,7 +93,7 @@ ${schema}
 ${RECOMPILE_PAGES.map((page) => `--- ${page} ---\n${drafts[page]}`).join('\n\n')}
 
 ## Pages you may update in this call
-${batchPages.map((page) => `- ${page} (draft is ${countWikiWords(drafts[page])} of ${WIKI_PAGE_WORD_BUDGET} words)`).join('\n')}
+${batchPages.map((page) => `- ${page} (draft is ${countWikiWords(drafts[page])} words; return at most ${RECOMPILE_TARGET_WORDS}, hard limit ${WIKI_PAGE_WORD_BUDGET})`).join('\n')}
 ${feedback ? `\n## Your previous update was rejected\n${feedback}\nReturn a corrected full page. If the page is at its budget, make room by merging entries about one pattern, not by leaving this period out.\n` : ''}
 ## Sources: ${foldingCurrent ? 'the current live pages (the last step)' : `period ${period}`}
 ${foldingCurrent
@@ -106,7 +109,7 @@ ${sourcesText || 'No sources for this step.'}
 4. These periods are past. Write no current-state content, and keep the schema's Reference-only sections exactly as given.
 5. Date every claim with [YYYY-MM-DD] stamps for the period it rests on. Never invent a [tick:#ID], [order:#ID], [review:#ID] or [lesson:key] marker; use one only if it appears verbatim in the sources or drafts.
 6. Replace "Not yet compiled" and "Nothing compiled yet" once a page or section has content; leave them where the history so far says nothing.
-7. Each page starts with a bold TLDR of at most 40 words stating what history shows, and stays within the schema's word budget.
+7. Each page starts with a bold TLDR of at most 40 words stating what history shows, and is returned at no more than ${RECOMPILE_TARGET_WORDS} words. A draft above that is consolidated in the same rewrite: merge entries about one pattern, shorten wording, never drop an earlier period to make room.
 
 Output full pages as XML blocks, only for pages that change:
 
@@ -146,11 +149,10 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
       text: RECOMPILE_PAGES.map((page) => `--- ${page} ---\n${currentPages[page] || ''}`).join('\n\n'),
     },
   ];
-  for (const step of steps) {
-    if (progress.done.includes(step.label)) continue;
+  const saveProgress = () => fs.writeFileSync(progressFile, JSON.stringify(progress, null, 2));
+  // Fold one step into the given page batches; returns how many pages were updated.
+  const foldStep = async (step, batches) => {
     const drafts = readDrafts(stagingDir);
-    const batches = [];
-    for (let i = 0; i < RECOMPILE_PAGES.length; i += PAGES_PER_CALL) batches.push(RECOMPILE_PAGES.slice(i, i + PAGES_PER_CALL));
     // One call at a time: the job shares the API rate limit with the journal, ingest and advisory.
     // A cut-off response may have lost pages, so those are asked for again one page per call;
     // otherwise the period would be marked folded for pages that never saw it.
@@ -171,16 +173,17 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
     let updated = 0;
     for (let { pagePath, content } of updates) {
       let errors = ruleErrors(pagePath, content);
-      if (errors.length > 0) {
-        // One corrected attempt with the reason; a plain rejection would drop this period from the page.
+      // Corrected attempts work on the rejected page itself: trimming a page that already holds
+      // this period is far easier for the model than folding the period in again within budget.
+      for (let attempt = 0; attempt < MAX_CORRECTIONS && errors.length > 0; attempt++) {
         const retry = await callModel(buildPrompt({
-          schema, drafts, batchPages: [pagePath], period: step.label, sourcesText: step.text, feedback: `${pagePath}: ${errors.join('; ')}`,
+          schema, drafts, batchPages: [pagePath], period: step.label, sourcesText: step.text,
+          feedback: `${pagePath}: ${errors.join('; ')}\n\nThe rejected page (${countWikiWords(content)} words) follows. Return it cut to at most ${RECOMPILE_TARGET_WORDS} words.\n\n${content}`,
         }));
         const corrected = parseUpdates(retry.text).find((update) => update.pagePath === pagePath);
-        if (corrected && ruleErrors(pagePath, corrected.content).length === 0) {
-          content = corrected.content;
-          errors = [];
-        }
+        if (!corrected) continue;
+        content = corrected.content;
+        errors = ruleErrors(pagePath, content);
       }
       if (errors.length > 0) {
         progress.rejected.push({ period: step.label, pagePath, reason: errors.join('; ') });
@@ -191,12 +194,29 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
       fs.writeFileSync(draftPath(stagingDir, pagePath), `${content}\n`);
       updated++;
     }
+    return updated;
+  };
+  for (const step of steps) {
+    if (progress.done.includes(step.label)) continue;
+    const batches = [];
+    for (let i = 0; i < RECOMPILE_PAGES.length; i += PAGES_PER_CALL) batches.push(RECOMPILE_PAGES.slice(i, i + PAGES_PER_CALL));
+    const updated = await foldStep(step, batches);
     progress.done.push(step.label);
-    fs.writeFileSync(progressFile, JSON.stringify(progress, null, 2));
+    saveProgress();
     log(`period ${step.label} folded (${progress.done.length}/${steps.length}), ${updated} page(s) updated`);
   }
+  // Replay each page-and-period a rejection dropped. The gap leaves progress.json only after its
+  // replay ran, so a restart mid-replay tries it again; a replay that fails is recorded again.
+  const doneFile = path.join(stagingDir, 'done.json');
+  for (const gap of fs.existsSync(doneFile) ? [] : [...progress.rejected]) {
+    const step = steps.find((candidate) => candidate.label === gap.period);
+    progress.rejected.splice(progress.rejected.indexOf(gap), 1);
+    const updated = step ? await foldStep(step, [[gap.pagePath]]) : 0;
+    saveProgress();
+    log(`gap ${gap.period} ${gap.pagePath}: ${updated ? 'folded' : 'still missing'}`);
+  }
   const summary = { completed_at: new Date().toISOString(), periods: steps.map((step) => step.label), rejected: progress.rejected };
-  fs.writeFileSync(path.join(stagingDir, 'done.json'), JSON.stringify(summary, null, 2));
+  fs.writeFileSync(doneFile, JSON.stringify(summary, null, 2));
   return summary;
 }
 

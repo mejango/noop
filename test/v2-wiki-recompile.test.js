@@ -66,8 +66,8 @@ test('a run folds each period, keeps a draft when an update breaks a rule, and r
 
   failMay = false;
   const summary = await recompile.runWikiRecompile(args);
-  // April was not repeated; May was retried; the live pages were folded last.
-  assert.deepEqual(seen, ['2026-04-a', '2026-05-a', '2026-05-a', recompile.CURRENT_PAGES_PERIOD]);
+  // April was not repeated; May was retried; the live pages were folded; May's rejected page was replayed.
+  assert.deepEqual(seen, ['2026-04-a', '2026-05-a', '2026-05-a', recompile.CURRENT_PAGES_PERIOD, '2026-05-a']);
   assert.deepEqual(summary.periods, ['2026-04-a', '2026-05-a', recompile.CURRENT_PAGES_PERIOD]);
   assert.equal(summary.rejected.length, 1);
   assert.match(summary.rejected[0].reason, /missing sections: Patterns/);
@@ -121,7 +121,7 @@ test('a cut-off response asks again, one page per call, for the pages it lost', 
   assert.equal(calls.filter((pages) => pages.length === 1 && pages[0] === 'regimes/history.md').length, 0);
 });
 
-test('a rejected update gets one corrected attempt with the reason before the period is dropped from the page', async () => {
+test('a rejected update gets corrected attempts on the rejected page before the period is dropped from the page', async () => {
   const stagingDir = tmp();
   const prompts = [];
   const callModel = async (prompt) => {
@@ -137,5 +137,25 @@ test('a rejected update gets one corrected attempt with the reason before the pe
   assert.equal(summary.rejected.length, 0);
   assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /Corrected with both sections/);
   assert.match(prompts[1], /regimes\/history\.md: Replacement is missing sections: Patterns/);
-  assert.match(prompts[0], /draft is \d+ of 2500 words/);
+  assert.match(prompts[1], /The rejected page \(\d+ words\) follows\. Return it cut to at most 2100 words\.\n\n\*\*TLDR\*\*/);
+  assert.match(prompts[0], /draft is \d+ words; return at most 2100, hard limit 2500/);
+});
+
+test('a page-and-period dropped by an earlier rejection is replayed once the periods are folded', async () => {
+  const stagingDir = tmp();
+  fs.writeFileSync(path.join(stagingDir, 'progress.json'), JSON.stringify({
+    done: ['2026-04-a'], rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md', reason: 'over budget' }],
+  }));
+  const calls = [];
+  const callModel = async (prompt) => {
+    const period = /## Sources: period (\S+)/.exec(prompt)?.[1] || recompile.CURRENT_PAGES_PERIOD;
+    calls.push(period);
+    if (period !== '2026-04-a') return { text: '<no_updates/>', truncated: false };
+    assert.ok(prompt.includes('\n- regimes/history.md (draft is ') && !prompt.includes('\n- protection/windows.md (draft is '));
+    return { text: update('regimes/history.md', 'April folded on replay [2026-04-10].'), truncated: false };
+  };
+  const summary = await recompile.runWikiRecompile({ stagingDir, sources: [entry('2026-04-10T00:00:00Z', 'note')], currentPages: {}, schema: 'S', callModel });
+  assert.deepEqual(summary.rejected, []);
+  assert.equal(calls.filter((period) => period === '2026-04-a').length, 1);
+  assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /April folded on replay/);
 });
