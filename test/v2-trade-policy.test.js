@@ -198,11 +198,12 @@ test('explicit reviewer rejection always wins, including disagreement and patien
   assert.equal(resolveConfirmationVotes(null, null), 'retry');
 });
 
-test('replacement hedge requires sufficient quantity at the same or higher strike', () => {
+test('replacement hedge requires sufficient later-expiry quantity at any strike', () => {
   const retiring = longPut(retiringName);
   assert.equal(getPutReplacementCoverage(retiring, [longPut('ETH-20261130-500-P', 0.01)], 100, now).allowed, false);
   assert.equal(getPutReplacementCoverage(retiring, [longPut(tailName, 0.01)], 100, now).allowed, false);
-  assert.equal(getPutReplacementCoverage(retiring, [longPut('ETH-20261130-1500-P', 100)], 100, now).allowed, false);
+  // After a decline every later put is struck below the one that paid off; it still covers.
+  assert.equal(getPutReplacementCoverage(retiring, [longPut('ETH-20261130-1500-P', 100)], 100, now).allowed, true);
   assert.equal(getPutReplacementCoverage(retiring, [longPut(tailName, 100)], 100, now).allowed, true);
   assert.equal(getPutReplacementCoverage(retiring, [longPut('ETH-20261130-2200-P', 100)], 100, now).allowed, true);
 });
@@ -366,6 +367,25 @@ test('final roll must recover the configured fraction of cost', () => {
   assert.equal(validateFinalOrderPolicy(rollOrder({ policy: recovering })).allowed, true);
   // longPut cost basis in this fixture is 10; a $3 roll recovers 30% and must hold the ticket
   rejectCode(rollOrder({ policy: recovering, price: 3, ticker: { b: 3, a: 4, M: 3.5, option_pricing: { d: -0.1 } } }), 'roll_recovery_failed');
+});
+
+test('lower-strike later puts cover a tranche of an appreciated put (2026-11-13 book)', () => {
+  const at = Date.parse('2026-11-13T12:00:00Z');
+  const book = [longPut('ETH-20261127-2000-P', 3.51), longPut('ETH-20261127-1900-P', 4.62),
+    longPut('ETH-20261225-1800-P', 2.67), longPut('ETH-20261225-1600-P', 4), longPut('ETH-20261225-1500-P', 0.72),
+    longPut('ETH-20270129-1000-P', 1.71)];
+  const coverage = getPutReplacementCoverage(book[0], book, 3.51, at);
+  assert.equal(coverage.allowed, true);
+  assert.ok(Math.abs(coverage.replacementAmount - 9.1) < 1e-9, 'the same-expiry 1900 put is not cover');
+  assert.equal(getPutReplacementCoverage(book[1], book, 4.62, at).allowed, true);
+});
+
+test('final roll never sells below the intrinsic floor', () => {
+  // strike 2000, spot 1900 -> intrinsic 100; 95% floor = 95
+  const floored = { ...policy, putMinIntrinsicFraction: 0.95 };
+  const quote = price => ({ price, spotPrice: 1900, policy: floored, ticker: { b: price, a: price + 2, M: price + 1, option_pricing: { d: -0.6 } } });
+  rejectCode(rollOrder(quote(90)), 'put_exit_price_failed');
+  assert.equal(validateFinalOrderPolicy(rollOrder(quote(96))).allowed, true);
 });
 
 test('final monetization floors the offer at a fraction of intrinsic and stops once the ladder is complete', () => {

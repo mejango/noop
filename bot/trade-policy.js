@@ -106,19 +106,20 @@ function getPutReplacementCoverage(position, positions = [], closeAmount = posit
   } catch (error) {
     return { allowed: false, reason: `Replacement commitments unavailable: ${error.message}`, requiredAmount: required, replacementAmount: 0 };
   }
+  // Any strike counts: the tail book is rebuilt at today's spot, so after a decline every
+  // later put is struck below the one that paid off. Demanding the old strike made rolls impossible.
   const replacementAmount = positions.reduce((sum, candidate) => {
     const replacement = optionIdentity(candidate, now);
     if (!replacement || replacement.type !== 'P' || replacement.name === retiring.name
       || candidate.direction !== 'long' || !positive(candidate.amount)
-      || replacement.expiry <= retiring.expiry || replacement.strike < retiring.strike) return sum;
+      || replacement.expiry <= retiring.expiry) return sum;
     return sum + Math.max(0, Number(candidate.amount) - (commitments.get(replacement.name) || 0));
   }, 0);
   return {
     allowed: replacementAmount + EPSILON >= required,
     requiredAmount: required,
     replacementAmount,
-    minimumStrike: retiring.strike,
-    reason: `later-expiry puts at strike >= ${retiring.strike}: ${replacementAmount} uncommitted contracts available, ${required} required`,
+    reason: `later-expiry long puts: ${replacementAmount} uncommitted contracts available, ${required} required`,
   };
 }
 
@@ -249,6 +250,8 @@ function validateFinalOrderPolicy({ action, instrumentName, price, amount, order
       if (intent === 'roll_protection') {
         if (identity.dte > policy.putRollDte || orderType !== 'ioc') return reject('roll_failed', 'Roll is outside its DTE window or is not IOC');
         if (Number(price) + EPSILON < entryPrice * (Number(policy.putRollMinRecoveryPct) || 0) / 100) return reject('roll_recovery_failed', 'Roll price recovers too little of cost; hold the ticket');
+        // Settlement pays intrinsic for free, so an early sale never goes below (most of) it.
+        if (Number(price) + EPSILON < (Number(policy.putMinIntrinsicFraction) || 0) * Math.max(0, identity.strike - Number(spotPrice))) return reject('put_exit_price_failed', 'Roll price is below the intrinsic floor; settlement pays more');
         const coverage = getPutReplacementCoverage(position, positions, amount, now, openOrders);
         if (!coverage.allowed) return reject('replacement_failed', coverage.reason);
         if (!bid || !evaluateConditions(criteria.conditions, criteria.condition_logic, values)) return reject('exit_conditions_failed', 'Fresh roll conditions or executable bid are unavailable');

@@ -36,7 +36,10 @@ test('advisory and confirmation check replacement against partial sale', () => {
 
 test('advisory and confirmation share partial-roll guidance', () => {
   for (const prompt of [helpers.getStandingRulebookDisciplinePrompt(), helpers.getPutExitDisciplinePrompt()]) {
-    assert.match(prompt, /Compare hold, partial roll, and full roll/);
+    assert.match(prompt, /compare hold, partial sale and full sale/);
+    assert.match(prompt, /sell into the surge, not after it/);
+    assert.match(prompt, /cover counts at any strike/);
+    assert.match(prompt, /execution_price gte/);
     assert.match(prompt, /criteria.retain_amount/);
     assert.match(prompt, /including on repeated evaluations/);
   }

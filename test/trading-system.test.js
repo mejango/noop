@@ -91,7 +91,6 @@ const {
   buildRulebookRequirements,
   findMissingRulebookRequirements,
   buildAgendaFromValidatedRules,
-  hasLongerDatedPutProtectionSnapshot,
   buildCanonicalRequiredWatcherRule,
   extractOrderRecord,
   CALL_EXPOSURE_CAP_PCT,
@@ -176,7 +175,6 @@ const {
   "buildRulebookRequirements",
   "findMissingRulebookRequirements",
   "buildAgendaFromValidatedRules",
-  "hasLongerDatedPutProtectionSnapshot",
   "buildCanonicalRequiredWatcherRule",
   "extractOrderRecord",
   "CALL_EXPOSURE_CAP_PCT",
@@ -901,7 +899,7 @@ describe('Standing rulebook coverage requirements', () => {
     assert.strictEqual(fallback.preferred_order_type, 'post_only');
   });
 
-  test('adds canonical long-put roll coverage only when longer protection exists', () => {
+  test('canonical long-put fallback holds even inside the roll window with longer protection', () => {
     const fallback = buildCanonicalRequiredWatcherRule(
       { type: 'exit', action: 'sell_put', instrument_name: 'ETH-20260717-1000-P' },
       {
@@ -926,12 +924,9 @@ describe('Standing rulebook coverage requirements', () => {
       }
     );
 
-    assert.strictEqual(fallback.criteria.put_exit_intent, 'roll_protection');
-    assert.deepStrictEqual(fallback.criteria.conditions, [
-      { field: 'dte', op: 'lte', value: PUT_ROLL_DTE_THRESHOLD },
-    ]);
-    assert.strictEqual(fallback.criteria.requires_longer_dated_protection, true);
-    assert.strictEqual(fallback.preferred_order_type, 'ioc');
+    // Harvest timing and size are the advisors' call; the deterministic fallback only holds.
+    assert.strictEqual(fallback.criteria.put_exit_intent, 'monetize_tail_win');
+    assert.strictEqual(fallback.criteria.retain_downside_protection, true);
   });
 
   test('repair path preserves prior assessment when repaired agenda omits it', () => {
@@ -4688,6 +4683,23 @@ describe('Fixture scenario: exit monitoring for put rolling', () => {
     );
 
     assert.strictEqual(gate.allowed, false);
+  });
+
+  test('roll_protection harvests a tranche of an appreciated put against lower-strike later puts', () => {
+    const position = { instrument_name: 'ETH-20991127-2000-P', amount: 3.51, direction: 'long', avg_entry_price: 28.84 };
+    const later = [
+      { instrument_name: 'ETH-20991225-1800-P', amount: 2.67, direction: 'long', avg_entry_price: 28.36 },
+      { instrument_name: 'ETH-20991225-1600-P', amount: 4, direction: 'long', avg_entry_price: 10.5 },
+    ];
+    const criteria = { put_exit_intent: 'roll_protection', retain_amount: 2.34 };
+    const values = { dte: 13.8, unrealized_pnl_pct: 230, execution_price: 95 };
+    const amount = getSellPutExitAmount({ action: 'sell_put' }, criteria, position, values);
+    assert.ok(Math.abs(amount - 1.17) < 1e-9);
+    const gate = getSellPutProtectionGate({ action: 'sell_put' }, values,
+      { criteria, position, positions: [position, ...later], plannedSellAmount: amount });
+    assert.strictEqual(gate.allowed, true);
+    // Once only the retained floor is left, repeated evaluations sell nothing more.
+    assert.strictEqual(getSellPutExitAmount({ action: 'sell_put' }, criteria, { ...position, amount: 2.34 }, values), 0);
   });
 
   test('roll_protection blocks a full close until replacement quantity is sufficient', () => {
