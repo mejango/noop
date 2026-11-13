@@ -4000,7 +4000,8 @@ const queryWikiContext = () => {
 const WIKI_RECOMPILE_DIR = path.join(WIKI_DIR, '.recompile');
 // Each id runs once (the staging folder records completion), so these stay set safely.
 // The run to stage starts on deploy; the run to apply is set in a later, reviewed commit.
-const WIKI_RECOMPILE_RUN = process.env.WIKI_RECOMPILE_RUN || 'full-history-2026-11-13';
+// Run -b replaces the first run: one of its periods was cut off at the output limit and never reached four pages.
+const WIKI_RECOMPILE_RUN = process.env.WIKI_RECOMPILE_RUN || 'full-history-2026-11-13b';
 const WIKI_RECOMPILE_APPLY = process.env.WIKI_RECOMPILE_APPLY || '';
 const isSafeRecompileRunId = (runId) => /^[A-Za-z0-9_-]{1,40}$/.test(String(runId || ''));
 
@@ -4020,10 +4021,11 @@ const callWikiRecompileModel = async (prompt, attempt = 1) => {
     await new Promise((resolve) => setTimeout(resolve, 60000));
     return { retried: await callWikiRecompileModel(prompt, attempt + 1) };
   });
-  if (typeof response.retried === 'string') return response.retried;
-  // A cut-off response still applies its complete page blocks; the period is not repeated.
-  if (response.data?.stop_reason !== 'end_turn') console.log(`📚 Wiki recompile: ${getAnthropicResponseFailure(response.data)}`);
-  return (response.data?.content || []).filter((block) => block.type === 'text').map((block) => block.text).join('');
+  if (response.retried) return response.retried;
+  // A cut-off response keeps its complete page blocks; the job asks again for the pages it lost.
+  const truncated = response.data?.stop_reason !== 'end_turn';
+  if (truncated) console.log(`📚 Wiki recompile: ${getAnthropicResponseFailure(response.data)}`);
+  return { text: (response.data?.content || []).filter((block) => block.type === 'text').map((block) => block.text).join(''), truncated };
 };
 
 // Stage a recompile in the background. It never writes a live page.

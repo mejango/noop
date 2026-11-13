@@ -53,11 +53,11 @@ test('a run folds each period, keeps a draft when an update breaks a rule, and r
     const first = prompt.includes('\n- regimes/history.md\n');
     if (first) seen.push(period);
     if (period === '2026-05-a' && failMay) throw new Error('529 overloaded');
-    if (!first) return '<no_updates/>';
-    if (period === '2026-04-a') return update('regimes/history.md', 'Fear to transition, 1 episode [2026-04-10].');
+    if (!first) return { text: '<no_updates/>', truncated: false };
+    if (period === '2026-04-a') return { text: update('regimes/history.md', 'Fear to transition, 1 episode [2026-04-10].'), truncated: false };
     // May drops a required section: rejected, April's draft stays.
-    if (period === '2026-05-a') return `<wiki_update path="regimes/history.md">\n**TLDR**\n## Regime Transitions\nA long enough body that only lacks the Patterns section.\n</wiki_update>`;
-    return update('regimes/history.md', 'Fear to transition, 2 episodes [2026-04-10] [2026-11-01]. [review:#7]');
+    if (period === '2026-05-a') return { text: `<wiki_update path="regimes/history.md">\n**TLDR**\n## Regime Transitions\nA long enough body that only lacks the Patterns section.\n</wiki_update>`, truncated: false };
+    return { text: update('regimes/history.md', 'Fear to transition, 2 episodes [2026-04-10] [2026-11-01]. [review:#7]'), truncated: false };
   };
   const args = { stagingDir, sources, currentPages: { 'regimes/history.md': 'live page [review:#7]' }, schema: 'SCHEMA', callModel };
   await assert.rejects(recompile.runWikiRecompile(args), /529/);
@@ -101,4 +101,22 @@ test('the bot stages in the background and applies only on its own explicit trig
   // Nothing is applied until a later commit names the run.
   assert.ok(script.includes("const WIKI_RECOMPILE_APPLY = process.env.WIKI_RECOMPILE_APPLY || '';"));
   assert.ok(apply.indexOf('saveWikiHistory(pagePath') < apply.indexOf('fs.writeFileSync(path.join(WIKI_DIR, pagePath)'), 'history is saved before a page is replaced');
+});
+
+test('a cut-off response asks again, one page per call, for the pages it lost', async () => {
+  const stagingDir = tmp();
+  const calls = [];
+  const callModel = async (prompt) => {
+    const pages = recompile.RECOMPILE_PAGES.filter((page) => prompt.includes(`\n- ${page}\n`));
+    calls.push(pages);
+    if (pages.length === 2 && pages[0] === 'regimes/history.md') return { text: update(pages[0], 'First page arrived [2026-04-10].'), truncated: true };
+    if (pages.length === 1) return { text: update(pages[0], 'Recovered alone [2026-04-10].'), truncated: false };
+    return { text: '<no_updates/>', truncated: false };
+  };
+  await recompile.runWikiRecompile({ stagingDir, sources: [entry('2026-04-10T00:00:00Z', 'note')], currentPages: {}, schema: 'S', callModel });
+  const drafts = recompile.readDrafts(stagingDir);
+  assert.match(drafts['regimes/history.md'], /First page arrived/);
+  assert.match(drafts[recompile.RECOMPILE_PAGES[1]], /Recovered alone/);
+  // The page that arrived was not asked for again.
+  assert.equal(calls.filter((pages) => pages.length === 1 && pages[0] === 'regimes/history.md').length, 0);
 });

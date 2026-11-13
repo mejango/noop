@@ -30,7 +30,8 @@ const RECOMPILE_PAGES = [
   'indicators/correlations.md',
   'indicators/divergences.md',
 ];
-const PAGES_PER_CALL = 4;
+// Two pages keep a call's output well under the model's limit; four overran it once pages filled up.
+const PAGES_PER_CALL = 2;
 // ponytail: ~60k tokens of sources per call next to ~35k of drafts; a busier journal just yields more parts.
 const MAX_PERIOD_CHARS = 240000;
 const CURRENT_PAGES_PERIOD = 'current-pages';
@@ -131,7 +132,7 @@ const readDrafts = (stagingDir) => Object.fromEntries(RECOMPILE_PAGES.map((pageP
 
 /**
  * Stage a recompile. Resumable: periods already recorded in progress.json are skipped.
- * callModel(prompt) resolves to the model's text; a rejected call stops the run so a
+ * callModel(prompt) resolves to { text, truncated }; a rejected call stops the run so a
  * later start resumes from the same period.
  */
 async function runWikiRecompile({ stagingDir, sources, currentPages, schema, callModel, log = () => {} }) {
@@ -151,13 +152,21 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
     const batches = [];
     for (let i = 0; i < RECOMPILE_PAGES.length; i += PAGES_PER_CALL) batches.push(RECOMPILE_PAGES.slice(i, i + PAGES_PER_CALL));
     // One call at a time: the job shares the API rate limit with the journal, ingest and advisory.
-    const texts = [];
-    for (const batchPages of batches) {
-      texts.push(await callModel(buildPrompt({ schema, drafts, batchPages, period: step.label, sourcesText: step.text })));
-    }
+    // A cut-off response may have lost pages, so those are asked for again one page per call;
+    // otherwise the period would be marked folded for pages that never saw it.
+    const foldBatch = async (batchPages) => {
+      const { text, truncated } = await callModel(buildPrompt({ schema, drafts, batchPages, period: step.label, sourcesText: step.text }));
+      const updates = parseUpdates(text).filter((update) => batchPages.includes(update.pagePath));
+      if (!truncated || batchPages.length === 1) return updates;
+      for (const pagePath of batchPages.filter((page) => !updates.some((update) => update.pagePath === page))) {
+        updates.push(...await foldBatch([pagePath]));
+      }
+      return updates;
+    };
+    const updates = [];
+    for (const batchPages of batches) updates.push(...await foldBatch(batchPages));
     let updated = 0;
-    texts.forEach((text, i) => parseUpdates(text).forEach(({ pagePath, content }) => {
-      if (!batches[i].includes(pagePath)) return;
+    updates.forEach(({ pagePath, content }) => {
       const previous = drafts[pagePath];
       const errors = content.length < 50
         ? ['too short']
@@ -170,7 +179,7 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
       fs.mkdirSync(path.dirname(draftPath(stagingDir, pagePath)), { recursive: true });
       fs.writeFileSync(draftPath(stagingDir, pagePath), `${content}\n`);
       updated++;
-    }));
+    });
     progress.done.push(step.label);
     fs.writeFileSync(progressFile, JSON.stringify(progress, null, 2));
     log(`period ${step.label} folded (${progress.done.length}/${steps.length}), ${updated} page(s) updated`);
