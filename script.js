@@ -248,26 +248,38 @@ const sendTelegram = async (message) => {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!token || !chatId) return;
+  const post = (body) => axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chatId, ...body }, { timeout: 5000 });
+  const markdown = { text: message, parse_mode: 'Markdown' };
   try {
-    await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
-      chat_id: chatId,
-      text: message,
-      parse_mode: 'Markdown',
-    }, { timeout: 5000 });
+    await post(markdown);
   } catch (e) {
-    // Retry without Markdown only if Telegram rejected the parse (unescaped _ * [ etc).
-    // A timeout usually means it was delivered; resending would duplicate it.
-    if (e.response?.status !== 400) return console.log('📱 Telegram failed:', e.message);
+    const resend = getTelegramResendBody(e, markdown);
+    if (!resend) return console.log('📱 Telegram failed:', e.message, e.code || '');
     try {
-      await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
-        chat_id: chatId,
-        text: message,
-      }, { timeout: 5000 });
+      await post(resend);
     } catch (e2) {
-      console.log('📱 Telegram failed:', e2.message);
+      console.log('📱 Telegram failed:', e2.message, e2.code || '');
     }
   }
 };
+
+// What to resend after a failed Telegram send, or null for no resend.
+// 400: Telegram rejected the Markdown (unescaped _ * [ etc), so send plain text.
+// No response and no timeout: the request never reached Telegram (a fill notice was lost
+// this way on 2026-11-13), so one resend cannot duplicate it.
+// A timeout usually means it was delivered; resending would duplicate it.
+const getTelegramResendBody = (error, markdown) => {
+  if (error.response?.status === 400) return { text: markdown.text };
+  const timedOut = error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT';
+  return !error.response && !timedOut ? markdown : null;
+};
+
+// An order that just left the book can miss its status lookup for one tick; the tick
+// stops with reservations held and the next tick resolves it. Alert only if it repeats.
+const shouldAlertTradingError = (message, previousMessage) => (
+  !/status unknown/.test(String(message)) || message === previousMessage
+);
+let _lastTradingSystemError = null;
 
 const formatAdvisoryRunNotification = ({ advisoryId, trigger, attempt, retryCount = 0 }) => {
   const extraReview = attempt > 1;
@@ -13309,9 +13321,11 @@ const runBot = async () => {
       await evaluateTradingRules(positions, instruments, tickerMap, spotPrice);
       await confirmAndExecutePending(instruments, tickerMap, spotPrice);
       optionsCycleSucceeded = true;
+      _lastTradingSystemError = null;
     } catch (error) {
       console.error('❌ Trading system error:', error.message);
-      sendTelegram(`❌ *Trading system error*: ${error.message}`);
+      if (shouldAlertTradingError(error.message, _lastTradingSystemError)) sendTelegram(`❌ *Trading system error*: ${error.message}`);
+      _lastTradingSystemError = error.message;
     }
 
     }
