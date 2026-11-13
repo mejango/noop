@@ -150,9 +150,11 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
     const drafts = readDrafts(stagingDir);
     const batches = [];
     for (let i = 0; i < RECOMPILE_PAGES.length; i += PAGES_PER_CALL) batches.push(RECOMPILE_PAGES.slice(i, i + PAGES_PER_CALL));
-    const texts = await Promise.all(batches.map((batchPages) => callModel(buildPrompt({
-      schema, drafts, batchPages, period: step.label, sourcesText: step.text,
-    }))));
+    // One call at a time: the job shares the API rate limit with the journal, ingest and advisory.
+    const texts = [];
+    for (const batchPages of batches) {
+      texts.push(await callModel(buildPrompt({ schema, drafts, batchPages, period: step.label, sourcesText: step.text })));
+    }
     let updated = 0;
     texts.forEach((text, i) => parseUpdates(text).forEach(({ pagePath, content }) => {
       if (!batches[i].includes(pagePath)) return;
