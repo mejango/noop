@@ -3996,6 +3996,101 @@ const queryWikiContext = () => {
   }).join('\n\n');
 };
 
+// ─── One-off recompile of the knowledge pages from full history (bot/wiki-recompile.js) ───
+const WIKI_RECOMPILE_DIR = path.join(WIKI_DIR, '.recompile');
+const isSafeRecompileRunId = (runId) => /^[A-Za-z0-9_-]{1,40}$/.test(String(runId || ''));
+
+const callWikiRecompileModel = async (prompt, attempt = 1) => {
+  const response = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: ANTHROPIC_SONNET_MODEL,
+    thinking: { type: 'between_tools' },
+    max_tokens: 32000,
+    messages: [{ role: 'user', content: prompt }],
+  }, {
+    headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    timeout: 900000,
+  }).catch(async (e) => {
+    // Overload and rate limits pass; a third failure stops the run, which resumes on the next restart.
+    if (attempt >= 3) throw e;
+    console.log(`📚 Wiki recompile: model call failed (${e.message}); retry ${attempt} in 60s`);
+    await new Promise((resolve) => setTimeout(resolve, 60000));
+    return { retried: await callWikiRecompileModel(prompt, attempt + 1) };
+  });
+  if (typeof response.retried === 'string') return response.retried;
+  // A cut-off response still applies its complete page blocks; the period is not repeated.
+  if (response.data?.stop_reason !== 'end_turn') console.log(`📚 Wiki recompile: ${getAnthropicResponseFailure(response.data)}`);
+  return (response.data?.content || []).filter((block) => block.type === 'text').map((block) => block.text).join('');
+};
+
+// Stage a recompile in the background. It never writes a live page.
+const maybeStageWikiRecompile = async () => {
+  const runId = process.env.WIKI_RECOMPILE_RUN;
+  if (!runId || !db || !process.env.ANTHROPIC_API_KEY) return;
+  if (!isSafeRecompileRunId(runId)) return console.log('📚 Wiki recompile: invalid WIKI_RECOMPILE_RUN id');
+  const stagingDir = path.join(WIKI_RECOMPILE_DIR, runId);
+  if (fs.existsSync(path.join(stagingDir, 'done.json'))) return;
+  const recompile = require('./bot/wiki-recompile');
+  try {
+    // Trade reviews join the analyst notes as dated sources and carry their [review:#ID] marker.
+    const reviews = (db.getRecentTradeReviews(100000) || []).map((review) => ({
+      timestamp: review.closed_at,
+      entry_type: `trade_review [review:#${review.id}] ${review.instrument_name} ${review.review_status} (${review.review_window_days}d window)`,
+      content: review.summary,
+    }));
+    const sources = [...db.getJournalHistory(), ...reviews];
+    console.log(`📚 Wiki recompile ${runId}: staging from ${sources.length - reviews.length} journal entries and ${reviews.length} trade reviews`);
+    const summary = await recompile.runWikiRecompile({
+      stagingDir,
+      sources,
+      currentPages: Object.fromEntries(recompile.RECOMPILE_PAGES.map((page) => [page, readWikiPage(page)])),
+      schema: readWikiPage('schema.md'),
+      callModel: callWikiRecompileModel,
+      log: (line) => console.log(`📚 Wiki recompile ${runId}: ${line}`),
+    });
+    appendWikiLog('recompile-staged', runId, [`periods=${summary.periods.length}`, `rejected_updates=${summary.rejected.length}`]);
+    sendTelegram(`📚 *Wiki recompile ${runId} staged*: ${summary.periods.length} periods folded, ${summary.rejected.length} rejected update(s). Live pages unchanged; compare before applying.`);
+  } catch (e) {
+    // Progress is saved per period, so the next start resumes where this stopped.
+    console.log(`📚 Wiki recompile ${runId} stopped: ${e.message}`);
+    sendTelegram(`📚 *Wiki recompile ${runId} stopped*: ${e.message}. It resumes on the next restart.`);
+  }
+};
+
+// Copy a staged run's drafts over the live knowledge pages, once per run id.
+const maybeApplyWikiRecompile = () => {
+  const runId = process.env.WIKI_RECOMPILE_APPLY;
+  if (!runId || !db) return;
+  if (!isSafeRecompileRunId(runId)) return console.log('📚 Wiki recompile: invalid WIKI_RECOMPILE_APPLY id');
+  const stagingDir = path.join(WIKI_RECOMPILE_DIR, runId);
+  const appliedFile = path.join(stagingDir, 'applied.json');
+  if (fs.existsSync(appliedFile)) return;
+  if (!fs.existsSync(path.join(stagingDir, 'done.json'))) return console.log(`📚 Wiki recompile ${runId}: not applied, the staged run is not complete`);
+  const recompile = require('./bot/wiki-recompile');
+  const staged = recompile.readDrafts(stagingDir);
+  const live = Object.fromEntries(recompile.RECOMPILE_PAGES.map((page) => [page, readWikiPage(page)]));
+  const reviews = (db.getRecentTradeReviews(100000) || []).map((review) => `[review:#${review.id}]`).join(' ');
+  const lessons = (db.getActiveTradeLessons() || []).map(formatTradeLessonForPrompt).join('\n');
+  const { apply, skipped } = recompile.selectRecompileApplicable({
+    staged,
+    live,
+    allowedMarkers: getStructuredWikiMarkers(`${WIKI_ALL_PAGES.map(readWikiPage).join('\n')}\n${reviews}\n${lessons}`),
+    getMarkers: getStructuredWikiMarkers,
+  });
+  const meta = readWikiMeta();
+  const appliedAt = new Date().toISOString();
+  for (const pagePath of apply) {
+    saveWikiHistory(pagePath, live[pagePath]);
+    fs.writeFileSync(path.join(WIKI_DIR, pagePath), staged[pagePath]);
+    updateWikiPageMeta(meta, pagePath, { last_changed_at: appliedAt, change_summary: `Recompiled from full history (run ${runId})` });
+  }
+  writeWikiMeta(meta);
+  refreshWikiIndex();
+  fs.writeFileSync(appliedFile, JSON.stringify({ applied_at: appliedAt, applied: apply, skipped }, null, 2));
+  appendWikiLog('recompile-applied', runId, [...apply.map((page) => `applied ${page}`), ...skipped.map((item) => `skipped ${item.pagePath}: ${item.reason}`)]);
+  console.log(`📚 Wiki recompile ${runId}: applied ${apply.length} page(s), skipped ${skipped.length}`);
+  sendTelegram(`📚 *Wiki recompile ${runId} applied*: ${apply.length} page(s) replaced, ${skipped.length} skipped. Previous versions are in the wiki history.`);
+};
+
 const saveWikiHistory = (pagePath, content) => {
   try {
     fs.mkdirSync(WIKI_HISTORY_DIR, { recursive: true });
@@ -13747,6 +13842,9 @@ if (!DERIVE_CONFIG.maintenance && db?.deactivateStaleEmergencyBuybackRules) {
 if (!DERIVE_CONFIG.maintenance) sendTelegram('🔄 *NOOP Bot restarted*');
 
 // Defer first run if the bot ran recently (prevents premature runs on redeploy)
+try { maybeApplyWikiRecompile(); } catch (e) { console.log('📚 Wiki recompile apply failed:', e.message); }
+maybeStageWikiRecompile(); // background; never blocks trading and never writes a live page
+
 const timeSinceLastCheck = Date.now() - botData.lastCheck;
 if (botData.lastCheck > 0 && timeSinceLastCheck < DYNAMIC_INTERVALS.normal) {
   const delay = DYNAMIC_INTERVALS.normal - timeSinceLastCheck;

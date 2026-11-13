@@ -966,6 +966,14 @@ const stmts = {
     VALUES (@timestamp, @entry_type, @content, @series_referenced)
   `),
 
+  // Every analyst note with its reviewed outcome, oldest first: the source for the wiki recompile.
+  getJournalHistory: db.prepare(`
+    SELECT id, timestamp, entry_type, content, outcome_status, outcome_verdict
+    FROM ai_journal
+    WHERE entry_type IN ('regime_note', 'hypothesis', 'observation')
+    ORDER BY timestamp ASC
+  `),
+
   getRecentJournalEntries: db.prepare(`
     SELECT id, timestamp, entry_type, content, series_referenced, created_at
     FROM ai_journal
@@ -2593,6 +2601,7 @@ const insertJournalEntry = (entryType, content, seriesReferenced = null) => {
 };
 
 const getRecentJournalEntries = (limit = 20) => stmts.getRecentJournalEntries.all({ limit });
+const getJournalHistory = () => stmts.getJournalHistory.all();
 
 const insertJournalEntryFull = (entryType, content, seriesReferenced = null, meta = null) => {
   stmts.insertJournalEntryFull.run({
@@ -3081,6 +3090,7 @@ module.exports = {
   refreshPositionLifecycle,
   insertJournalEntry,
   getRecentJournalEntries,
+  getJournalHistory,
   insertJournalEntryFull,
   getPendingHypotheses,
   updateHypothesisVerdict,
