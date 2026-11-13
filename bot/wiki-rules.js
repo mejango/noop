@@ -62,12 +62,6 @@ const normalizeProse = (content) => String(content).replace(/\s+/g, ' ').trim();
 const getTickIds = (content) => Array.from(String(content).matchAll(/\[tick:#(\d+)\]/gi), (match) => Number(match[1]))
   .filter(Number.isFinite);
 
-// Calendar months covered by the page's [YYYY-MM-DD] observation stamps.
-/** @param {string} content @returns {Set<string>} */
-const getStampedMonths = (content) => new Set(
-  Array.from(String(content || '').matchAll(/\[(\d{4}-\d{2})-\d{2}\]/g), (match) => match[1]),
-);
-
 /**
  * Rules every rewrite of a wiki page must satisfy, whoever proposes it.
  * @param {{ pagePath: string, previousContent?: string, replacementContent: string }} args
@@ -95,17 +89,6 @@ function getWikiPageRuleErrors({ pagePath, previousContent = '', replacementCont
     );
   }
 
-  // Under a fixed budget, new detail crowds out old. A rewrite may compress
-  // history but may not erase a month the page covered: without this each
-  // pass can trim a little, and the page ends up knowing only this week.
-  const replacementMonths = getStampedMonths(replacement);
-  const droppedMonths = Array.from(getStampedMonths(previousContent)).filter((month) => !replacementMonths.has(month)).sort();
-  if (droppedMonths.length > 0) {
-    errors.push(
-      `Replacement drops all dated history for ${droppedMonths.join(', ')}; keep at least one [YYYY-MM-DD] entry per month the page covered`,
-    );
-  }
-
   if (pagePath.startsWith('strategy/')) {
     const previousTickIds = new Set(getTickIds(previousContent));
     const addedTickIds = Array.from(new Set(getTickIds(replacement))).filter((tickId) => !previousTickIds.has(tickId));
@@ -127,6 +110,5 @@ module.exports = {
   hasH2,
   getH2Body,
   getTickIds,
-  getStampedMonths,
   getWikiPageRuleErrors,
 };

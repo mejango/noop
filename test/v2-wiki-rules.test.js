@@ -50,16 +50,6 @@ test('a page cannot grow past the word budget, but an oversized page is never fr
   assert.equal(errorsFor('regimes/history.md', over, `${over} ${words(5)}`).length, 1);
 });
 
-test('a rewrite may compress history but may not erase a month the page covered', () => {
-  const previous = page('protection/windows.md', '- cheap window [2026-09-14]\n- cheap window [2026-09-20]\n- rich [2026-10-02]\n- today [2026-11-13]');
-  const compressed = page('protection/windows.md', '- two cheap windows in September [2026-09-20]\n- rich [2026-10-02]\n- today [2026-11-13]');
-  const recencyOnly = page('protection/windows.md', '- today [2026-11-13]\n- also today [2026-11-13]');
-  assert.deepEqual(errorsFor('protection/windows.md', previous, compressed), []);
-  assert.deepEqual(errorsFor('protection/windows.md', previous, recencyOnly), [
-    'Replacement drops all dated history for 2026-09, 2026-10; keep at least one [YYYY-MM-DD] entry per month the page covered',
-  ]);
-});
-
 test('strategy pages may not gain tick evidence', () => {
   const previous = page('strategy/playbook.md', 'old [tick:#10]');
   assert.deepEqual(errorsFor('strategy/playbook.md', previous, previous), []);

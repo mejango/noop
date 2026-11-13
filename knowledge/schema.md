@@ -145,11 +145,11 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 
 ## Update Rules
 
-1. **Preserve accurate content** — never delete observations that are still valid
-2. **Add with dates** — new observations include `[YYYY-MM-DD]` date stamps
-3. **Revise transparently** — when updating, use "Previously: X. Updated [YYYY-MM-DD]: Y" format
-4. **Word budget** — each page has a budget of 2,500 words, enforced in code: a rewrite that grows a page past it is rejected. Advisors read every page in full, so the budget is what keeps their context from growing. Make room by compressing, not deleting, and compress the newest material first: today's tick-by-tick narration shrinks to its conclusion, and several dated entries about one pattern merge into a single dated pattern line with its count, range and outcome
-4a. **History stays** — history is as valuable as today. A page must keep at least one dated `[YYYY-MM-DD]` entry for every calendar month it has covered; a rewrite that drops a month is rejected. Never make room by removing the oldest entries
+1. **Compile, do not append** — a page is the current synthesis of everything learned so far, not a diary. New evidence revises the existing claim in place: it strengthens, weakens or overturns it, and updates its sample (how many episodes, over what period, with what outcome). Do not add a new dated entry beside an older one about the same pattern. Chronology lives in log.md and the raw evidence packets; never delete a conclusion that is still valid
+2. **Date the evidence** — each claim carries `[YYYY-MM-DD]` stamps for the period it rests on and when it was last confirmed
+3. **Revise transparently** — when evidence overturns a claim, say so once in "Previously: X. Updated [YYYY-MM-DD]: Y" format, then fold it into the claim on the next revision
+4. **Word budget** — each page has a budget of 2,500 words, enforced in code: a rewrite that grows a page past it is rejected. Advisors read every page in full, so the budget is what keeps their context from growing. Make room by compiling: several entries about one pattern merge into a single claim with its count, range and outcome, and today's tick-by-tick narration shrinks to its conclusion
+4a. **Weigh all history** — a conclusion reflects every episode behind it, not the latest packet. One new observation moves a pattern built on many by its share of the sample; it does not replace it. State a pattern as general only with its sample and period, and never make room by dropping what older evidence established
 5. **Bold TLDR** — a page may begin with one H1 title; the next content must be a bold one-line summary of current state
 6. **Evidence required** — claims must reference specific data values (IV levels, percentages, dates)
 7. **Falsification criteria** — regime assessments and hypotheses include what would disprove them
