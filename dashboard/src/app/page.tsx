@@ -2131,6 +2131,7 @@ export function MarketOverview({ asset = 'ETH', initialAssetOverview, initialAss
             <div className="text-xs text-gray-400 mb-2 space-y-0.5">
               <div>{isEth ? 'Ethereum mainnet, Liquidity totals for the selected pools below.' : asset === 'BTC' || asset === 'ZEC'
                 ? 'Maya TVL is a balanced-pool estimate.'
+                : asset === 'NVDA' ? 'No onchain pool is tracked for NVDA.'
                 : 'GeckoTerminal values are pool reserves.'}</div>
               {dexNames.filter(name => marketLabel(name)).map((name, i) => (
                 <div key={name} style={{ color: getColor(name, i) }}>

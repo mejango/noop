@@ -6,7 +6,7 @@ if (!parentPort || !assets.slice(1).includes(workerData?.asset)) throw new Error
 
 const store = require('./db');
 const { collectAsset } = require('./asset-market-collector');
-const { collectAssetLiquidity } = require('./asset-dex-liquidity');
+const { collectAssetLiquidity, SOURCES } = require('./asset-dex-liquidity');
 const { assetMomentum } = require('./asset-market-momentum');
 const asset = workerData.asset;
 parentPort.postMessage({ type: 'ready', asset });
@@ -24,7 +24,7 @@ parentPort.on('message', message => {
       }
     })
     .catch(error => console.error(`Asset ${asset} collection failed: ${error.message}`));
-  void collectAssetLiquidity(asset, message.timestamp)
+  if (SOURCES[asset]) void collectAssetLiquidity(asset, message.timestamp)
     .then(sample => store.insertAssetLiquiditySnapshot(sample))
     .catch(error => console.warn(`Asset ${asset} liquidity unavailable: ${error.message}`));
 });

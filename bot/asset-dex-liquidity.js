@@ -14,6 +14,15 @@ const SOURCES = Object.freeze({
     token: '0x5555555555555555555555555555555555555555',
     quoteToken: '0xb88339cb7199b77e23db6e890353e22632ba630f', dex: 'hyperswap-v3',
     url: 'https://api.geckoterminal.com/api/v2/networks/hyperevm/pools/0xe712d505572b3f84c1b4deb99e1beab9dd0e23c9?include=base_token,quote_token', kind: 'gecko' },
+  XAUT: { chain: 'Ethereum', network: 'eth', venue: 'Uniswap V3', pool: '0x6546055f46e866a4b9a4a13e81273e3152bae5da', pair: 'XAUt/USDT',
+    token: '0x68749665ff8d2d112fa859aa293f07a622782f38',
+    quoteToken: '0xdac17f958d2ee523a2206206994597c13d831ec7', dex: 'uniswap_v3',
+    url: 'https://api.geckoterminal.com/api/v2/networks/eth/pools/0x6546055f46e866a4b9a4a13e81273e3152bae5da?include=base_token,quote_token', kind: 'gecko' },
+  VVV: { chain: 'Base', network: 'base', venue: 'Aerodrome Slipstream', pool: '0xdebaebe5b2729f7d62072b2ea40472d78d2c1626', pair: 'VVV/WETH',
+    token: '0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf',
+    quoteToken: '0x4200000000000000000000000000000000000006', dex: 'aero-slipstream-base',
+    url: 'https://api.geckoterminal.com/api/v2/networks/base/pools/0xdebaebe5b2729f7d62072b2ea40472d78d2c1626?include=base_token,quote_token', kind: 'gecko' },
+  // ponytail: NVDA has no pool here; it is a stock, and tokenized-stock pools are a different asset.
 });
 
 const positive = value => {

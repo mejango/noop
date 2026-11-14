@@ -136,7 +136,7 @@ test('each ETH ping reaches independent asset workers without awaiting their wor
   }
   const stop = startAssetMarketWorkers({ WorkerClass: FakeWorker });
   try {
-    assert.deepEqual(created.map(worker => worker.asset), ['BTC', 'ZEC', 'HYPE', 'SOL']);
+    assert.deepEqual(created.map(worker => worker.asset), ['BTC', 'ZEC', 'HYPE', 'SOL', 'XAUT', 'NVDA', 'VVV']);
     pingAssetMarkets('2026-10-23T12:34:00.000Z');
     for (const worker of created) {
       assert.deepEqual(worker.messages, [{ type: 'ping', timestamp: '2026-10-23T12:34:00.000Z' }]);
