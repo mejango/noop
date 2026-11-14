@@ -122,7 +122,7 @@ test('real runtime and adapter transfer only credited funds, settle a DRV buy an
   assert.equal(summary.funding.destination_available_usdc, '0.99');
   assert.equal(fromUnits(h.state.destination - toUnits(summary.funding.destination_available_usdc)), '5.01');
   assert.equal(h.db.db.prepare('SELECT status FROM execution_submissions').get().status, 'accounted');
-  assert.equal(h.sends()[1].params.max_fee, '0.001021184968');
+  assert.equal(h.sends()[1].params.max_fee, '0.001072244216');
   const settledTrade = summary.reservations[0].evidence.trades[0];
   assert.equal(settledTrade.fee_currency, 'USDC');
   assert.equal(Object.hasOwn(settledTrade.raw_venue_trade, 'fee_currency'), false);

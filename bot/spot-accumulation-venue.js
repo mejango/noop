@@ -228,7 +228,7 @@ function createSpotVenue({ config, wallet, post: injectedPost, http = axios, now
     const feeRequest = unsignedOrder({ subaccount_id: destinationId, instrument_name: 'DRV-USDC', direction: 'buy',
       amount: fromUnits(bounds.minimum), limit_price: fromUnits(market.price), max_fee: '0', time_in_force: 'ioc', signature_expiry_sec: expiry });
     const quote = await read('private/order_quote', feeRequest);
-    const fee = (toUnits(quote?.suggested_max_fee, 'suggested per-unit max fee') / FEE_QUANTUM + 1n) * FEE_QUANTUM;
+    const fee = (toUnits(quote?.suggested_max_fee, 'suggested per-unit max fee') * BigInt(10000 + POLICY.drvFeeHeadroomBps) / 10000n / FEE_QUANTUM + 1n) * FEE_QUANTUM;
     return { source, destination, instruments: { DRV: instrument }, drvTicker: { ...ticker, received_at: now() },
       fees: { DRV: { max_fee_per_unit: fromUnits(fee) } }, keyExpirySec: key.expiry_sec, transfer: { max_fee_usdc: '0' },
       session: key, fee_info: accountInfo.fee_info };

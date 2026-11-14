@@ -86,7 +86,7 @@ test('read snapshot and exact previews use unsigned request auth only, preserve 
   assert.equal(result.destination.subaccount_id, 120934);
   assert.equal(result.source.usdc_balance, '1000');
   assert.equal(result.source.committed_usdc, '0');
-  assert.equal(result.fees.DRV.max_fee_per_unit, '0.001000000001');
+  assert.equal(result.fees.DRV.max_fee_per_unit, '0.001050000001'); // suggested 0.001 plus 5% headroom and one step
   assert.equal((await io.venue.previewOrder(order)).valid, true);
   assert.equal((await io.venue.previewTransfer(transfer)).valid, true);
   assert.equal(io.signatures, 0);

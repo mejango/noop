@@ -7,7 +7,11 @@ const { KEY_MARGIN_SEC } = require('./signature-expiry');
 const SCALE = 10n ** 18n;
 const ALLOCATION_POLICY = 'drv-only-v1';
 const POLICY = Object.freeze({ floatCycles: 4, maxAgeMs: 30000,
-  minSignatureHorizonSec: 10, keyMarginSec: KEY_MARGIN_SEC, drvSlippageBps: 50 });
+  minSignatureHorizonSec: 10, keyMarginSec: KEY_MARGIN_SEC, drvSlippageBps: 50,
+  // Derive's suggested fee moves with the price between the snapshot and the exact quote; a cap
+  // set one step above the snapshot's suggestion was refused about every other attempt.
+  // max_fee is a ceiling, not the fee charged.
+  drvFeeHeadroomBps: 500 });
 const min = (...values) => values.reduce((a, b) => a < b ? a : b);
 const ceilDiv = (a, b) => (a + b - 1n) / b;
 const floorStep = (value, step) => value / step * step;
