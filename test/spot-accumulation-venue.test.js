@@ -285,3 +285,32 @@ test('only direct accepted-identity-free order RPC refusals carry durable reject
   });
   assert.equal(failedRead.signatures, 0);
 });
+
+test('a rate-limited read waits as Derive asks and retries twice; a refused order is never repeated', async () => {
+  const limited = { error: { code: -32000, message: 'Rate limit exceeded 1.2.3.4', data: 'Retry after 3377 ms' } };
+  const waits = [];
+  let refusals = 2;
+  const io = fixture((method, _p, value) => (method === 'private/get_open_orders' && refusals-- > 0 ? limited : value),
+    { sleep: async ms => { waits.push(ms); } });
+  await snapshot(io);
+  assert.deepEqual(waits, [3377, 3377]);
+
+  const always = fixture((method, _p, value) => (method === 'public/get_ticker' ? limited : value), { sleep: async () => {} });
+  await assert.rejects(snapshot(always), /get_ticker RPC refusal \(-32000\)/);
+  assert.equal(always.calls.filter(call => call.method === 'public/get_ticker').length, 3);
+
+  const send = fixture((method, _p, value) => (method === 'private/order' ? limited : value), { sleep: async () => { throw new Error('a send must not wait and retry'); } });
+  await snapshot(send);
+  const prepared = await send.venue.prepareOrder(order);
+  await assert.rejects(send.venue.submitOrder(prepared, testJournal));
+  assert.equal(send.calls.filter(call => call.method === 'private/order').length, 1);
+});
+
+test('a failed order preview names the condition that failed', async () => {
+  const fee = fixture((method, params, value) => (method === 'private/order_quote' && params.max_fee !== '0' ? { ...value, suggested_max_fee: '0.002' } : value));
+  await snapshot(fee);
+  await assert.rejects(fee.venue.previewOrder(order), /unverified \(fee_above_cap\)/);
+  const margin = fixture((method, _p, value) => (method === 'private/get_margin' ? { ...value, is_valid_trade: false } : value));
+  await snapshot(margin);
+  await assert.rejects(margin.venue.previewOrder(order), /unverified \(margin_invalid_trade\)/);
+});

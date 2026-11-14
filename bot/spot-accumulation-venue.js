@@ -4,7 +4,7 @@
 const axios = require('axios');
 const { getDeriveConfig, authHeaders, orderNonce } = require('./derive-config');
 const { signOrder } = require('./derive-signing');
-const { isDefinitiveOrderRejection } = require('./derive-errors');
+const { isDefinitiveOrderRejection, rateLimitWaitMs } = require('./derive-errors');
 const { collectRecoveryEvidence } = require('./reconcile-execution');
 const { POLICY, SCALE, toUnits, fromUnits } = require('./spot-accumulation');
 
@@ -79,6 +79,7 @@ function sourceCashCommitments({ openOrders, pendingActions, subaccountId }) {
 }
 
 function createSpotVenue({ config, wallet, post: injectedPost, http = axios, now = Date.now,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
   assertCanSend = () => { throw new Error('Spot financial sends are disabled'); } }) {
   const owner = config.accountAddress || config.wallet;
   const sourceId = Number(config.sourceSubaccountId ?? config.subaccountId);
@@ -138,7 +139,18 @@ function createSpotVenue({ config, wallet, post: injectedPost, http = axios, now
     if (response.data?.result == null) throw new Error(`Derive ${method} evidence unavailable`);
     return response.data.result;
   }
-  const read = (method, params) => call(method, params);
+  // Reads are idempotent, so a rate-limited read waits as Derive asks and tries again, twice at
+  // most. Orders and transfers never pass through here: a refused send is never repeated.
+  const read = async (method, params) => {
+    for (let attempt = 0; ; attempt++) {
+      try { return await call(method, params); }
+      catch (error) {
+        const waitMs = rateLimitWaitMs(error.venueResponse?.error);
+        if (waitMs == null || attempt >= 2) throw error;
+        await sleep(waitMs);
+      }
+    }
+  };
   let inputs = null;
   const prepared = new Map();
   function validateSession(session) {
@@ -239,9 +251,12 @@ function createSpotVenue({ config, wallet, post: injectedPost, http = axios, now
     if (debit > toUnits(snapshot.destination.usdc_balance) - toUnits(snapshot.destination.committed_usdc)) throw new Error('Order exceeds uncommitted destination USDC');
     const [quote, margin] = await Promise.all([read('private/order_quote', request), read('private/get_margin', {
       subaccount_id: destinationId, simulated_collateral_changes: [{ asset_name: 'DRV', amount: request.amount }, { asset_name: 'USDC', amount: `-${fromUnits(debit)}` }] })]);
-    if (quote?.is_valid !== true || !positiveMargin(quote.post_initial_margin)
-      || toUnits(quote.suggested_max_fee, 'exact suggested fee') >= toUnits(request.max_fee)
-      || margin?.is_valid_trade !== true || !positiveMargin(margin.post_initial_margin) || !positiveMargin(margin.post_maintenance_margin)) throw new Error('Exact order fees or post-trade margin are unverified');
+    // The same refusal as before, now naming which condition failed.
+    const failed = [quote?.is_valid !== true && 'quote_invalid', !positiveMargin(quote?.post_initial_margin) && 'quote_margin',
+      toUnits(quote?.suggested_max_fee, 'exact suggested fee') >= toUnits(request.max_fee) && 'fee_above_cap',
+      margin?.is_valid_trade !== true && 'margin_invalid_trade', !positiveMargin(margin?.post_initial_margin) && 'post_initial_margin',
+      !positiveMargin(margin?.post_maintenance_margin) && 'post_maintenance_margin'].filter(Boolean);
+    if (failed.length) throw new Error(`Exact order fees or post-trade margin are unverified (${failed.join(', ')})`);
     return { valid: true, request, quote, margin, snapshot };
   }
   async function prepareOrder(terms) {

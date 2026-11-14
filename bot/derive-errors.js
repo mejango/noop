@@ -17,6 +17,14 @@ const isDefinitiveVenueRejection = (apiError) => (
   [-32600, -32602, 14038].includes(Number(apiError?.code)) || /rate limit exceeded/i.test(String(apiError?.message || ''))
 );
 
+// How long Derive asks a rate-limited caller to wait, or null when the error is not its rate
+// limiter. Bounded so a caller never stalls on a malformed hint.
+const rateLimitWaitMs = (apiError) => {
+  if (!/rate limit exceeded/i.test(String(apiError?.message || ''))) return null;
+  const hinted = Number(/retry after (\d+) ms/i.exec(String(apiError?.data || ''))?.[1]);
+  return Math.min(5000, Math.max(250, Number.isFinite(hinted) ? hinted : 1000));
+};
+
 const isIocNoLiquidityError = (err) => {
   const code = Number(err?.code ?? err?.error?.code);
   if (code === 11009) return true;
@@ -45,4 +53,4 @@ function isDefinitiveOrderRejection(evidence) {
     || (evidence.request.time_in_force === 'ioc' && isIocNoLiquidityError(response.error));
 }
 
-module.exports = { stringifyApiError, isDefinitiveVenueRejection, isIocNoLiquidityError, isDefinitiveOrderRejection };
+module.exports = { rateLimitWaitMs, stringifyApiError, isDefinitiveVenueRejection, isIocNoLiquidityError, isDefinitiveOrderRejection };
