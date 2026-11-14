@@ -117,7 +117,7 @@ const { fetchV3OnchainLiquidity } = require('./bot/v3-onchain-liquidity');
 const { refreshDexVolume, volumeSummary } = require('./bot/dex-volume');
 const { invalidDexReason, calculateValidatedLiquidityFlow, dexForAdvisor, LIQUIDITY_DATA_NOTICE } = require('./bot/liquidity-quality');
 const { getDeriveConfig, orderNonce, fetchInstruments } = require('./bot/derive-config');
-const { WIKI_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGES, getWikiPageRuleErrors } = require('./bot/wiki-rules');
+const { WIKI_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGES, WIKI_TABLE_ROW_LIMIT, countWikiWords, countWikiTableRows, getWikiPageWordBudget, getWikiPageRuleErrors } = require('./bot/wiki-rules');
 const { stringifyApiError, isDefinitiveVenueRejection, isIocNoLiquidityError } = require('./bot/derive-errors');
 const { getSpotAccumulationSettings, readSpotSourceHistory, readSpotPendingActions } = require('./bot/spot-accumulation-config');
 const { encodeTradeData: encodeOrderData, buildActionHashes, TRADE_MODULE_ADDRESS } = require('./bot/derive-signing');
@@ -4516,6 +4516,9 @@ ${schema}
 ## Allowed Wiki Pages (the only pages you may update in this response)
 ${batchPages.join('\n')}
 
+## Page sizes (as the rule check measures them; a rewrite past a limit is discarded)
+${batchPages.map((page) => `- ${page}: ${countWikiWords(pages[page])} of ${getWikiPageWordBudget(page)} words, ${countWikiTableRows(pages[page])} of ${WIKI_TABLE_ROW_LIMIT} table rows`).join('\n')}
+
 ## Current Wiki Pages (full content; pages not listed above are read-only context for cross-page consistency)
 ${buildWikiIngestPagesContext(pages, selectedPages)}
 
@@ -4540,7 +4543,7 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 3. Compile, do not append. Each page is the current synthesis, not a diary: the evidence packets and the log already keep the chronology. In TLDR, Current, and Active sections, replace superseded state and drop it; do not archive it as a prior or historical snapshot, and remove snapshot trails a page already has (per-pass "archived" or "prior snapshot" lists). Keep only what the superseded state teaches: when it completes or extends an episode, or adds to a pattern's sample, revise that one compiled entry in place (strengthen, weaken or overturn it; update how many episodes, over what period, with what outcome). Weigh all history: one new observation moves a pattern built on many by its share of the sample and does not replace it
 4. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
 5. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" only in historical context—never leave the obsolete value in the current TLDR or Active section
-6. Each page has a budget of ${WIKI_PAGE_WORD_BUDGET} words (${WIKI_HISTORY_PAGE_WORD_BUDGET} for the pages that compile the whole history: ${WIKI_HISTORY_PAGES.join(', ')}); a rewrite that grows a page past it is rejected. Make room by compiling: several entries about the same pattern merge into one claim with its count, range and outcome, and today's tick-by-tick narration shrinks to its conclusion. Never make room by dropping what older evidence established
+6. Each page has a budget of ${WIKI_PAGE_WORD_BUDGET} words (${WIKI_HISTORY_PAGE_WORD_BUDGET} for the pages that compile the whole history: ${WIKI_HISTORY_PAGES.join(', ')}); a rewrite that grows a page past it is rejected (Page sizes above gives each page's measured count). Make room by compiling: several entries about the same pattern merge into one claim with its count, range and outcome, and today's tick-by-tick narration shrinks to its conclusion. Never make room by dropping what older evidence established
 7. Each page may start with one H1 title; place a bold TLDR line immediately after that optional title. It states the page's conclusion in at most 40 words; on pages about history, patterns, indicators or correlations it says what history shows, not today's readings
 8. Prefer a compact update set only after every live-state page has been checked for cross-page consistency
 9. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically
@@ -4565,13 +4568,14 @@ Output your updates as XML blocks. Only include pages that need changes:
 
 If no pages need updating, output: <no_updates/>`;
 
-  const requestIngestCall = async (batchPages) => {
+  const requestIngestCall = (batchPages) => callIngestModel(buildIngestPrompt(batchPages), `${batchPages[0]}…`);
+  const callIngestModel = async (prompt, label) => {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
       thinking: { type: 'between_tools' },
       // 4096 truncated every run and silently applied nothing; 16384 fit only ~5 rewrites.
       max_tokens: 32000,
-      messages: [{ role: 'user', content: buildIngestPrompt(batchPages) }],
+      messages: [{ role: 'user', content: prompt }],
     }, {
       headers: {
         'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -4583,7 +4587,7 @@ If no pages need updating, output: <no_updates/>`;
     // Each complete <wiki_update> block is validated on its own below, so a
     // truncated response still applies the pages that finished. Log the cut.
     const truncated = response.data?.stop_reason !== 'end_turn';
-    if (truncated) console.log(`📚 Wiki ingest [${batchPages[0]}…]: ${getAnthropicResponseFailure(response.data)}; applying complete page blocks only`);
+    if (truncated) console.log(`📚 Wiki ingest [${label}]: ${getAnthropicResponseFailure(response.data)}; applying complete page blocks only`);
     return { text: (response.data?.content || []).filter(block => block.type === 'text').map(block => block.text).join(''), truncated };
   };
   // A cut-off response lost the pages it had not finished, and they were skipped until the next
@@ -4600,12 +4604,12 @@ If no pages need updating, output: <no_updates/>`;
   };
 
   try {
-    const settled = await Promise.allSettled(batches.map(requestIngestBatch));
-    if (!settled.some((result) => result.status === 'fulfilled')) throw settled[0].reason;
-    settled.forEach((result, i) => {
+    const batchResults = await Promise.allSettled(batches.map(requestIngestBatch));
+    if (!batchResults.some((result) => result.status === 'fulfilled')) throw batchResults[0].reason;
+    batchResults.forEach((result, i) => {
       if (result.status === 'rejected') console.log(`📚 Wiki ingest batch [${batches[i].join(', ')}] failed: ${result.reason?.message}`);
     });
-    const batchTexts = settled.map((result, i) => ({ text: result.status === 'fulfilled' ? result.value : '', batchPages: batches[i] }));
+    const batchTexts = batchResults.map((result, i) => ({ text: result.status === 'fulfilled' ? result.value : '', batchPages: batches[i] }));
     const text = batchTexts.map((batch) => batch.text).join('\n');
 
     // Parse wiki_update blocks
@@ -4634,92 +4638,80 @@ If no pages need updating, output: <no_updates/>`;
       rejections[pagePath] = reason;
       console.log(`📚 Wiki ingest: rejected update for ${pagePath} — ${reason}`);
     };
+    // Why a rewrite of a page cannot be applied, or null.
+    const ingestRejection = (pagePath, newContent) => {
+      // Safety: reject updates < 50 chars
+      if (newContent.length < 50) return `too short (${newContent.length} chars)`;
+      const existingContent = pages[pagePath] || '';
+      // Strategy pages are views of canonical Learning records, so loss is checkable exactly:
+      // any length is fine (rule 6 asks them to consolidate) as long as no active lesson drops out.
+      if (pagePath.startsWith('strategy/')) {
+        const dropped = getDroppedLessonMarkers(existingContent, newContent, availableLessonMarkers);
+        if (dropped.length > 0) return `drops active lesson(s) ${dropped.slice(0, 5).join(', ')}`;
+      // Research pages have no record to check history against: reject a rewrite that halves one.
+      } else if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) {
+        return `shrinks by >50% (${existingContent.length} -> ${newContent.length})`;
+      }
+      // Sections, reference-only text, word budget, history coverage and strategy
+      // tick evidence: the same rules the dashboard's manual repair applies.
+      const ruleErrors = getWikiPageRuleErrors({
+        pagePath,
+        previousContent: isPlaceholderWikiPage(existingContent) ? '' : existingContent,
+        replacementContent: newContent,
+      });
+      if (ruleErrors.length > 0) return ruleErrors.join('; ');
+      if (/^#+\s*(outstanding\s+)?validation findings/im.test(newContent)) {
+        return 'page contains a Validation Findings section; findings are instructions, never page content';
+      }
+      const outputMarkers = getStructuredWikiMarkers(newContent);
+      const unknownMarkers = Array.from(outputMarkers).filter((marker) => !allowedMarkers.has(marker));
+      if (unknownMarkers.length > 0) return `invented source marker(s): ${unknownMarkers.slice(0, 5).join(', ')}`;
+      if (
+        WIKI_LIVE_RESEARCH_PAGES.includes(pagePath)
+        && latestTickMarkers.size > 0
+        && !Array.from(outputMarkers).some((marker) => latestTickMarkers.has(marker))
+      ) return 'live state lacks an exact marker from the latest tick packet';
+      if (
+        WIKI_STRATEGY_PAGES.has(pagePath)
+        && availableLessonMarkers.size > 0
+        && !Array.from(outputMarkers).some((marker) => availableLessonMarkers.has(marker))
+      ) return 'Learning-owned page lacks a canonical lesson marker';
+      return null;
+    };
+
+    const blocks = [];
     for (const { text: batchText, batchPages } of batchTexts) {
       updateRegex.lastIndex = 0;
       while ((match = updateRegex.exec(batchText)) !== null) {
-        const pagePath = match[1];
-        const newContent = match[2].trim();
-
-        // Validate page path
-        if (!batchPages.includes(pagePath)) {
-          console.log(`📚 Wiki ingest: rejected unknown page "${pagePath}"`);
-          continue;
-        }
-
-        // Safety: reject updates < 50 chars
-        if (newContent.length < 50) {
-          reject(pagePath, `too short (${newContent.length} chars)`);
-          continue;
-        }
-
-        const existingContent = pages[pagePath] || '';
-        // Strategy pages are views of canonical Learning records, so loss is checkable exactly:
-        // any length is fine (rule 6 asks them to consolidate) as long as no active lesson drops out.
-        if (pagePath.startsWith('strategy/')) {
-          const dropped = getDroppedLessonMarkers(existingContent, newContent, availableLessonMarkers);
-          if (dropped.length > 0) {
-            reject(pagePath, `drops active lesson(s) ${dropped.slice(0, 5).join(', ')}`);
-            continue;
-          }
-        // Research pages have no record to check history against: reject a rewrite that halves one.
-        } else if (existingContent.length > 100 && newContent.length < existingContent.length * 0.5) {
-          reject(pagePath, `shrinks by >50% (${existingContent.length} -> ${newContent.length})`);
-          continue;
-        }
-
-        // Sections, reference-only text, word budget, history coverage and strategy
-        // tick evidence: the same rules the dashboard's manual repair applies.
-        const ruleErrors = getWikiPageRuleErrors({
-          pagePath,
-          previousContent: isPlaceholderWikiPage(existingContent) ? '' : existingContent,
-          replacementContent: newContent,
-        });
-        if (ruleErrors.length > 0) {
-          reject(pagePath, ruleErrors.join('; '));
-          continue;
-        }
-
-        if (/^#+\s*(outstanding\s+)?validation findings/im.test(newContent)) {
-          reject(pagePath, 'page contains a Validation Findings section; findings are instructions, never page content');
-          continue;
-        }
-
-        const outputMarkers = getStructuredWikiMarkers(newContent);
-        const unknownMarkers = Array.from(outputMarkers).filter((marker) => !allowedMarkers.has(marker));
-        if (unknownMarkers.length > 0) {
-          reject(pagePath, `invented source marker(s): ${unknownMarkers.slice(0, 5).join(', ')}`);
-          continue;
-        }
-        if (
-          WIKI_LIVE_RESEARCH_PAGES.includes(pagePath)
-          && latestTickMarkers.size > 0
-          && !Array.from(outputMarkers).some((marker) => latestTickMarkers.has(marker))
-        ) {
-          reject(pagePath, `live state lacks an exact marker from the latest tick packet`);
-          continue;
-        }
-        if (
-          WIKI_STRATEGY_PAGES.has(pagePath)
-          && availableLessonMarkers.size > 0
-          && !Array.from(outputMarkers).some((marker) => availableLessonMarkers.has(marker))
-        ) {
-          reject(pagePath, `Learning-owned page lacks a canonical lesson marker`);
-          continue;
-        }
-
-        // Save history before overwriting
-        if (existingContent && !existingContent.includes('Awaiting initial assessment')) {
-          saveWikiHistory(pagePath, existingContent);
-        }
-
-        // Write updated page
-        const fullPath = path.join(WIKI_DIR, pagePath);
-        fs.writeFileSync(fullPath, newContent);
-        updateCount++;
-        updatedPages.push({ pagePath, existingContent, newContent });
-        console.log(`📚 Wiki ingest: updated ${pagePath}`);
+        if (batchPages.includes(match[1])) blocks.push({ pagePath: match[1], content: match[2].trim() });
+        else console.log(`📚 Wiki ingest: rejected unknown page "${match[1]}"`);
       }
     }
+    // A rejection used to cost the page a whole cycle, and a page at its budget could only be
+    // rejected. Each page now gets one corrected attempt, then one consolidation near its budget.
+    // ponytail: strategy pages are views of Learning's lessons and the repair pass rewrites
+    // flagged pages only; neither is consolidated here.
+    const settled = await Promise.all(blocks.map(({ pagePath, content }) => require('./bot/wiki-recompile').settleIngestPage({
+      pagePath,
+      content,
+      validate: (candidate) => ingestRejection(pagePath, candidate),
+      callModel: (prompt) => callIngestModel(prompt, pagePath),
+      consolidate: !onlyPages && !WIKI_STRATEGY_PAGES.has(pagePath),
+      log: (message) => console.log(`📚 Wiki ingest: ${message}`),
+    })));
+    blocks.forEach(({ pagePath }, i) => {
+      const { content: newContent, reason } = settled[i];
+      if (newContent == null) return reject(pagePath, reason);
+      const existingContent = pages[pagePath] || '';
+      // Save history before overwriting
+      if (existingContent && !existingContent.includes('Awaiting initial assessment')) {
+        saveWikiHistory(pagePath, existingContent);
+      }
+      fs.writeFileSync(path.join(WIKI_DIR, pagePath), newContent);
+      updateCount++;
+      updatedPages.push({ pagePath, existingContent, newContent });
+      console.log(`📚 Wiki ingest: updated ${pagePath}`);
+    });
 
     // Update meta
     const meta = readWikiMeta();

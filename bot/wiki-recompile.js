@@ -135,10 +135,58 @@ Output only:
 ${content}`;
 };
 
+// A rejected rewrite is usually one mechanical defect from valid (an over-long line, a table row
+// too many). Handing the draft back with the reason keeps the page from going a cycle stale.
+const buildCorrectionPrompt = ({ pagePath, content, reason }) => `Your rewrite of this wiki page of an ETH options trading bot was discarded by the wiki's rule check:
+
+${reason}
+
+Return the same page with only that fixed. Change nothing else: add no fact, number or source marker that is not already in it, and keep every section heading. If the fix needs room, merge entries that describe one pattern.
+
+Output only:
+
+<wiki_update path="${pagePath}">
+[full corrected page]
+</wiki_update>
+
+--- ${pagePath} ---
+${content}`;
+
 const parseUpdates = (text) => Array.from(
   String(text || '').matchAll(/<wiki_update\s+path="([^"]+)">([\s\S]*?)<\/wiki_update>/g),
   (match) => ({ pagePath: match[1], content: match[2].trim() }),
 );
+
+// Share of its word budget above which an ingested page is consolidated before it hits the wall.
+const CONSOLIDATE_ABOVE = 0.9;
+
+// The regular ingest's second chance for one page: a rejected rewrite gets one corrected attempt,
+// and an accepted page near its budget gets one consolidation on its own (the model cannot hold a
+// word limit while it compiles from evidence). `validate` returns a rejection reason or null.
+// Returns the content to write, or content null with the reason the first rewrite was rejected.
+async function settleIngestPage({ pagePath, content, validate, callModel, consolidate = true, log = () => {} }) {
+  const ask = async (prompt) => {
+    try { return parseUpdates((await callModel(prompt)).text).find((update) => update.pagePath === pagePath)?.content || null; }
+    catch (e) { log(`${pagePath}: model call failed (${e.message})`); return null; }
+  };
+  const reason = validate(content);
+  if (reason) {
+    const corrected = await ask(buildCorrectionPrompt({ pagePath, content, reason }));
+    const still = corrected ? validate(corrected) : 'no page came back';
+    log(`asked again for ${pagePath} (${reason}): ${still ? `still rejected, ${still}` : 'accepted'}`);
+    if (still) return { content: null, reason };
+    content = corrected;
+  }
+  const words = countWikiWords(content);
+  if (consolidate && words > CONSOLIDATE_ABOVE * getWikiPageWordBudget(pagePath)) {
+    const shorter = await ask(buildConsolidationPrompt({ pagePath, content, words }));
+    const problem = !shorter ? 'no page came back'
+      : countWikiWords(shorter) >= words ? `not shorter (${countWikiWords(shorter)} words)` : validate(shorter);
+    log(`consolidate ${pagePath} (${words} words): ${problem || `${countWikiWords(shorter)} words`}`);
+    if (!problem) content = shorter;
+  }
+  return { content, reason: null };
+}
 
 // Pages a cut-off response did not finish: no complete <wiki_update> block came back for them.
 const getPagesWithoutUpdate = (text, pages) => {
@@ -312,6 +360,8 @@ module.exports = {
   buildPrompt,
   parseUpdates,
   getPagesWithoutUpdate,
+  buildCorrectionPrompt,
+  settleIngestPage,
   readDrafts,
   runWikiRecompile,
   hasUnreplayedGaps,

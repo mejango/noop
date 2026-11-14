@@ -233,3 +233,44 @@ test('the regular ingest asks again, page by page, for what a cut-off response l
   assert.ok(ingest.includes('requestIngestCall([pagePath])'));
   assert.ok(script.includes('const WIKI_INGEST_PAGES_PER_CALL = 3;'));
 });
+
+test('a rejected ingest page gets one corrected attempt, and a page near its budget one consolidation', async () => {
+  const pagePath = 'regimes/history.md';
+  const page = (words) => `**History.**\n${'word '.repeat(words)}`.trim();
+  const reply = (content) => ({ text: `<wiki_update path="${pagePath}">\n${content}\n</wiki_update>` });
+  const validate = (content) => (content.includes('BAD') ? 'has a 146-word line' : null);
+  const run = (content, replies, options = {}) => {
+    const prompts = [];
+    return recompile.settleIngestPage({ pagePath, content, validate, ...options,
+      callModel: async (prompt) => { prompts.push(prompt); const next = replies.shift(); if (next instanceof Error) throw next; return next; },
+    }).then((result) => ({ ...result, prompts }));
+  };
+
+  // Valid and well under budget: no model call.
+  assert.deepEqual(await run(page(100), []), { content: page(100), reason: null, prompts: [] });
+
+  // Rejected: the draft and the reason go back once; the corrected page is applied.
+  const fixed = await run(`BAD ${page(100)}`, [reply(page(101))]);
+  assert.equal(fixed.content, page(101));
+  assert.equal(fixed.prompts.length, 1);
+  assert.match(fixed.prompts[0], /has a 146-word line/);
+  assert.match(fixed.prompts[0], /BAD/);
+
+  // Still invalid, no page, or a failed call: rejected with the first reason, never a third call.
+  for (const second of [reply(`BAD ${page(100)}`), { text: '' }, new Error('overloaded')]) {
+    assert.deepEqual(await run(`BAD ${page(100)}`, [second]), { content: null, reason: 'has a 146-word line', prompts: (await run(`BAD ${page(100)}`, [second])).prompts });
+  }
+
+  // Above 90% of the 3,500-word budget: one consolidation, applied only if shorter and valid.
+  const big = page(3300);
+  assert.equal((await run(big, [reply(page(3000))])).content, page(3000));
+  assert.equal((await run(big, [reply(page(3400))])).content, big);
+  assert.equal((await run(big, [reply(`BAD ${page(3000)}`)])).content, big);
+  assert.equal((await run(big, [new Error('overloaded')])).content, big);
+  assert.deepEqual((await run(big, [], { consolidate: false })).prompts, []);
+  assert.equal((await run(page(3100), [])).prompts.length, 0);
+
+  const script = fs.readFileSync(path.join(root, 'script.js'), 'utf8');
+  assert.ok(script.includes("consolidate: !onlyPages && !WIKI_STRATEGY_PAGES.has(pagePath)"));
+  assert.ok(script.includes('## Page sizes (as the rule check measures them'));
+});
