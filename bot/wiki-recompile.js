@@ -34,7 +34,9 @@ const RECOMPILE_PAGES = [
 const PAGES_PER_CALL = 2;
 // Working target below the hard budget, so a page has room to take the next period.
 const RECOMPILE_TARGET_WORDS = 2100;
-const MAX_CORRECTIONS = 2;
+const MAX_CORRECTIONS = 3;
+// ponytail: bump to replay the recorded gaps once more after a fix to the replay itself.
+const REPLAY_VERSION = 2;
 // ponytail: ~60k tokens of sources per call next to ~35k of drafts; a busier journal just yields more parts.
 const MAX_PERIOD_CHARS = 240000;
 const CURRENT_PAGES_PERIOD = 'current-pages';
@@ -120,6 +122,26 @@ Output full pages as XML blocks, only for pages that change:
 If nothing changes, output: <no_updates/>`;
 };
 
+const buildConsolidationPrompt = ({ pagePath, content, words }) => {
+  const cut = Math.ceil((1 - RECOMPILE_TARGET_WORDS / words) * 100);
+  return `This wiki page of an ETH options trading bot is ${words} words by the counter that enforces its ${WIKI_PAGE_WORD_BUDGET}-word limit. The counter counts every space-separated token, including table cells and source markers, so the page is longer than it reads. Rewrite it about ${cut}% shorter (at most ${RECOMPILE_TARGET_WORDS} words).
+
+Rules:
+1. Lose wording, not knowledge. Merge entries that describe one pattern, merge adjacent table rows of one arc, cut restated numbers and qualifiers. Every month the page covers stays represented, and every pattern keeps its sample and outcome.
+2. Do not favour recent periods: cut detail in proportion across the whole history.
+3. Keep every section heading, the bold TLDR (at most 40 words) and any Reference-only section exactly.
+4. Keep source markers ([review:#ID], [order:#ID], [tick:#ID], [lesson:key]) verbatim where the claim they support stays; add none.
+
+Output only:
+
+<wiki_update path="${pagePath}">
+[full consolidated page]
+</wiki_update>
+
+--- ${pagePath} ---
+${content}`;
+};
+
 const parseUpdates = (text) => Array.from(
   String(text || '').matchAll(/<wiki_update\s+path="([^"]+)">([\s\S]*?)<\/wiki_update>/g),
   (match) => ({ pagePath: match[1], content: match[2].trim() }),
@@ -173,13 +195,16 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
     let updated = 0;
     for (let { pagePath, content } of updates) {
       let errors = ruleErrors(pagePath, content);
-      // Corrected attempts work on the rejected page itself: trimming a page that already holds
-      // this period is far easier for the model than folding the period in again within budget.
+      // An over-budget page is consolidated on its own: a short prompt holding only the page, with
+      // the measured count and the share to cut. Asking for the fold again with all sources and a
+      // word limit failed about two times in three; the model cannot count words while compiling.
       for (let attempt = 0; attempt < MAX_CORRECTIONS && errors.length > 0; attempt++) {
-        const retry = await callModel(buildPrompt({
-          schema, drafts, batchPages: [pagePath], period: step.label, sourcesText: step.text,
-          feedback: `${pagePath}: ${errors.join('; ')}\n\nThe rejected page (${countWikiWords(content)} words) follows. Return it cut to at most ${RECOMPILE_TARGET_WORDS} words.\n\n${content}`,
-        }));
+        const words = countWikiWords(content);
+        const retry = await callModel(words > WIKI_PAGE_WORD_BUDGET
+          ? buildConsolidationPrompt({ pagePath, content, words })
+          : buildPrompt({
+            schema, drafts, batchPages: [pagePath], period: step.label, sourcesText: step.text, feedback: `${pagePath}: ${errors.join('; ')}`,
+          }));
         const corrected = parseUpdates(retry.text).find((update) => update.pagePath === pagePath);
         if (!corrected) continue;
         content = corrected.content;
@@ -207,13 +232,13 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
   }
   // Replay each page-and-period a rejection dropped, once. The gap leaves progress.json only after
   // its replay ran, so a restart mid-replay tries it again; a replay that fails is recorded as
-  // replayed and is not tried a third time.
-  for (const gap of progress.rejected.filter((item) => !item.replayed)) {
+  // replayed and is not tried again.
+  for (const gap of progress.rejected.filter((item) => item.replayed !== REPLAY_VERSION)) {
     const step = steps.find((candidate) => candidate.label === gap.period);
     progress.rejected.splice(progress.rejected.indexOf(gap), 1);
     const updated = step ? await foldStep(step, [[gap.pagePath]]) : 0;
     if (!updated && !progress.rejected.some((item) => item.period === gap.period && item.pagePath === gap.pagePath)) progress.rejected.push(gap);
-    for (const item of progress.rejected) if (item.period === gap.period && item.pagePath === gap.pagePath) item.replayed = true;
+    for (const item of progress.rejected) if (item.period === gap.period && item.pagePath === gap.pagePath) item.replayed = REPLAY_VERSION;
     saveProgress();
     log(`gap ${gap.period} ${gap.pagePath}: ${updated ? 'folded' : 'still missing'}`);
   }
@@ -227,7 +252,7 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
  * breaking a page rule, or citing a marker the live wiki and reviews do not contain is skipped.
  */
 // A finished run still has work when a dropped page-and-period was never replayed.
-const hasUnreplayedGaps = (summary) => (summary?.rejected || []).some((item) => !item.replayed);
+const hasUnreplayedGaps = (summary) => (summary?.rejected || []).some((item) => item.replayed !== REPLAY_VERSION);
 
 function selectRecompileApplicable({ staged, live, allowedMarkers, getMarkers }) {
   const apply = [];

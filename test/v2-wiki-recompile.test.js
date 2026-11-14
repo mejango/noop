@@ -71,7 +71,7 @@ test('a run folds each period, keeps a draft when an update breaks a rule, and r
   assert.deepEqual(summary.periods, ['2026-04-a', '2026-05-a', recompile.CURRENT_PAGES_PERIOD]);
   assert.equal(summary.rejected.length, 1);
   assert.match(summary.rejected[0].reason, /missing sections: Patterns/);
-  assert.equal(summary.rejected[0].replayed, true);
+  assert.equal(summary.rejected[0].replayed, 2);
   assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /2 episodes/);
   // A completed run is not repeated.
   await recompile.runWikiRecompile({ ...args, callModel: async () => { throw new Error('must not be called'); } });
@@ -138,7 +138,6 @@ test('a rejected update gets corrected attempts on the rejected page before the 
   assert.equal(summary.rejected.length, 0);
   assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /Corrected with both sections/);
   assert.match(prompts[1], /regimes\/history\.md: Replacement is missing sections: Patterns/);
-  assert.match(prompts[1], /The rejected page \(\d+ words\) follows\. Return it cut to at most 2100 words\.\n\n\*\*TLDR\*\*/);
   assert.match(prompts[0], /draft is \d+ words; return at most 2100, hard limit 2500/);
 });
 
@@ -161,6 +160,29 @@ test('a page-and-period dropped by an earlier rejection is replayed once the per
   assert.equal(recompile.hasUnreplayedGaps(summary), false);
   // A finished run that still lists a dropped period is picked up again, once.
   assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md' }] }), true);
-  assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md', replayed: true }] }), false);
+  assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md', replayed: 2 }] }), false);
+  // A gap replayed by the earlier, weaker replay is tried again.
+  assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md', replayed: true }] }), true);
   assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /April folded on replay/);
+});
+
+test('an over-budget page is consolidated on its own, without the sources, until it fits', async () => {
+  const stagingDir = tmp();
+  const long = (n) => compiled('regimes/history.md', Array.from({ length: n }, (_, i) => `w${i}`).join(' '));
+  const consolidations = [];
+  const callModel = async (prompt) => {
+    if (prompt.startsWith('This wiki page')) {
+      consolidations.push(prompt);
+      assert.ok(!prompt.includes('SOURCE-NOTE'), 'consolidation carries only the page');
+      // The first consolidation is still too long; the second fits.
+      return { text: `<wiki_update path="regimes/history.md">\n${long(consolidations.length === 1 ? 2600 : 1900)}\n</wiki_update>`, truncated: false };
+    }
+    if (!prompt.includes('\n- regimes/history.md (draft is ') || prompt.includes('## Sources: the current live pages')) return { text: '<no_updates/>', truncated: false };
+    return { text: `<wiki_update path="regimes/history.md">\n${long(3000)}\n</wiki_update>`, truncated: false };
+  };
+  const summary = await recompile.runWikiRecompile({ stagingDir, sources: [entry('2026-04-10T00:00:00Z', 'SOURCE-NOTE')], currentPages: {}, schema: 'S', callModel });
+  assert.deepEqual(summary.rejected, []);
+  assert.equal(consolidations.length, 2);
+  assert.match(consolidations[0], /is 30\d\d words by the counter .* Rewrite it about 3\d% shorter \(at most 2100 words\)/);
+  assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /w1899/);
 });
