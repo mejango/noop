@@ -36,7 +36,7 @@ const PAGES_PER_CALL = 2;
 const RECOMPILE_TARGET_WORDS = 2100;
 const MAX_CORRECTIONS = 3;
 // ponytail: bump to replay the recorded gaps once more after a fix to the replay itself.
-const REPLAY_VERSION = 2;
+const REPLAY_VERSION = 3;
 // ponytail: ~60k tokens of sources per call next to ~35k of drafts; a busier journal just yields more parts.
 const MAX_PERIOD_CHARS = 240000;
 const CURRENT_PAGES_PERIOD = 'current-pages';
@@ -189,31 +189,43 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
     };
     const updates = [];
     for (const batchPages of batches) updates.push(...await foldBatch(batchPages));
-    const ruleErrors = (pagePath, content) => (content.length < 50
+    // The word budget never rejects a fold: dropping a period loses knowledge, while an over-budget
+    // draft only needs shortening. Staging holds the long draft, a separate pass consolidates it,
+    // and the apply step still refuses a page that grows a live page past the budget.
+    const ruleErrors = (pagePath, content, previousContent = drafts[pagePath]) => (content.length < 50
       ? ['too short']
-      : getWikiPageRuleErrors({ pagePath, previousContent: drafts[pagePath] === skeletonPage(pagePath) ? '' : drafts[pagePath], replacementContent: content }));
+      : getWikiPageRuleErrors({ pagePath, previousContent: previousContent === skeletonPage(pagePath) ? '' : previousContent, replacementContent: content })
+        .filter((error) => !error.includes('word budget')));
     let updated = 0;
     for (let { pagePath, content } of updates) {
       let errors = ruleErrors(pagePath, content);
-      // An over-budget page is consolidated on its own: a short prompt holding only the page, with
-      // the measured count and the share to cut. Asking for the fold again with all sources and a
-      // word limit failed about two times in three; the model cannot count words while compiling.
-      for (let attempt = 0; attempt < MAX_CORRECTIONS && errors.length > 0; attempt++) {
-        const words = countWikiWords(content);
-        const retry = await callModel(words > WIKI_PAGE_WORD_BUDGET
-          ? buildConsolidationPrompt({ pagePath, content, words })
-          : buildPrompt({
-            schema, drafts, batchPages: [pagePath], period: step.label, sourcesText: step.text, feedback: `${pagePath}: ${errors.join('; ')}`,
-          }));
+      if (errors.length > 0) {
+        // One corrected attempt with the reason; a plain rejection would drop this period from the page.
+        const retry = await callModel(buildPrompt({
+          schema, drafts, batchPages: [pagePath], period: step.label, sourcesText: step.text, feedback: `${pagePath}: ${errors.join('; ')}`,
+        }));
         const corrected = parseUpdates(retry.text).find((update) => update.pagePath === pagePath);
-        if (!corrected) continue;
-        content = corrected.content;
-        errors = ruleErrors(pagePath, content);
+        if (corrected && ruleErrors(pagePath, corrected.content).length === 0) {
+          content = corrected.content;
+          errors = [];
+        }
       }
       if (errors.length > 0) {
         progress.rejected.push({ period: step.label, pagePath, reason: errors.join('; ') });
         log(`rejected ${pagePath} for ${step.label}: ${errors.join('; ')}`);
         continue;
+      }
+      // Consolidate on its own: a short prompt holding only the page, its measured count and the
+      // share to cut. The model cannot hold a word limit while it compiles from the sources.
+      for (let attempt = 0; attempt < MAX_CORRECTIONS && countWikiWords(content) > WIKI_PAGE_WORD_BUDGET; attempt++) {
+        const words = countWikiWords(content);
+        const retry = await callModel(buildConsolidationPrompt({ pagePath, content, words }));
+        const shorter = parseUpdates(retry.text).find((update) => update.pagePath === pagePath);
+        const problems = !shorter ? [`no page in the response${retry.truncated ? ' (cut off)' : ''}`]
+          : countWikiWords(shorter.content) >= words ? [`not shorter (${countWikiWords(shorter.content)} words)`]
+            : ruleErrors(pagePath, shorter.content, content);
+        log(`consolidate ${pagePath} (${words} words): ${problems.length ? problems.join('; ') : `${countWikiWords(shorter.content)} words`}`);
+        if (problems.length === 0) content = shorter.content;
       }
       fs.mkdirSync(path.dirname(draftPath(stagingDir, pagePath)), { recursive: true });
       fs.writeFileSync(draftPath(stagingDir, pagePath), `${content}\n`);
