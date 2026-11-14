@@ -167,7 +167,7 @@ test('a page-and-period dropped by an earlier rejection is replayed once the per
 });
 
 test('an over-budget fold is kept and consolidated on its own; a failed consolidation never drops the period', async () => {
-  const long = (n) => compiled('regimes/history.md', Array.from({ length: n }, (_, i) => `w${i}`).join(' '));
+  const long = (n) => compiled('regimes/history.md', Array.from({ length: n }, (_, i) => `w${i}${i % 50 === 49 ? '\n' : ''}`).join(' '));
   const run = async (consolidated) => {
     const stagingDir = tmp();
     const consolidations = [];

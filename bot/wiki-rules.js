@@ -53,6 +53,12 @@ const WIKI_HISTORY_PAGES = [
 /** @param {string} pagePath */
 const getWikiPageWordBudget = (pagePath) => (WIKI_HISTORY_PAGES.includes(pagePath) ? WIKI_HISTORY_PAGE_WORD_BUDGET : WIKI_PAGE_WORD_BUDGET);
 
+// An entry is a bullet, a table row or a short paragraph. Longer lines were
+// chains of numbers no reader could use (400 to 860 words in the 2026-11
+// recompile). Same shape as the budget: an existing long line may stay, a
+// rewrite may not make the longest line longer.
+const WIKI_LINE_WORD_LIMIT = 120;
+
 /** @param {string} content */
 const countWikiWords = (content) => String(content || '').trim().split(/\s+/).filter(Boolean).length;
 
@@ -104,6 +110,14 @@ function getWikiPageRuleErrors({ pagePath, previousContent = '', replacementCont
     );
   }
 
+  const longestLine = (content) => Math.max(0, ...String(content || '').split('\n').map(countWikiWords));
+  const replacementLongest = longestLine(replacement);
+  if (replacementLongest > Math.max(WIKI_LINE_WORD_LIMIT, longestLine(previousContent))) {
+    errors.push(
+      `Replacement has a ${replacementLongest}-word line; an entry is a bullet, table row or paragraph of at most ${WIKI_LINE_WORD_LIMIT} words, so split it into entries`,
+    );
+  }
+
   if (pagePath.startsWith('strategy/')) {
     const previousTickIds = new Set(getTickIds(previousContent));
     const addedTickIds = Array.from(new Set(getTickIds(replacement))).filter((tickId) => !previousTickIds.has(tickId));
@@ -123,6 +137,7 @@ module.exports = {
   WIKI_PAGE_WORD_BUDGET,
   WIKI_HISTORY_PAGE_WORD_BUDGET,
   WIKI_HISTORY_PAGES,
+  WIKI_LINE_WORD_LIMIT,
   getWikiPageWordBudget,
   countWikiWords,
   hasH2,

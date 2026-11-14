@@ -53,6 +53,21 @@ Rules:
 - **Learning owns execution memory:** trade rules, mistakes, decision standards, contradictions, and revisions.
 - `strategy/lessons.md`, `strategy/mistakes.md`, and `strategy/playbook.md` are readable views of canonical Learning records. They must not invent independent execution rules or present disputed lessons as settled.
 
+### One home per recurring fact
+
+A fact that several pages need is stated in full, with its sample and period, on one page only. Every other page uses at most one line that names the conclusion and the home page, and never restates the count: two pages that each keep their own count drift apart.
+
+| Kind of fact | Home page |
+|---|---|
+| Dated regime arcs, spot levels, how long floors and ceilings held | regimes/history.md |
+| Whether a signal predicts anything (flow, open-interest steps, momentum flips, put-spike clusters, skew floors), and the record of failed forecasts | indicators/leading.md |
+| Statistical relationships between two series, with n and window | indicators/correlations.md |
+| Divergence episodes and what to do about each type | indicators/divergences.md |
+| When puts were cheap or dear, and what marked those windows | protection/windows.md |
+| Put campaigns (strikes, distance, outcome, reviews) and how the put surface repriced around falls | protection/convexity.md |
+| Premium environment and call-selling windows, gate episodes | revenue/windows.md |
+| Short-call record, strike distance, buybacks, order execution | revenue/efficiency.md |
+
 ## Evidence References
 
 Material claims should retain their supplied source marker:
@@ -163,6 +178,7 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 3. **Revise transparently** — when evidence overturns a claim, say so once in "Previously: X. Updated [YYYY-MM-DD]: Y" format, then fold it into the claim on the next revision
 4. **Word budget** — each page has a budget of 2,500 words, or 3,500 words for the eight pages that compile the whole history (regimes/history, protection/windows, protection/convexity, revenue/windows, revenue/efficiency and the three indicators pages), enforced in code: a rewrite that grows a page past it is rejected. Advisors read every page in full, so the budget is what keeps their context from growing. Make room by compiling: several entries about one pattern merge into a single claim with its count, range and outcome, and today's tick-by-tick narration shrinks to its conclusion
 4a. **Weigh all history** — a conclusion reflects every episode behind it, not the latest packet. One new observation moves a pattern built on many by its share of the sample; it does not replace it. State a pattern as general only with its sample and period, and never make room by dropping what older evidence established
+4b. **Entries, not walls** — an entry is a bullet, a table row or a paragraph of at most 120 words (enforced in code). A long chain of dated numbers is a table or several entries, each with its own conclusion; a number that supports no stated conclusion is left out
 5. **Bold TLDR** — a page may begin with one H1 title; the next content must be a bold summary of the page's conclusion in at most 40 words. On pages about history, patterns, indicators or correlations it states what history shows, not today's readings
 6. **Evidence required** — claims must reference specific data values (IV levels, percentages, dates)
 7. **Falsification criteria** — regime assessments and hypotheses include what would disprove them

@@ -38,8 +38,21 @@ test('reference-only sections must keep their canonical text', () => {
   assert.match(errors[0], /^Skew & IV Context section must contain only:/);
 });
 
-test('a page cannot grow past the word budget, but an oversized page is never frozen', () => {
+test('a rewrite may not add a line longer than 120 words, but an existing long line is never frozen', () => {
   const words = (count) => Array(count).fill('word').join(' ');
+  const base = page('regimes/history.md');
+  assert.match(errorsFor('regimes/history.md', base, `${base}\n- ${words(130)}`)[0], /has a 131-word line; an entry is .* at most 120 words/);
+  assert.deepEqual(errorsFor('regimes/history.md', base, `${base}\n- ${words(119)}\n- ${words(119)}`), []);
+  // The page already holds a 200-word line: it may stay or shrink, not grow.
+  const walled = `${base}\n${words(200)}`;
+  assert.deepEqual(errorsFor('regimes/history.md', walled, `${base}\n${words(180)}`), []);
+  assert.match(errorsFor('regimes/history.md', walled, `${base}\n${words(220)}`)[0], /has a 220-word line/);
+  // The schema the LLM reads states the same limit.
+  assert.ok(fs.readFileSync(path.join(root, 'knowledge/schema.md'), 'utf8').includes('at most 120 words'));
+});
+
+test('a page cannot grow past the word budget, but an oversized page is never frozen', () => {
+  const words = (count) => Array.from({ length: count }, (_, index) => (index % 50 === 49 ? 'word\n' : 'word')).join(' ');
   const base = page('regimes/history.md');
   const under = `${base}\n${words(WIKI_HISTORY_PAGE_WORD_BUDGET - 100)}`;
   const over = `${base}\n${words(WIKI_HISTORY_PAGE_WORD_BUDGET + 200)}`;
