@@ -24,7 +24,7 @@ test('BTC and ZEC Maya reserves become explicitly estimated whole-pool TVL', asy
 });
 
 test('fixed GeckoTerminal pools require the expected token pair', async () => {
-  for (const asset of ['SOL', 'HYPE', 'XAUT', 'VVV']) {
+  for (const asset of ['SOL', 'HYPE', 'XAUT', 'VVV', 'DRV']) {
     const source = SOURCES[asset];
     const body = token => ({ data: { id: `${source.network}_${source.pool}`, attributes: {
       name: source.pair, reserve_in_usd: '1250000', volume_usd: { h24: '24000' } },

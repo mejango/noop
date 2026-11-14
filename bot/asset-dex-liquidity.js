@@ -22,6 +22,10 @@ const SOURCES = Object.freeze({
     token: '0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf',
     quoteToken: '0x4200000000000000000000000000000000000006', dex: 'aero-slipstream-base',
     url: 'https://api.geckoterminal.com/api/v2/networks/base/pools/0xdebaebe5b2729f7d62072b2ea40472d78d2c1626?include=base_token,quote_token', kind: 'gecko' },
+  DRV: { chain: 'Base', network: 'base', venue: 'Aerodrome Slipstream', pool: '0xa75f386c129f0478d61d1692ee7cc71beb468d92', pair: 'DRV/USDC',
+    token: '0x9d0e8f5b25384c7310cb8c6ae32c8fbeb645d083',
+    quoteToken: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', dex: 'aerodrome-slipstream-3',
+    url: 'https://api.geckoterminal.com/api/v2/networks/base/pools/0xa75f386c129f0478d61d1692ee7cc71beb468d92?include=base_token,quote_token', kind: 'gecko' },
   // ponytail: NVDA has no pool here; it is a stock, and tokenized-stock pools are a different asset.
 });
 
