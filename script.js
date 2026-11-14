@@ -4002,7 +4002,7 @@ const WIKI_RECOMPILE_DIR = path.join(WIKI_DIR, '.recompile');
 // The run to stage starts on deploy; the run to apply is set in a later, reviewed commit.
 // Run -b replaces the first run: one of its periods was cut off at the output limit and never reached four pages.
 const WIKI_RECOMPILE_RUN = process.env.WIKI_RECOMPILE_RUN || 'full-history-2026-11-13b';
-const WIKI_RECOMPILE_APPLY = process.env.WIKI_RECOMPILE_APPLY || '';
+const WIKI_RECOMPILE_APPLY = process.env.WIKI_RECOMPILE_APPLY || 'edited-2026-11-14';
 const isSafeRecompileRunId = (runId) => /^[A-Za-z0-9_-]{1,40}$/.test(String(runId || ''));
 
 const callWikiRecompileModel = async (prompt, attempt = 1) => {

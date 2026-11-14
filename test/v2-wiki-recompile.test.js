@@ -99,8 +99,8 @@ test('the bot stages in the background and applies only on its own explicit trig
   assert.ok(!/writeFileSync\(path\.join\(WIKI_DIR/.test(stage), 'staging never writes a live page');
   const apply = script.slice(script.indexOf('const maybeApplyWikiRecompile'), script.indexOf('const saveWikiHistory'));
   assert.ok(apply.includes('const runId = WIKI_RECOMPILE_APPLY;'));
-  // Nothing is applied until a later commit names the run.
-  assert.ok(script.includes("const WIKI_RECOMPILE_APPLY = process.env.WIKI_RECOMPILE_APPLY || '';"));
+  // The run to apply is named in a commit, so applying is a reviewed push.
+  assert.ok(script.includes("const WIKI_RECOMPILE_APPLY = process.env.WIKI_RECOMPILE_APPLY || 'edited-2026-11-14';"));
   assert.ok(apply.indexOf('saveWikiHistory(pagePath') < apply.indexOf('fs.writeFileSync(path.join(WIKI_DIR, pagePath)'), 'history is saved before a page is replaced');
 });
 
