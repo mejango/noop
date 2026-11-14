@@ -15,28 +15,20 @@
 
 const fs = require('fs');
 const path = require('path');
-const { WIKI_EXPECTED_HEADERS, REFERENCE_ONLY_SECTIONS, WIKI_PAGE_WORD_BUDGET, countWikiWords, getWikiPageRuleErrors } = require('./wiki-rules');
+const { WIKI_EXPECTED_HEADERS, REFERENCE_ONLY_SECTIONS, WIKI_HISTORY_PAGES, getWikiPageWordBudget, countWikiWords, getWikiPageRuleErrors } = require('./wiki-rules');
 
 // Assessment pages (regimes/current, the two pricing pages) describe the present,
 // and strategy pages are views of Learning's canonical lessons: neither has
 // history to recompile.
-const RECOMPILE_PAGES = [
-  'regimes/history.md',
-  'protection/windows.md',
-  'protection/convexity.md',
-  'revenue/windows.md',
-  'revenue/efficiency.md',
-  'indicators/leading.md',
-  'indicators/correlations.md',
-  'indicators/divergences.md',
-];
+const RECOMPILE_PAGES = WIKI_HISTORY_PAGES;
 // Two pages keep a call's output well under the model's limit; four overran it once pages filled up.
 const PAGES_PER_CALL = 2;
 // Working target below the hard budget, so a page has room to take the next period.
-const RECOMPILE_TARGET_WORDS = 2100;
+const RECOMPILE_HEADROOM_WORDS = 400;
+const targetWords = (pagePath) => getWikiPageWordBudget(pagePath) - RECOMPILE_HEADROOM_WORDS;
 const MAX_CORRECTIONS = 3;
 // ponytail: bump to replay the recorded gaps once more after a fix to the replay itself.
-const REPLAY_VERSION = 3;
+const REPLAY_VERSION = 4;
 // ponytail: ~60k tokens of sources per call next to ~35k of drafts; a busier journal just yields more parts.
 const MAX_PERIOD_CHARS = 240000;
 const CURRENT_PAGES_PERIOD = 'current-pages';
@@ -95,7 +87,7 @@ ${schema}
 ${RECOMPILE_PAGES.map((page) => `--- ${page} ---\n${drafts[page]}`).join('\n\n')}
 
 ## Pages you may update in this call
-${batchPages.map((page) => `- ${page} (draft is ${countWikiWords(drafts[page])} words; return at most ${RECOMPILE_TARGET_WORDS}, hard limit ${WIKI_PAGE_WORD_BUDGET})`).join('\n')}
+${batchPages.map((page) => `- ${page} (draft is ${countWikiWords(drafts[page])} words; return at most ${targetWords(page)}, hard limit ${getWikiPageWordBudget(page)})`).join('\n')}
 ${feedback ? `\n## Your previous update was rejected\n${feedback}\nReturn a corrected full page. If the page is at its budget, make room by merging entries about one pattern, not by leaving this period out.\n` : ''}
 ## Sources: ${foldingCurrent ? 'the current live pages (the last step)' : `period ${period}`}
 ${foldingCurrent
@@ -111,7 +103,7 @@ ${sourcesText || 'No sources for this step.'}
 4. These periods are past. Write no current-state content, and keep the schema's Reference-only sections exactly as given.
 5. Date every claim with [YYYY-MM-DD] stamps for the period it rests on. Never invent a [tick:#ID], [order:#ID], [review:#ID] or [lesson:key] marker; use one only if it appears verbatim in the sources or drafts.
 6. Replace "Not yet compiled" and "Nothing compiled yet" once a page or section has content; leave them where the history so far says nothing.
-7. Each page starts with a bold TLDR of at most 40 words stating what history shows, and is returned at no more than ${RECOMPILE_TARGET_WORDS} words. A draft above that is consolidated in the same rewrite: merge entries about one pattern, shorten wording, never drop an earlier period to make room.
+7. Each page starts with a bold TLDR of at most 40 words stating what history shows, and is returned at no more than the word count given for it above. A draft above that is consolidated in the same rewrite: merge entries about one pattern, shorten wording, never drop an earlier period to make room.
 
 Output full pages as XML blocks, only for pages that change:
 
@@ -123,8 +115,9 @@ If nothing changes, output: <no_updates/>`;
 };
 
 const buildConsolidationPrompt = ({ pagePath, content, words }) => {
-  const cut = Math.ceil((1 - RECOMPILE_TARGET_WORDS / words) * 100);
-  return `This wiki page of an ETH options trading bot is ${words} words by the counter that enforces its ${WIKI_PAGE_WORD_BUDGET}-word limit. The counter counts every space-separated token, including table cells and source markers, so the page is longer than it reads. Rewrite it about ${cut}% shorter (at most ${RECOMPILE_TARGET_WORDS} words).
+  const target = targetWords(pagePath);
+  const cut = Math.ceil((1 - target / words) * 100);
+  return `This wiki page of an ETH options trading bot is ${words} words by the counter that enforces its ${getWikiPageWordBudget(pagePath)}-word limit. The counter counts every space-separated token, including table cells and source markers, so the page is longer than it reads. Rewrite it about ${cut}% shorter (at most ${target} words).
 
 Rules:
 1. Lose wording, not knowledge. Merge entries that describe one pattern, merge adjacent table rows of one arc, cut restated numbers and qualifiers. Every month the page covers stays represented, and every pattern keeps its sample and outcome.
@@ -217,7 +210,7 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
       }
       // Consolidate on its own: a short prompt holding only the page, its measured count and the
       // share to cut. The model cannot hold a word limit while it compiles from the sources.
-      for (let attempt = 0; attempt < MAX_CORRECTIONS && countWikiWords(content) > WIKI_PAGE_WORD_BUDGET; attempt++) {
+      for (let attempt = 0; attempt < MAX_CORRECTIONS && countWikiWords(content) > getWikiPageWordBudget(pagePath); attempt++) {
         const words = countWikiWords(content);
         const retry = await callModel(buildConsolidationPrompt({ pagePath, content, words }));
         const shorter = parseUpdates(retry.text).find((update) => update.pagePath === pagePath);
@@ -226,6 +219,8 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
             : ruleErrors(pagePath, shorter.content, content);
         log(`consolidate ${pagePath} (${words} words): ${problems.length ? problems.join('; ') : `${countWikiWords(shorter.content)} words`}`);
         if (problems.length === 0) content = shorter.content;
+        // A cut-off reply spent its whole output allowance; asking again repeats the cost.
+        if (!shorter && retry.truncated) break;
       }
       fs.mkdirSync(path.dirname(draftPath(stagingDir, pagePath)), { recursive: true });
       fs.writeFileSync(draftPath(stagingDir, pagePath), `${content}\n`);

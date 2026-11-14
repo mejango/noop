@@ -34,10 +34,24 @@ const REFERENCE_ONLY_SECTIONS = {
 };
 
 // Advisors read every page in full, so this bounds their wiki context at
-// 14 pages x 2,500 words. A page already over budget may stay its size; it may
-// not grow. ponytail: one budget for every page; per-page budgets if one page
-// proves to need more room than the rest.
+// 2,500 words a page, 3,500 for the pages that compile the whole history (at most
+// 43,000 words in all). A page already over budget may stay its size; it may not
+// grow. A year of history compiled to about 2,600-2,900 words on those pages and
+// would not shorten further without dropping periods, hence their larger budget.
 const WIKI_PAGE_WORD_BUDGET = 2500;
+const WIKI_HISTORY_PAGE_WORD_BUDGET = 3500;
+const WIKI_HISTORY_PAGES = [
+  'regimes/history.md',
+  'protection/windows.md',
+  'protection/convexity.md',
+  'revenue/windows.md',
+  'revenue/efficiency.md',
+  'indicators/leading.md',
+  'indicators/correlations.md',
+  'indicators/divergences.md',
+];
+/** @param {string} pagePath */
+const getWikiPageWordBudget = (pagePath) => (WIKI_HISTORY_PAGES.includes(pagePath) ? WIKI_HISTORY_PAGE_WORD_BUDGET : WIKI_PAGE_WORD_BUDGET);
 
 /** @param {string} content */
 const countWikiWords = (content) => String(content || '').trim().split(/\s+/).filter(Boolean).length;
@@ -83,9 +97,10 @@ function getWikiPageRuleErrors({ pagePath, previousContent = '', replacementCont
 
   const previousWords = countWikiWords(previousContent);
   const replacementWords = countWikiWords(replacement);
-  if (replacementWords > Math.max(WIKI_PAGE_WORD_BUDGET, previousWords)) {
+  const budget = getWikiPageWordBudget(pagePath);
+  if (replacementWords > Math.max(budget, previousWords)) {
     errors.push(
-      `Replacement grows the page past the ${WIKI_PAGE_WORD_BUDGET}-word budget (${previousWords} → ${replacementWords} words); consolidate instead of appending`,
+      `Replacement grows the page past the ${budget}-word budget (${previousWords} → ${replacementWords} words); consolidate instead of appending`,
     );
   }
 
@@ -106,6 +121,9 @@ module.exports = {
   WIKI_EXPECTED_HEADERS,
   REFERENCE_ONLY_SECTIONS,
   WIKI_PAGE_WORD_BUDGET,
+  WIKI_HISTORY_PAGE_WORD_BUDGET,
+  WIKI_HISTORY_PAGES,
+  getWikiPageWordBudget,
   countWikiWords,
   hasH2,
   getH2Body,

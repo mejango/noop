@@ -117,7 +117,7 @@ const { fetchV3OnchainLiquidity } = require('./bot/v3-onchain-liquidity');
 const { refreshDexVolume, volumeSummary } = require('./bot/dex-volume');
 const { invalidDexReason, calculateValidatedLiquidityFlow, dexForAdvisor, LIQUIDITY_DATA_NOTICE } = require('./bot/liquidity-quality');
 const { getDeriveConfig, orderNonce, fetchInstruments } = require('./bot/derive-config');
-const { WIKI_PAGE_WORD_BUDGET, getWikiPageRuleErrors } = require('./bot/wiki-rules');
+const { WIKI_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGES, getWikiPageRuleErrors } = require('./bot/wiki-rules');
 const { stringifyApiError, isDefinitiveVenueRejection, isIocNoLiquidityError } = require('./bot/derive-errors');
 const { getSpotAccumulationSettings, readSpotSourceHistory, readSpotPendingActions } = require('./bot/spot-accumulation-config');
 const { encodeTradeData: encodeOrderData, buildActionHashes, TRADE_MODULE_ADDRESS } = require('./bot/derive-signing');
@@ -3978,7 +3978,7 @@ const writeRawEvidencePacket = (journalEntries = []) => {
 
 // Advisors read every page in full. Excerpts hid most of each page (about a
 // sixth reached the prompt) and half the pages never reached it at all. Size is
-// bounded on the write side: WIKI_PAGE_WORD_BUDGET per page in bot/wiki-rules.js.
+// bounded on the write side: getWikiPageWordBudget per page in bot/wiki-rules.js.
 const queryWikiContext = () => {
   const pageMeta = getWikiPageMetaMap(readWikiMeta());
   return WIKI_ALL_PAGES.flatMap((page) => {
@@ -4534,7 +4534,7 @@ ${activeTradeLessons.length > 0 ? activeTradeLessons.map(formatTradeLessonForPro
 3. Compile, do not append. Each page is the current synthesis, not a diary: the evidence packets and the log already keep the chronology. In TLDR, Current, and Active sections, replace superseded state and drop it; do not archive it as a prior or historical snapshot, and remove snapshot trails a page already has (per-pass "archived" or "prior snapshot" lists). Keep only what the superseded state teaches: when it completes or extends an episode, or adds to a pattern's sample, revise that one compiled entry in place (strengthen, weaken or overturn it; update how many episodes, over what period, with what outcome). Weigh all history: one new observation moves a pattern built on many by its share of the sample and does not replace it
 4. Add date stamps [${new Date().toISOString().split('T')[0]}] to new observations
 5. If current data contradicts existing wiki content, use "Previously: X. Updated [date]: Y" only in historical context—never leave the obsolete value in the current TLDR or Active section
-6. Each page has a budget of ${WIKI_PAGE_WORD_BUDGET} words; a rewrite that grows a page past it is rejected. Make room by compiling: several entries about the same pattern merge into one claim with its count, range and outcome, and today's tick-by-tick narration shrinks to its conclusion. Never make room by dropping what older evidence established
+6. Each page has a budget of ${WIKI_PAGE_WORD_BUDGET} words (${WIKI_HISTORY_PAGE_WORD_BUDGET} for the pages that compile the whole history: ${WIKI_HISTORY_PAGES.join(', ')}); a rewrite that grows a page past it is rejected. Make room by compiling: several entries about the same pattern merge into one claim with its count, range and outcome, and today's tick-by-tick narration shrinks to its conclusion. Never make room by dropping what older evidence established
 7. Each page may start with one H1 title; place a bold TLDR line immediately after that optional title. It states the page's conclusion in at most 40 words; on pages about history, patterns, indicators or correlations it says what history shows, not today's readings
 8. Prefer a compact update set only after every live-state page has been checked for cross-page consistency
 9. Never update ${WIKI_INDEX_PAGE} or ${WIKI_LOG_PAGE}; the system maintains those deterministically

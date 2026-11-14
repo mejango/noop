@@ -6,7 +6,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { WIKI_EXPECTED_HEADERS, WIKI_PAGE_WORD_BUDGET, REFERENCE_ONLY_SECTIONS, getWikiPageRuleErrors } = require('../bot/wiki-rules');
+const { WIKI_EXPECTED_HEADERS, WIKI_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGES, getWikiPageWordBudget, REFERENCE_ONLY_SECTIONS, getWikiPageRuleErrors } = require('../bot/wiki-rules');
 const { loadProduction } = require('./helpers/load-production');
 
 const root = path.resolve(__dirname, '..');
@@ -41,9 +41,15 @@ test('reference-only sections must keep their canonical text', () => {
 test('a page cannot grow past the word budget, but an oversized page is never frozen', () => {
   const words = (count) => Array(count).fill('word').join(' ');
   const base = page('regimes/history.md');
-  const under = `${base}\n${words(WIKI_PAGE_WORD_BUDGET - 100)}`;
-  const over = `${base}\n${words(WIKI_PAGE_WORD_BUDGET + 200)}`;
-  assert.match(errorsFor('regimes/history.md', under, over)[0], /grows the page past the 2500-word budget/);
+  const under = `${base}\n${words(WIKI_HISTORY_PAGE_WORD_BUDGET - 100)}`;
+  const over = `${base}\n${words(WIKI_HISTORY_PAGE_WORD_BUDGET + 200)}`;
+  assert.match(errorsFor('regimes/history.md', under, over)[0], /grows the page past the 3500-word budget/);
+  // Only the pages that compile the whole history get the larger budget.
+  assert.equal(getWikiPageWordBudget('regimes/current.md'), WIKI_PAGE_WORD_BUDGET);
+  assert.equal(getWikiPageWordBudget('strategy/lessons.md'), 2500);
+  assert.equal(WIKI_HISTORY_PAGES.length, 8);
+  const current = page('regimes/current.md');
+  assert.match(errorsFor('regimes/current.md', current, `${current}\n${words(2600)}`)[0], /grows the page past the 2500-word budget/);
   // Already over budget: the same size or smaller is accepted, larger is not.
   assert.deepEqual(errorsFor('regimes/history.md', over, over), []);
   assert.deepEqual(errorsFor('regimes/history.md', over, under), []);
@@ -82,5 +88,5 @@ test('both write paths call the shared rules', () => {
   assert.match(dashboard, /errors\.push\(\.\.\.getWikiPageRuleErrors\(/);
   assert.ok(!/WIKI_EXPECTED_HEADERS\s*(?::[^=]+)?=\s*\{/.test(script + dashboard), 'no second copy of the section list');
   // The schema the LLM reads states the same budget the code enforces.
-  assert.ok(fs.readFileSync(path.join(root, 'knowledge/schema.md'), 'utf8').includes(`${WIKI_PAGE_WORD_BUDGET.toLocaleString('en-US')} words`));
+  assert.ok(fs.readFileSync(path.join(root, 'knowledge/schema.md'), 'utf8').includes(`${WIKI_PAGE_WORD_BUDGET.toLocaleString('en-US')} words, or ${WIKI_HISTORY_PAGE_WORD_BUDGET.toLocaleString('en-US')} words`));
 });

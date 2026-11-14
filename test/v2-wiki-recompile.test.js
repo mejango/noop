@@ -71,7 +71,7 @@ test('a run folds each period, keeps a draft when an update breaks a rule, and r
   assert.deepEqual(summary.periods, ['2026-04-a', '2026-05-a', recompile.CURRENT_PAGES_PERIOD]);
   assert.equal(summary.rejected.length, 1);
   assert.match(summary.rejected[0].reason, /missing sections: Patterns/);
-  assert.equal(summary.rejected[0].replayed, 3);
+  assert.equal(summary.rejected[0].replayed, 4);
   assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /2 episodes/);
   // A completed run is not repeated.
   await recompile.runWikiRecompile({ ...args, callModel: async () => { throw new Error('must not be called'); } });
@@ -138,7 +138,7 @@ test('a rejected update gets corrected attempts on the rejected page before the 
   assert.equal(summary.rejected.length, 0);
   assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /Corrected with both sections/);
   assert.match(prompts[1], /regimes\/history\.md: Replacement is missing sections: Patterns/);
-  assert.match(prompts[0], /draft is \d+ words; return at most 2100, hard limit 2500/);
+  assert.match(prompts[0], /draft is \d+ words; return at most 3100, hard limit 3500/);
 });
 
 test('a page-and-period dropped by an earlier rejection is replayed once the periods are folded', async () => {
@@ -160,7 +160,7 @@ test('a page-and-period dropped by an earlier rejection is replayed once the per
   assert.equal(recompile.hasUnreplayedGaps(summary), false);
   // A finished run that still lists a dropped period is picked up again, once.
   assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md' }] }), true);
-  assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md', replayed: 3 }] }), false);
+  assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md', replayed: 4 }] }), false);
   // A gap replayed by the earlier, weaker replay is tried again.
   assert.equal(recompile.hasUnreplayedGaps({ rejected: [{ period: '2026-04-a', pagePath: 'regimes/history.md', replayed: 2 }] }), true);
   assert.match(recompile.readDrafts(stagingDir)['regimes/history.md'], /April folded on replay/);
@@ -179,22 +179,22 @@ test('an over-budget fold is kept and consolidated on its own; a failed consolid
         return { text: consolidated(consolidations.length), truncated: false };
       }
       if (!prompt.includes('\n- regimes/history.md (draft is ') || prompt.includes('## Sources: the current live pages')) return { text: '<no_updates/>', truncated: false };
-      return { text: `<wiki_update path="regimes/history.md">\n${long(3000)}\n</wiki_update>`, truncated: false };
+      return { text: `<wiki_update path="regimes/history.md">\n${long(4400)}\n</wiki_update>`, truncated: false };
     };
     const summary = await recompile.runWikiRecompile({ stagingDir, sources: [entry('2026-04-10T00:00:00Z', 'SOURCE-NOTE')], currentPages: {}, schema: 'S', callModel, log: (line) => logs.push(line) });
     return { summary, consolidations, logs, draft: recompile.readDrafts(stagingDir)['regimes/history.md'] };
   };
   // The first consolidation is still too long; the second fits.
-  const fits = await run((n) => `<wiki_update path="regimes/history.md">\n${long(n === 1 ? 2600 : 1900)}\n</wiki_update>`);
+  const fits = await run((n) => `<wiki_update path="regimes/history.md">\n${long(n === 1 ? 3700 : 2900)}\n</wiki_update>`);
   assert.deepEqual(fits.summary.rejected, []);
   assert.equal(fits.consolidations.length, 2);
-  assert.match(fits.consolidations[0], /is 30\d\d words by the counter .* Rewrite it about 3\d% shorter \(at most 2100 words\)/);
-  assert.ok(fits.draft.includes('w1899') && !fits.draft.includes('w1900'));
-  assert.ok(fits.logs.some((line) => /consolidate regimes\/history\.md \(30\d\d words\): 26\d\d words/.test(line)));
+  assert.match(fits.consolidations[0], /is 44\d\d words by the counter that enforces its 3500-word limit.* Rewrite it about 3\d% shorter \(at most 3100 words\)/);
+  assert.ok(fits.draft.includes('w2899') && !fits.draft.includes('w2900'));
+  assert.ok(fits.logs.some((line) => /consolidate regimes\/history\.md \(44\d\d words\): 37\d\d words/.test(line)));
   // The model never returns a page: the long draft stays, the period is not dropped.
   const stuck = await run(() => 'I cannot do that.');
   assert.deepEqual(stuck.summary.rejected, []);
   assert.equal(stuck.consolidations.length, 3);
-  assert.ok(stuck.draft.includes('w2999'));
+  assert.ok(stuck.draft.includes('w4399'));
   assert.ok(stuck.logs.some((line) => line.includes('no page in the response')));
 });
