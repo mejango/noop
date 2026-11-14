@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { collectAssetLiquidity, SOURCES } = require('../bot/asset-dex-liquidity');
+const { liquidityDue, collectAssetLiquidity, SOURCES } = require('../bot/asset-dex-liquidity');
 
 test('BTC and ZEC Maya reserves become explicitly estimated whole-pool TVL', async () => {
   for (const asset of ['BTC', 'ZEC']) {
@@ -46,4 +46,12 @@ test('fixed GeckoTerminal pools require the expected token pair', async () => {
       ...body(source.token), data: { ...body(source.token).data,
         attributes: { name: source.pair, reserve_in_usd: '0' } } })), /reserves/);
   }
+});
+
+test('pools added after SOL and HYPE are sampled every five minutes, and NVDA never', () => {
+  assert.equal(liquidityDue('SOL', 60_000, 10_000), true);
+  assert.equal(liquidityDue('DRV', 60_000, null), true);
+  assert.equal(liquidityDue('DRV', 60_000, 10_000), false);
+  assert.equal(liquidityDue('DRV', 310_000, 10_000), true);
+  assert.equal(liquidityDue('NVDA', 60_000, null), false);
 });

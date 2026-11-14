@@ -1,6 +1,9 @@
 'use strict';
 
 // Fixed pools keep a changing search ranking from silently changing the series.
+// GeckoTerminal's free limit is shared with the ETH DEX volume fetch. Sampling every pool on
+// every ping exhausted it, so pools added after SOL and HYPE are sampled every five minutes.
+const SLOW_MS = 5 * 60_000;
 const SOURCES = Object.freeze({
   BTC: { chain: 'Bitcoin', venue: 'Maya Protocol', pool: 'BTC.BTC', pair: 'BTC/CACAO',
     url: 'https://midgard.mayachain.info/v2/pool/BTC.BTC', kind: 'maya' },
@@ -14,15 +17,15 @@ const SOURCES = Object.freeze({
     token: '0x5555555555555555555555555555555555555555',
     quoteToken: '0xb88339cb7199b77e23db6e890353e22632ba630f', dex: 'hyperswap-v3',
     url: 'https://api.geckoterminal.com/api/v2/networks/hyperevm/pools/0xe712d505572b3f84c1b4deb99e1beab9dd0e23c9?include=base_token,quote_token', kind: 'gecko' },
-  XAUT: { chain: 'Ethereum', network: 'eth', venue: 'Uniswap V3', pool: '0x6546055f46e866a4b9a4a13e81273e3152bae5da', pair: 'XAUt/USDT',
+  XAUT: { everyMs: SLOW_MS, chain: 'Ethereum', network: 'eth', venue: 'Uniswap V3', pool: '0x6546055f46e866a4b9a4a13e81273e3152bae5da', pair: 'XAUt/USDT',
     token: '0x68749665ff8d2d112fa859aa293f07a622782f38',
     quoteToken: '0xdac17f958d2ee523a2206206994597c13d831ec7', dex: 'uniswap_v3',
     url: 'https://api.geckoterminal.com/api/v2/networks/eth/pools/0x6546055f46e866a4b9a4a13e81273e3152bae5da?include=base_token,quote_token', kind: 'gecko' },
-  VVV: { chain: 'Base', network: 'base', venue: 'Aerodrome Slipstream', pool: '0xdebaebe5b2729f7d62072b2ea40472d78d2c1626', pair: 'VVV/WETH',
+  VVV: { everyMs: SLOW_MS, chain: 'Base', network: 'base', venue: 'Aerodrome Slipstream', pool: '0xdebaebe5b2729f7d62072b2ea40472d78d2c1626', pair: 'VVV/WETH',
     token: '0xacfe6019ed1a7dc6f7b508c02d1b04ec88cc21bf',
     quoteToken: '0x4200000000000000000000000000000000000006', dex: 'aero-slipstream-base',
     url: 'https://api.geckoterminal.com/api/v2/networks/base/pools/0xdebaebe5b2729f7d62072b2ea40472d78d2c1626?include=base_token,quote_token', kind: 'gecko' },
-  DRV: { chain: 'Base', network: 'base', venue: 'Aerodrome Slipstream', pool: '0xa75f386c129f0478d61d1692ee7cc71beb468d92', pair: 'DRV/USDC',
+  DRV: { everyMs: SLOW_MS, chain: 'Base', network: 'base', venue: 'Aerodrome Slipstream', pool: '0xa75f386c129f0478d61d1692ee7cc71beb468d92', pair: 'DRV/USDC',
     token: '0x9d0e8f5b25384c7310cb8c6ae32c8fbeb645d083',
     quoteToken: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', dex: 'aerodrome-slipstream-3',
     url: 'https://api.geckoterminal.com/api/v2/networks/base/pools/0xa75f386c129f0478d61d1692ee7cc71beb468d92?include=base_token,quote_token', kind: 'gecko' },
@@ -77,4 +80,8 @@ async function collectAssetLiquidity(asset, observedAt, get = fetch) {
     chain: source.chain, venue: source.venue, pool_id: source.pool, pair: source.pair, ...values };
 }
 
-module.exports = { collectAssetLiquidity, SOURCES, parseMaya, parseGecko };
+// True when this asset has a pool and its sampling interval has passed since `lastAt`.
+const liquidityDue = (asset, now, lastAt) => Boolean(SOURCES[asset])
+  && (lastAt == null || now - lastAt >= (SOURCES[asset].everyMs || 0));
+
+module.exports = { liquidityDue, collectAssetLiquidity, SOURCES, parseMaya, parseGecko };
