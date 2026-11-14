@@ -10,6 +10,10 @@ const { collectAssetLiquidity, liquidityDue } = require('./asset-dex-liquidity')
 const { assetMomentum } = require('./asset-market-momentum');
 const asset = workerData.asset;
 let liquidityAt = null;
+// Derive allows 25 public requests per 5 seconds per IP (docs.derive.xyz/rate-limits). Every
+// worker firing on the same ping exceeded it and starved the ETH loop and the DRV accumulation
+// job, so each market starts in its own 5-second slot after the ping. Rows keep the ping's time.
+const startDelayMs = assets.indexOf(asset) * 5_000;
 parentPort.postMessage({ type: 'ready', asset });
 
 parentPort.on('message', message => {
@@ -17,7 +21,7 @@ parentPort.on('message', message => {
   const at = Date.parse(message.timestamp);
   if (!Number.isFinite(at)) return;
   // Each ping starts its own async request chain; another asset or a slow request cannot stall ETH.
-  void collectAsset(asset, undefined, at)
+  const collect = () => void collectAsset(asset, undefined, at)
     .then(({ summary, options }) => {
       Object.assign(summary, assetMomentum(store, asset, summary.hour, summary.spot));
       if (store.insertAssetMarketSnapshot(summary, options)) {
@@ -25,6 +29,7 @@ parentPort.on('message', message => {
       }
     })
     .catch(error => console.error(`Asset ${asset} collection failed: ${error.message}`));
+  if (startDelayMs) setTimeout(collect, startDelayMs); else collect();
   if (!liquidityDue(asset, at, liquidityAt)) return;
   liquidityAt = at;
   void collectAssetLiquidity(asset, message.timestamp)
