@@ -152,6 +152,11 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 - revenue/efficiency.md, Strike Selection Patterns: "Strikes 11–22% OTM have produced consistent disciplined wins; select strike distance by the OTM buffer tolerable if spot touches the top of the expected range. See [lesson:short_call.strike_and_sizing]."
 - revenue/efficiency.md, Buyback Patterns: "A buyback is insurance, not a rescue: once most of the premium has decayed, buying back below strike is a disciplined exit when its certain cost is smaller than the risk it removes, and spot later staying below strike does not make it a mistake. Assess strike distance, DTE, IV trend, and momentum before any buyback. See [lesson:short_call.exit_insurance] and [lesson:process.decision_quality]."
 
+### Required statements (keep word for word wherever the page carries them; enforced in code)
+- revenue/efficiency.md: "It is not an OTM minimum or maximum" and "No lesson sets an OTM floor"
+- protection/windows.md: "A 7d low is not an all-history low"
+- regimes/history.md: "Book events are not regime evidence"
+
 ### strategy/lessons.md
 - **TLDR** (bold, 1 line)
 - **Active Lessons** (currently valid actionable insights)
@@ -179,6 +184,7 @@ Never invent a source marker. A date stamp records when prose was added; it is n
 4. **Word budget** — each page has a budget of 2,500 words, or 3,500 words for the eight pages that compile the whole history (regimes/history, protection/windows, protection/convexity, revenue/windows, revenue/efficiency and the three indicators pages), enforced in code: a rewrite that grows a page past it is rejected. Advisors read every page in full, so the budget is what keeps their context from growing. Make room by compiling: several entries about one pattern merge into a single claim with its count, range and outcome, and today's tick-by-tick narration shrinks to its conclusion
 4a. **Weigh all history** — a conclusion reflects every episode behind it, not the latest packet. One new observation moves a pattern built on many by its share of the sample; it does not replace it. State a pattern as general only with its sample and period, and never make room by dropping what older evidence established
 4b. **Entries, not walls** — an entry is a bullet, a table row or a paragraph of at most 120 words (enforced in code). A long chain of dated numbers is a table or several entries, each with its own conclusion; a number that supports no stated conclusion is left out
+4c. **Bounded episode lists** — a page compiles; it is not a chronicle. The full record of every episode stays in the database. Tables hold a fixed set of the most instructive episodes: a page has at most 45 table rows (enforced in code). When a new episode arrives, first update the count and range of the pattern it belongs to; add a row only if it teaches something no existing row does, and then make room by merging the oldest adjacent rows into one coarser row or dropping the least instructive one. A page should stay about the same size from month to month and grow only when a new pattern appears
 5. **Bold TLDR** — a page may begin with one H1 title; the next content must be a bold summary of the page's conclusion in at most 40 words. On pages about history, patterns, indicators or correlations it states what history shows, not today's readings
 6. **Evidence required** — claims must reference specific data values (IV levels, percentages, dates)
 7. **Falsification criteria** — regime assessments and hypotheses include what would disprove them

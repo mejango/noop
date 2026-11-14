@@ -59,6 +59,32 @@ const getWikiPageWordBudget = (pagePath) => (WIKI_HISTORY_PAGES.includes(pagePat
 // rewrite may not make the longest line longer.
 const WIKI_LINE_WORD_LIMIT = 120;
 
+// Episode tables are bounded so a page stops growing with time: a new episode
+// updates a pattern's count, replaces a less instructive row, or the oldest
+// rows merge. The full chronicle stays in the database, not in the wiki.
+// ponytail: one cap for every page, set just above the largest page at the
+// 2026-11 recompile (42 rows); per-table caps if one table needs its own.
+const WIKI_TABLE_ROW_LIMIT = 45;
+
+// Sentences that constrain trading and were lost once in a rewrite (the
+// 2026-11 recompile dropped all four). A rewrite of a page that carries one
+// must keep it, word for word.
+const REQUIRED_STATEMENTS = {
+  'revenue/efficiency.md': ['It is not an OTM minimum or maximum', 'No lesson sets an OTM floor'],
+  'protection/windows.md': ['A 7d low is not an all-history low'],
+  'regimes/history.md': ['Book events are not regime evidence'],
+};
+
+/** @param {string} content */
+const countWikiTableRows = (content) => String(content || '').split('\n')
+  .filter((line) => line.trim().startsWith('|') && !/^\|[\s:|-]+\|?$/.test(line.trim())).length;
+
+/** Required statements the previous page carried and the replacement lost. @returns {string[]} */
+const getDroppedRequiredStatements = (pagePath, previousContent, replacementContent) => {
+  const has = (content, statement) => normalizeProse(content).toLowerCase().includes(statement.toLowerCase());
+  return (REQUIRED_STATEMENTS[pagePath] || []).filter((statement) => has(previousContent, statement) && !has(replacementContent, statement));
+};
+
 /** @param {string} content */
 const countWikiWords = (content) => String(content || '').trim().split(/\s+/).filter(Boolean).length;
 
@@ -118,6 +144,18 @@ function getWikiPageRuleErrors({ pagePath, previousContent = '', replacementCont
     );
   }
 
+  const replacementRows = countWikiTableRows(replacement);
+  if (replacementRows > Math.max(WIKI_TABLE_ROW_LIMIT, countWikiTableRows(previousContent))) {
+    errors.push(
+      `Replacement has ${replacementRows} table rows; a page holds at most ${WIKI_TABLE_ROW_LIMIT}. Fold the new episode into a pattern's count, or merge the oldest adjacent rows into one, instead of adding a row`,
+    );
+  }
+
+  const droppedStatements = getDroppedRequiredStatements(pagePath, previousContent, replacement);
+  if (droppedStatements.length > 0) {
+    errors.push(`Replacement drops required statement(s), keep each word for word: ${droppedStatements.map((statement) => `"${statement}"`).join(', ')}`);
+  }
+
   if (pagePath.startsWith('strategy/')) {
     const previousTickIds = new Set(getTickIds(previousContent));
     const addedTickIds = Array.from(new Set(getTickIds(replacement))).filter((tickId) => !previousTickIds.has(tickId));
@@ -138,6 +176,10 @@ module.exports = {
   WIKI_HISTORY_PAGE_WORD_BUDGET,
   WIKI_HISTORY_PAGES,
   WIKI_LINE_WORD_LIMIT,
+  WIKI_TABLE_ROW_LIMIT,
+  REQUIRED_STATEMENTS,
+  countWikiTableRows,
+  getDroppedRequiredStatements,
   getWikiPageWordBudget,
   countWikiWords,
   hasH2,

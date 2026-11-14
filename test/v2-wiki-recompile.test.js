@@ -198,3 +198,38 @@ test('an over-budget fold is kept and consolidated on its own; a failed consolid
   assert.ok(stuck.draft.includes('w4399'));
   assert.ok(stuck.logs.some((line) => line.includes('no page in the response')));
 });
+
+test('a run edited outside the bot is staged from the repo once and then applied through the same checks', () => {
+  const repoRunDir = tmp();
+  const stagingDir = path.join(tmp(), 'run');
+  fs.mkdirSync(path.join(repoRunDir, 'regimes'), { recursive: true });
+  fs.writeFileSync(path.join(repoRunDir, 'regimes/history.md'), compiled('regimes/history.md', 'Edited by hand. [review:#7]'));
+  fs.writeFileSync(path.join(repoRunDir, 'notes.txt'), 'not a page');
+  assert.deepEqual(recompile.seedRunFromRepo({ repoRunDir, stagingDir }), ['regimes/history.md']);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(stagingDir, 'done.json'), 'utf8')).source, 'repo');
+  assert.ok(!fs.existsSync(path.join(stagingDir, 'notes.txt')));
+  // A second start does not overwrite what is staged; a run with no repo folder stages nothing.
+  fs.writeFileSync(path.join(repoRunDir, 'regimes/history.md'), 'changed later');
+  assert.deepEqual(recompile.seedRunFromRepo({ repoRunDir, stagingDir }), []);
+  assert.deepEqual(recompile.seedRunFromRepo({ repoRunDir: path.join(repoRunDir, 'missing'), stagingDir: path.join(tmp(), 'other') }), []);
+  const staged = recompile.readDrafts(stagingDir);
+  assert.match(staged['regimes/history.md'], /Edited by hand/);
+  const { apply, skipped } = recompile.selectRecompileApplicable({ staged, live: {}, allowedMarkers: new Set(['[review:#7]']), getMarkers: (content) => new Set(content.match(/\[review:#\d+\]/g) || []) });
+  assert.deepEqual(apply, ['regimes/history.md']);
+  assert.equal(skipped.length, recompile.RECOMPILE_PAGES.length - 1);
+  // The bot stages from the repo before it checks that the run is complete.
+  const script = fs.readFileSync(path.join(root, 'script.js'), 'utf8');
+  const applyStep = script.slice(script.indexOf('const maybeApplyWikiRecompile'), script.indexOf('const saveWikiHistory'));
+  assert.ok(applyStep.indexOf('seedRunFromRepo') < applyStep.indexOf('the staged run is not complete'));
+});
+
+test('the regular ingest asks again, page by page, for what a cut-off response lost', () => {
+  const text = `${update('regimes/history.md', 'Done [2026-04-10].')}\n<wiki_update path="protection/windows.md">\ncut off mid-page`;
+  assert.deepEqual(recompile.getPagesWithoutUpdate(text, ['regimes/history.md', 'protection/windows.md', 'revenue/windows.md']), ['protection/windows.md', 'revenue/windows.md']);
+  const script = fs.readFileSync(path.join(root, 'script.js'), 'utf8');
+  const ingest = script.slice(script.indexOf('const requestIngestCall'), script.indexOf('const settled = await Promise.allSettled'));
+  assert.ok(ingest.includes('if (!first.truncated || batchPages.length === 1) return first.text;'));
+  assert.ok(ingest.includes('getPagesWithoutUpdate(first.text, batchPages)'));
+  assert.ok(ingest.includes('requestIngestCall([pagePath])'));
+  assert.ok(script.includes('const WIKI_INGEST_PAGES_PER_CALL = 3;'));
+});

@@ -4072,8 +4072,11 @@ const maybeApplyWikiRecompile = () => {
   const stagingDir = path.join(WIKI_RECOMPILE_DIR, runId);
   const appliedFile = path.join(stagingDir, 'applied.json');
   if (fs.existsSync(appliedFile)) return;
-  if (!fs.existsSync(path.join(stagingDir, 'done.json'))) return console.log(`📚 Wiki recompile ${runId}: not applied, the staged run is not complete`);
   const recompile = require('./bot/wiki-recompile');
+  // Pages edited outside the bot ship in the repo; they are staged here and checked like any run.
+  const seeded = recompile.seedRunFromRepo({ repoRunDir: path.join(__dirname, 'knowledge', 'recompiled', runId), stagingDir });
+  if (seeded.length > 0) console.log(`📚 Wiki recompile ${runId}: staged ${seeded.length} page(s) from the repo`);
+  if (!fs.existsSync(path.join(stagingDir, 'done.json'))) return console.log(`📚 Wiki recompile ${runId}: not applied, the staged run is not complete`);
   const staged = recompile.readDrafts(stagingDir);
   const live = Object.fromEntries(recompile.RECOMPILE_PAGES.map((page) => [page, readWikiPage(page)]));
   const reviews = (db.getRecentTradeReviews(100000) || []).map((review) => `[review:#${review.id}]`).join(' ');
@@ -4238,7 +4241,9 @@ const decideWikiEscalation = (stored = {}, pageIssues = [], now = new Date().toI
     notify: !stored?.escalated_at,
   };
 };
-const WIKI_INGEST_PAGES_PER_CALL = 5;
+// Three pages a call: history pages run to 3,500 words, and five pages a call was already cut
+// off at the 32,000-token output limit when pages were half that size.
+const WIKI_INGEST_PAGES_PER_CALL = 3;
 
 // ponytail: mirrors freshnessDays in dashboard/src/lib/wikiCatalog.ts; keep them in sync.
 const WIKI_FRESHNESS_DAYS = {
@@ -4486,7 +4491,8 @@ const ingestToWiki = async (journalEntries, { onlyPages = null } = {}) => {
   }
   // One call's 32k output fits ~10 full rewrites (~3.5k tokens each), and the page cut off
   // last never applied: strategy pages, then revenue/pricing, for weeks. Parallel calls of
-  // at most 5 writable pages; each still reads every selected page to keep them consistent.
+  // at most WIKI_INGEST_PAGES_PER_CALL writable pages; each still reads every selected page to
+  // keep them consistent.
   const batches = [];
   for (let i = 0; i < selectedPages.length; i += WIKI_INGEST_PAGES_PER_CALL) {
     batches.push(selectedPages.slice(i, i + WIKI_INGEST_PAGES_PER_CALL));
@@ -4559,7 +4565,7 @@ Output your updates as XML blocks. Only include pages that need changes:
 
 If no pages need updating, output: <no_updates/>`;
 
-  const requestIngestBatch = async (batchPages) => {
+  const requestIngestCall = async (batchPages) => {
     const response = await axios.post('https://api.anthropic.com/v1/messages', {
       model: ANTHROPIC_SONNET_MODEL,
       thinking: { type: 'between_tools' },
@@ -4576,8 +4582,21 @@ If no pages need updating, output: <no_updates/>`;
     });
     // Each complete <wiki_update> block is validated on its own below, so a
     // truncated response still applies the pages that finished. Log the cut.
-    if (response.data?.stop_reason !== 'end_turn') console.log(`📚 Wiki ingest [${batchPages[0]}…]: ${getAnthropicResponseFailure(response.data)}; applying complete page blocks only`);
-    return (response.data?.content || []).filter(block => block.type === 'text').map(block => block.text).join('');
+    const truncated = response.data?.stop_reason !== 'end_turn';
+    if (truncated) console.log(`📚 Wiki ingest [${batchPages[0]}…]: ${getAnthropicResponseFailure(response.data)}; applying complete page blocks only`);
+    return { text: (response.data?.content || []).filter(block => block.type === 'text').map(block => block.text).join(''), truncated };
+  };
+  // A cut-off response lost the pages it had not finished, and they were skipped until the next
+  // cycle. Ask again for each of them alone; a single page fits the output limit.
+  const requestIngestBatch = async (batchPages) => {
+    const first = await requestIngestCall(batchPages);
+    if (!first.truncated || batchPages.length === 1) return first.text;
+    const texts = [first.text];
+    for (const pagePath of require('./bot/wiki-recompile').getPagesWithoutUpdate(first.text, batchPages)) {
+      console.log(`📚 Wiki ingest: asking again for ${pagePath} after a cut-off response`);
+      texts.push((await requestIngestCall([pagePath]).catch((e) => ({ text: '', error: console.log(`📚 Wiki ingest: second request for ${pagePath} failed: ${e.message}`) }))).text);
+    }
+    return texts.join('\n');
   };
 
   try {

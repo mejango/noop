@@ -6,6 +6,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { WIKI_TABLE_ROW_LIMIT, REQUIRED_STATEMENTS, countWikiTableRows, getDroppedRequiredStatements } = require('../bot/wiki-rules');
 const { WIKI_EXPECTED_HEADERS, WIKI_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGE_WORD_BUDGET, WIKI_HISTORY_PAGES, getWikiPageWordBudget, REFERENCE_ONLY_SECTIONS, getWikiPageRuleErrors } = require('../bot/wiki-rules');
 const { loadProduction } = require('./helpers/load-production');
 
@@ -49,6 +50,33 @@ test('a rewrite may not add a line longer than 120 words, but an existing long l
   assert.match(errorsFor('regimes/history.md', walled, `${base}\n${words(220)}`)[0], /has a 220-word line/);
   // The schema the LLM reads states the same limit.
   assert.ok(fs.readFileSync(path.join(root, 'knowledge/schema.md'), 'utf8').includes('at most 120 words'));
+});
+
+test('episode tables are bounded: a rewrite may not add rows past the cap', () => {
+  const rows = (count) => ['| Date | Event |', '|---|---|', ...Array.from({ length: count - 1 }, (_, index) => `| d${index} | e${index} |`)].join('\n');
+  const base = page('regimes/history.md');
+  assert.equal(countWikiTableRows(rows(10)), 10, 'the separator line is not a row');
+  assert.deepEqual(errorsFor('regimes/history.md', base, `${base}\n${rows(WIKI_TABLE_ROW_LIMIT)}`), []);
+  assert.match(errorsFor('regimes/history.md', base, `${base}\n${rows(WIKI_TABLE_ROW_LIMIT + 1)}`)[0], /has 46 table rows; a page holds at most 45\. Fold the new episode into a pattern/);
+  // A page already over the cap may keep its rows or lose some, not gain one.
+  const over = `${base}\n${rows(60)}`;
+  assert.deepEqual(errorsFor('regimes/history.md', over, `${base}\n${rows(59)}`), []);
+  assert.match(errorsFor('regimes/history.md', over, `${base}\n${rows(61)}`)[0], /has 61 table rows/);
+  assert.ok(fs.readFileSync(path.join(root, 'knowledge/schema.md'), 'utf8').includes(`at most ${WIKI_TABLE_ROW_LIMIT} table rows`));
+});
+
+test('a rewrite keeps the trading guardrail sentences the page carries', () => {
+  const schema = fs.readFileSync(path.join(root, 'knowledge/schema.md'), 'utf8');
+  for (const [pagePath, statements] of Object.entries(REQUIRED_STATEMENTS)) {
+    const base = page(pagePath);
+    const guarded = base.replace('**TLDR**', `**TLDR**\n${statements.join('. ')}.`);
+    assert.deepEqual(errorsFor(pagePath, guarded, guarded.replace('**TLDR**', '**TLDR**\nMore.')), []);
+    assert.match(errorsFor(pagePath, guarded, base.replace('**TLDR**', '**TLDR**\nRewritten without it.'))[0], /drops required statement\(s\), keep each word for word/);
+    // A page that never carried the sentence (a new or skeleton page) is not blocked.
+    assert.deepEqual(errorsFor(pagePath, base, base.replace('**TLDR**', '**TLDR**\nMore.')), []);
+    assert.deepEqual(getDroppedRequiredStatements(pagePath, guarded, guarded.toUpperCase()), [], 'case does not matter');
+    for (const statement of statements) assert.ok(schema.includes(statement), statement);
+  }
 });
 
 test('a page cannot grow past the word budget, but an oversized page is never frozen', () => {

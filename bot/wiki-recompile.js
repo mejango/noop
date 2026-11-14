@@ -15,7 +15,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { WIKI_EXPECTED_HEADERS, REFERENCE_ONLY_SECTIONS, WIKI_HISTORY_PAGES, getWikiPageWordBudget, countWikiWords, getWikiPageRuleErrors } = require('./wiki-rules');
+const { WIKI_EXPECTED_HEADERS, REFERENCE_ONLY_SECTIONS, WIKI_HISTORY_PAGES, getWikiPageWordBudget, countWikiWords, getWikiPageRuleErrors, getDroppedRequiredStatements } = require('./wiki-rules');
 
 // Assessment pages (regimes/current, the two pricing pages) describe the present,
 // and strategy pages are views of Learning's canonical lessons: neither has
@@ -140,6 +140,12 @@ const parseUpdates = (text) => Array.from(
   (match) => ({ pagePath: match[1], content: match[2].trim() }),
 );
 
+// Pages a cut-off response did not finish: no complete <wiki_update> block came back for them.
+const getPagesWithoutUpdate = (text, pages) => {
+  const returned = new Set(parseUpdates(text).map((update) => update.pagePath));
+  return pages.filter((page) => !returned.has(page));
+};
+
 const readJson = (file, fallback) => {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 };
@@ -175,7 +181,7 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
       const { text, truncated } = await callModel(buildPrompt({ schema, drafts, batchPages, period: step.label, sourcesText: step.text }));
       const updates = parseUpdates(text).filter((update) => batchPages.includes(update.pagePath));
       if (!truncated || batchPages.length === 1) return updates;
-      for (const pagePath of batchPages.filter((page) => !updates.some((update) => update.pagePath === page))) {
+      for (const pagePath of getPagesWithoutUpdate(text, batchPages)) {
         updates.push(...await foldBatch([pagePath]));
       }
       return updates;
@@ -258,6 +264,24 @@ async function runWikiRecompile({ stagingDir, sources, currentPages, schema, cal
  * Which staged drafts may replace their live page. A draft still holding the skeleton,
  * breaking a page rule, or citing a marker the live wiki and reviews do not contain is skipped.
  */
+/**
+ * A run whose pages were written outside the bot ships in the repo under
+ * knowledge/recompiled/<run>/ and is copied to the staging folder once, so it passes
+ * through the same apply checks as a run the bot staged itself. Returns the pages copied.
+ */
+function seedRunFromRepo({ repoRunDir, stagingDir }) {
+  if (!fs.existsSync(repoRunDir) || fs.existsSync(path.join(stagingDir, 'done.json'))) return [];
+  const seeded = RECOMPILE_PAGES.filter((pagePath) => fs.existsSync(path.join(repoRunDir, pagePath)));
+  for (const pagePath of seeded) {
+    fs.mkdirSync(path.dirname(draftPath(stagingDir, pagePath)), { recursive: true });
+    fs.copyFileSync(path.join(repoRunDir, pagePath), draftPath(stagingDir, pagePath));
+  }
+  if (seeded.length > 0) {
+    fs.writeFileSync(path.join(stagingDir, 'done.json'), JSON.stringify({ completed_at: new Date().toISOString(), source: 'repo', periods: [], rejected: [] }, null, 2));
+  }
+  return seeded;
+}
+
 // A finished run still has work when a dropped page-and-period was never replayed.
 const hasUnreplayedGaps = (summary) => (summary?.rejected || []).some((item) => item.replayed !== REPLAY_VERSION);
 
@@ -271,6 +295,8 @@ function selectRecompileApplicable({ staged, live, allowedMarkers, getMarkers })
     const errors = getWikiPageRuleErrors({ pagePath, previousContent: '', replacementContent: content });
     const unknown = Array.from(getMarkers(content)).filter((marker) => !allowedMarkers.has(marker));
     if (unknown.length > 0) errors.push(`unknown source marker(s): ${unknown.slice(0, 5).join(', ')}`);
+    const dropped = getDroppedRequiredStatements(pagePath, live[pagePath], content);
+    if (dropped.length > 0) errors.push(`drops required statement(s): ${dropped.join('; ')}`);
     if (errors.length > 0) return skipped.push({ pagePath, reason: errors.join('; ') });
     if (content.trim() === String(live[pagePath] || '').trim()) return skipped.push({ pagePath, reason: 'identical to live page' });
     apply.push(pagePath);
@@ -285,8 +311,10 @@ module.exports = {
   chunkSources,
   buildPrompt,
   parseUpdates,
+  getPagesWithoutUpdate,
   readDrafts,
   runWikiRecompile,
   hasUnreplayedGaps,
+  seedRunFromRepo,
   selectRecompileApplicable,
 };
